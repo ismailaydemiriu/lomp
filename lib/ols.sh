@@ -261,7 +261,7 @@ _ols_braces_balanced() {
 
 # remove a block (and collapse blank lines)
 _ols_block_remove_stream() {   # file type name -> stdout
-  local file="$1" type="$2" name="$3" span s e
+  local file="$1" type="$2" name="$3" span="" s="" e=""
   span="$(_ols_span "$file" "$type" "$name")"
   if [[ -z "$span" ]]; then cat "$file"; return 0; fi
   s="${span%% *}"; e="${span##* }"
@@ -270,7 +270,7 @@ _ols_block_remove_stream() {   # file type name -> stdout
 
 # replace a block with the content of $4 (a file) or append it
 _ols_block_put_stream() {      # file type name contentfile -> stdout
-  local file="$1" type="$2" name="$3" content="$4" span s e
+  local file="$1" type="$2" name="$3" content="$4" span="" s="" e=""
   span="$(_ols_span "$file" "$type" "$name")"
   if [[ -z "$span" ]]; then
     cat "$file"
@@ -293,7 +293,7 @@ lib_ols_tx_begin() {
   if [[ -f "$LSWS_CONF" ]]; then cp "$LSWS_CONF" "$OLS_TX_FILE"; else : >"$OLS_TX_FILE"; fi
 }
 _ols_tx_apply() {   # stdin -> tx file
-  local tmp; tmp="$(mktemp "${TMPDIR:-/tmp}/server-setup.XXXXXX")"
+  local tmp=""; tmp="$(mktemp "${TMPDIR:-/tmp}/server-setup.XXXXXX")"
   cat >"$tmp" && mv -f "$tmp" "$OLS_TX_FILE"
 }
 lib_ols_tx_top_set()      { _ols_top_key "$OLS_TX_FILE" "$1" set "$2" | _ols_tx_apply; }
@@ -305,7 +305,7 @@ lib_ols_tx_block_del()    { _ols_block_key "$OLS_TX_FILE" "$1" "$2" "$3" del | _
 lib_ols_tx_block_exists() { [[ -n "$(_ols_span "$OLS_TX_FILE" "$1" "${2:-}")" ]]; }
 lib_ols_tx_block_remove() { _ols_block_remove_stream "$OLS_TX_FILE" "$1" "${2:-}" | _ols_tx_apply; }
 lib_ols_tx_block_put() {    # type name  (block content on stdin)
-  local c; c="$(lib_mktemp)"; cat >"$c"
+  local c=""; c="$(lib_mktemp)"; cat >"$c"
   _ols_block_put_stream "$OLS_TX_FILE" "$1" "$2" "$c" | _ols_tx_apply
   rm -f "$c"
 }
@@ -335,7 +335,7 @@ lib_ols_conf_vhosts()       { _ols_block_names "$LSWS_CONF" virtualhost; }
 #  Snapshots, config test, reload
 # =============================================================================
 lib_ols_snapshot_take() {
-  local dest ts
+  local dest="" ts=""
   ts="$(lib_ts)"
   dest="${STATE_DIR}/archive/ols-conf-${ts}.tar.gz"
   mkdir -p "${STATE_DIR}/archive" && chmod 0700 "${STATE_DIR}/archive"
@@ -351,7 +351,7 @@ lib_ols_snapshot_take() {
 }
 
 lib_ols_snapshot_restore() {
-  local snap="$1" tmp
+  local snap="$1" tmp=""
   if [[ -z "$snap" || ! -f "$snap" ]]; then lib_warn "no OpenLiteSpeed snapshot available to restore"; return 1; fi
   tmp="$(lib_mktemp -d)"
   if ! tar -xzf "$snap" -C "$tmp"; then lib_warn "snapshot ${snap} is unreadable"; return 1; fi
@@ -369,7 +369,7 @@ lib_ols_snapshot_restore() {
 
 # Structural checks + "openlitespeed -t". Output/diagnostics in OLS_TEST_OUTPUT.
 lib_ols_config_test() {
-  local f rc=0 out name cfg
+  local f="" rc=0 out="" name="" cfg=""
   OLS_TEST_OUTPUT=""
   [[ -f "$LSWS_CONF" ]] || { OLS_TEST_OUTPUT="missing ${LSWS_CONF}"; return 1; }
   for f in "$LSWS_CONF" "$LSWS_VHOSTS_DIR"/*/vhconf.conf; do
@@ -402,23 +402,24 @@ lib_ols_reload() {
 
 lib_ols_restart() { lib_systemctl restart "$OLS_SERVICE"; }
 
-# Wait until the service is active and answers on port 80 (any HTTP status).
+# Wait until the service is active, is listening on port 80 and answers an HTTP request.
 lib_ols_wait_ready() {
-  local timeout="${1:-30}" i code
+  local timeout="${1:-30}" i="" code=""
   (( OPT_DRY_RUN )) && return 0
   for (( i = 0; i < timeout; i++ )); do
-    if lib_ols_running; then
+    if lib_ols_running && lib_port_listening 80; then
       code="$(lib_http_code "http://127.0.0.1/" -H "Host: server-setup-probe.invalid")"
       [[ "$code" != "000" ]] && return 0
     fi
     sleep 1
   done
+  lib_log_write ERROR "OpenLiteSpeed not ready after ${timeout}s (running=$(lib_ols_running && echo yes || echo no), port 80=$(lib_port_listening 80 && echo listening || echo closed), probe=${code:-none})"
   return 1
 }
 
 # lib_ols_smoke_test <host> <expected-code-regex> [https]  -> 0 on match
 lib_ols_smoke_test() {
-  local host="$1" expect="$2" scheme="${3:-http}" code i
+  local host="$1" expect="$2" scheme="${3:-http}" code="" i=""
   (( OPT_DRY_RUN )) && return 0
   for (( i = 0; i < 6; i++ )); do
     if [[ "$scheme" == "https" ]]; then
@@ -599,7 +600,7 @@ EOF
 
 # Site vhconf.conf rendered from the D_* state variables (see lib/domain.sh).
 lib_ols_render_vhconf() {
-  local scheme="http" post_mb upload_mb php_bin children rules="" hsts="" esc
+  local scheme="http" post_mb="" upload_mb="" php_bin="" children="" rules="" hsts="" esc=""
   (( D_SSL )) && scheme="https"
   esc="${D_DOMAIN//./\\.}"
   upload_mb="$(lib_size_to_mb "$D_UPLOAD")"
@@ -744,7 +745,7 @@ context /.well-known/acme-challenge/ {
 }
 EOF
   if [[ "$D_MODE" == "proxy" ]]; then
-    local p
+    local p=""
     for p in ${D_STATIC_PATHS//,/ }; do
       [[ "$p" == /*/ ]] || continue
       cat <<EOF
@@ -844,7 +845,7 @@ lib_ols_default_cert_ensure() {
 
 # Ensure the two listeners exist with the right settings (maps are preserved).
 _ols_tx_listeners_ensure() {
-  local addr; addr="$(lib_ols_listener_address)"
+  local addr=""; addr="$(lib_ols_listener_address)"
   local keydir="${SSL_DEPLOY_DIR}/${OLS_DEFAULT_VHOST}"
   if ! lib_ols_tx_block_exists listener "$OLS_LISTENER_HTTP"; then
     lib_ols_tx_block_put listener "$OLS_LISTENER_HTTP" <<EOF
@@ -887,7 +888,7 @@ EOF
 
 # Re-assert listener maps for every registered domain (state -> config).
 _ols_tx_domain_maps_ensure() {
-  local d www
+  local d="" www=""
   while read -r d; do
     [[ -n "$d" ]] || continue
     www="$(lib_json_get "$(lib_domain_json "$d")" '.www')"
@@ -903,7 +904,7 @@ _ols_tx_domain_maps_ensure() {
 
 # Apply tuning + structure to the transaction (used by install and optimize).
 lib_ols_tx_apply_server_settings() {
-  local ver php_bin
+  local ver="" php_bin=""
   lib_ols_tx_top_set showVersionNumber 0
   lib_ols_tx_top_set adminEmails "${DEFAULT_EMAIL:-root@localhost}"
   lib_ols_tx_top_set httpdWorkers "$CALC_OLS_WORKERS"
@@ -986,7 +987,8 @@ lib_ols_configure_server() {
   fi
   lib_ols_acme_root_ensure
   lib_ols_default_cert_ensure
-  local pending="$OLS_PENDING_RELOAD"     # e.g. WebAdmin port changed by lib_ols_admin_setup
+  # e.g. the WebAdmin port was just changed by lib_ols_admin_setup
+  local pending="$OLS_PENDING_RELOAD"
   lib_ols_change_begin
   (( pending )) && OLS_PENDING_RELOAD=1
   lib_mkdir "${LSWS_VHOSTS_DIR}/${OLS_DEFAULT_VHOST}" 0750 lsadm:lsadm
@@ -1024,7 +1026,7 @@ lib_ols_admin_tunnel_only() { [[ "$(lib_ols_admin_current_bind)" == 127.0.0.1:* 
 
 # Bind the WebAdmin listener to an address ("127.0.0.1", "*" or "[ANY]").
 lib_ols_admin_bind() {
-  local addr="$1" tmp
+  local addr="$1" tmp=""
   [[ -f "$LSWS_ADMIN_CONF" ]] || return 0
   tmp="$(lib_mktemp)"
   sed -E "s|^([[:space:]]*address[[:space:]]+)[^[:space:]]*:[0-9]+[[:space:]]*$|\1${addr}:${ADMIN_PORT}|" "$LSWS_ADMIN_CONF" >"$tmp"
@@ -1036,7 +1038,7 @@ lib_ols_admin_bind() {
 
 # WebAdmin: random password (once) and listener binding.
 lib_ols_admin_setup() {
-  local info="${STATE_DIR}/openlitespeed-admin.info" pass hash addr
+  local info="${STATE_DIR}/openlitespeed-admin.info" pass="" hash="" addr=""
   if [[ -s "$info" ]]; then
     lib_ok "WebAdmin credentials already stored (${info})"
   elif (( OPT_DRY_RUN )); then
@@ -1067,7 +1069,7 @@ lib_ols_admin_setup() {
 }
 
 lib_ols_admin_url() {
-  local secure host
+  local secure="" host=""
   secure="$(_ols_block_key "$LSWS_ADMIN_CONF" listener adminListener secure get 2>/dev/null || true)"
   if lib_ols_admin_tunnel_only; then host="127.0.0.1"; else host="${SYS_PUBLIC_IPV4:-$(lib_primary_ipv4)}"; fi
   if [[ "$secure" == "0" ]]; then printf 'http://%s:%s' "$host" "$ADMIN_PORT"; else printf 'https://%s:%s' "$host" "$ADMIN_PORT"; fi
@@ -1075,7 +1077,7 @@ lib_ols_admin_url() {
 
 # Ready-to-paste tunnel command for the administrator's workstation.
 lib_ols_admin_tunnel_cmd() {
-  local port user ip
+  local port="" user="" ip=""
   port="$(printf '%s' "${SYS_SSH_PORTS:-22}" | awk '{print $1}')"
   user="${SUDO_USER:-root}"
   ip="${SYS_PUBLIC_IPV4:-$(lib_primary_ipv4)}"

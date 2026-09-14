@@ -35,7 +35,7 @@ lib_backup_remote_send() {   # file [file...]
     rsync)
       lib_run rsync -az --partial -e "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new" "$@" "${BKR_TARGET%/}/" || { BK_ERROR="rsync upload failed"; return 1; } ;;
     rclone)
-      local f
+      local f=""
       for f in "$@"; do lib_run rclone copy --no-traverse "$f" "$BKR_TARGET" || { BK_ERROR="rclone upload failed"; return 1; }; done ;;
     *) BK_ERROR="unknown remote type ${BKR_TYPE}"; return 1 ;;
   esac
@@ -43,7 +43,7 @@ lib_backup_remote_send() {   # file [file...]
 }
 
 lib_backup_configure_remote() {   # [--type rsync|rclone --target X]
-  local type="" target="" a
+  local type="" target="" a=""
   while (($# > 0)); do
     a="$1"; shift
     case "$a" in
@@ -81,7 +81,7 @@ lib_backup_configure_remote() {   # [--type rsync|rclone --target X]
 
 # Keep the newest N untagged archives of a domain.
 lib_backup_prune() {   # domain keep
-  local domain="$1" keep="$2" dir="${BACKUP_ROOT}/${1}" f
+  local domain="$1" keep="$2" dir="${BACKUP_ROOT}/${1}" f=""
   (( keep > 0 )) || return 0
   [[ -d "$dir" ]] || return 0
   find "$dir" -maxdepth 1 -type f -regextype posix-extended -regex ".*/${domain//./\\.}-[0-9]{8}-[0-9]{6}\.tar\.gz(\.enc)?" -printf '%T@ %p\n' 2>/dev/null \
@@ -106,7 +106,7 @@ lib_backup_verify() {   # archive -> 0 ok  (checks sha256 sidecar + tar listing 
 # =============================================================================
 lib_backup_domain() {   # domain [--keep N] [--encrypt] [--remote] [--tag T]
   local domain="$1"; shift
-  local keep="$BACKUP_KEEP" encrypt=0 remote=0 tag="" a work name ts dest final dbfile="" parts=() vh
+  local keep="$BACKUP_KEEP" encrypt=0 remote=0 tag="" a="" work="" name="" ts="" dest="" final="" dbfile="" parts=() vh=""
   BK_ERROR=""; BK_LAST_FILE=""
   while (($# > 0)); do
     a="$1"; shift
@@ -195,7 +195,7 @@ lib_backup_failed() {
 #  backup command
 # =============================================================================
 lib_backup_main() {
-  local domain="" all=0 remote=0 encrypt=0 keep="$BACKUP_KEEP" tag="" a
+  local domain="" all=0 remote=0 encrypt=0 keep="$BACKUP_KEEP" tag="" a=""
   local -a passthru=()
   [[ "${1:-}" == "--configure-remote" ]] && { shift; lib_require_tools; lib_backup_configure_remote "$@"; return 0; }
   while (($# > 0)); do
@@ -214,7 +214,7 @@ lib_backup_main() {
   lib_require_installed
   (( remote )) && ! lib_backup_remote_load && lib_die "Remote backup is not configured" "" "setup.sh backup --configure-remote"
   if (( all )); then
-    local d failed=() n=0
+    local d="" failed=() n=0
     while read -r d; do
       [[ -n "$d" ]] || continue
       n=$((n + 1))
@@ -240,7 +240,7 @@ lib_backup_main() {
 # =============================================================================
 # lib_backup_schedule "daily 03:00" | "hourly" | "weekly sun 04:00" | "<5-field cron>"  [extra flags]
 lib_backup_schedule() {
-  local spec="$1" flags="${2:-}" cron="" hh mm dow
+  local spec="$1" flags="${2:-}" cron="" hh="" mm="" dow=""
   case "$spec" in
     daily\ [0-9]*:[0-9]*)
       hh="${spec#daily }"; mm="${hh#*:}"; hh="${hh%%:*}"
@@ -264,7 +264,7 @@ lib_backup_schedule() {
 #  restore
 # =============================================================================
 lib_restore_main() {
-  local domain="${1:-}" file="" no_db=0 no_files=0 a work archive plain adomain
+  local domain="${1:-}" file="" no_db=0 no_files=0 a="" work="" archive="" plain="" adomain=""
   [[ -n "$domain" ]] || lib_die "Usage: setup.sh restore <domain> --file <archive> [--no-db] [--no-files]" "" "setup.sh restore example.com --file /var/backups/server-setup/example.com/example.com-20250101-030000.tar.gz"
   shift
   while (($# > 0)); do
@@ -340,7 +340,7 @@ lib_restore_main() {
     fi
   fi
   # ---- database --------------------------------------------------------------
-  local dump
+  local dump=""
   dump="$(find "${work}/x" -maxdepth 1 -name 'db-*.sql.gz' | head -n1 || true)"
   if (( ! no_db )) && [[ -n "$dump" ]]; then
     if ! lib_db_info_load "$domain"; then

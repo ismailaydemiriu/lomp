@@ -14,7 +14,7 @@ lib_php_installed()  { [[ -x "$(lib_php_bin "$1")" ]]; }
 lib_php_valid_version() { [[ "$1" =~ ^[78]\.[0-9]$ ]]; }
 
 lib_php_installed_versions() {
-  local d tag v
+  local d="" tag="" v=""
   for d in "$LSWS_HOME"/lsphp[0-9][0-9]/bin/lsphp; do
     [[ -x "$d" ]] || continue
     tag="$(basename "$(dirname "$(dirname "$d")")")"
@@ -24,25 +24,25 @@ lib_php_installed_versions() {
 }
 
 lib_php_full_version() {   # 8.3 -> 8.3.12
-  local cli; cli="$(lib_php_cli "$1")"
+  local cli=""; cli="$(lib_php_cli "$1")"
   [[ -x "$cli" ]] && "$cli" -r 'echo PHP_VERSION;' 2>/dev/null || true
 }
 
 lib_php_default_version() {
-  local v; v="$(lib_manifest_get '.components.php.default')"
+  local v=""; v="$(lib_manifest_get '.components.php.default')"
   printf '%s' "${v:-$PHP_VERSION}"
 }
 
 # Base package set for a version (verified against the LiteSpeed repository naming).
 _php_packages() {
-  local tag; tag="$(lib_php_tag "$1")"
+  local tag=""; tag="$(lib_php_tag "$1")"
   printf '%s %s-common %s-mysql %s-opcache %s-curl %s-imagick %s-intl %s-redis\n' \
     "$tag" "$tag" "$tag" "$tag" "$tag" "$tag" "$tag" "$tag"
 }
 
 # lib_php_install <version>  (idempotent)
 lib_php_install() {
-  local ver="$1" pkgs=() p
+  local ver="$1" pkgs=() p=""
   lib_php_valid_version "$ver" || lib_die "Invalid PHP version '${ver}'" "expected e.g. 8.2 / 8.3 / 8.4" "use --php 8.3"
   if (( OPT_DRY_RUN )) && ! lib_php_installed "$ver"; then
     lib_info "[dry-run] would install $(_php_packages "$ver"), verify extensions (${PHP_REQUIRED_EXTS}) and write the php.ini drop-in"
@@ -81,7 +81,7 @@ lib_php_register() {   # record version in manifest
 
 # Verify every required extension is loaded; try lsphpXX-<ext> packages for missing ones.
 lib_php_ensure_extensions() {
-  local ver="$1" cli mods ext pkg missing=() tag
+  local ver="$1" cli="" mods="" ext="" pkg="" missing=() tag=""
   cli="$(lib_php_cli "$ver")"; tag="$(lib_php_tag "$ver")"
   [[ -x "$cli" ]] || return 0
   mods="$("$cli" -m 2>/dev/null | tr '[:upper:]' '[:lower:]')"
@@ -115,7 +115,7 @@ _php_has_ext() {   # modules-list ext
 _php_trim() { local s="$1"; s="${s#"${s%%[![:space:]]*}"}"; printf '%s' "${s%"${s##*[![:space:]]}"}"; }
 
 lib_php_ini_paths() {   # sets PHP_INI_FILE / PHP_INI_SCAN_DIR for a version
-  local cli info
+  local cli="" info=""
   cli="$(lib_php_cli "$1")"
   PHP_INI_FILE=""; PHP_INI_SCAN_DIR=""
   [[ -x "$cli" ]] || return 0
@@ -178,7 +178,7 @@ EOF
 
 # Write the tuning drop-in (or patch php.ini when no scan dir exists). Sets PHP_INI_CHANGED.
 lib_php_write_ini() {
-  local ver="$1" target line key value
+  local ver="$1" target="" line="" key="" value=""
   PHP_INI_CHANGED=0
   lib_php_ini_paths "$ver"
   if [[ -n "$PHP_INI_SCAN_DIR" ]]; then
@@ -209,7 +209,7 @@ lib_php_restart_workers() {
 
 # /usr/local/bin/php -> default LSPHP CLI (only when no distro php exists), plus php<ver> links.
 lib_php_cli_links() {
-  local ver="$1" cli
+  local ver="$1" cli=""
   cli="$(lib_php_cli "$ver")"
   [[ -x "$cli" ]] || return 0
   if (( OPT_DRY_RUN )); then lib_debug "dry-run: would link CLI for PHP ${ver}"; return 0; fi
@@ -244,7 +244,7 @@ lib_php_ensure_version() {
 }
 
 lib_php_summary_line() {   # for status: "8.3 (8.3.12), 8.2 (8.2.24)"
-  local v out=()
+  local v="" out=()
   for v in $(lib_php_installed_versions); do out+=("${v} ($(lib_php_full_version "$v"))"); done
   ((${#out[@]})) && lib_join ', ' "${out[@]}" || printf 'none'
 }

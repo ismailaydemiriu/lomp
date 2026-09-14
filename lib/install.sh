@@ -10,7 +10,7 @@ INS_MARIADB="" INS_REDIS_PERSIST=0 INS_AUTO_REBOOT=0 INS_SKIP_UPGRADE=0 INS_BACK
 #  Arguments
 # =============================================================================
 lib_install_parse_args() {
-  local a
+  local a=""
   while (($# > 0)); do
     a="$1"; shift
     case "$a" in
@@ -70,7 +70,7 @@ lib_install_parse_args() {
   # Re-runs: keep previously chosen values when the flag is not repeated (idempotent re-run)
   if [[ -s "$STATE_DIR/manifest.json" ]] && lib_have jq; then
     if [[ "$ADMIN_ACCESS" == "tunnel" && -z "$ADMIN_ALLOWED_IP" ]]; then
-      local prev_access; prev_access="$(lib_manifest_get '.params.admin_access')"
+      local prev_access=""; prev_access="$(lib_manifest_get '.params.admin_access')"
       if [[ -n "$prev_access" ]]; then
         ADMIN_ACCESS="$prev_access"
         [[ "$ADMIN_ACCESS" == "ip" ]] && ADMIN_ALLOWED_IP="$(lib_manifest_get '.params.admin_ip')"
@@ -230,7 +230,7 @@ EOF
 }
 
 lib_install_ufw() {
-  local p
+  local p=""
   lib_apt_install ufw
   # never "ufw reset": existing rules are kept, ours are added idempotently
   lib_ufw_rule default deny incoming
@@ -261,7 +261,7 @@ lib_install_ufw() {
     lib_systemctl enable ufw >/dev/null 2>&1 || true
   fi
   lib_manifest_set_json '.components.ufw' true
-  local admin_desc
+  local admin_desc=""
   case "$ADMIN_ACCESS" in
     ip)     admin_desc="WebAdmin ${ADMIN_PORT} only from ${ADMIN_ALLOWED_IP}" ;;
     open)   admin_desc="WebAdmin ${ADMIN_PORT} open to everyone" ;;
@@ -271,7 +271,7 @@ lib_install_ufw() {
 }
 
 lib_install_ssh_harden() {
-  local dropin="/etc/ssh/sshd_config.d/99-server-setup.conf" login_user h keys_ok=0 content prev="" had_prev=0
+  local dropin="/etc/ssh/sshd_config.d/99-server-setup.conf" login_user="" h="" keys_ok=0 content="" prev="" had_prev=0
   local ports_before="$SYS_SSH_PORTS" port_changed=0
   if [[ ! -f /etc/ssh/sshd_config ]] || ! lib_have sshd; then
     lib_warn "openssh-server is not installed (/etc/ssh/sshd_config missing); SSH hardening skipped"
@@ -329,7 +329,7 @@ lib_install_ssh_harden() {
 }
 
 lib_install_fail2ban() {
-  local ignore="127.0.0.1/8 ::1" ports
+  local ignore="127.0.0.1/8 ::1" ports=""
   [[ -n "$ADMIN_ALLOWED_IP" ]] && ignore+=" ${ADMIN_ALLOWED_IP}"
   [[ -n "$FAIL2BAN_IGNORE_IP" ]] && ignore+=" ${FAIL2BAN_IGNORE_IP}"
   ports="$(printf '%s' "${SYS_SSH_PORTS} ${SSH_PORT}" | tr -s ' ' '\n' | sed '/^$/d' | sort -un | paste -sd, -)"
@@ -524,7 +524,7 @@ _panel_apply_bind() {   # address
 
 # One-line summary used by "status".
 lib_panel_status_line() {
-  local mode; mode="$(_panel_mode)"
+  local mode=""; mode="$(_panel_mode)"
   case "$mode" in
     ip)   printf 'port %s only from %s' "$ADMIN_PORT" "$(lib_manifest_get '.params.admin_ip')" ;;
     open) printf 'port %s open to everyone' "$ADMIN_PORT" ;;
@@ -535,7 +535,7 @@ lib_panel_status_line() {
 }
 
 lib_panel_status() {
-  local mode bind rules
+  local mode="" bind="" rules=""
   mode="$(_panel_mode)"
   bind="$(lib_ols_admin_current_bind)"
   lib_system_analyze --no-net
@@ -559,7 +559,7 @@ lib_panel_status() {
 }
 
 lib_panel_open() {
-  local ip="auto" minutes=60 a
+  local ip="auto" minutes=60 a=""
   while (($# > 0)); do
     a="$1"; shift
     case "$a" in
@@ -587,7 +587,7 @@ lib_panel_open() {
   else lib_ufw_rule allow from "$ip" to any port "$ADMIN_PORT" proto tcp; fi
   _panel_timer_schedule "$minutes"
   lib_system_analyze
-  local url pass
+  local url="" pass=""
   url="$(lib_ols_admin_url)"
   pass="$(awk -F= '$1=="PASSWORD"{sub(/^[^=]*=/, ""); print; exit}' "${STATE_DIR}/openlitespeed-admin.info" 2>/dev/null || true)"
   printf '\n%s%sWebAdmin is open - click or paste this into your browser%s\n' "$C_BLD" "$C_GRN" "$C_RST"
@@ -601,7 +601,7 @@ lib_panel_open() {
 }
 
 lib_panel_close() {
-  local mode admin_ip
+  local mode="" admin_ip=""
   mode="$(_panel_mode)"
   admin_ip="$(lib_manifest_get '.params.admin_ip')"
   _panel_timer_cancel
@@ -683,7 +683,7 @@ lib_install_python() {
 }
 
 _ini_set() {   # file section key value  (simple INI editor, keeps other content)
-  local file="$1" section="$2" key="$3" value="$4" tmp
+  local file="$1" section="$2" key="$3" value="$4" tmp=""
   tmp="$(lib_mktemp)"
   if [[ -f "$file" ]]; then cp "$file" "$tmp"; else : >"$tmp"; fi
   awk -v s="$section" -v k="$key" -v v="$value" '
@@ -696,7 +696,7 @@ _ini_set() {   # file section key value  (simple INI editor, keeps other content
 }
 
 lib_install_netdata() {
-  local conf="" d ks
+  local conf="" d="" ks=""
   if ! lib_have netdata && [[ ! -x /opt/netdata/bin/netdata && ! -x /usr/sbin/netdata ]]; then
     if (( OPT_DRY_RUN )); then lib_info "[dry-run] would install Netdata via the official kickstart script"; return 0; fi
     ks="$(lib_mktemp)"
@@ -724,7 +724,7 @@ lib_update_main() {
   lib_require_installed
   lib_system_analyze --no-net
   lib_steps_begin 6
-  local ts snap before_ols before_db before_redis before_php after_ols after_db after_redis after_php
+  local ts="" snap="" before_ols="" before_db="" before_redis="" before_php="" after_ols="" after_db="" after_redis="" after_php=""
   ts="$(lib_ts)"
 
   lib_step "Configuration backups"
@@ -795,7 +795,7 @@ lib_update_main() {
 #  optimize
 # =============================================================================
 _opt_diff() {   # title file  (new content on stdin) -> prints diff, returns 0 when changes exist
-  local title="$1" file="$2" new
+  local title="$1" file="$2" new=""
   new="$(lib_mktemp)"; cat >"$new"
   if [[ -f "$file" ]] && cmp -s "$new" "$file"; then rm -f "$new"; return 1; fi
   printf '\n%s--- %s (%s)%s\n' "$C_BLD" "$title" "$file" "$C_RST"
@@ -811,7 +811,7 @@ lib_optimize_main() {
   lib_system_report
   lib_system_profile
   lib_system_profile_report
-  local changes=() ver
+  local changes=() ver=""
   lib_heading "Proposed changes"
   lib_system_render_sysctl | _opt_diff "Kernel parameters" "$SYSCTL_FILE" && changes+=(sysctl)
   lib_system_render_limits | _opt_diff "Limits" "$LIMITS_FILE" && changes+=(limits)
@@ -840,7 +840,7 @@ lib_optimize_main() {
   if ((${#changes[@]} == 0)); then lib_ok "Everything is already tuned for this hardware; nothing to do."; return 0; fi
   printf '\n'
   lib_confirm "Apply these changes (${changes[*]})?" y || { lib_info "No changes applied."; return 0; }
-  local c
+  local c=""
   for c in "${changes[@]}"; do
     case "$c" in
       sysctl)  lib_system_sysctl_apply ;;

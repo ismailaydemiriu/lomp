@@ -17,7 +17,7 @@ lib_cf_account_id() { lib_manifest_get '.cloudflare.account_id'; }
 # =============================================================================
 # Download both lists into a temp file (validated). Prints the path; returns 1 on failure.
 lib_cf_ips_download() {
-  local tmp n
+  local tmp="" n=""
   tmp="$(lib_mktemp)"
   {
     curl -fsSL --retry 2 --max-time 20 "$CF_IPV4_URL" && printf '\n' && curl -fsSL --retry 2 --max-time 20 "$CF_IPV6_URL" && printf '\n'
@@ -31,7 +31,7 @@ lib_cf_ips_download() {
 
 # Refresh the stored list; apply to OLS when Cloudflare mode is enabled.
 lib_cf_update_ips() {
-  local tmp cur new changed=0
+  local tmp="" cur="" new="" changed=0
   if ! tmp="$(lib_cf_ips_download)" || [[ -z "$tmp" ]]; then
     lib_error "Cloudflare IP list download failed; keeping the existing list ($( [[ -s "$CF_IPS_FILE" ]] && printf 'updated %s' "$(lib_manifest_get '.cloudflare.ips_updated')" || printf 'none'))"
     lib_notify_send "Cloudflare IP update failed on $(hostname)" "Could not download ${CF_IPV4_URL} / ${CF_IPV6_URL}. The previous list is still in use." || true
@@ -68,7 +68,7 @@ lib_cf_ips_ensure() {
 
 # All given IPs inside Cloudflare ranges?  lib_cf_ips_are_cloudflare "1.2.3.4 5.6.7.8"
 lib_cf_ips_are_cloudflare() {
-  local ips="$1" ip list="$CF_IPS_FILE" tmp="" any=0
+  local ips="$1" ip="" list="$CF_IPS_FILE" tmp="" any=0
   if [[ ! -s "$list" ]]; then
     tmp="$(lib_cf_ips_download 2>/dev/null || true)"
     [[ -n "$tmp" ]] || return 1
@@ -83,14 +83,14 @@ lib_cf_ips_are_cloudflare() {
 }
 
 lib_cf_is_proxied() {   # domain -> 0 when all A/AAAA records are Cloudflare
-  local a; a="$(lib_resolve A "$1" | tr '\n' ' ')$(lib_resolve AAAA "$1" | tr '\n' ' ')"
+  local a=""; a="$(lib_resolve A "$1" | tr '\n' ' ')$(lib_resolve AAAA "$1" | tr '\n' ' ')"
   [[ -n "${a// /}" ]] || return 1
   lib_cf_ips_are_cloudflare "$a"
 }
 
 # Inside an open OLS transaction: trusted ranges + useIpInProxyHeader.
 lib_cf_tx_apply() {   # enabled(0/1)
-  local enabled="${1:-1}" allow="ALL" cidr
+  local enabled="${1:-1}" allow="ALL" cidr=""
   if (( enabled )) && [[ -s "$CF_IPS_FILE" ]]; then
     while read -r cidr; do
       [[ -z "$cidr" || "$cidr" == \#* ]] && continue
@@ -130,7 +130,7 @@ lib_cf_schedule() {
 
 # Store the API token (certbot dns-cloudflare format, 0600) and discover the account id.
 lib_cf_store_token() {   # token
-  local token="$1" verify acct
+  local token="$1" verify="" acct=""
   [[ "$token" =~ ^[A-Za-z0-9_-]{20,}$ ]] || lib_die "Cloudflare API token looks invalid" "unexpected characters/length" "create a token at https://dash.cloudflare.com/profile/api-tokens"
   if (( ! OPT_DRY_RUN )); then
     verify="$(curl -fsS --max-time 15 -H "Authorization: Bearer ${token}" "${CF_API}/user/tokens/verify" 2>/dev/null | jq -r '.result.status // "invalid"' 2>/dev/null || printf 'error')"
@@ -187,7 +187,7 @@ EOF
 
 # Extra "action" lines for web jails when bans must also reach Cloudflare.
 lib_cf_fail2ban_action_lines() {
-  local token acct
+  local token="" acct=""
   token="$(lib_cf_token)"; acct="$(lib_cf_account_id)"
   [[ -n "$token" && -n "$acct" && -f "$CF_F2B_ACTION" ]] || return 0
   printf 'action = %%(action_)s\n         server-setup-cloudflare[cftoken="%s", cfaccount="%s"]\n' "$token" "$acct"

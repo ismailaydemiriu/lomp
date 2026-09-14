@@ -30,7 +30,7 @@ _d_json_bool() { (( ${1:-0} )) && printf 'true' || printf 'false'; }
 
 # lib_domain_state_load domain  (returns 1 when not registered)
 lib_domain_state_load() {
-  local domain="$1" f
+  local domain="$1" f=""
   f="$(lib_domain_json "$domain")"
   lib_domain_state_reset
   [[ -s "$f" ]] || return 1
@@ -90,7 +90,7 @@ lib_domain_state_json() {
 }
 
 lib_domain_state_save() {
-  local dir f tmp
+  local dir="" f="" tmp=""
   dir="$(lib_domain_state_dir "$D_DOMAIN")"; f="${dir}/domain.json"
   if (( OPT_DRY_RUN )); then lib_debug "dry-run: state for ${D_DOMAIN} not written"; return 0; fi
   mkdir -p "$dir" && chmod 0700 "$dir"
@@ -134,7 +134,7 @@ EOF
 }
 
 lib_domain_parse_add_args() {
-  local a
+  local a=""
   lib_domain_state_reset
   D_DOMAIN="${1,,}"; shift
   D_EMAIL="$DEFAULT_EMAIL"
@@ -197,7 +197,7 @@ lib_domain_add_main() {
   lib_require_tools
   lib_require_installed
   lib_domain_parse_add_args "$@"
-  local domain="$D_DOMAIN" total=6 http_expect="200|301|302" rc
+  local domain="$D_DOMAIN" total=6 http_expect="200|301|302" rc=""
   lib_domain_registered "$domain" && lib_die "Site ${domain} already exists" "registered in $(lib_domain_state_dir "$domain")" "use 'setup.sh remove ${domain}' first, or 'renew-ssl' / 'db' to change it"
   lib_ols_is_installed || lib_die "OpenLiteSpeed is not installed" "run install first" "sudo ./setup.sh install"
   (( D_SSL_WANTED )) && total=$((total + 1))
@@ -313,7 +313,7 @@ lib_domain_add_ssl() {
 #  Users, directories, config application, probes
 # =============================================================================
 lib_domain_user_ensure() {
-  local existing_home
+  local existing_home=""
   if getent group "$D_GROUP" >/dev/null 2>&1; then :; else
     if (( OPT_DRY_RUN )); then lib_info "[dry-run] would create group ${D_GROUP}"; else lib_run groupadd "$D_GROUP" || lib_die "groupadd ${D_GROUP} failed" "" "check /etc/group"; fi
   fi
@@ -335,7 +335,7 @@ lib_domain_user_ensure() {
 }
 
 lib_domain_dirs_create() {
-  local ols_user; ols_user="$(lib_ols_user)"
+  local ols_user=""; ols_user="$(lib_ols_user)"
   if [[ ! -d "$D_HOME" ]]; then
     DOMAIN_CREATED_HOME=1
     (( OPT_DRY_RUN )) || lib_rollback_push "rm -rf '${D_HOME}'"
@@ -351,7 +351,7 @@ lib_domain_dirs_create() {
     lib_mkdir "${D_HOME}/app" 0750 "${D_USER}:${D_GROUP}"
     # every static context in the vhost points at one of these; OpenLiteSpeed rejects the
     # whole configuration with "path is not accessible" if the directory is missing
-    local p
+    local p=""
     for p in ${D_STATIC_PATHS//,/ }; do
       [[ "$p" == /*/ ]] || continue
       lib_mkdir "${D_HOME}/public_html${p}" 0755 "${D_USER}:${D_GROUP}"
@@ -393,7 +393,7 @@ lib_domain_apply_config() {   # [description]
 # Drop a tiny PHP probe into the docroot, fetch it, remove it.
 lib_domain_php_probe() {
   (( OPT_DRY_RUN )) && return 0
-  local name f body="" i
+  local name="" f="" body="" i=""
   name="ss-probe-$(lib_random_hex 6).php"
   f="${D_HOME}/public_html/${name}"
   printf '<?php echo "server-setup-php-ok:" . PHP_VERSION;\n' >"$f"
@@ -413,7 +413,7 @@ lib_domain_php_probe() {
 #  logrotate / fail2ban regeneration (state -> config)
 # =============================================================================
 lib_domain_logrotate_regen() {
-  local d paths=()
+  local d="" paths=()
   while read -r d; do [[ -n "$d" ]] && paths+=("$(lib_domain_home "$d")/logs/*.log"); done < <(lib_domains_list)
   {
     printf '# Managed by lompstack - site logs (OpenLiteSpeed rolling is disabled for sites; logrotate owns rotation)\n'
@@ -455,12 +455,12 @@ EOF
 }
 
 lib_domain_fail2ban_regen() {
-  local d logs=() enabled=true
+  local d="" logs=() enabled=true
   lib_pkg_installed fail2ban || return 0
   while read -r d; do [[ -n "$d" ]] && logs+=("$(lib_domain_home "$d")/logs/access.log"); done < <(lib_domains_list)
   ((${#logs[@]} == 0)) && { enabled=false; logs=("/dev/null"); }
   lib_domain_fail2ban_filters_write
-  local cf_action; cf_action="$(lib_cf_fail2ban_action_lines)"
+  local cf_action=""; cf_action="$(lib_cf_fail2ban_action_lines)"
   # NOTE: every branch below must end on a successful command. A trailing
   # "[[ ... ]] && printf ..." makes the whole group exit 1 when the test is false,
   # and pipefail then propagates that to the pipeline. Use "if" blocks here.
@@ -481,7 +481,7 @@ lib_domain_fail2ban_regen() {
 #  WordPress
 # =============================================================================
 lib_domain_wpcli_ensure() {
-  local tmp sha
+  local tmp="" sha=""
   if [[ -x "$WPCLI_PHAR" && -x "$WPCLI_BIN" ]]; then return 0; fi
   if (( OPT_DRY_RUN )); then lib_info "[dry-run] would install wp-cli into ${WPCLI_PHAR}"; return 0; fi
   lib_info "Installing wp-cli..."
@@ -508,7 +508,7 @@ _wp() {   # run wp-cli as the site user
 }
 
 lib_domain_wp_install() {
-  local docroot="${D_HOME}/public_html" url scheme="http" host="$D_DOMAIN" title admin email pass info
+  local docroot="${D_HOME}/public_html" url="" scheme="http" host="$D_DOMAIN" title="" admin="" email="" pass="" info=""
   info="$(lib_domain_state_dir "$D_DOMAIN")/wp.info"
   lib_domain_wpcli_ensure
   lib_db_info_load "$D_DOMAIN" || lib_die "WordPress needs a database" "db.info missing" "run: setup.sh db ${D_DOMAIN}"
@@ -555,7 +555,7 @@ define('FS_METHOD', 'direct');" || lib_die "wp config create failed" "database c
 #  summary / credentials / list / logs
 # =============================================================================
 lib_domain_summary() {
-  local sslline
+  local sslline=""
   sslline="$(lib_ssl_status_line "$D_DOMAIN")"
   (( D_SSL )) || sslline="not active$( (( D_SSL_WANTED )) && printf ' (run: setup.sh renew-ssl %s)' "$D_DOMAIN")"
   printf '\n%s%sSite %s is ready%s\n' "$C_BLD" "$C_GRN" "$D_DOMAIN" "$C_RST"
@@ -572,7 +572,7 @@ lib_domain_summary() {
 }
 
 lib_domain_credentials_main() {
-  local target="${1:-}" d
+  local target="${1:-}" d=""
   [[ -n "$target" ]] || lib_die "Usage: setup.sh credentials <domain>|--all" "" "setup.sh credentials example.com"
   lib_require_tools
   if [[ "$target" == "--all" ]]; then
@@ -600,7 +600,7 @@ lib_domain_credentials_server() {
 }
 
 lib_domain_credentials_show() {
-  local domain="$1" info
+  local domain="$1" info=""
   lib_domain_state_load "$domain" || return 0
   printf '\n%s== %s ==%s\n' "$C_BLD" "$domain" "$C_RST"
   lib_print_kv "Mode / status" "${D_MODE} / ${D_STATUS}"
@@ -622,7 +622,7 @@ lib_domain_credentials_show() {
 }
 
 lib_domain_list_main() {
-  local d rows=() json=0 mode php ssl last status
+  local d="" rows=() json=0 mode="" php="" ssl="" last="" status=""
   [[ "${1:-}" == "--json" ]] && json=1
   (( OPT_JSON )) && json=1
   lib_require_tools
@@ -648,7 +648,7 @@ lib_domain_list_main() {
 }
 
 lib_domain_logs_main() {
-  local domain="${1:-}" which="both" lines=50 a files=()
+  local domain="${1:-}" which="both" lines=50 a="" files=()
   [[ -n "$domain" ]] || lib_die "Usage: setup.sh logs <domain> [--access|--error] [-n LINES]" "" "setup.sh logs example.com"
   shift
   while (($# > 0)); do
@@ -662,7 +662,7 @@ lib_domain_logs_main() {
   done
   domain="${domain,,}"
   lib_domain_registered "$domain" || lib_die "Site ${domain} is not registered" "" "setup.sh list"
-  local dir; dir="$(lib_domain_home "$domain")/logs"
+  local dir=""; dir="$(lib_domain_home "$domain")/logs"
   [[ "$which" != "error" ]]  && files+=("${dir}/access.log")
   [[ "$which" != "access" ]] && files+=("${dir}/error.log")
   for a in "${files[@]}"; do [[ -f "$a" ]] || touch "$a" 2>/dev/null || true; done
@@ -674,7 +674,7 @@ lib_domain_logs_main() {
 #  remove
 # =============================================================================
 lib_domain_remove_main() {
-  local domain="${1:-}" keep_db=0 keep_files=0 keep_ssl=0 a
+  local domain="${1:-}" keep_db=0 keep_files=0 keep_ssl=0 a=""
   [[ -n "$domain" ]] || lib_die "Usage: setup.sh remove <domain> [--keep-db] [--keep-files] [--keep-ssl]" "" "setup.sh remove example.com"
   shift
   while (($# > 0)); do

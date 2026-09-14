@@ -39,7 +39,7 @@ lib_notify_channels() {
 
 # lib_notify_send "subject" "body"  - best effort, never fails the caller
 lib_notify_send() {
-  local subject="$1" body="$2" host payload
+  local subject="$1" body="$2" host="" payload=""
   host="$(hostname -f 2>/dev/null || hostname)"
   lib_log_write NOTIFY "$subject"
   lib_notify_load
@@ -73,7 +73,7 @@ lib_notify_send() {
 }
 
 _nt_set() {   # key value  (rewrite notify.conf atomically, 0600)
-  local key="$1" value="$2" tmp
+  local key="$1" value="$2" tmp=""
   (( OPT_DRY_RUN )) && { lib_info "[dry-run] would set ${key} in ${NOTIFY_CONF}"; return 0; }
   mkdir -p "$STATE_DIR" && chmod 0700 "$STATE_DIR"
   tmp="$(lib_mktemp)"
@@ -94,7 +94,7 @@ lib_notify_msmtp_write() {
 }
 
 lib_notify_ssh_login() {   # on|off
-  local mode="$1" line="session    optional     pam_exec.so quiet ${SSH_NOTIFY_SCRIPT}" tmp
+  local mode="$1" line="session    optional     pam_exec.so quiet ${SSH_NOTIFY_SCRIPT}" tmp=""
   if [[ "$mode" == "on" ]]; then
     lib_mkdir "$INSTALL_DIR" 0755 root:root
     cat <<EOF | lib_write_file "$SSH_NOTIFY_SCRIPT" 0755 root:root
@@ -122,7 +122,7 @@ EOF
 }
 
 lib_notify_main() {
-  local a test=0 show=0 send_subject="" send_body="" changed=0 ssh_login=""
+  local a="" test=0 show=0 send_subject="" send_body="" changed=0 ssh_login=""
   lib_require_tools
   [[ $# -gt 0 ]] || { lib_notify_show; return 0; }
   while (($# > 0)); do
@@ -183,7 +183,7 @@ _svc_state() {   # unit -> active|inactive|missing
 }
 
 lib_status_main() {
-  local json=0 d svc st
+  local json=0 d="" svc="" st=""
   [[ "${1:-}" == "--json" ]] && json=1
   (( OPT_JSON )) && json=1
   lib_require_tools
@@ -193,11 +193,11 @@ lib_status_main() {
   for svc in "${services[@]}"; do sstate["$svc"]="$(_svc_state "$svc")"; done
   local ram_used=$(( SYS_RAM_MB - SYS_RAM_AVAIL_MB ))
   local reboot="no"; lib_system_reboot_required && reboot="yes"
-  local last_backup; last_backup="$(lib_manifest_get '.backup.last_run')"
-  local installed_at; installed_at="$(lib_manifest_get '.installed_at')"
+  local last_backup=""; last_backup="$(lib_manifest_get '.backup.last_run')"
+  local installed_at=""; installed_at="$(lib_manifest_get '.installed_at')"
 
   if (( json )); then
-    local sites="[]" s
+    local sites="[]" s=""
     for d in $(lib_domains_list); do
       lib_domain_state_load "$d" || continue
       s="$(jq -n --arg d "$d" --arg mode "$D_MODE" --arg php "$D_PHP" --argjson ssl "$(_d_json_bool "$D_SSL")" \
@@ -273,7 +273,7 @@ _doc_add() {   # STATUS name detail
 }
 
 _doc_check_services() {
-  local svc
+  local svc=""
   if lib_ols_is_installed; then
     lib_ols_running && _doc_add OK "openlitespeed" "running $(lib_ols_version)" || _doc_add FAIL "openlitespeed" "service lsws is not active (systemctl status lsws)"
     if lib_ols_config_test; then _doc_add OK "ols config test" "openlitespeed -t passed"
@@ -297,12 +297,12 @@ _doc_check_services() {
   else _doc_add WARN "fail2ban" "not installed"; fi
   if lib_have ufw; then
     if ufw status 2>/dev/null | head -n1 | grep -q 'Status: active'; then
-      local p missing=()
+      local p="" missing=()
       for p in $SYS_SSH_PORTS; do ufw status 2>/dev/null | grep -qE "^${p}/tcp" || missing+=("$p"); done
       ((${#missing[@]} == 0)) && _doc_add OK "ufw" "active, SSH port(s) ${SYS_SSH_PORTS} allowed" || _doc_add WARN "ufw" "active but SSH port(s) ${missing[*]} not explicitly allowed"
     else _doc_add FAIL "ufw" "firewall inactive"; fi
   else _doc_add WARN "ufw" "not installed"; fi
-  local admin_rules; admin_rules="$(lib_ufw_port_rule_numbers "$ADMIN_PORT" 2>/dev/null | wc -l | tr -d ' ')"
+  local admin_rules=""; admin_rules="$(lib_ufw_port_rule_numbers "$ADMIN_PORT" 2>/dev/null | wc -l | tr -d ' ')"
   if lib_ols_admin_tunnel_only && (( admin_rules == 0 )); then
     _doc_add OK "webadmin exposure" "closed to the internet (SSH tunnel only)"
   elif ufw status 2>/dev/null | grep -qE "^${ADMIN_PORT}/tcp[[:space:]]+ALLOW IN[[:space:]]+Anywhere"; then
@@ -325,7 +325,7 @@ _doc_check_resources() {
   if (( SYS_SWAP_MB == 0 && SYS_RAM_MB < 2048 )); then _doc_add WARN "swap" "no swap on a $(lib_human_mb "$SYS_RAM_MB") host"; else _doc_add OK "swap" "$( (( SYS_SWAP_MB > 0 )) && lib_human_mb "$SYS_SWAP_MB" || printf 'not needed')"; fi
   lib_system_reboot_required && _doc_add WARN "reboot" "reboot required ($(tr '\n' ' ' </var/run/reboot-required.pkgs 2>/dev/null | cut -c1-80))" || _doc_add OK "reboot" "not required"
   [[ -f "$SYSCTL_FILE" ]] && _doc_add OK "kernel tuning" "$SYSCTL_FILE present" || _doc_add WARN "kernel tuning" "${SYSCTL_FILE} missing (run install/optimize)"
-  local perm; perm="$(stat -c %a "$STATE_DIR" 2>/dev/null || true)"
+  local perm=""; perm="$(stat -c %a "$STATE_DIR" 2>/dev/null || true)"
   [[ "$perm" == "700" ]] && _doc_add OK "state dir" "${STATE_DIR} is 0700" || _doc_add FAIL "state dir" "${STATE_DIR} permissions are ${perm:-missing} (expected 700)"
 }
 
@@ -333,7 +333,7 @@ _doc_check_ssl_infra() {
   if lib_service_active certbot.timer || lib_cron_has certbot-renew; then _doc_add OK "certbot renewal" "timer/cron active"; else _doc_add WARN "certbot renewal" "certbot.timer inactive and no cron fallback"; fi
   [[ -x "$CERTBOT_DEPLOY_HOOK" ]] && _doc_add OK "certbot deploy hook" "installed" || _doc_add FAIL "certbot deploy hook" "${CERTBOT_DEPLOY_HOOK} missing"
   if lib_cf_enabled; then
-    local age; age="$(lib_file_age_days "$CF_IPS_FILE")"
+    local age=""; age="$(lib_file_age_days "$CF_IPS_FILE")"
     if (( age > 14 )); then _doc_add WARN "cloudflare ips" "list is ${age} days old (update-cf-ips)"; else _doc_add OK "cloudflare ips" "list updated ${age} day(s) ago"; fi
     lib_cron_has cfips && _doc_add OK "cloudflare cron" "weekly update scheduled" || _doc_add WARN "cloudflare cron" "weekly update not scheduled"
     if [[ -s "$CF_INI" ]]; then
@@ -344,10 +344,10 @@ _doc_check_ssl_infra() {
 
 _doc_check_cron() {
   lib_cron_has healthcheck && _doc_add OK "healthcheck cron" "daily" || _doc_add WARN "healthcheck cron" "not scheduled (re-run install)"
-  local sched; sched="$(lib_manifest_get '.backup.schedule')"
+  local sched=""; sched="$(lib_manifest_get '.backup.schedule')"
   if [[ -n "$sched" ]]; then
     lib_cron_has backup && _doc_add OK "backup cron" "$sched" || _doc_add WARN "backup cron" "schedule '${sched}' configured but no cron entry"
-    local last; last="$(lib_manifest_get '.backup.last_run')"
+    local last=""; last="$(lib_manifest_get '.backup.last_run')"
     if [[ -n "$last" ]]; then
       local age=$(( ( $(date +%s) - $(date -d "$last" +%s 2>/dev/null || date +%s) ) / 86400 ))
       (( age > 2 )) && _doc_add WARN "last backup run" "${age} days ago" || _doc_add OK "last backup run" "${last:0:16}"
@@ -356,7 +356,7 @@ _doc_check_cron() {
 }
 
 _doc_check_domains() {
-  local d code days maps ver
+  local d="" code="" days="" maps="" ver=""
   local -a cfg_vhosts=()
   while read -r d; do [[ -n "$d" && "$d" != "$OLS_DEFAULT_VHOST" ]] && cfg_vhosts+=("$d"); done < <(lib_ols_conf_vhosts)
   for d in $(lib_domains_list); do
@@ -404,7 +404,7 @@ _doc_check_domains() {
 
 _doc_check_log_leaks() {
   [[ -f "$LOG_FILE" ]] || { _doc_add OK "log secrets" "no log yet"; return 0; }
-  local hits
+  local hits=""
   hits="$(grep -Eic '(password|passwd|secret|token|api[_-]?key|requirepass)[[:space:]]*[=:][[:space:]]*["'"'"']?[A-Za-z0-9+/=._~-]{8,}' "$LOG_FILE" 2>/dev/null || true)"
   hits="${hits:-0}"
   if (( hits > 0 )); then _doc_add FAIL "log secrets" "${hits} line(s) in ${LOG_FILE} look like unmasked credentials"; else _doc_add OK "log secrets" "no credential patterns in ${LOG_FILE}"; fi
@@ -423,7 +423,7 @@ lib_doctor_run() {
 }
 
 lib_doctor_main() {
-  local json=0 quiet="$OPT_QUIET" r st name detail
+  local json=0 quiet="$OPT_QUIET" r="" st="" name="" detail=""
   [[ "${1:-}" == "--json" ]] && json=1
   (( OPT_JSON )) && json=1
   lib_require_tools
@@ -452,7 +452,7 @@ lib_healthcheck_main() {
   lib_require_tools
   OPT_QUIET=1
   lib_doctor_run
-  local r st name detail body=""
+  local r="" st="" name="" detail="" body=""
   for r in "${DOC_RESULTS[@]}"; do
     st="${r%%|*}"; name="${r#*|}"; detail="${name#*|}"; name="${name%%|*}"
     [[ "$st" == "OK" ]] && continue

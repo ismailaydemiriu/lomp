@@ -189,7 +189,7 @@ EOF
 # =============================================================================
 declare -a ARGS=()
 _ss_parse_globals() {
-  local a
+  local a=""
   while (($# > 0)); do
     a="$1"; shift
     case "$a" in

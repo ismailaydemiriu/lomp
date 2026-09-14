@@ -609,7 +609,46 @@ assert_true "acme webroot created" test -d "${ACME_ROOT}/.well-known/acme-challe
 lib_domain_state_reset
 
 # =============================================================================
+section "HTTP status helper (regression: 000000)"
+# curl prints 000 itself on a connection failure and then exits non-zero, so appending a
+# fallback produced "000000"; callers compared that against "000" and saw a healthy server.
+curl() {
+  case "${FAKE_CURL:-ok}" in
+    ok)   printf '200' ;;
+    fail) printf '000'; return 7 ;;
+    empty) return 7 ;;
+  esac
+}
+FAKE_CURL=ok;    assert_eq "successful request" "200" "$(lib_http_code http://127.0.0.1/)"
+FAKE_CURL=fail;  assert_eq "connection refused is exactly 000" "000" "$(lib_http_code http://127.0.0.1/)"
+FAKE_CURL=empty; assert_eq "no output at all is 000" "000" "$(lib_http_code http://127.0.0.1/)"
+FAKE_CURL=fail;  assert_true "failure is detected as 000" bash -c "[[ '$(lib_http_code http://127.0.0.1/)' == '000' ]]"
+unset -f curl; unset FAKE_CURL
+
+# =============================================================================
 section "shell pitfalls (static)"
+# Under set -u a "local x" that is only assigned on some branches aborts the script when it
+# is read on another branch. This bit lib_db_install ("dump: unbound variable") on a real
+# server, so every scalar local must be initialised at declaration.
+bare_locals="$(for f in "$ROOT/setup.sh" "$ROOT"/lib/*.sh; do
+  awk -v F="$f" '
+    BEGIN { q = sprintf("%c", 39) }                     # a literal single quote
+    /^[[:space:]]*local[[:space:]]+-/ { next }          # typed declarations are left alone
+    /^[[:space:]]*local[[:space:]]/ {
+      line=$0
+      sub(/^[[:space:]]*local[[:space:]]+/, "", line)
+      gsub(/"[^"]*"/, "", line)                         # values may contain spaces
+      gsub(q "[^" q "]*" q, "", line)
+      gsub(/\$\(\([^)]*\)\)/, "", line)                 # arithmetic values, e.g. $(( A - B ))
+      gsub(/\$\([^)]*\)/, "", line)                     # command substitution
+      gsub(/\$\{[^}]*\}/, "", line)
+      sub(/;.*$/, "", line)                             # another command on the same line
+      n=split(line, tok, /[[:space:]]+/)
+      for (i=1; i<=n; i++) if (tok[i] ~ /^[A-Za-z_][A-Za-z0-9_]*$/) printf "%s:%d: %s\n", F, NR, tok[i]
+    }
+  ' "$f"
+done)"
+assert_eq "every scalar local is initialised" "" "$bare_locals"
 # A group that ends in "[[ ... ]] && cmd" exits 1 when the test is false. Feeding such a
 # group into a pipeline makes pipefail kill the whole script. This regression guard exists
 # because exactly that bug reached a real server in lib_domain_fail2ban_regen.

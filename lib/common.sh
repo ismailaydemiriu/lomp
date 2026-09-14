@@ -90,7 +90,7 @@ lib_log_line_no() {
 lib_rollback_clear() { LIB_ROLLBACK_STACK=(); }
 lib_rollback_push()  { LIB_ROLLBACK_STACK+=("$*"); lib_debug "rollback step registered: $*"; }
 lib_rollback_run() {
-  local n=${#LIB_ROLLBACK_STACK[@]} i cmd
+  local n=${#LIB_ROLLBACK_STACK[@]} i="" cmd=""
   (( n > 0 )) || return 0
   local -a steps=("${LIB_ROLLBACK_STACK[@]}")
   LIB_ROLLBACK_STACK=()            # cleared first: a failing step must not re-enter this loop
@@ -110,7 +110,7 @@ lib_rollback_run() {
 # lib_die "what failed" ["probable cause"] ["suggested fix"]
 lib_die() {
   local what="$1" cause="${2:-}" fix="${3:-}"
-  local lineno
+  local lineno=""
   lineno="$(lib_log_line_no)"
   lib_log_write ERROR "$what${cause:+ | cause: $cause}${fix:+ | fix: $fix}"
   {
@@ -129,7 +129,7 @@ lib_on_error() {
   local code="$1" line="$2" src="$3" cmd="$4"
   (( LIB_ERR_HANDLING )) && exit "$code"
   LIB_ERR_HANDLING=1
-  local lineno
+  local lineno=""
   lineno="$(lib_log_line_no)"
   lib_log_write ERROR "unexpected failure (exit ${code}) at ${src}:${line}: ${cmd}"
   {
@@ -150,7 +150,7 @@ lib_on_error() {
 trap 'lib_on_error "$?" "$LINENO" "${BASH_SOURCE[0]}" "$BASH_COMMAND"' ERR
 
 lib_cleanup_on_exit() {
-  local f
+  local f=""
   for f in "${LIB_TMP_FILES[@]}"; do
     [[ -e "$f" ]] && rm -rf -- "$f"
   done
@@ -160,7 +160,7 @@ trap lib_cleanup_on_exit EXIT
 
 # mktemp wrapper that is cleaned up on exit. Usage: f=$(lib_mktemp [-d])
 lib_mktemp() {
-  local t
+  local t=""
   if [[ "${1:-}" == "-d" ]]; then t="$(mktemp -d "${TMPDIR:-/tmp}/server-setup.XXXXXX")"
   else t="$(mktemp "${TMPDIR:-/tmp}/server-setup.XXXXXX")"; fi
   LIB_TMP_FILES+=("$t")
@@ -216,7 +216,7 @@ lib_have() { command -v "$1" >/dev/null 2>&1; }
 
 # Make sure the small set of tools every command needs is present.
 lib_require_tools() {
-  local missing=() t
+  local missing=() t=""
   for t in jq curl flock; do lib_have "$t" || missing+=("$t"); done
   ((${#missing[@]} == 0)) && return 0
   if (( OPT_DRY_RUN )); then
@@ -234,7 +234,7 @@ lib_is_interactive() {
 
 # lib_confirm "Question?" [y|n]  -> 0 = yes, 1 = no
 lib_confirm() {
-  local q="$1" def="${2:-n}" ans
+  local q="$1" def="${2:-n}" ans=""
   (( OPT_YES )) && { lib_log_write INFO "auto-confirmed: $q"; return 0; }
   if ! lib_is_interactive; then
     lib_log_write INFO "non-interactive default '${def}' for: $q"
@@ -271,7 +271,7 @@ lib_run() {
     return 0
   fi
   lib_log_write CMD "$*"
-  local out rc=0
+  local out="" rc=0
   out="$(lib_mktemp)"
   if (( OPT_VERBOSE )); then
     "$@" > >(tee -a "$out") 2>&1 || rc=$?
@@ -299,7 +299,7 @@ lib_run_secret() {
     return 0
   fi
   lib_log_write CMD "$desc"
-  local out rc=0
+  local out="" rc=0
   out="$(lib_mktemp)"
   "$@" >"$out" 2>&1 || rc=$?
   if [[ -s "$out" ]]; then lib_mask_secrets <"$out" >>"$LOG_FILE" 2>/dev/null || true; fi
@@ -316,7 +316,7 @@ lib_run_secret() {
 # =============================================================================
 # Copy a config file into the archive before modifying it. Prints the backup path.
 lib_backup_config() {
-  local path="$1" dest name
+  local path="$1" dest="" name=""
   [[ -f "$path" ]] || return 0
   (( OPT_DRY_RUN )) && return 0
   name="$(printf '%s' "$path" | sed 's#^/##; s#/#_#g')"
@@ -332,7 +332,7 @@ lib_backup_config() {
 # dry-run shows a diff. Sets LIB_FILE_CHANGED=1 when the file was (or would be) modified.
 lib_write_file() {
   local path="$1" mode="${2:-}" owner="${3:-}"
-  local content tmp
+  local content="" tmp=""
   LIB_FILE_CHANGED=0
   content="$(lib_mktemp)"
   cat >"$content"
@@ -383,7 +383,7 @@ lib_mkdir() {   # lib_mkdir path [mode] [owner:group]
 }
 
 lib_rm() {      # lib_rm path...   (dry-run aware)
-  local p
+  local p=""
   for p in "$@"; do
     [[ -e "$p" || -L "$p" ]] || continue
     if (( OPT_DRY_RUN )); then (( OPT_QUIET )) || printf '%s[dry ]%s  would remove %s\n' "$C_MAG" "$C_RST" "$p"; continue; fi
@@ -413,7 +413,7 @@ lib_append_line_once() {
 # lib_set_kv file key value [sep]  -> replaces "key sep value" (commented or not) or appends.
 lib_set_kv() {
   local file="$1" key="$2" value="$3" sep="${4:-=}"
-  local tmp ekey
+  local tmp="" ekey=""
   ekey="$(printf '%s' "$key" | sed 's/[][\.*^$/]/\\&/g')"
   tmp="$(lib_mktemp)"
   if [[ -f "$file" ]]; then cp "$file" "$tmp"; else : >"$tmp"; fi
@@ -449,7 +449,7 @@ lib_apt_update() {
 
 # Install packages that are not installed yet. Returns 0 when nothing to do.
 lib_apt_install() {
-  local pkgs=() p
+  local pkgs=() p=""
   for p in "$@"; do lib_pkg_installed "$p" || pkgs+=("$p"); done
   ((${#pkgs[@]} == 0)) && return 0
   lib_apt_update
@@ -460,7 +460,7 @@ lib_apt_install() {
 
 # Download an apt signing key into /etc/apt/keyrings (binary form). lib_apt_key_install url dest
 lib_apt_key_install() {
-  local url="$1" dest="$2" tmp
+  local url="$1" dest="$2" tmp=""
   if [[ -s "$dest" ]]; then lib_debug "keyring present: $dest"; return 0; fi
   if (( OPT_DRY_RUN )); then (( OPT_QUIET )) || printf '%s[dry ]%s  would install apt key %s -> %s\n' "$C_MAG" "$C_RST" "$url" "$dest"; return 0; fi
   mkdir -p /etc/apt/keyrings && chmod 0755 /etc/apt/keyrings
@@ -503,7 +503,7 @@ lib_ufw_port_rule_numbers() {
 
 # Remove every UFW rule for a port. Only that port is touched; SSH/80/443 are never matched.
 lib_ufw_delete_port_rules() {
-  local port="$1" n count=0
+  local port="$1" n="" count=0
   lib_have ufw || return 0
   if (( OPT_DRY_RUN )); then
     count="$(lib_ufw_port_rule_numbers "$port" | wc -l | tr -d ' ')"
@@ -522,7 +522,7 @@ lib_ufw_delete_port_rules() {
 # systemd drop-in with resource limits. lib_systemd_override unit "LimitNOFILE=65535" ...
 lib_systemd_override() {
   local unit="$1"; shift
-  local dir="/etc/systemd/system/${unit}.service.d" line
+  local dir="/etc/systemd/system/${unit}.service.d" line=""
   {
     printf '# Managed by lompstack\n[Service]\n'
     for line in "$@"; do printf '%s\n' "$line"; done
@@ -555,13 +555,13 @@ lib_version_ge() { # lib_version_ge 10.11.2 10.6  -> 0 if a >= b
 lib_join() { local IFS="$1"; shift; printf '%s' "$*"; }
 
 lib_days_until() {  # epoch -> whole days from now (may be negative)
-  local target="$1" now
+  local target="$1" now=""
   now="$(date +%s)"
   printf '%d' $(( (target - now) / 86400 ))
 }
 
 lib_file_age_days() {
-  local f="$1" m now
+  local f="$1" m="" now=""
   [[ -e "$f" ]] || { printf '%d' 99999; return 0; }
   m="$(stat -c %Y "$f")"; now="$(date +%s)"
   printf '%d' $(( (now - m) / 86400 ))
@@ -573,7 +573,7 @@ lib_file_age_days() {
 lib_json_valid() { [[ -s "$1" ]] && jq -e . "$1" >/dev/null 2>&1; }
 
 lib_json_get() {   # lib_json_get file 'filter' -> raw value ("" if null/missing)
-  local file="$1" filter="$2" v
+  local file="$1" filter="$2" v=""
   [[ -s "$file" ]] || { printf ''; return 0; }
   v="$(jq -r "$filter // empty" "$file" 2>/dev/null || true)"
   printf '%s' "$v"
@@ -582,7 +582,7 @@ lib_json_get() {   # lib_json_get file 'filter' -> raw value ("" if null/missing
 # lib_json_set file 'filter' [--arg k v ...]  (atomic; creates {} when missing)
 lib_json_set() {
   local file="$1" filter="$2"; shift 2
-  local tmp
+  local tmp=""
   if (( OPT_DRY_RUN )); then lib_debug "dry-run: state update skipped (${file}: ${filter})"; return 0; fi
   mkdir -p "$(dirname "$file")"
   [[ -s "$file" ]] || printf '{}\n' >"$file"
@@ -632,7 +632,7 @@ lib_domain_valid() {
 
 # Sanitised identifier for Linux user / DB names: example.com -> example_com
 lib_domain_ident() {
-  local d="${1,,}" id
+  local d="${1,,}" id=""
   id="$(printf '%s' "$d" | sed -E 's/[^a-z0-9]+/_/g; s/^_+//; s/_+$//')"
   [[ "$id" =~ ^[a-z] ]] || id="s_${id}"
   printf '%s' "${id:0:28}"
@@ -644,7 +644,7 @@ lib_domain_registered() { [[ -s "$(lib_domain_json "$1")" ]]; }
 lib_domain_home()      { printf '%s/%s' "$SITES_ROOT" "$1"; }
 
 lib_domains_list() {   # prints registered domains, one per line
-  local d
+  local d=""
   [[ -d "$STATE_DIR/domains" ]] || return 0
   for d in "$STATE_DIR"/domains/*/domain.json; do
     [[ -s "$d" ]] || continue
@@ -657,7 +657,7 @@ lib_domains_list() {   # prints registered domains, one per line
 # =============================================================================
 # lib_cron_set <id> "<schedule> <user> <command>"   ;  lib_cron_remove <id>
 lib_cron_set() {
-  local id="$1" entry="$2" tmp
+  local id="$1" entry="$2" tmp=""
   tmp="$(lib_mktemp)"
   if [[ -f "$CRON_FILE" ]]; then grep -v -- "# server-setup:${id}\$" "$CRON_FILE" >"$tmp" || true; fi
   if ! grep -q '^SHELL=' "$tmp" 2>/dev/null; then
@@ -673,7 +673,7 @@ lib_cron_set() {
 }
 
 lib_cron_remove() {
-  local id="$1" tmp
+  local id="$1" tmp=""
   [[ -f "$CRON_FILE" ]] || return 0
   grep -q -- "# server-setup:${id}\$" "$CRON_FILE" || return 0
   tmp="$(lib_mktemp)"
@@ -688,7 +688,7 @@ lib_cron_has() { [[ -f "$CRON_FILE" ]] && grep -q -- "# server-setup:${1}\$" "$C
 #  Network helpers
 # =============================================================================
 lib_public_ipv4() {
-  local ip u
+  local ip="" u=""
   for u in https://api.ipify.org https://ipv4.icanhazip.com https://ifconfig.me/ip; do
     ip="$(curl -4 -fsS --max-time 6 "$u" 2>/dev/null | tr -d '[:space:]' || true)"
     if [[ "$ip" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then printf '%s' "$ip"; return 0; fi
@@ -697,7 +697,7 @@ lib_public_ipv4() {
 }
 
 lib_public_ipv6() {
-  local ip u
+  local ip="" u=""
   for u in https://api6.ipify.org https://ipv6.icanhazip.com; do
     ip="$(curl -6 -fsS --max-time 6 "$u" 2>/dev/null | tr -d '[:space:]' || true)"
     if [[ "$ip" == *:* ]]; then printf '%s' "$ip"; return 0; fi
@@ -752,7 +752,7 @@ lib_admin_client_ip() {
 
 # Detect SSH ports: active connection first, then sshd -T, then listening sockets.
 lib_ssh_ports() {
-  local ports=() p
+  local ports=() p=""
   if [[ -n "${SSH_CONNECTION:-}" ]]; then
     p="$(awk '{print $4}' <<<"$SSH_CONNECTION")"
     [[ "$p" =~ ^[0-9]+$ ]] && ports+=("$p")
@@ -771,8 +771,13 @@ lib_port_listening() {   # lib_port_listening 443 [tcp|udp]
   else ss -tlnH 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${port}\$"; fi
 }
 
-# Run curl and print only the HTTP status code (000 on failure).
+# Run curl and print exactly one three-digit HTTP status code ("000" when the request failed).
+# curl already prints 000 on a connection failure and then exits non-zero, so a naive
+# "|| printf '000'" appends a second one and produces "000000", which every caller then
+# compares against "000" and wrongly treats as a success.
 lib_http_code() {   # lib_http_code url [extra curl args...]
-  local url="$1"; shift
-  curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$@" "$url" 2>/dev/null || printf '000'
+  local url="$1" code=""; shift
+  code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$@" "$url" 2>/dev/null || true)"
+  [[ "$code" =~ ^[0-9]{3}$ ]] || code="000"
+  printf '%s' "$code"
 }

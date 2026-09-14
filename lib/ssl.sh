@@ -90,13 +90,13 @@ lib_ssl_cert_exists()  { [[ -s "${LE_LIVE}/${1}/fullchain.pem" ]]; }
 lib_ssl_deployed()     { [[ -s "${SSL_DEPLOY_DIR}/${1}/fullchain.pem" && -s "${SSL_DEPLOY_DIR}/${1}/privkey.pem" ]]; }
 
 lib_ssl_expiry_epoch() {   # certfile -> epoch (empty when unreadable)
-  local end
+  local end=""
   end="$(openssl x509 -enddate -noout -in "$1" 2>/dev/null | cut -d= -f2)"
   [[ -n "$end" ]] && date -d "$end" +%s 2>/dev/null || printf ''
 }
 
 lib_ssl_days_left() {      # domain -> days (empty when no cert)
-  local f="${SSL_DEPLOY_DIR}/${1}/fullchain.pem" e
+  local f="${SSL_DEPLOY_DIR}/${1}/fullchain.pem" e=""
   [[ -s "$f" ]] || f="${LE_LIVE}/${1}/fullchain.pem"
   [[ -s "$f" ]] || { printf ''; return 0; }
   e="$(lib_ssl_expiry_epoch "$f")"
@@ -115,7 +115,7 @@ lib_ssl_cf_token_available() { [[ -s "$CF_INI" ]] && grep -q '^dns_cloudflare_ap
 #  DNS verification  (0 = points here, 1 = mismatch, 2 = Cloudflare proxied)
 # =============================================================================
 lib_ssl_dns_check() {   # domain www(0/1)
-  local domain="$1" www="${2:-0}" n a4 a6 ok=1 proxied=0 detail=""
+  local domain="$1" www="${2:-0}" n="" a4="" a6="" ok=1 proxied=0 detail=""
   local -a names=("$domain")
   (( www )) && names+=("www.${domain}")
   lib_system_analyze
@@ -171,7 +171,7 @@ lib_ssl_obtain() {
 
 # Copy live certificate into the OLS deploy directory + update state.
 lib_ssl_deploy() {
-  local domain="$1" src="${LE_LIVE}/${1}" dst="${SSL_DEPLOY_DIR}/${1}" exp
+  local domain="$1" src="${LE_LIVE}/${1}" dst="${SSL_DEPLOY_DIR}/${1}" exp=""
   (( OPT_DRY_RUN )) && { lib_info "[dry-run] would deploy ${src} -> ${dst}"; return 0; }
   [[ -s "${src}/fullchain.pem" && -s "${src}/privkey.pem" ]] || { SSL_LAST_ERROR="no certificate in ${src}"; return 1; }
   lib_mkdir "$SSL_DEPLOY_DIR" 0700 root:root
@@ -206,7 +206,7 @@ lib_ssl_delete() {   # domain
 }
 
 lib_ssl_status_line() {   # domain -> "42 days (Let's Encrypt)" / "none"
-  local d; d="$(lib_ssl_days_left "$1")"
+  local d=""; d="$(lib_ssl_days_left "$1")"
   if [[ -z "$d" ]]; then printf 'none'; else printf '%s days%s' "$d" "$( [[ -n "$(lib_ssl_issuer "$1")" ]] && printf ' (%s)' "$(lib_ssl_issuer "$1")")"; fi
 }
 
@@ -214,7 +214,7 @@ lib_ssl_status_line() {   # domain -> "42 days (Let's Encrypt)" / "none"
 #  renew-ssl command
 # =============================================================================
 lib_ssl_renew_main() {
-  local domain="" force=0 all=0 staging=0 wildcard=0 a
+  local domain="" force=0 all=0 staging=0 wildcard=0 a=""
   while (($# > 0)); do
     a="$1"; shift
     case "$a" in
@@ -229,7 +229,7 @@ lib_ssl_renew_main() {
   lib_require_tools
   lib_require_installed
   if (( all )) || [[ -z "$domain" ]]; then
-    local d failed=() n=0
+    local d="" failed=() n=0
     while read -r d; do
       [[ -n "$d" ]] || continue
       [[ "$(lib_json_get "$(lib_domain_json "$d")" '.ssl.wanted')" == "false" ]] && continue

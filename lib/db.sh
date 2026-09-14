@@ -27,7 +27,7 @@ lib_db_version() {
 lib_db_ping() { "$(lib_db_admin)" --protocol=socket --socket="$DB_SOCKET" ping >/dev/null 2>&1; }
 
 lib_db_wait_ready() {
-  local i
+  local i=""
   for (( i = 0; i < "${1:-30}"; i++ )); do lib_db_ping && return 0; sleep 1; done
   return 1
 }
@@ -37,7 +37,7 @@ lib_db_sql() { "$(lib_db_client)" --protocol=socket --socket="$DB_SOCKET" -N -B 
 
 # Execute SQL that contains secrets: only the description is logged.
 lib_db_sql_secret() {   # description sql
-  local desc="$1" sql="$2" rc=0 out
+  local desc="$1" sql="$2" rc=0 out=""
   if (( OPT_DRY_RUN )); then lib_info "[dry-run] SQL: ${desc}"; return 0; fi
   lib_log_write CMD "SQL: ${desc}"
   out="$(printf '%s\n' "$sql" | "$(lib_db_client)" --protocol=socket --socket="$DB_SOCKET" -N -B 2>&1)" || rc=$?
@@ -76,7 +76,7 @@ lib_db_full_dump() {   # path.gz  (all databases, for pre-upgrade safety)
 
 # lib_db_install [version]
 lib_db_install() {
-  local want="${1:-}" cur major_cur major_want dump
+  local want="${1:-}" cur="" major_cur="" major_want="" dump=""
   cur="$(lib_db_version)"
   if [[ -n "$want" ]]; then
     major_want="${want%%.*}.${want#*.}"; major_want="${major_want%%.*}"
@@ -119,7 +119,7 @@ lib_db_install() {
 lib_db_secure() {
   if (( OPT_DRY_RUN )); then lib_info "[dry-run] would remove anonymous users, test database and remote root"; return 0; fi
   lib_db_wait_ready 10 || lib_die "MariaDB not reachable" "service down" "systemctl status mariadb"
-  local sql
+  local sql=""
   sql="DELETE FROM mysql.global_priv WHERE User='';
 DROP DATABASE IF EXISTS test;
 DELETE FROM mysql.db WHERE Db='test' OR Db='test\\_%';
@@ -203,7 +203,7 @@ lib_db_apply_tuning() {
 lib_db_info_file() { printf '%s/db.info' "$(lib_domain_state_dir "$1")"; }
 
 lib_db_info_load() {   # domain -> DBI_* ; returns 1 when missing
-  local f; f="$(lib_db_info_file "$1")"
+  local f=""; f="$(lib_db_info_file "$1")"
   DBI_NAME=""; DBI_USER=""; DBI_PASS=""; DBI_HOST="localhost"
   [[ -s "$f" ]] || return 1
   DBI_NAME="$(awk -F= '$1=="DB_NAME"{sub(/^[^=]*=/,""); print; exit}' "$f")"
@@ -213,7 +213,7 @@ lib_db_info_load() {   # domain -> DBI_* ; returns 1 when missing
 }
 
 _db_unique_name() {   # base kind(db|user) maxlen -> unique identifier
-  local base="$1" kind="$2" max="$3" cand i
+  local base="$1" kind="$2" max="$3" cand="" i=""
   cand="${base:0:$max}"
   for (( i = 2; i < 100; i++ )); do
     if [[ "$kind" == "db" ]]; then lib_db_exists "$cand" || { printf '%s' "$cand"; return 0; }
@@ -225,7 +225,7 @@ _db_unique_name() {   # base kind(db|user) maxlen -> unique identifier
 
 # Create DB + user for a registered domain, store credentials (600).
 lib_db_create_for_domain() {
-  local domain="$1" ident dbname dbuser dbpass info sql
+  local domain="$1" ident="" dbname="" dbuser="" dbpass="" info="" sql=""
   info="$(lib_db_info_file "$domain")"
   if lib_db_info_load "$domain"; then lib_ok "Database already exists for ${domain} (${DBI_NAME})"; return 0; fi
   lib_db_installed || lib_die "MariaDB is not installed" "run install first" "sudo ./setup.sh install"
@@ -267,7 +267,7 @@ lib_db_show() {   # print credentials (never logged)
 }
 
 lib_db_drop_for_domain() {   # domain [force]
-  local domain="$1" info
+  local domain="$1" info=""
   info="$(lib_db_info_file "$domain")"
   lib_db_info_load "$domain" || return 0
   if (( OPT_DRY_RUN )); then lib_info "[dry-run] would drop database ${DBI_NAME} and user ${DBI_USER}"; return 0; fi
@@ -303,7 +303,7 @@ lib_db_restore_domain() {   # domain dump.sql(.gz)
 
 # Recreate a DB/user from an archived db.info (restore on a fresh server).
 lib_db_recreate_from_info() {   # domain infofile
-  local domain="$1" src="$2" name user pass dest
+  local domain="$1" src="$2" name="" user="" pass="" dest=""
   name="$(awk -F= '$1=="DB_NAME"{sub(/^[^=]*=/,""); print; exit}' "$src")"
   user="$(awk -F= '$1=="DB_USER"{sub(/^[^=]*=/,""); print; exit}' "$src")"
   pass="$(awk -F= '$1=="DB_PASS"{sub(/^[^=]*=/,""); print; exit}' "$src")"
@@ -347,7 +347,7 @@ lib_redis_password() {
 }
 
 lib_redis_ping() {
-  local pass; pass="$(lib_redis_password)"
+  local pass=""; pass="$(lib_redis_password)"
   [[ "$(REDISCLI_AUTH="$pass" redis-cli -h 127.0.0.1 ping 2>/dev/null)" == "PONG" ]]
 }
 
@@ -376,7 +376,7 @@ EOF
 
 # lib_redis_install [persist(0/1)]
 lib_redis_install() {
-  local persist="${1:-0}" pass prev=""
+  local persist="${1:-0}" pass="" prev=""
   if lib_redis_installed; then lib_ok "Redis already installed ($(lib_redis_version))"
   else
     lib_apt_install redis-server redis-tools || lib_die "Redis installation failed" "apt error" "check the log"
@@ -423,7 +423,7 @@ lib_redis_install() {
 }
 
 lib_redis_show() {
-  local pass; pass="$(lib_redis_password)"
+  local pass=""; pass="$(lib_redis_password)"
   [[ -n "$pass" ]] || { lib_info "Redis is not configured"; return 0; }
   printf '\n%sRedis credentials%s\n' "$C_BLD" "$C_RST"
   lib_print_kv "Host / port" "127.0.0.1 / 6379"
