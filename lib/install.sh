@@ -211,7 +211,7 @@ lib_install_base_packages() {
     lib_run apt-get -y -q -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold upgrade \
       || lib_warn "apt-get upgrade reported errors (see log); continuing"
   fi
-  lib_apt_install curl wget ca-certificates gnupg lsb-release jq unzip tar gzip rsync openssl python3 cron logrotate \
+  lib_apt_install curl wget git ca-certificates gnupg lsb-release jq unzip tar gzip rsync openssl python3 cron logrotate \
     dnsutils acl htop ufw fail2ban unattended-upgrades \
     || lib_die "Base package installation failed" "apt error" "check network / apt sources and re-run"
   lib_ok "Base packages present"

@@ -62,6 +62,9 @@ cd /opt/lompstack
 chmod +x setup.sh
 ```
 
+Ubuntu server images do not ship git, and it is needed both to fetch the code and by
+`self-update` later, so it is installed here and kept as one of the base packages.
+
 ### 3. See what it would do (optional but recommended)
 
 Nothing is changed in this mode, you just get the full plan and the diffs:
