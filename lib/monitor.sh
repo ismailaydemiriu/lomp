@@ -223,7 +223,8 @@ lib_status_main() {
     return 0
   fi
 
-  lib_heading "Server status - ${SYS_HOSTNAME} (Ubuntu ${OS_VERSION_ID}, setup.sh ${SCRIPT_VERSION}${installed_at:+, installed ${installed_at:0:10}})"
+  local revision=""; revision="$(lib_manifest_get '.install.revision')"
+  lib_heading "Server status - ${SYS_HOSTNAME} (Ubuntu ${OS_VERSION_ID}, lompstack ${SCRIPT_VERSION}${revision:+ @${revision}}${installed_at:+, installed ${installed_at:0:10}})"
   printf '  %sServices%s\n' "$C_BLD" "$C_RST"
   for svc in "${services[@]}"; do
     st="${sstate[$svc]}"

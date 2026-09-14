@@ -433,6 +433,9 @@ lib_install_self() {   # [source_dir]
     mv -f "${INSTALL_DIR}/setup.sh.new" "${INSTALL_DIR}/setup.sh"
     rm -rf "${INSTALL_DIR}/lib.old"
     lib_manifest_set '.install.source_dir' "$src"
+    if [[ -d "${src}/.git" ]] && lib_have git; then
+      lib_manifest_set '.install.revision' "$(git -C "$src" rev-parse --short HEAD 2>/dev/null || printf 'unknown')"
+    fi
   fi
   ln -sfn "${INSTALL_DIR}/setup.sh" "$BIN_LINK"
   lib_ok "Installed to ${INSTALL_DIR}; use '${BIN_LINK} <command>' from anywhere"
@@ -477,7 +480,7 @@ lib_selfupdate_main() {
 
   lib_install_self "$src"
   lib_manifest_set '.install.updated_at' "$(lib_iso_now)"
-  lib_ok "lompstack $("$BIN_LINK" --version 2>/dev/null | head -n1 | awk '{print $2}' || true) is now active"
+  lib_ok "Now running lompstack ${SCRIPT_VERSION}$( [[ -n "$(lib_manifest_get '.install.revision')" ]] && printf ' (%s)' "$(lib_manifest_get '.install.revision')")"
   lib_note "Nothing on the server was reconfigured. Run 'sudo lompstack doctor' to check its state."
 }
 
