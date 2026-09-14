@@ -152,6 +152,10 @@ check "ufw is active" bash -c "ufw status | head -1 | grep -q 'Status: active'"
 check "port 80 is listening" bash -c "ss -tlnH | awk '{print \$4}' | grep -qE '[:.]80\$'"
 check "port 443 is listening" bash -c "ss -tlnH | awk '{print \$4}' | grep -qE '[:.]443\$'"
 check "OpenLiteSpeed config test passes" "${LSWS_HOME}/bin/openlitespeed" -t
+check "fail2ban base jail written" test -s /etc/fail2ban/jail.d/server-setup.conf
+check "fail2ban web jail is 0600" test "$(stat -c %a /etc/fail2ban/jail.d/server-setup-web.conf)" = "600"
+check "fail2ban accepted the generated configuration" fail2ban-client ping
+check "sshd jail is loaded" bash -c "fail2ban-client status sshd >/dev/null 2>&1"
 check_eq "unknown Host gets 403 (catch-all vhost)" "403" "$(http_code unknown-host.invalid)"
 
 # =============================================================================

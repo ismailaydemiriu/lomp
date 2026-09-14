@@ -17,6 +17,7 @@ STATE_DIR="$TMP/state"; SITES_ROOT="$TMP/home"; LSWS_HOME="$TMP/lsws"; LOG_FILE=
 BACKUP_ROOT="$TMP/backups"; ACME_ROOT="$TMP/acme"; SSL_DEPLOY_DIR="$TMP/ssl"
 SYSCTL_FILE="$TMP/sysctl.conf"; LIMITS_FILE="$TMP/limits.conf"; MARIADB_TUNED_FILE="$TMP/60-tuned.cnf"
 FAIL2BAN_JAIL_FILE="$TMP/jail.conf"; FAIL2BAN_WEB_JAIL_FILE="$TMP/jail-web.conf"; CRON_FILE="$TMP/cron"
+FAIL2BAN_FILTER_DIR="$TMP/f2b-filters"
 CERTBOT_DEPLOY_HOOK="$TMP/hook.sh"; LOGROTATE_SITES_FILE="$TMP/lr-sites"; LOGROTATE_SELF_FILE="$TMP/lr-self"
 INSTALL_DIR="$TMP/install"; BIN_LINK="$TMP/server-setup"; LOCK_FILE="$TMP/lock"
 OPT_YES=1 OPT_DRY_RUN=0 OPT_QUIET=1 OPT_VERBOSE=0 OPT_NO_COLOR=1 OPT_JSON=0 OPT_NON_INTERACTIVE=1
@@ -29,6 +30,13 @@ done
 trap cleanup EXIT
 mkdir -p "$STATE_DIR" "$LSWS_HOME/conf/vhosts" "$SITES_ROOT"; : >"$LOG_FILE"
 chown() { return 0; }   # no lsadm/site users on the test machine
+
+# Some filesystems (MSYS/NTFS under Git Bash) ignore chmod, so permission assertions
+# only run where they are meaningful. On Linux and in CI they always run.
+CAN_CHMOD=0
+: >"$TMP/.permprobe"; chmod 0600 "$TMP/.permprobe" 2>/dev/null || true
+[[ "$(stat -c %a "$TMP/.permprobe" 2>/dev/null || true)" == "600" ]] && CAN_CHMOD=1
+rm -f "$TMP/.permprobe"
 
 PASS=0; FAIL=0
 ok()   { PASS=$((PASS + 1)); }
@@ -477,6 +485,79 @@ assert_true "config test passes" lib_ols_config_test
 lib_ols_tx_begin; lib_ols_tx_vhost_remove example.com; lib_ols_tx_commit
 assert_false "vhost removed from conf" lib_ols_conf_block_exists virtualhost example.com
 assert_eq "maps removed" "" "$(lib_ols_conf_map_get HTTPS example.com)"
+
+# =============================================================================
+section "renderers must exit 0 (pipefail safety)"
+# Every renderer is used as "renderer | lib_write_file". If a renderer's last statement is a
+# conditional that turns out false, the renderer exits 1 and pipefail aborts the installer.
+# These run with errexit explicitly re-armed, which is how the installer executes them.
+run_isolated() { local rc=0; ( set -Eeuo pipefail; shopt -s lastpipe; "$@" ) >/dev/null 2>&1 || rc=$?; printf '%s' "$rc"; }
+for fn in lib_system_render_sysctl lib_system_render_limits lib_db_render_tuning \
+          lib_php_render_ini lib_ols_render_default_vhconf lib_ols_render_default_vhost_block \
+          lib_ssl_hook_render lib_ols_admin_address; do
+  assert_eq "${fn} exits 0" 0 "$(run_isolated "$fn")"
+done
+assert_eq "lib_ols_render_extprocessor exits 0" 0 "$(run_isolated lib_ols_render_extprocessor 8.3 4)"
+assert_eq "lib_ols_render_vhost_block exits 0" 0 "$(run_isolated lib_ols_render_vhost_block example.com 1)"
+assert_eq "lib_redis_render_conf (cache) exits 0" 0 "$(run_isolated lib_redis_render_conf pw 0)"
+assert_eq "lib_redis_render_conf (persist) exits 0" 0 "$(run_isolated lib_redis_render_conf pw 1)"
+assert_eq "lib_ols_render_vhssl exits 0" 0 "$(run_isolated lib_ols_render_vhssl /k.pem /c.pem 1)"
+
+# the site renderer has the most branches: cover every mode with and without TLS
+for _mode in php static proxy wordpress; do
+  for _ssl in 0 1; do
+    lib_domain_state_reset
+    D_DOMAIN="example.com"; D_IDENT="example_com"; D_USER="example_com"; D_GROUP="example_com"
+    D_HOME="$SITES_ROOT/example.com"; D_MODE="$_mode"; D_SSL="$_ssl"
+    [[ "$_mode" == "proxy" ]] && D_PROXY="127.0.0.1:3000"
+    [[ "$_mode" == "php" || "$_mode" == "wordpress" ]] && { D_PHP="8.3"; D_MEMORY="256M"; D_UPLOAD="64M"; D_PHP_CHILDREN=4; }
+    assert_eq "vhconf ${_mode} ssl=${_ssl} exits 0" 0 "$(run_isolated lib_ols_render_vhconf)"
+    # and with every optional switch on at once
+    D_WWW=1; D_WWW_PRIMARY=1; D_HSTS_PRELOAD=1; D_EMAIL="a@b.c"; D_WS_PATH="/ws"
+    assert_eq "vhconf ${_mode} ssl=${_ssl} (all options) exits 0" 0 "$(run_isolated lib_ols_render_vhconf)"
+  done
+done
+lib_domain_state_reset
+
+# =============================================================================
+section "shell pitfalls (static)"
+# A group that ends in "[[ ... ]] && cmd" exits 1 when the test is false. Feeding such a
+# group into a pipeline makes pipefail kill the whole script. This regression guard exists
+# because exactly that bug reached a real server in lib_domain_fail2ban_regen.
+pitfalls="$(for f in "$ROOT/setup.sh" "$ROOT"/lib/*.sh; do
+  awk -v F="$f" '
+    /^[[:space:]]*\}[[:space:]]*\|/ {
+      if (prev ~ /(^|[^|&])&&[^&]/ || prev ~ /^[[:space:]]*(\[\[|\(\()/) printf "%s:%d: %s\n", F, prevnr, prev
+    }
+    !/^[[:space:]]*(#|$)/ { prev=$0; prevnr=NR }
+  ' "$f"
+done)"
+assert_eq "no piped group ends in a conditional" "" "$pitfalls"
+
+# =============================================================================
+section "fail2ban jail regeneration (regression: empty Cloudflare action)"
+mkdir -p "$FAIL2BAN_FILTER_DIR"
+mv "$STATE_DIR/domains" "$STATE_DIR/domains.bak" 2>/dev/null || true
+mkdir -p "$STATE_DIR/domains"
+CF_F2B_ACTION="$TMP/cf-action.conf"; CF_INI="$TMP/cloudflare-absent.ini"
+lib_pkg_installed() { [[ "$1" == "fail2ban" ]]; }
+lib_service_active() { return 1; }
+# run with errexit explicitly re-armed: this is what the installer does, and what broke
+rc=0; ( set -Eeuo pipefail; shopt -s lastpipe; lib_domain_fail2ban_regen ) >/dev/null 2>&1 || rc=$?
+assert_eq "regen succeeds with no sites and no Cloudflare token" 0 "$rc"
+assert_true "web jail file written" test -s "$FAIL2BAN_WEB_JAIL_FILE"
+out="$(cat "$FAIL2BAN_WEB_JAIL_FILE")"
+assert_has "wp-login jail present" "[server-setup-wp-login]" "$out"
+assert_has "probe jail present" "[server-setup-web-probe]" "$out"
+assert_has "jails disabled while there are no sites" "enabled = false" "$out"
+assert_lacks "no cloudflare action without a token" "server-setup-cloudflare" "$out"
+assert_true "wp-login filter written" test -s "${FAIL2BAN_FILTER_DIR}/server-setup-wp-login.conf"
+assert_true "probe filter written" test -s "${FAIL2BAN_FILTER_DIR}/server-setup-web-probe.conf"
+if (( CAN_CHMOD )); then assert_eq "jail file is 0600" "600" "$(stat -c %a "$FAIL2BAN_WEB_JAIL_FILE")"; fi
+rc=0; ( set -Eeuo pipefail; shopt -s lastpipe; lib_domain_fail2ban_regen ) >/dev/null 2>&1 || rc=$?
+assert_eq "second regen is also clean" 0 "$rc"
+rm -rf "$STATE_DIR/domains"
+mv "$STATE_DIR/domains.bak" "$STATE_DIR/domains" 2>/dev/null || mkdir -p "$STATE_DIR/domains"
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 if (( FAIL > 0 )); then exit 1; fi

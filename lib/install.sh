@@ -287,7 +287,8 @@ lib_install_ssh_harden() {
   if (( keys_ok )); then
     content+="PasswordAuthentication no"$'\n'"PermitRootLogin prohibit-password"$'\n'
   else
-    lib_warn "No authorized_keys found for ${login_user} (or root): password authentication stays ENABLED. Add a key, then re-run install."
+    lib_warn "No authorized_keys found for $( [[ "$login_user" == "root" ]] && printf 'root' || printf '%s or root' "$login_user"): password authentication stays ENABLED."
+    lib_note "Add your public key (ssh-copy-id), then re-run install to disable password logins."
   fi
   if [[ -n "$SSH_PORT" ]] && [[ " ${SYS_SSH_PORTS} " != *" ${SSH_PORT} "* ]]; then
     content+="Port ${SSH_PORT}"$'\n'

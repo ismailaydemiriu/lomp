@@ -397,6 +397,7 @@ lib_secure_file() {   # chmod 600 root:root (dry-run aware)
   (( OPT_DRY_RUN )) && return 0
   [[ -e "$1" ]] || return 0
   chown root:root "$1" && chmod 0600 "$1"
+  return 0
 }
 
 # Append a line if it is not already present (exact match).

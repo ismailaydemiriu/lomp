@@ -79,6 +79,7 @@ _nt_set() {   # key value  (rewrite notify.conf atomically, 0600)
   tmp="$(lib_mktemp)"
   { [[ -s "$NOTIFY_CONF" ]] && grep -v "^${key}=" "$NOTIFY_CONF"; printf '%s=%s\n' "$key" "$value"; } >"$tmp" || true
   chmod 0600 "$tmp" && mv -f "$tmp" "$NOTIFY_CONF"
+  return 0
 }
 
 lib_notify_msmtp_write() {

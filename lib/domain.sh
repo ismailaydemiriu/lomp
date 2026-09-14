@@ -426,13 +426,14 @@ EOF
 }
 
 lib_domain_fail2ban_filters_write() {
-  cat <<'EOF' | lib_write_file /etc/fail2ban/filter.d/server-setup-wp-login.conf 0644 root:root
+  lib_mkdir "$FAIL2BAN_FILTER_DIR" 0755 root:root
+  cat <<'EOF' | lib_write_file "${FAIL2BAN_FILTER_DIR}/server-setup-wp-login.conf" 0644 root:root
 # Managed by lompstack - WordPress login / xmlrpc brute force (OpenLiteSpeed combined access log)
 [Definition]
 failregex = ^<HOST> \S+ \S+ \[[^\]]+\] "POST /+(?:wp-login\.php|xmlrpc\.php)[^"]*" (?:200|403)
 ignoreregex =
 EOF
-  cat <<'EOF' | lib_write_file /etc/fail2ban/filter.d/server-setup-web-probe.conf 0644 root:root
+  cat <<'EOF' | lib_write_file "${FAIL2BAN_FILTER_DIR}/server-setup-web-probe.conf" 0644 root:root
 # Managed by lompstack - vulnerability scanners probing well-known paths
 [Definition]
 failregex = ^<HOST> \S+ \S+ \[[^\]]+\] "(?:GET|POST|HEAD) /+(?:\.env|\.git|\.aws|\.ssh|wp-config\.php|phpmyadmin|pma|adminer|cgi-bin|vendor/phpunit|wp-content/plugins/[^/]+/[^"]*\.php)[^"]*" (?:403|404)
@@ -448,12 +449,15 @@ lib_domain_fail2ban_regen() {
   ((${#logs[@]} == 0)) && { enabled=false; logs=("/dev/null"); }
   lib_domain_fail2ban_filters_write
   local cf_action; cf_action="$(lib_cf_fail2ban_action_lines)"
+  # NOTE: every branch below must end on a successful command. A trailing
+  # "[[ ... ]] && printf ..." makes the whole group exit 1 when the test is false,
+  # and pipefail then propagates that to the pipeline. Use "if" blocks here.
   {
     printf '# Managed by lompstack - web jails (regenerated on add/remove)\n\n'
     printf '[server-setup-wp-login]\nenabled = %s\nfilter = server-setup-wp-login\nbackend = auto\nport = http,https\nmaxretry = 10\nfindtime = 10m\nbantime = 1h\nlogpath = %s\n' "$enabled" "$(lib_join $'\n          ' "${logs[@]}")"
-    [[ -n "$cf_action" ]] && printf '%s\n' "$cf_action"
+    if [[ -n "$cf_action" ]]; then printf '%s\n' "$cf_action"; fi
     printf '\n[server-setup-web-probe]\nenabled = %s\nfilter = server-setup-web-probe\nbackend = auto\nport = http,https\nmaxretry = 5\nfindtime = 10m\nbantime = 6h\nlogpath = %s\n' "$enabled" "$(lib_join $'\n          ' "${logs[@]}")"
-    [[ -n "$cf_action" ]] && printf '%s\n' "$cf_action"
+    if [[ -n "$cf_action" ]]; then printf '%s\n' "$cf_action"; fi
   } | lib_write_file "$FAIL2BAN_WEB_JAIL_FILE" 0600 root:root
   if (( LIB_FILE_CHANGED )) && (( ! OPT_DRY_RUN )) && lib_service_active fail2ban; then
     lib_run fail2ban-client reload || lib_warn "fail2ban reload failed (see log)"
