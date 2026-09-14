@@ -28,7 +28,7 @@ after it is applied, and rolled back if the verification fails.
 | TLS | Let's Encrypt via certbot, shared ACME webroot, TLS 1.2/1.3 only, HSTS, auto-renew with an OpenLiteSpeed deploy hook |
 | Security | UFW, Fail2ban (sshd + recidive + WordPress/scanner jails), sshd drop-in hardening, unattended security updates |
 | Operations | Backups with retention/encryption/remote upload, daily health check, e-mail / Telegram / webhook alerts, `status` and `doctor` |
-| Optional | Node.js + PM2, Python venv tooling, Netdata, Cloudflare real-client-IP mode |
+| Optional | Node.js + PM2, Python venv tooling, Netdata, Cloudflare real-client-IP mode. None of these is installed unless you ask for it, on the command line or from the menu. |
 
 Everything is sized from the machine it runs on: CPU count, RAM, and whether the disk is
 NVMe, SSD or spinning rust all feed into the OpenLiteSpeed, PHP, MariaDB and Redis settings.
@@ -89,7 +89,9 @@ no static IP. See [WebAdmin access](#webadmin-access) if you want to change that
 Useful extras:
 
 ```bash
-# Node.js app hosting, Python tooling, Cloudflare in front, custom PHP
+# Node.js app hosting, Python tooling, Cloudflare in front, custom PHP.
+# These are opt-in: without the flags nothing extra is installed. They can also be
+# added later, from "Optional components" in the menu or by re-running install.
 sudo ./setup.sh install --with-node --with-python --cloudflare --php 8.3
 
 # Change the SSH port safely (UFW is opened first, sshd is tested before it is restarted)

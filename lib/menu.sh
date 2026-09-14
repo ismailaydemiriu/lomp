@@ -216,7 +216,8 @@ lib_menu_main() {
     _menu_item 14 "Update lompstack"
     _menu_item 15 "Re-tune to hardware"
     _menu_item 16 "Notifications"
-    _menu_item 17 "Command reference"
+    _menu_item 17 "Optional components (Node.js, Python, Netdata)"
+    _menu_item 18 "Command reference"
     _menu_item  0 "Exit"
     printf '\n%sChoice: %s' "$C_BLD" "$C_RST"
     read -r choice </dev/tty || return 0
@@ -238,7 +239,8 @@ lib_menu_main() {
       14) _menu_run self-update ;;
       15) _menu_run optimize ;;
       16) _menu_run notify --show ;;
-      17) lib_usage | ${PAGER:-less} 2>/dev/null || lib_usage; _menu_pause ;;
+      17) _menu_runtimes ;;
+      18) lib_usage | ${PAGER:-less} 2>/dev/null || lib_usage; _menu_pause ;;
       0|q|Q|"") printf '\n'; return 0 ;;
       *) printf '%sPick a number from the list.%s\n' "$C_YEL" "$C_RST" ;;
     esac
@@ -291,6 +293,36 @@ _menu_remove_site() {
   _menu_ask keep "Keep the files? (y/n)" "n"
   [[ "${keep,,}" == y* ]] && args+=(--keep-files)
   _menu_run remove "${args[@]}"
+}
+
+# Optional runtimes are never installed unless asked for, on the command line with
+# --with-node / --with-python / --with-netdata, or from here.
+_menu_runtimes() {
+  local choice="" ver="" node_v="" py_v="" nd=""
+  while true; do
+    node_v="$(lib_manifest_get '.components.node')"
+    py_v="$(lib_manifest_get '.components.python')"
+    nd="$(lib_manifest_get '.components.netdata')"
+    printf '\n %sOPTIONAL COMPONENTS%s   (nothing here is installed by default)\n' "$C_BLD" "$C_RST"
+    _menu_rule
+    printf '  %s1%s) Node.js + PM2        %s\n' "$C_CYN" "$C_RST" \
+      "$( [[ -n "$node_v" ]] && printf '%sinstalled %s%s' "$C_GRN" "$node_v" "$C_RST" || printf '%snot installed%s' "$C_DIM" "$C_RST")"
+    printf '  %s2%s) Python venv + pip    %s\n' "$C_CYN" "$C_RST" \
+      "$( [[ -n "$py_v" ]] && printf '%sinstalled %s%s' "$C_GRN" "$py_v" "$C_RST" || printf '%snot installed%s' "$C_DIM" "$C_RST")"
+    printf '  %s3%s) Netdata monitoring   %s\n' "$C_CYN" "$C_RST" \
+      "$( [[ "$nd" == "true" ]] && printf '%sinstalled%s' "$C_GRN" "$C_RST" || printf '%snot installed%s' "$C_DIM" "$C_RST")"
+    printf '  %s0%s) Back\n' "$C_CYN" "$C_RST"
+    printf '\n%sChoice: %s' "$C_BLD" "$C_RST"
+    read -r choice </dev/tty || return 0
+    case "$choice" in
+      1) _menu_ask ver "Node.js major version" "20"
+         _menu_run install --with-node --node "$ver" --skip-upgrade ;;
+      2) _menu_run install --with-python --skip-upgrade ;;
+      3) _menu_run install --with-netdata --skip-upgrade ;;
+      0|q|Q|"") return 0 ;;
+      *) printf '%sPick a number from the list.%s\n' "$C_YEL" "$C_RST" ;;
+    esac
+  done
 }
 
 _menu_backup() {
