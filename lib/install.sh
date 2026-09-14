@@ -643,7 +643,9 @@ lib_panel_main() {
       # bare "panel" opens it; without an SSH session there is no address to open for,
       # so fall back to showing the tunnel instructions instead of failing
       if [[ $# -eq 0 ]] && [[ -z "$(lib_admin_client_ip)" ]]; then
-        lib_warn "Not an SSH session, so there is no address to open the panel for."
+        lib_warn "Could not work out which address you are connecting from, so nothing was opened."
+        lib_note "Give it explicitly with: sudo lompstack panel --ip <your address>"
+        lib_note "Do not know your address? Run this on your own computer: curl -s https://api.ipify.org"
         lib_panel_status
         return 0
       fi

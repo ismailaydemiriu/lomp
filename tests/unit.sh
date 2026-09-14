@@ -451,10 +451,20 @@ SSH_CONNECTION="203.0.113.9 51234 10.0.0.5 22"
 assert_eq "admin client ip from SSH" "203.0.113.9" "$(lib_admin_client_ip)"
 SSH_CONNECTION="2001:db8::1 51234 2001:db8::2 22"
 assert_eq "admin client ipv6 from SSH" "2001:db8::1" "$(lib_admin_client_ip)"
-SSH_CONNECTION="garbage"
-assert_eq "garbage SSH_CONNECTION ignored" "" "$(lib_admin_client_ip)"
 unset SSH_CONNECTION
-assert_eq "no SSH session means no client ip" "" "$(lib_admin_client_ip)"
+# sudo clears the environment, so the fallbacks decide; each part is tested on its own
+# because the ancestry walk depends on the machine the suite runs on.
+assert_eq "who: remote IPv4"  "203.0.113.77" "$(lib_admin_ip_from_who <<<'root     pts/0        2026-09-14 17:30 (203.0.113.77)')"
+assert_eq "who: remote IPv6"  "2001:db8::1"  "$(lib_admin_ip_from_who <<<'ubuntu   pts/1        2026-09-14 17:30 (2001:db8::1)')"
+assert_eq "who: local console" ""            "$(lib_admin_ip_from_who <<<'root     tty1         2026-09-14 17:30')"
+assert_eq "who: X display"     ":0"          "$(lib_admin_ip_from_who <<<'root     pts/0        2026-09-14 17:30 (:0)')"
+assert_eq "who: no output"     ""            "$(lib_admin_ip_from_who </dev/null)"
+assert_true  "valid IPv4 accepted" lib_admin_ip_valid 203.0.113.77
+assert_true  "valid IPv6 accepted" lib_admin_ip_valid 2001:db8::1
+assert_false "X display rejected"  lib_admin_ip_valid ':0'
+assert_false "hostname rejected"   lib_admin_ip_valid 'client.example.com'
+assert_false "empty rejected"      lib_admin_ip_valid ''
+assert_eq "ancestry walk exits cleanly" 0 "$(run_isolated lib_admin_ip_from_ancestors)"
 
 # ufw rule parsing must never touch a port it was not asked about
 ufw() {

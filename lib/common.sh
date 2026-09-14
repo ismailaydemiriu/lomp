@@ -743,10 +743,44 @@ PYEOF
 
 # The address the administrator is connected FROM (not the server's own address).
 # Empty when the session is not an SSH session, e.g. a provider web console.
+#
+# sudo resets the environment by default, so SSH_CONNECTION is gone under "sudo lompstack".
+# Three sources are tried in order: our own environment, the environment of an ancestor
+# process (the login shell still has it), and finally the utmp entry for our terminal.
+lib_admin_ip_valid() { [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ || "$1" == *:*:* ]]; }
+
+# Extract the remote address from "who -m" output given on stdin. A local console has no
+# address, and an X display shows up as ":0", neither of which is a client address.
+lib_admin_ip_from_who() {
+  local out=""
+  out="$(cat)"
+  printf '%s' "$(sed -nE 's/.*\(([^)]+)\)[[:space:]]*$/\1/p' <<<"$out" | sed -n 1p)"
+}
+
+# Walk our own process ancestry looking for an inherited SSH_CONNECTION. /proc/PID/environ
+# is frozen at exec time, so the login shell and the sudo process both still carry it even
+# though sudo stripped it from ours.
+lib_admin_ip_from_ancestors() {
+  local pid="$$" hops=0 env_data="" ip=""
+  while [[ -n "$pid" && "$pid" != "0" && "$pid" != "1" ]] && (( hops < 20 )); do
+    hops=$(( hops + 1 ))
+    if [[ -r "/proc/${pid}/environ" ]]; then
+      env_data="$(tr '\0' '\n' <"/proc/${pid}/environ" 2>/dev/null || true)"
+      ip="$(awk -F= '$1=="SSH_CONNECTION"{print $2; exit}' <<<"$env_data")"
+      ip="${ip%% *}"
+      if [[ -n "$ip" ]]; then printf '%s' "$ip"; return 0; fi
+    fi
+    pid="$(awk '/^PPid:/{print $2; exit}' "/proc/${pid}/status" 2>/dev/null || true)"
+  done
+  printf ''
+}
+
 lib_admin_client_ip() {
   local ip=""
-  [[ -n "${SSH_CONNECTION:-}" ]] && ip="$(awk '{print $1}' <<<"$SSH_CONNECTION")"
-  [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ || "$ip" == *:*:* ]] || ip=""
+  [[ -n "${SSH_CONNECTION:-}" ]] && ip="${SSH_CONNECTION%% *}"
+  [[ -z "$ip" ]] && ip="$(lib_admin_ip_from_ancestors)"
+  if [[ -z "$ip" ]] && lib_have who; then ip="$(who -m 2>/dev/null | lib_admin_ip_from_who || true)"; fi
+  lib_admin_ip_valid "$ip" || ip=""
   printf '%s' "$ip"
 }
 
