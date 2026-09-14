@@ -276,6 +276,6 @@ lib_ssl_renew_main() {
   D_SSL=1; D_SSL_WANTED=1
   lib_domain_state_save
   lib_domain_apply_config "enable SSL for ${domain}"
-  lib_ols_smoke_test "$domain" "200|301|302|403" https || lib_warn "HTTPS smoke test failed for ${domain} (${OLS_TEST_OUTPUT})"
+  lib_ols_smoke_test "$domain" "$(lib_domain_expected_codes lenient)" https || lib_warn "HTTPS smoke test failed for ${domain} (${OLS_TEST_OUTPUT})"
   lib_ok "SSL active for ${domain}: $(lib_ssl_status_line "$domain")"
 }

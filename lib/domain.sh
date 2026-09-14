@@ -233,12 +233,15 @@ lib_domain_add_main() {
 
   # ---- 4 smoke test --------------------------------------------------------
   lib_step "Smoke test (HTTP)"
-  if (( D_WWW && D_WWW_PRIMARY )); then http_expect="301|302"; fi
+  http_expect="$(lib_domain_expected_codes)"
   lib_ols_smoke_test "$domain" "$http_expect" || lib_die "Smoke test failed for ${domain}" "${OLS_TEST_OUTPUT}" "check ${LSWS_HOME}/logs/error.log and ${D_HOME}/logs/error.log"
   if [[ "$D_MODE" == "php" || "$D_MODE" == "wordpress" ]]; then
     lib_domain_php_probe || lib_die "PHP is not executing for ${domain}" "${OLS_TEST_OUTPUT}" "check ${D_HOME}/logs/error.log and the LSAPI processor (${D_IDENT})"
   fi
   lib_ok "Site answers on http://${domain}/"
+  if [[ "$D_MODE" == "proxy" ]]; then
+    lib_note "Until your application listens on ${D_PROXY}, the site answers 502/503. That is expected."
+  fi
 
   # ---- 5 SSL ---------------------------------------------------------------
   if (( D_SSL_WANTED )); then
@@ -300,7 +303,7 @@ lib_domain_add_ssl() {
     D_SSL=1
     lib_domain_state_save
     lib_domain_apply_config "enable SSL for ${D_DOMAIN}"
-    if lib_ols_smoke_test "$D_DOMAIN" "200|301|302" https; then lib_ok "HTTPS active: https://${D_DOMAIN}/"
+    if lib_ols_smoke_test "$D_DOMAIN" "$(lib_domain_expected_codes)" https; then lib_ok "HTTPS active: https://${D_DOMAIN}/"
     else lib_warn "HTTPS smoke test failed (${OLS_TEST_OUTPUT}); check ${D_HOME}/logs/error.log"; fi
   else
     lib_error "Certificate could not be obtained: ${SSL_LAST_ERROR}"
@@ -375,6 +378,19 @@ EOF
     fi
   fi
   return 0
+}
+
+# HTTP status codes that mean "this vhost is working", for the site currently in D_*.
+# Kept in one place so the add, SSL and renew paths cannot drift apart.
+#   proxy sites: the application is usually deployed after the site is created, so a
+#                502/503/504 from an absent backend still proves the vhost is right
+#   lenient    : also accept 403, which an existing site with an empty docroot returns
+lib_domain_expected_codes() {   # [lenient]
+  local codes="200|301|302"
+  if (( D_WWW && D_WWW_PRIMARY )); then codes="301|302"; fi
+  if [[ "$D_MODE" == "proxy" ]]; then codes="${codes}|502|503|504"; fi
+  if [[ "${1:-}" == "lenient" ]]; then codes="${codes}|403"; fi
+  printf '%s' "$codes"
 }
 
 # Render vhconf + register vhost/maps in httpd_config, test and reload (one change set).

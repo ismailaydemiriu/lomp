@@ -699,6 +699,24 @@ OPT_NON_INTERACTIVE=1   # the suite runs non-interactive throughout
 assert_has "command name prefers the short alias" "lomp" "$(_menu_cmd_name)"
 
 # =============================================================================
+section "smoke test expectations per site mode"
+# A proxy site is created before its application is deployed, so 502/503 from an absent
+# backend must count as success. Getting this wrong made "add --proxy" roll the whole
+# site back for a completely normal situation.
+lib_domain_state_reset
+D_MODE="php";    assert_eq "php site"            "200|301|302"                 "$(lib_domain_expected_codes)"
+D_MODE="static"; assert_eq "static site"         "200|301|302"                 "$(lib_domain_expected_codes)"
+D_MODE="proxy";  assert_eq "proxy tolerates 50x" "200|301|302|502|503|504"     "$(lib_domain_expected_codes)"
+D_MODE="php"; D_WWW=1; D_WWW_PRIMARY=1
+assert_eq "apex redirects to www"                "301|302"                     "$(lib_domain_expected_codes)"
+D_MODE="proxy"
+assert_eq "proxy plus www-primary"               "301|302|502|503|504"         "$(lib_domain_expected_codes)"
+D_MODE="php"; D_WWW=0; D_WWW_PRIMARY=0
+assert_eq "lenient also accepts 403"             "200|301|302|403"             "$(lib_domain_expected_codes lenient)"
+assert_eq "helper exits 0"                       0                             "$(run_isolated lib_domain_expected_codes)"
+lib_domain_state_reset
+
+# =============================================================================
 section "shell pitfalls (static)"
 # Under set -u a "local x" that is only assigned on some branches aborts the script when it
 # is read on another branch. This bit lib_db_install ("dump: unbound variable") on a real
