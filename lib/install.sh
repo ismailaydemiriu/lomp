@@ -16,7 +16,8 @@ lib_install_parse_args() {
     case "$a" in
       --php)             PHP_VERSION="${1:-}"; shift ;;
       --timezone)        TIMEZONE="${1:-}"; shift ;;
-      --admin-ip)        ADMIN_ALLOWED_IP="${1:-}"; shift ;;
+      --admin-ip)        ADMIN_ALLOWED_IP="${1:-}"; ADMIN_ACCESS="ip"; shift ;;
+      --admin-access)    ADMIN_ACCESS="${1:-}"; shift ;;
       --email)           DEFAULT_EMAIL="${1:-}"; shift ;;
       --ssh-port)        SSH_PORT="${1:-}"; shift ;;
       --with-node)       INS_WITH_NODE=1 ;;
@@ -42,13 +43,39 @@ lib_install_parse_args() {
   lib_php_valid_version "$PHP_VERSION" || lib_die "Invalid --php '${PHP_VERSION}'" "expected e.g. 8.3" "--php 8.3"
   [[ "$ADMIN_PORT" =~ ^[0-9]{2,5}$ ]] || lib_die "Invalid ADMIN_PORT '${ADMIN_PORT}'" "" "set a numeric port"
   [[ -z "$SSH_PORT" || ( "$SSH_PORT" =~ ^[0-9]{1,5}$ && "$SSH_PORT" -ge 1 && "$SSH_PORT" -le 65535 ) ]] || lib_die "Invalid --ssh-port '${SSH_PORT}'" "" "--ssh-port 2222"
-  [[ -z "$ADMIN_ALLOWED_IP" || "$ADMIN_ALLOWED_IP" =~ ^[0-9a-fA-F.:/]+$ ]] || lib_die "Invalid --admin-ip '${ADMIN_ALLOWED_IP}'" "" "--admin-ip 1.2.3.4 or 1.2.3.0/24"
+  case "$ADMIN_ACCESS" in
+    tunnel|ip|open) ;;
+    *) lib_die "Invalid --admin-access '${ADMIN_ACCESS}'" "expected tunnel, ip or open" \
+         "--admin-access tunnel (default, SSH tunnel) | --admin-ip <your IP> | --admin-access open" ;;
+  esac
+  if [[ "$ADMIN_ALLOWED_IP" == "auto" ]]; then
+    ADMIN_ALLOWED_IP="$(lib_admin_client_ip)"
+    if [[ -n "$ADMIN_ALLOWED_IP" ]]; then
+      lib_info "--admin-ip auto: using ${ADMIN_ALLOWED_IP} (the address this SSH session comes from)"
+      lib_warn "If that address is dynamic you will lose the panel when it changes. 'setup.sh panel open' reopens it at any time."
+    else
+      lib_warn "--admin-ip auto: no SSH session detected, falling back to tunnel mode"
+      ADMIN_ACCESS="tunnel"
+    fi
+  fi
+  [[ -z "$ADMIN_ALLOWED_IP" || "$ADMIN_ALLOWED_IP" =~ ^[0-9a-fA-F.:/]+$ ]] || lib_die "Invalid --admin-ip '${ADMIN_ALLOWED_IP}'" "" "--admin-ip 1.2.3.4, 1.2.3.0/24 or auto"
+  if [[ "$ADMIN_ACCESS" == "ip" && -z "$ADMIN_ALLOWED_IP" ]]; then
+    lib_warn "--admin-access ip needs --admin-ip <address>; falling back to tunnel mode"
+    ADMIN_ACCESS="tunnel"
+  fi
+  [[ "$ADMIN_ACCESS" == "ip" ]] || ADMIN_ALLOWED_IP=""
   [[ "$BACKUP_KEEP" =~ ^[0-9]+$ ]] || lib_die "Invalid backup keep count '${BACKUP_KEEP}'" "" "--backup-keep 7"
   [[ "$INS_NODE_MAJOR" =~ ^[0-9]{2}$ ]] || lib_die "Invalid --node '${INS_NODE_MAJOR}'" "" "--node 20"
   [[ -n "$INS_BACKUP_SCHEDULE" ]] || INS_BACKUP_SCHEDULE="$BACKUP_SCHEDULE"
   # Re-runs: keep previously chosen values when the flag is not repeated (idempotent re-run)
   if [[ -s "$STATE_DIR/manifest.json" ]] && lib_have jq; then
-    [[ -n "$ADMIN_ALLOWED_IP" ]]   || ADMIN_ALLOWED_IP="$(lib_manifest_get '.params.admin_ip')"
+    if [[ "$ADMIN_ACCESS" == "tunnel" && -z "$ADMIN_ALLOWED_IP" ]]; then
+      local prev_access; prev_access="$(lib_manifest_get '.params.admin_access')"
+      if [[ -n "$prev_access" ]]; then
+        ADMIN_ACCESS="$prev_access"
+        [[ "$ADMIN_ACCESS" == "ip" ]] && ADMIN_ALLOWED_IP="$(lib_manifest_get '.params.admin_ip')"
+      fi
+    fi
     [[ -n "$DEFAULT_EMAIL" ]]      || DEFAULT_EMAIL="$(lib_manifest_get '.params.email')"
     [[ -n "$INS_BACKUP_SCHEDULE" ]] || INS_BACKUP_SCHEDULE="$(lib_manifest_get '.params.backup_schedule')"
     [[ -n "$FAIL2BAN_IGNORE_IP" ]] || FAIL2BAN_IGNORE_IP="$(lib_manifest_get '.params.fail2ban_ignore_ip')"
@@ -122,7 +149,7 @@ lib_install_main() {
   lib_ols_admin_setup
   lib_ols_configure_server
   (( OPT_DRY_RUN )) || lib_ols_running || lib_ols_restart
-  [[ -n "$ADMIN_ALLOWED_IP" ]] || lib_warn "WebAdmin port ${ADMIN_PORT} is reachable from ANY IP (no --admin-ip given). Restrict it: setup.sh install --admin-ip <your IP>"
+  [[ "$ADMIN_ACCESS" == "open" ]] && lib_warn "WebAdmin port ${ADMIN_PORT} is reachable from ANY IP (--admin-access open). Prefer 'tunnel' unless you really need this."
 
   lib_step "MariaDB"
   lib_db_install "$INS_MARIADB"
@@ -212,12 +239,20 @@ lib_install_ufw() {
   lib_ufw_rule allow 80/tcp
   lib_ufw_rule allow 443/tcp
   lib_ufw_rule allow 443/udp
-  if [[ -n "$ADMIN_ALLOWED_IP" ]]; then
-    lib_ufw_rule allow from "$ADMIN_ALLOWED_IP" to any port "$ADMIN_PORT" proto tcp
-    (( INS_WITH_NETDATA )) && lib_ufw_rule allow from "$ADMIN_ALLOWED_IP" to any port 19999 proto tcp
-  else
-    lib_ufw_rule allow "${ADMIN_PORT}/tcp"
-  fi
+  case "$ADMIN_ACCESS" in
+    ip)
+      lib_ufw_delete_port_rules "$ADMIN_PORT"
+      lib_ufw_rule allow from "$ADMIN_ALLOWED_IP" to any port "$ADMIN_PORT" proto tcp
+      (( INS_WITH_NETDATA )) && lib_ufw_rule allow from "$ADMIN_ALLOWED_IP" to any port 19999 proto tcp
+      ;;
+    open)
+      lib_ufw_rule allow "${ADMIN_PORT}/tcp"
+      ;;
+    tunnel)
+      # the panel is not exposed at all: no firewall rule and the listener binds to 127.0.0.1
+      lib_ufw_delete_port_rules "$ADMIN_PORT"
+      ;;
+  esac
   if (( ! OPT_DRY_RUN )); then
     if ! ufw status 2>/dev/null | head -n1 | grep -q 'Status: active'; then
       ufw show added 2>/dev/null | grep -qE "allow ${SYS_SSH_PORTS%% *}/tcp" || lib_die "Refusing to enable UFW without an SSH allow rule" "SSH port ${SYS_SSH_PORTS} rule missing" "add it manually: ufw allow ${SYS_SSH_PORTS%% *}/tcp"
@@ -226,7 +261,13 @@ lib_install_ufw() {
     lib_systemctl enable ufw >/dev/null 2>&1 || true
   fi
   lib_manifest_set_json '.components.ufw' true
-  lib_ok "UFW active: SSH ${SYS_SSH_PORTS}${SSH_PORT:+ + $SSH_PORT}, 80/tcp, 443/tcp+udp, WebAdmin ${ADMIN_PORT}$( [[ -n "$ADMIN_ALLOWED_IP" ]] && printf ' (only from %s)' "$ADMIN_ALLOWED_IP")"
+  local admin_desc
+  case "$ADMIN_ACCESS" in
+    ip)     admin_desc="WebAdmin ${ADMIN_PORT} only from ${ADMIN_ALLOWED_IP}" ;;
+    open)   admin_desc="WebAdmin ${ADMIN_PORT} open to everyone" ;;
+    *)      admin_desc="WebAdmin ${ADMIN_PORT} closed (SSH tunnel only)" ;;
+  esac
+  lib_ok "UFW active: SSH ${SYS_SSH_PORTS}${SSH_PORT:+ + $SSH_PORT}, 80/tcp, 443/tcp+udp, ${admin_desc}"
 }
 
 lib_install_ssh_harden() {
@@ -391,11 +432,13 @@ lib_install_manifest() {
   lib_manifest_set '.components.openlitespeed' "$(lib_ols_version)"
   lib_manifest_set '.components.mariadb' "$(lib_db_version)"
   lib_manifest_set '.components.redis' "$(lib_redis_version)"
+  lib_manifest_set '.params.admin_access' "$ADMIN_ACCESS"
   lib_manifest_set_json '.params' "$(jq -n --arg tz "$TIMEZONE" --arg ap "$ADMIN_PORT" --arg ai "$ADMIN_ALLOWED_IP" --arg em "$DEFAULT_EMAIL" \
+      --arg aa "$ADMIN_ACCESS" \
       --arg ssh "${SYS_SSH_PORTS}${SSH_PORT:+ $SSH_PORT}" --arg php "$PHP_VERSION" --arg keep "$BACKUP_KEEP" --arg sched "$INS_BACKUP_SCHEDULE" \
       --argjson rp "$( (( INS_REDIS_PERSIST )) && printf 'true' || printf 'false')" --argjson ar "$( (( INS_AUTO_REBOOT )) && printf 'true' || printf 'false')" \
       --arg f2b "$FAIL2BAN_IGNORE_IP" --arg dbp "$DB_BUFFER_PERCENT" --arg rdp "$REDIS_MAX_PERCENT" \
-      '{timezone:$tz, admin_port:$ap, admin_ip:$ai, email:$em, ssh_ports:$ssh, php:$php, backup_keep:$keep, backup_schedule:$sched,
+      '{timezone:$tz, admin_port:$ap, admin_access:$aa, admin_ip:$ai, email:$em, ssh_ports:$ssh, php:$php, backup_keep:$keep, backup_schedule:$sched,
         redis_persist:$rp, auto_reboot:$ar, fail2ban_ignore_ip:$f2b, db_buffer_percent:$dbp, redis_max_percent:$rdp}')"
   lib_manifest_set_json '.profile' "$(lib_system_profile_json)"
   lib_ok "Manifest updated (${STATE_DIR}/manifest.json)"
@@ -404,7 +447,18 @@ lib_install_manifest() {
 lib_install_summary() {
   local rerun="$1"
   printf '\n%s%s=== Installation %s ===%s\n' "$C_BLD" "$C_GRN" "$( (( rerun )) && printf 'verified' || printf 'completed')" "$C_RST"
-  lib_print_kv "WebAdmin"       "$(lib_ols_admin_url)  (credentials: ${STATE_DIR}/openlitespeed-admin.info, or: setup.sh credentials --all)"
+  case "$ADMIN_ACCESS" in
+    tunnel)
+      lib_print_kv "WebAdmin" "closed to the internet (safe with a dynamic IP)"
+      lib_note "open a tunnel from your own computer:"
+      lib_note "  $(lib_ols_admin_tunnel_cmd)"
+      lib_note "then browse to $(lib_ols_admin_url)"
+      lib_note "or open the port temporarily: sudo lompstack panel open"
+      ;;
+    ip)   lib_print_kv "WebAdmin" "$(lib_ols_admin_url)  (only from ${ADMIN_ALLOWED_IP})" ;;
+    open) lib_print_kv "WebAdmin" "$(lib_ols_admin_url)  (reachable from anywhere)" ;;
+  esac
+  lib_print_kv "WebAdmin login"  "user admin, password: sudo lompstack credentials --all"
   lib_print_kv "Sites root"     "${SITES_ROOT}/<domain>/public_html"
   lib_print_kv "Add a site"     "setup.sh add example.com [--www] [--wordpress] [--proxy 127.0.0.1:3000]"
   lib_print_kv "Health"         "setup.sh status | setup.sh doctor"
@@ -415,6 +469,165 @@ lib_install_summary() {
   printf '\n'
   (( OPT_DRY_RUN )) || lib_notify_send "Installation $( (( rerun )) && printf 'verified' || printf 'completed')" \
     "setup.sh ${SCRIPT_VERSION} finished on $(hostname). OLS $(lib_ols_version), PHP $(lib_php_summary_line), MariaDB $(lib_db_version), Redis $(lib_redis_version)." || true
+}
+
+# =============================================================================
+#  panel - WebAdmin access (built for administrators without a static IP)
+# =============================================================================
+PANEL_TIMER_UNIT="lompstack-panel-close"
+
+_panel_self() { if [[ -x "$BIN_LINK" ]]; then printf '%s' "$BIN_LINK"; else printf '%s' "$SCRIPT_PATH"; fi; }
+_panel_mode() { local m; m="$(lib_manifest_get '.params.admin_access')"; printf '%s' "${m:-tunnel}"; }
+
+_panel_timer_pending() { systemctl is-active --quiet "${PANEL_TIMER_UNIT}.timer" 2>/dev/null; }
+
+_panel_timer_cancel() {
+  (( OPT_DRY_RUN )) && return 0
+  systemctl stop "${PANEL_TIMER_UNIT}.timer" >/dev/null 2>&1 || true
+  systemctl stop "${PANEL_TIMER_UNIT}.service" >/dev/null 2>&1 || true
+  return 0
+}
+
+_panel_timer_schedule() {   # minutes
+  local m="$1"
+  (( m > 0 )) || { lib_warn "No automatic close scheduled: run 'lompstack panel close' when you are done"; return 0; }
+  if (( OPT_DRY_RUN )); then lib_info "[dry-run] would close the port again automatically in ${m} minute(s)"; return 0; fi
+  lib_have systemd-run || { lib_warn "systemd-run unavailable: the port stays open until 'lompstack panel close'"; return 0; }
+  _panel_timer_cancel
+  if systemd-run --quiet --on-active="${m}min" --unit="$PANEL_TIMER_UNIT" \
+       --description="lompstack: close the WebAdmin port again" \
+       "$(_panel_self)" panel close --yes --quiet >/dev/null 2>&1; then
+    lib_ok "The port closes again automatically in ${m} minute(s)"
+  else
+    lib_warn "Could not schedule the automatic close; run 'lompstack panel close' when you are done"
+  fi
+}
+
+# Apply a listener binding and make sure it really took effect.
+_panel_apply_bind() {   # address
+  local addr="$1"
+  lib_ols_change_begin
+  lib_ols_admin_bind "$addr"
+  lib_ols_change_commit "WebAdmin listener"
+  (( OPT_DRY_RUN )) && return 0
+  sleep 1
+  if [[ "$addr" == "127.0.0.1" ]]; then
+    if ss -tlnH 2>/dev/null | awk '{print $4}' | grep -qE "^(0\.0\.0\.0|\*|\[::\]):${ADMIN_PORT}\$"; then
+      lib_ols_restart; lib_ols_wait_ready 40 || lib_warn "OpenLiteSpeed took long to come back; check systemctl status lsws"
+    fi
+  else
+    lib_port_listening "$ADMIN_PORT" || { lib_ols_restart; lib_ols_wait_ready 40 || lib_warn "OpenLiteSpeed took long to come back"; }
+  fi
+  return 0
+}
+
+# One-line summary used by "status".
+lib_panel_status_line() {
+  local mode; mode="$(_panel_mode)"
+  case "$mode" in
+    ip)   printf 'port %s only from %s' "$ADMIN_PORT" "$(lib_manifest_get '.params.admin_ip')" ;;
+    open) printf 'port %s open to everyone' "$ADMIN_PORT" ;;
+    *)    printf 'closed, SSH tunnel only (setup.sh panel)' ;;
+  esac
+  _panel_timer_pending && printf ' [temporarily open]'
+  return 0
+}
+
+lib_panel_status() {
+  local mode bind rules
+  mode="$(_panel_mode)"
+  bind="$(lib_ols_admin_current_bind)"
+  lib_system_analyze --no-net
+  printf '\n%sWebAdmin access%s\n' "$C_BLD" "$C_RST"
+  lib_print_kv "Configured mode" "${mode}$( [[ "$mode" == "ip" ]] && printf ' (%s)' "$(lib_manifest_get '.params.admin_ip')")"
+  lib_print_kv "Listener"        "${bind:-unknown}"
+  rules="$(lib_ufw_port_rule_numbers "$ADMIN_PORT" | wc -l | tr -d ' ')"
+  lib_print_kv "Firewall"        "$( (( rules > 0 )) && printf '%s UFW rule(s) allow port %s' "$rules" "$ADMIN_PORT" || printf 'port %s is not opened' "$ADMIN_PORT")"
+  if _panel_timer_pending; then
+    lib_print_kv "Auto-close" "scheduled ($(systemctl show "${PANEL_TIMER_UNIT}.timer" -p NextElapseUSecRealtime --value 2>/dev/null || true))"
+  fi
+  lib_print_kv "URL"             "$(lib_ols_admin_url)"
+  lib_print_kv "Login"           "user admin, password: sudo lompstack credentials --all"
+  printf '\n  %sFrom your own computer, without opening any port:%s\n' "$C_BLD" "$C_RST"
+  printf '    %s\n' "$(lib_ols_admin_tunnel_cmd)"
+  printf '    then browse to https://127.0.0.1:%s\n' "$ADMIN_PORT"
+  printf '\n  %sOr open the port for your current address for a while:%s\n' "$C_BLD" "$C_RST"
+  printf '    sudo lompstack panel open            # your SSH address, 60 minutes\n'
+  printf '    sudo lompstack panel open --minutes 15\n'
+  printf '    sudo lompstack panel close\n\n'
+}
+
+lib_panel_open() {
+  local ip="auto" minutes=60 a
+  while (($# > 0)); do
+    a="$1"; shift
+    case "$a" in
+      --ip)      ip="${1:-auto}"; shift ;;
+      --minutes) minutes="${1:-60}"; shift ;;
+      *) lib_die "Unknown option for panel open: ${a}" "" "panel open [--ip auto|<IP>|any] [--minutes N]" ;;
+    esac
+  done
+  [[ "$minutes" =~ ^[0-9]+$ ]] || lib_die "Invalid --minutes '${minutes}'" "expected a whole number" "--minutes 30 (0 = no automatic close)"
+  if [[ "$ip" == "auto" ]]; then
+    ip="$(lib_admin_client_ip)"
+    [[ -n "$ip" ]] || lib_die "Could not detect your address" \
+      "this is not an SSH session, so SSH_CONNECTION is empty" \
+      "pass it yourself: panel open --ip 1.2.3.4, or use the SSH tunnel shown by 'panel status'"
+    lib_info "Opening port ${ADMIN_PORT} for ${ip} (the address this SSH session comes from)"
+  elif [[ "$ip" == "any" ]]; then
+    lib_warn "This exposes the WebAdmin login to the whole internet."
+    lib_confirm "Really open port ${ADMIN_PORT} to everyone?" n || lib_die "Cancelled" "" "use 'panel open' without --ip any"
+  else
+    [[ "$ip" =~ ^[0-9a-fA-F.:/]+$ ]] || lib_die "Invalid --ip '${ip}'" "" "--ip 1.2.3.4 or --ip 1.2.3.0/24"
+  fi
+  _panel_apply_bind "$(lib_ols_listener_address)"
+  lib_ufw_delete_port_rules "$ADMIN_PORT"
+  if [[ "$ip" == "any" ]]; then lib_ufw_rule allow "${ADMIN_PORT}/tcp"
+  else lib_ufw_rule allow from "$ip" to any port "$ADMIN_PORT" proto tcp; fi
+  _panel_timer_schedule "$minutes"
+  lib_ok "WebAdmin reachable at $(lib_ols_admin_url)$( [[ "$ip" != "any" ]] && printf ' from %s' "$ip")"
+  lib_note "user admin, password: sudo lompstack credentials --all"
+  lib_log_write INFO "panel opened for ${ip} for ${minutes} minute(s)"
+}
+
+lib_panel_close() {
+  local mode admin_ip
+  mode="$(_panel_mode)"
+  admin_ip="$(lib_manifest_get '.params.admin_ip')"
+  _panel_timer_cancel
+  lib_ufw_delete_port_rules "$ADMIN_PORT"
+  case "$mode" in
+    ip)
+      [[ -n "$admin_ip" ]] && lib_ufw_rule allow from "$admin_ip" to any port "$ADMIN_PORT" proto tcp
+      _panel_apply_bind "$(lib_ols_listener_address)"
+      lib_ok "Back to the configured mode: port ${ADMIN_PORT} only from ${admin_ip}"
+      ;;
+    open)
+      lib_ufw_rule allow "${ADMIN_PORT}/tcp"
+      _panel_apply_bind "$(lib_ols_listener_address)"
+      lib_ok "Back to the configured mode: port ${ADMIN_PORT} open to everyone"
+      ;;
+    *)
+      _panel_apply_bind 127.0.0.1
+      lib_ok "WebAdmin closed again: the port is firewalled and the listener is bound to 127.0.0.1"
+      lib_note "reach it any time with: $(lib_ols_admin_tunnel_cmd)"
+      ;;
+  esac
+  lib_log_write INFO "panel closed (mode ${mode})"
+}
+
+lib_panel_main() {
+  local action="${1:-status}"
+  (($# > 0)) && shift
+  lib_require_tools
+  lib_require_installed
+  case "$action" in
+    status) lib_panel_status ;;
+    open)   lib_panel_open "$@" ;;
+    close)  lib_panel_close ;;
+    -h|--help) printf 'Usage: setup.sh panel [status|open|close] [--ip auto|<IP>|any] [--minutes N]\n' ;;
+    *) lib_die "Unknown panel action '${action}'" "expected status, open or close" "setup.sh panel status" ;;
+  esac
 }
 
 # =============================================================================

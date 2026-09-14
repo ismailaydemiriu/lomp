@@ -171,7 +171,40 @@ check_has "second run reports existing components" "already" "$(cat "${OUT_DIR}/
 check "services survived the second run" systemctl is-active --quiet lsws
 
 # =============================================================================
-step "T05  add site (no SSL: the test domain has no public DNS)"
+step "T05  WebAdmin access (default: closed, SSH tunnel only)"
+# =============================================================================
+ADMIN_PORT="$(jq -r '.params.admin_port // "7080"' "${STATE_DIR}/manifest.json")"
+check_eq "configured mode is tunnel" "tunnel" "$(jq -r '.params.admin_access // ""' "${STATE_DIR}/manifest.json")"
+check "listener is bound to localhost" \
+  grep -qE "^[[:space:]]*address[[:space:]]+127\.0\.0\.1:${ADMIN_PORT}" "${LSWS_HOME}/admin/conf/admin_config.conf"
+check_not "no firewall rule opens the panel" bash -c "ufw status numbered | grep -qE '^\[[[:space:]]*[0-9]+\][[:space:]]+${ADMIN_PORT}/tcp'"
+check_not "panel is not listening on a public address" \
+  bash -c "ss -tlnH | awk '{print \$4}' | grep -qE '^(0\.0\.0\.0|\*|\[::\]):${ADMIN_PORT}\$'"
+check "panel is listening on localhost" bash -c "ss -tlnH | awk '{print \$4}' | grep -qE '^127\.0\.0\.1:${ADMIN_PORT}\$'"
+rc="$(run_setup panelstatus panel status --no-color)"
+check_eq "panel status exits 0" 0 "$rc"
+check_has "panel status prints the tunnel command" "ssh -N -L ${ADMIN_PORT}:127.0.0.1:${ADMIN_PORT}" "$(cat "${OUT_DIR}/panelstatus.out")"
+
+rc="$(run_setup panelopen panel open --ip 203.0.113.5 --minutes 0 --yes --no-color)"
+check_eq "panel open exits 0" 0 "$rc"
+check "panel open added exactly one firewall rule" \
+  bash -c "test \"\$(ufw status numbered | grep -cE '^\[[[:space:]]*[0-9]+\][[:space:]]+${ADMIN_PORT}/tcp')\" -ge 1"
+check "panel open allows only that address" bash -c "ufw status | grep -E '^${ADMIN_PORT}/tcp' | grep -q '203.0.113.5'"
+check "panel now listens publicly" bash -c "ss -tlnH | awk '{print \$4}' | grep -qE '^(0\.0\.0\.0|\*|\[::\]):${ADMIN_PORT}\$'"
+check "OpenLiteSpeed survived the rebind" systemctl is-active --quiet lsws
+check_eq "web server still answers while the panel is open" "403" "$(http_code unknown-host.invalid)"
+
+rc="$(run_setup panelclose panel close --yes --no-color)"
+check_eq "panel close exits 0" 0 "$rc"
+check_not "firewall rule removed again" bash -c "ufw status numbered | grep -qE '^\[[[:space:]]*[0-9]+\][[:space:]]+${ADMIN_PORT}/tcp'"
+check_not "listener is private again" \
+  bash -c "ss -tlnH | awk '{print \$4}' | grep -qE '^(0\.0\.0\.0|\*|\[::\]):${ADMIN_PORT}\$'"
+check "ssh, http and https rules were never touched" \
+  bash -c "ufw status | grep -qE '^80/tcp' && ufw status | grep -qE '^443/tcp' && ufw status | grep -qE '^22/tcp'"
+check "OpenLiteSpeed still healthy" "${LSWS_HOME}/bin/openlitespeed" -t
+
+# =============================================================================
+step "T06  add site (no SSL: the test domain has no public DNS)"
 # =============================================================================
 rc="$(run_setup add add "$TEST_DOMAIN" --no-ssl --non-interactive --no-color --yes)"
 check_eq "add exits 0" 0 "$rc"
@@ -201,7 +234,7 @@ check_not "dotfiles are blocked" test "$(http_code "$TEST_DOMAIN" /.env)" = "200
 rm -f "/home/${TEST_DOMAIN}/public_html/.env"
 
 # =============================================================================
-step "T06  database for the site"
+step "T07  database for the site"
 # =============================================================================
 rc="$(run_setup db db "$TEST_DOMAIN" --no-color)"
 check_eq "db exits 0" 0 "$rc"
@@ -222,7 +255,7 @@ check_not "MariaDB does not listen on a public interface" \
   bash -c "ss -tlnH | awk '{print \$4}' | grep -qE '^(0\.0\.0\.0|\*|\[::\]):3306\$'"
 
 # =============================================================================
-step "T07  reporting commands"
+step "T08  reporting commands"
 # =============================================================================
 rc="$(run_setup status status --no-color)";        check_eq "status exits 0" 0 "$rc"
 check_has "status lists the site" "$TEST_DOMAIN" "$(cat "${OUT_DIR}/status.out")"
@@ -238,7 +271,7 @@ check_eq "doctor reports no failures" "0" "$DOC_FAILS"
 if [[ "$DOC_FAILS" != "0" ]]; then bash "$SETUP" doctor --no-color </dev/null | grep FAIL | sed 's/^/         /'; fi
 
 # =============================================================================
-step "T08  backup"
+step "T09  backup"
 # =============================================================================
 rc="$(run_setup backup backup "$TEST_DOMAIN" --no-color --yes)"
 check_eq "backup exits 0" 0 "$rc"
@@ -251,7 +284,7 @@ check "archive contains the database dump" bash -c "tar -tzf '$ARCHIVE' | grep -
 check "archive contains the site files" bash -c "tar -tzf '$ARCHIVE' | grep -q '^\./files\.tar\.gz$'"
 
 # =============================================================================
-step "T09  rollback: a broken config must not take the server down"
+step "T10  rollback: a broken config must not take the server down"
 # =============================================================================
 VHCONF="${LSWS_HOME}/conf/vhosts/${TEST_DOMAIN}/vhconf.conf"
 cp -p "$VHCONF" "${OUT_DIR}/vhconf.good"
@@ -271,7 +304,7 @@ sleep 2
 check_eq "site healthy again after repair" "200" "$(http_code "$TEST_DOMAIN")"
 
 # =============================================================================
-step "T10  no secret reaches the log file"
+step "T11  no secret reaches the log file"
 # =============================================================================
 check_not "database password is not in the log" grep -qF "$DB_PASS" "$LOG_FILE"
 REDIS_PASS="$(awk -F= '$1=="PASSWORD"{sub(/^[^=]*=/,""); print; exit}' "${STATE_DIR}/redis.info")"
@@ -282,7 +315,7 @@ check_not "no credential-looking assignment in the log" \
   grep -qEi '(password|passwd|secret|token|api[_-]?key|requirepass)[[:space:]]*[=:][[:space:]]*["'"'"']?[A-Za-z0-9+/=._~-]{8,}' "$LOG_FILE"
 
 # =============================================================================
-step "T11  add --dry-run changes nothing"
+step "T12  add --dry-run changes nothing"
 # =============================================================================
 rc="$(run_setup adddry add "$TEST_DOMAIN2" --no-ssl --dry-run --non-interactive --no-color)"
 check_eq "add --dry-run exits 0" 0 "$rc"
@@ -291,7 +324,7 @@ check_not "dry-run created no home" test -e "/home/${TEST_DOMAIN2}"
 check_not "dry-run created no vhost" test -e "${LSWS_HOME}/conf/vhosts/${TEST_DOMAIN2}"
 
 # =============================================================================
-step "T12  remove the site"
+step "T13  remove the site"
 # =============================================================================
 rc="$(run_setup remove remove "$TEST_DOMAIN" --yes --no-color)"
 check_eq "remove exits 0" 0 "$rc"
@@ -308,7 +341,7 @@ check "OpenLiteSpeed still healthy after removal" "${LSWS_HOME}/bin/openlitespee
 check_eq "catch-all still answers 403" "403" "$(http_code "$TEST_DOMAIN")"
 
 # =============================================================================
-step "T13  final health"
+step "T14  final health"
 # =============================================================================
 DOC_FAILS="$(bash "$SETUP" doctor --json </dev/null | jq -r '.summary.fail')"
 check_eq "doctor reports no failures at the end" "0" "$DOC_FAILS"

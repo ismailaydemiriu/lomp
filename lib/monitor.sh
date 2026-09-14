@@ -211,13 +211,14 @@ lib_status_main() {
       --arg olsv "$(lib_ols_version)" --arg phpv "$(lib_php_summary_line)" --arg dbv "$(lib_db_version)" --arg redisv "$(lib_redis_version)" \
       --argjson ram_mb "$SYS_RAM_MB" --argjson ram_used_mb "$ram_used" --argjson swap_mb "$SYS_SWAP_MB" \
       --argjson disk_pct "$SYS_DISK_USED_PCT" --arg load "$SYS_LOAD" --arg uptime "$SYS_UPTIME" --arg reboot "$reboot" \
-      --arg cf "$(lib_cf_status_line)" --arg notify "$(lib_notify_channels)" --arg schedule "$(lib_manifest_get '.backup.schedule')" \
+      --arg cf "$(lib_cf_status_line)" --arg admin "$(lib_panel_status_line)" \
+      --arg notify "$(lib_notify_channels)" --arg schedule "$(lib_manifest_get '.backup.schedule')" \
       --arg last_backup "$last_backup" --argjson sites "$sites" \
       '{host:$host, os:$os, script_version:$ver, installed_at:$inst,
         services:{lsws:$lsws, mariadb:$mariadb, redis:$redis, fail2ban:$f2b, ufw:$ufw, certbot_timer:$certbot},
         versions:{openlitespeed:$olsv, php:$phpv, mariadb:$dbv, redis:$redisv},
         resources:{ram_mb:$ram_mb, ram_used_mb:$ram_used_mb, swap_mb:$swap_mb, disk_used_pct:$disk_pct, load:$load, uptime:$uptime, reboot_required:($reboot=="yes")},
-        cloudflare:$cf, notifications:$notify, backup:{schedule:$schedule, last_run:$last_backup}, sites:$sites}'
+        cloudflare:$cf, webadmin:$admin, notifications:$notify, backup:{schedule:$schedule, last_run:$last_backup}, sites:$sites}'
     return 0
   fi
 
@@ -243,6 +244,7 @@ lib_status_main() {
   lib_print_kv "Load / uptime" "${SYS_LOAD} / ${SYS_UPTIME}"
   lib_print_kv "Reboot required" "$reboot"
   printf '  %sConfiguration%s\n' "$C_BLD" "$C_RST"
+  lib_print_kv "WebAdmin"      "$(lib_panel_status_line)"
   lib_print_kv "Cloudflare"    "$(lib_cf_status_line)"
   lib_print_kv "Notifications" "$(lib_notify_channels)"
   lib_print_kv "Backups"       "schedule: $(lib_manifest_get '.backup.schedule' || true), last run: ${last_backup:-never}"
@@ -299,6 +301,14 @@ _doc_check_services() {
       ((${#missing[@]} == 0)) && _doc_add OK "ufw" "active, SSH port(s) ${SYS_SSH_PORTS} allowed" || _doc_add WARN "ufw" "active but SSH port(s) ${missing[*]} not explicitly allowed"
     else _doc_add FAIL "ufw" "firewall inactive"; fi
   else _doc_add WARN "ufw" "not installed"; fi
+  local admin_rules; admin_rules="$(lib_ufw_port_rule_numbers "$ADMIN_PORT" 2>/dev/null | wc -l | tr -d ' ')"
+  if lib_ols_admin_tunnel_only && (( admin_rules == 0 )); then
+    _doc_add OK "webadmin exposure" "closed to the internet (SSH tunnel only)"
+  elif ufw status 2>/dev/null | grep -qE "^${ADMIN_PORT}/tcp[[:space:]]+ALLOW IN[[:space:]]+Anywhere"; then
+    _doc_add WARN "webadmin exposure" "port ${ADMIN_PORT} accepts connections from any address (setup.sh panel close)"
+  else
+    _doc_add OK "webadmin exposure" "restricted (${admin_rules} firewall rule(s) for port ${ADMIN_PORT})"
+  fi
   for svc in unattended-upgrades; do
     if [[ "$(apt-config dump 2>/dev/null | awk -F'"' '/^APT::Periodic::Unattended-Upgrade /{print $2}')" == "1" ]]; then _doc_add OK "$svc" "enabled (security updates)"; else _doc_add WARN "$svc" "not enabled"; fi
   done

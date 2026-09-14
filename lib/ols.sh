@@ -998,9 +998,36 @@ lib_ols_configure_server() {
   fi
 }
 
-# WebAdmin: random password (once) and port.
+# Address the WebAdmin listener should bind to, derived from ADMIN_ACCESS.
+lib_ols_admin_address() {
+  case "${ADMIN_ACCESS:-tunnel}" in
+    tunnel) printf '127.0.0.1' ;;
+    *)      lib_ols_listener_address ;;
+  esac
+}
+
+lib_ols_admin_current_bind() {
+  [[ -f "$LSWS_ADMIN_CONF" ]] || { printf ''; return 0; }
+  _ols_block_key "$LSWS_ADMIN_CONF" listener adminListener address get 2>/dev/null || true
+}
+
+lib_ols_admin_tunnel_only() { [[ "$(lib_ols_admin_current_bind)" == 127.0.0.1:* ]]; }
+
+# Bind the WebAdmin listener to an address ("127.0.0.1", "*" or "[ANY]").
+lib_ols_admin_bind() {
+  local addr="$1" tmp
+  [[ -f "$LSWS_ADMIN_CONF" ]] || return 0
+  tmp="$(lib_mktemp)"
+  sed -E "s|^([[:space:]]*address[[:space:]]+)[^[:space:]]*:[0-9]+[[:space:]]*$|\1${addr}:${ADMIN_PORT}|" "$LSWS_ADMIN_CONF" >"$tmp"
+  lib_write_file "$LSWS_ADMIN_CONF" 0640 lsadm:lsadm <"$tmp"
+  rm -f "$tmp"
+  (( LIB_FILE_CHANGED )) && OLS_PENDING_RELOAD=1
+  return 0
+}
+
+# WebAdmin: random password (once) and listener binding.
 lib_ols_admin_setup() {
-  local info="${STATE_DIR}/openlitespeed-admin.info" pass hash addr tmp
+  local info="${STATE_DIR}/openlitespeed-admin.info" pass hash addr
   if [[ -s "$info" ]]; then
     lib_ok "WebAdmin credentials already stored (${info})"
   elif (( OPT_DRY_RUN )); then
@@ -1018,20 +1045,33 @@ lib_ols_admin_setup() {
     lib_ok "WebAdmin password generated and stored in ${info}"
   fi
   if [[ -f "$LSWS_ADMIN_CONF" ]]; then
-    addr="$(lib_ols_listener_address)"
-    tmp="$(lib_mktemp)"
-    sed -E "s/^([[:space:]]*address[[:space:]]+)[^[:space:]]*:[0-9]+[[:space:]]*$/\1${addr//\*/\\*}:${ADMIN_PORT}/" "$LSWS_ADMIN_CONF" >"$tmp"
-    lib_write_file "$LSWS_ADMIN_CONF" 0640 lsadm:lsadm <"$tmp"
-    rm -f "$tmp"
-    if (( LIB_FILE_CHANGED )); then OLS_PENDING_RELOAD=1; lib_ok "WebAdmin listener set to port ${ADMIN_PORT}"; fi
+    addr="$(lib_ols_admin_address)"
+    lib_ols_admin_bind "$addr"
+    if (( LIB_FILE_CHANGED )); then
+      case "${ADMIN_ACCESS:-tunnel}" in
+        tunnel) lib_ok "WebAdmin bound to 127.0.0.1:${ADMIN_PORT} (reachable through an SSH tunnel only)" ;;
+        *)      lib_ok "WebAdmin listener set to ${addr}:${ADMIN_PORT}" ;;
+      esac
+    fi
   fi
   return 0
 }
 
 lib_ols_admin_url() {
-  local ip="${SYS_PUBLIC_IPV4:-$(lib_primary_ipv4)}" secure
+  local secure host
   secure="$(_ols_block_key "$LSWS_ADMIN_CONF" listener adminListener secure get 2>/dev/null || true)"
-  if [[ "$secure" == "0" ]]; then printf 'http://%s:%s' "$ip" "$ADMIN_PORT"; else printf 'https://%s:%s' "$ip" "$ADMIN_PORT"; fi
+  if lib_ols_admin_tunnel_only; then host="127.0.0.1"; else host="${SYS_PUBLIC_IPV4:-$(lib_primary_ipv4)}"; fi
+  if [[ "$secure" == "0" ]]; then printf 'http://%s:%s' "$host" "$ADMIN_PORT"; else printf 'https://%s:%s' "$host" "$ADMIN_PORT"; fi
+}
+
+# Ready-to-paste tunnel command for the administrator's workstation.
+lib_ols_admin_tunnel_cmd() {
+  local port user ip
+  port="$(printf '%s' "${SYS_SSH_PORTS:-22}" | awk '{print $1}')"
+  user="${SUDO_USER:-root}"
+  ip="${SYS_PUBLIC_IPV4:-$(lib_primary_ipv4)}"
+  printf 'ssh -N -L %s:127.0.0.1:%s%s %s@%s' "$ADMIN_PORT" "$ADMIN_PORT" \
+    "$( [[ "$port" != "22" ]] && printf ' -p %s' "$port")" "$user" "${ip:-<server-ip>}"
 }
 
 # =============================================================================

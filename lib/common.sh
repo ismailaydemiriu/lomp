@@ -488,6 +488,36 @@ lib_ufw_rule() {    # lib_ufw_rule allow 80/tcp comment 'x'   (idempotent by ufw
   lib_run ufw "$@"
 }
 
+# Numbers of every UFW rule whose port column is exactly <port>/tcp (highest first,
+# because deleting by number renumbers everything below it).
+lib_ufw_port_rule_numbers() {
+  local port="$1"
+  lib_have ufw || return 0
+  # "no matching rule" is a normal result, not an error (pipefail would make grep fail the pipeline)
+  ufw status numbered 2>/dev/null \
+    | grep -E "^\[[[:space:]]*[0-9]+\][[:space:]]+${port}/tcp" \
+    | sed -E 's/^\[[[:space:]]*([0-9]+)\].*/\1/' \
+    | sort -rn || true
+}
+
+# Remove every UFW rule for a port. Only that port is touched; SSH/80/443 are never matched.
+lib_ufw_delete_port_rules() {
+  local port="$1" n count=0
+  lib_have ufw || return 0
+  if (( OPT_DRY_RUN )); then
+    count="$(lib_ufw_port_rule_numbers "$port" | wc -l | tr -d ' ')"
+    (( count > 0 )) && { (( OPT_QUIET )) || printf '%s[dry ]%s  would remove %s UFW rule(s) for port %s\n' "$C_MAG" "$C_RST" "$count" "$port"; }
+    return 0
+  fi
+  while read -r n; do
+    [[ -n "$n" ]] || continue
+    lib_run ufw --force delete "$n" || lib_warn "could not delete UFW rule ${n}"
+    count=$((count + 1))
+  done < <(lib_ufw_port_rule_numbers "$port")
+  (( count > 0 )) && lib_log_write INFO "removed ${count} UFW rule(s) for port ${port}"
+  return 0
+}
+
 # systemd drop-in with resource limits. lib_systemd_override unit "LimitNOFILE=65535" ...
 lib_systemd_override() {
   local unit="$1"; shift
@@ -708,6 +738,15 @@ with open(sys.argv[2]) as fh:
             sys.exit(0)
 sys.exit(1)
 PYEOF
+}
+
+# The address the administrator is connected FROM (not the server's own address).
+# Empty when the session is not an SSH session, e.g. a provider web console.
+lib_admin_client_ip() {
+  local ip=""
+  [[ -n "${SSH_CONNECTION:-}" ]] && ip="$(awk '{print $1}' <<<"$SSH_CONNECTION")"
+  [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ || "$ip" == *:*:* ]] || ip=""
+  printf '%s' "$ip"
 }
 
 # Detect SSH ports: active connection first, then sshd -T, then listening sockets.

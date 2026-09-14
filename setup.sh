@@ -20,7 +20,12 @@ readonly SCRIPT_VERSION="1.0.0"
 TIMEZONE="Europe/Istanbul"
 ADMIN_PORT="7080"            # OpenLiteSpeed WebAdmin port
 PHP_VERSION="8.3"            # default LSPHP version (e.g. 8.2, 8.3, 8.4)
-ADMIN_ALLOWED_IP=""          # restrict WebAdmin (and Netdata) to this IP/CIDR
+ADMIN_ACCESS="tunnel"        # how the WebAdmin panel is reachable:
+                             #   tunnel = closed to the internet, use an SSH tunnel (safest,
+                             #            works with a dynamic IP) -> setup.sh panel
+                             #   ip     = only from ADMIN_ALLOWED_IP (needs a static address)
+                             #   open   = reachable from anywhere (not recommended)
+ADMIN_ALLOWED_IP=""          # only used when ADMIN_ACCESS=ip: your IP/CIDR, not the server's
 DEFAULT_EMAIL=""             # Let's Encrypt / notifications default address
 SSH_PORT=""                  # only set to CHANGE the SSH port (empty = keep)
 DB_BUFFER_PERCENT=""         # innodb_buffer_pool_size as % of RAM (empty = auto)
@@ -101,7 +106,9 @@ COMMANDS
   install [opts]                Provision the server (idempotent, re-run safe)
       --php 8.3                 Default LSPHP version
       --timezone Europe/Istanbul
-      --admin-ip 1.2.3.4        Restrict WebAdmin (and Netdata) to this IP/CIDR
+      --admin-access MODE       WebAdmin reachability: tunnel (default) | ip | open
+      --admin-ip 1.2.3.4        YOUR address (not the server's); implies --admin-access ip
+                                Use "auto" to take it from the current SSH session
       --email admin@x.com       Default e-mail (Let's Encrypt / notifications)
       --ssh-port 2222           Change SSH port (UFW is opened first)
       --non-interactive         Never ask questions, use defaults
@@ -138,6 +145,11 @@ COMMANDS
                                 --smtp-user U --smtp-pass P --smtp-from F]
                                 --telegram-token T --telegram-chat ID
                                 --webhook URL   --ssh-login on|off  --test  --show
+  panel [status|open|close]     WebAdmin access. "status" prints the ready-to-paste
+                                SSH tunnel command; "open [--ip auto|IP|any]
+                                [--minutes N]" opens the port temporarily (default:
+                                your current SSH address, 60 minutes, auto-closed);
+                                "close" shuts it again. Built for dynamic IPs.
   logs <domain> [--access|--error] [-n LINES]
   help                          This text
 
@@ -220,6 +232,7 @@ main() {
   # read-only commands (and "notify --send", used by hooks/PAM) do not take the lock
   case "$cmd" in
     list|status|doctor|credentials|logs) ;;
+    panel) [[ "${rest[0]:-status}" == "status" ]] || lib_lock ;;
     notify) [[ " ${rest[*]:-} " == *" --send "* ]] || lib_lock ;;
     *) lib_lock ;;
   esac
@@ -244,6 +257,7 @@ main() {
     update)         lib_update_main "${rest[@]}" ;;
     update-cf-ips)  lib_cf_update_main "${rest[@]}" || exit 1 ;;
     notify)         lib_notify_main "${rest[@]}" ;;
+    panel)          lib_panel_main "${rest[@]}" ;;
     logs)           lib_domain_logs_main "${rest[@]}" ;;
     healthcheck)    lib_healthcheck_main "${rest[@]}" ;;   # internal (cron)
     *)

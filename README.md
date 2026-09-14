@@ -8,7 +8,7 @@
 production host for dynamic, database-heavy sites, and manages those sites afterwards.
 
 ```bash
-sudo ./setup.sh install --admin-ip 203.0.113.5 --email you@example.com
+sudo ./setup.sh install --email you@example.com
 sudo ./setup.sh add example.com --www --wordpress
 ```
 
@@ -67,19 +67,21 @@ chmod +x setup.sh
 Nothing is changed in this mode, you just get the full plan and the diffs:
 
 ```bash
-sudo ./setup.sh install --dry-run --admin-ip YOUR_HOME_IP --email you@example.com
+sudo ./setup.sh install --dry-run --email you@example.com
 ```
 
 ### 4. Run the installation
 
 ```bash
-sudo ./setup.sh install --admin-ip YOUR_HOME_IP --email you@example.com --backup-schedule "daily 03:00"
+sudo ./setup.sh install --email you@example.com --backup-schedule "daily 03:00"
 ```
 
-`--admin-ip` restricts the OpenLiteSpeed WebAdmin port to your own address. Leave it out and
-the script warns you that the panel is open to the world. Add `--non-interactive` to run it
-unattended, for example from cloud-init. The run takes a few minutes and prints a
-`[n/20]` progress line for every stage.
+Add `--non-interactive` to run it unattended, for example from cloud-init. The run takes a
+few minutes and prints a `[n/20]` progress line for every stage.
+
+By default the WebAdmin panel is **not** exposed to the internet at all: the listener binds
+to localhost and no firewall port is opened. You reach it through an SSH tunnel, which needs
+no static IP. See [WebAdmin access](#webadmin-access) if you want to change that.
 
 Useful extras:
 
@@ -101,14 +103,20 @@ sudo lompstack doctor     # deep health check, exits non-zero if something is br
 After installation the script is available system-wide as `lompstack`, so you do not need
 to stay in the clone directory.
 
-### 6. Get your WebAdmin password
+### 6. Reach the WebAdmin panel
 
 ```bash
-sudo lompstack credentials --all
+sudo lompstack panel          # prints the exact tunnel command for this server
+sudo lompstack credentials --all   # user admin + the generated password
 ```
 
-The panel runs on `https://YOUR_SERVER_IP:7080` with user `admin`. Credentials live in
-`/root/.server-setup/` with mode 0600 and are never written to the log.
+Run the tunnel command on **your own computer**, then open `https://127.0.0.1:7080`:
+
+```bash
+ssh -N -L 7080:127.0.0.1:7080 root@YOUR_SERVER_IP
+```
+
+Credentials live in `/root/.server-setup/` with mode 0600 and are never written to the log.
 
 ### 7. Add your first site
 
@@ -142,6 +150,7 @@ sudo lompstack logs shop.example.com                     # tail access and error
 sudo lompstack backup --all --encrypt                    # back up every site
 sudo lompstack restore shop.example.com --file /var/backups/server-setup/shop.example.com/....tar.gz
 sudo lompstack renew-ssl --all                           # renew every certificate
+sudo lompstack panel                                     # how to reach the WebAdmin panel
 sudo lompstack optimize                                  # re-measure hardware, show a diff, re-tune
 sudo lompstack update                                    # safe package update, ordered restarts
 sudo lompstack remove old.example.com --keep-db          # remove a site, keep its database
@@ -166,6 +175,40 @@ Global flags work everywhere: `--yes`, `--dry-run`, `--quiet`, `--verbose`, `--n
 | `--staging` | Use the Let's Encrypt staging CA while you are testing |
 
 ---
+
+## WebAdmin access
+
+The OpenLiteSpeed panel is a login form on port 7080. Leaving it open to the internet is an
+invitation, and pinning it to one IP address does not work for the many administrators whose
+home connection gets a new address every day. So there are three modes, and the safe one is
+the default.
+
+| `--admin-access` | Behaviour | Good for |
+|---|---|---|
+| `tunnel` *(default)* | Listener bound to `127.0.0.1`, no firewall port. Reached over an SSH tunnel. | Everyone, especially dynamic IPs |
+| `ip` | Only the address given with `--admin-ip` may connect. | A real static address |
+| `open` | Anyone may connect. You get a warning. | Lab machines only |
+
+```bash
+sudo ./setup.sh install                          # tunnel (default)
+sudo ./setup.sh install --admin-ip 203.0.113.5   # implies --admin-access ip
+sudo ./setup.sh install --admin-ip auto          # takes the IP of your current SSH session
+sudo ./setup.sh install --admin-access open      # exposed, warned about
+```
+
+For day-to-day use with a dynamic IP, open the port only while you need it:
+
+```bash
+sudo lompstack panel                      # status, tunnel command, login hint
+sudo lompstack panel open                 # your current SSH address, 60 minutes
+sudo lompstack panel open --minutes 15    # shorter window
+sudo lompstack panel open --ip 1.2.3.4    # somebody else's address
+sudo lompstack panel close                # back to the configured mode
+```
+
+`panel open` rebinds the listener, adds one firewall rule for that single address, and
+schedules a systemd timer that closes everything again on its own. If your address changed
+since yesterday it does not matter: it is read from the SSH session you are already in.
 
 ## How a site is laid out
 

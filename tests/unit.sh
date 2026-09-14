@@ -11,7 +11,7 @@ cleanup() { rm -rf "$TMP"; }
 
 # ---- globals normally provided by setup.sh (all paths redirected into TMP) --
 SCRIPT_VERSION="test"
-TIMEZONE="Europe/Istanbul"; ADMIN_PORT="7080"; PHP_VERSION="8.3"; ADMIN_ALLOWED_IP=""; DEFAULT_EMAIL=""; SSH_PORT=""
+TIMEZONE="Europe/Istanbul"; ADMIN_PORT="7080"; PHP_VERSION="8.3"; ADMIN_ACCESS="tunnel"; ADMIN_ALLOWED_IP=""; DEFAULT_EMAIL=""; SSH_PORT=""
 DB_BUFFER_PERCENT=""; REDIS_MAX_PERCENT=""; BACKUP_KEEP="7"; BACKUP_SCHEDULE=""; FAIL2BAN_IGNORE_IP=""
 STATE_DIR="$TMP/state"; SITES_ROOT="$TMP/home"; LSWS_HOME="$TMP/lsws"; LOG_FILE="$TMP/server_setup.log"
 BACKUP_ROOT="$TMP/backups"; ACME_ROOT="$TMP/acme"; SSL_DEPLOY_DIR="$TMP/ssl"
@@ -393,6 +393,78 @@ PARSE_FNS="$(declare -f lib_domain_parse_add_args lib_domain_state_reset lib_dom
 assert_false "parse bad memory" bash -c "${PARSE_FNS}; DEFAULT_EMAIL=; PHP_VERSION=8.3; SITES_ROOT=/home; STATE_DIR=/tmp; lib_domain_parse_add_args x.com --memory 256 2>/dev/null"
 assert_false "parse www domain" bash -c "${PARSE_FNS}; DEFAULT_EMAIL=; PHP_VERSION=8.3; SITES_ROOT=/home; STATE_DIR=/tmp; lib_domain_parse_add_args www.x.com 2>/dev/null"
 assert_true  "parse ok in subshell" bash -c "${PARSE_FNS}; DEFAULT_EMAIL=; PHP_VERSION=8.3; SITES_ROOT=/home; STATE_DIR=/tmp; lib_domain_parse_add_args ok.example.com --static 2>/dev/null"
+
+# =============================================================================
+section "WebAdmin access modes"
+mkdir -p "$LSWS_HOME/admin/conf"
+cat >"$LSWS_ADMIN_CONF" <<'EOF'
+enableCoreDump      1
+sessionTimeout      3600
+
+accessControl {
+  allow             ALL
+}
+
+listener adminListener {
+  address           *:7080
+  secure            0
+}
+EOF
+SYS_IPV6=0
+ADMIN_ACCESS="tunnel"; assert_eq "tunnel binds localhost" "127.0.0.1" "$(lib_ols_admin_address)"
+ADMIN_ACCESS="ip";     assert_eq "ip mode binds all (v4)" "*" "$(lib_ols_admin_address)"
+ADMIN_ACCESS="open";   assert_eq "open mode binds all" "*" "$(lib_ols_admin_address)"
+SYS_IPV6=1; assert_eq "dual stack binds [ANY]" "[ANY]" "$(lib_ols_admin_address)"
+SYS_IPV6=0; ADMIN_ACCESS="tunnel"
+assert_eq "current bind read" "*:7080" "$(lib_ols_admin_current_bind)"
+assert_false "not tunnel-only yet" lib_ols_admin_tunnel_only
+lib_ols_admin_bind 127.0.0.1
+assert_eq "bind rewritten" "127.0.0.1:7080" "$(lib_ols_admin_current_bind)"
+assert_true  "tunnel-only detected" lib_ols_admin_tunnel_only
+assert_eq "admin URL uses localhost" "http://127.0.0.1:7080" "$(lib_ols_admin_url)"
+lib_ols_admin_bind 127.0.0.1
+assert_eq "rebinding is idempotent" 0 "$LIB_FILE_CHANGED"
+lib_ols_admin_bind '*'
+assert_eq "bind back to all" "*:7080" "$(lib_ols_admin_current_bind)"
+assert_false "no longer tunnel-only" lib_ols_admin_tunnel_only
+assert_eq "admin conf still balanced" 1 "$( _ols_braces_balanced "$LSWS_ADMIN_CONF" && echo 1 || echo 0)"
+assert_eq "secure flag untouched" "0" "$(_ols_block_key "$LSWS_ADMIN_CONF" listener adminListener secure get)"
+
+SYS_SSH_PORTS="22"; SYS_PUBLIC_IPV4="198.51.100.7"; SUDO_USER="deploy"
+assert_eq "tunnel command (default port)" "ssh -N -L 7080:127.0.0.1:7080 deploy@198.51.100.7" "$(lib_ols_admin_tunnel_cmd)"
+SYS_SSH_PORTS="2222 22"
+assert_eq "tunnel command (custom port)" "ssh -N -L 7080:127.0.0.1:7080 -p 2222 deploy@198.51.100.7" "$(lib_ols_admin_tunnel_cmd)"
+unset SUDO_USER
+
+SSH_CONNECTION="203.0.113.9 51234 10.0.0.5 22"
+assert_eq "admin client ip from SSH" "203.0.113.9" "$(lib_admin_client_ip)"
+SSH_CONNECTION="2001:db8::1 51234 2001:db8::2 22"
+assert_eq "admin client ipv6 from SSH" "2001:db8::1" "$(lib_admin_client_ip)"
+SSH_CONNECTION="garbage"
+assert_eq "garbage SSH_CONNECTION ignored" "" "$(lib_admin_client_ip)"
+unset SSH_CONNECTION
+assert_eq "no SSH session means no client ip" "" "$(lib_admin_client_ip)"
+
+# ufw rule parsing must never touch a port it was not asked about
+ufw() {
+  [[ "$*" == "status numbered" ]] || return 0
+  cat <<'EOF'
+Status: active
+
+     To                         Action      From
+     --                         ------      ----
+[ 1] 22/tcp                     ALLOW IN    Anywhere
+[ 2] 80/tcp                     ALLOW IN    Anywhere
+[ 3] 7080/tcp                   ALLOW IN    203.0.113.5
+[ 4] 443/tcp                    ALLOW IN    Anywhere
+[10] 7080/tcp (v6)              ALLOW IN    Anywhere (v6)
+EOF
+}
+assert_eq "admin port rules, highest first" "$(printf '10\n3')" "$(lib_ufw_port_rule_numbers 7080)"
+assert_eq "ssh port rule found" "1" "$(lib_ufw_port_rule_numbers 22)"
+assert_eq "unused port has no rules" "" "$(lib_ufw_port_rule_numbers 9999)"
+assert_lacks "port 80 never matched for 7080" "2" "$(lib_ufw_port_rule_numbers 7080)"
+unset -f ufw
 
 # =============================================================================
 section "config test (structural)"
