@@ -154,7 +154,8 @@ sudo lompstack logs shop.example.com                     # tail access and error
 sudo lompstack backup --all --encrypt                    # back up every site
 sudo lompstack restore shop.example.com --file /var/backups/server-setup/shop.example.com/....tar.gz
 sudo lompstack renew-ssl --all                           # renew every certificate
-sudo lompstack panel                                     # how to reach the WebAdmin panel
+sudo lompstack panel                                     # open the WebAdmin panel for your address
+sudo lompstack self-update                               # pull the latest lompstack, server untouched
 sudo lompstack optimize                                  # re-measure hardware, show a diff, re-tune
 sudo lompstack update                                    # safe package update, ordered restarts
 sudo lompstack remove old.example.com --keep-db          # remove a site, keep its database

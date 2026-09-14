@@ -636,6 +636,40 @@ FAKE_CURL=fail;  assert_true "failure is detected as 000" bash -c "[[ '$(lib_htt
 unset -f curl; unset FAKE_CURL
 
 # =============================================================================
+section "self-installation (regression: the command runs the installed copy)"
+# "lompstack" runs the copy under INSTALL_DIR, not the checkout, so a git pull alone does
+# not change what runs. lib_install_self refreshes it, and must never replace a working
+# installation with a checkout that does not parse.
+SRC_GOOD="$TMP/src-good"
+mkdir -p "$SRC_GOOD/lib"
+printf '#!/usr/bin/env bash\necho marker-v1\n' >"$SRC_GOOD/setup.sh"
+printf '# lib a\n' >"$SRC_GOOD/lib/a.sh"
+printf '# lib b\n' >"$SRC_GOOD/lib/b.sh"
+assert_eq "install_self exits 0" 0 "$(run_isolated lib_install_self "$SRC_GOOD")"
+assert_true "setup.sh copied" test -f "${INSTALL_DIR}/setup.sh"
+assert_true "lib copied" test -f "${INSTALL_DIR}/lib/a.sh"
+assert_has "copied content is the source" "marker-v1" "$(cat "${INSTALL_DIR}/setup.sh")"
+# compared by suffix: MSYS rewrites absolute paths when handing them to jq
+assert_has "source dir recorded for self-update" "src-good" "$(lib_manifest_get '.install.source_dir')"
+
+# a file removed from the checkout must disappear from the installation
+rm -f "$SRC_GOOD/lib/b.sh"
+printf '#!/usr/bin/env bash\necho marker-v2\n' >"$SRC_GOOD/setup.sh"
+lib_install_self "$SRC_GOOD" >/dev/null 2>&1
+assert_has "second copy updated" "marker-v2" "$(cat "${INSTALL_DIR}/setup.sh")"
+assert_false "deleted module is gone from the installation" test -f "${INSTALL_DIR}/lib/b.sh"
+assert_false "no staging leftovers" test -e "${INSTALL_DIR}/lib.new"
+assert_false "no rollback leftovers" test -e "${INSTALL_DIR}/lib.old"
+
+SRC_BAD="$TMP/src-bad"
+mkdir -p "$SRC_BAD/lib"
+printf '#!/usr/bin/env bash\necho ok\n' >"$SRC_BAD/setup.sh"
+printf 'if then fi\n' >"$SRC_BAD/lib/broken.sh"
+assert_eq "a checkout that does not parse is refused" 1 "$(run_isolated lib_install_self "$SRC_BAD")"
+assert_has "the good installation survived" "marker-v2" "$(cat "${INSTALL_DIR}/setup.sh")"
+assert_false "the broken module was not installed" test -f "${INSTALL_DIR}/lib/broken.sh"
+
+# =============================================================================
 section "shell pitfalls (static)"
 # Under set -u a "local x" that is only assigned on some branches aborts the script when it
 # is read on another branch. This bit lib_db_install ("dump: unbound variable") on a real

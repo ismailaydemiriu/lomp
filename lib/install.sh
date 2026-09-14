@@ -410,16 +410,75 @@ lib_install_cron() {
   lib_ok "Scheduled tasks in ${CRON_FILE} (healthcheck daily 06:15$( lib_cf_enabled && printf ', cloudflare ips weekly')$( [[ -n "$INS_BACKUP_SCHEDULE" ]] && printf ', backups %s' "$INS_BACKUP_SCHEDULE"))"
 }
 
-lib_install_self() {
+# Copy this checkout to INSTALL_DIR and link the command. The source directory is
+# remembered so "self-update" can find the checkout later, when the running copy is the
+# installed one and $SCRIPT_DIR points at INSTALL_DIR.
+lib_install_self() {   # [source_dir]
+  local src="${1:-$SCRIPT_DIR}" f=""
   if (( OPT_DRY_RUN )); then lib_info "[dry-run] would install a copy to ${INSTALL_DIR} and link ${BIN_LINK}"; return 0; fi
   mkdir -p "${INSTALL_DIR}/lib" && chmod 0755 "$INSTALL_DIR"
-  if [[ "$SCRIPT_DIR" != "$INSTALL_DIR" ]]; then
-    install -m 0755 "${SCRIPT_DIR}/setup.sh" "${INSTALL_DIR}/setup.sh"
-    rsync -a --delete "${SCRIPT_DIR}/lib/" "${INSTALL_DIR}/lib/"
-    chmod 0644 "${INSTALL_DIR}"/lib/*.sh
+  if [[ "$src" != "$INSTALL_DIR" ]]; then
+    # never replace a working installation with a checkout that does not even parse
+    bash -n "${src}/setup.sh" || lib_die "${src}/setup.sh has a syntax error" "the checkout is broken" "fix it or check out a known good revision"
+    for f in "$src"/lib/*.sh; do
+      bash -n "$f" || lib_die "${f} has a syntax error" "the checkout is broken" "fix it or check out a known good revision"
+    done
+    # staged then swapped, so a failure halfway through never leaves a half-copied install
+    rm -rf "${INSTALL_DIR}/lib.new" "${INSTALL_DIR}/lib.old"
+    cp -a "${src}/lib" "${INSTALL_DIR}/lib.new"
+    chmod 0644 "${INSTALL_DIR}"/lib.new/*.sh
+    install -m 0755 "${src}/setup.sh" "${INSTALL_DIR}/setup.sh.new"
+    [[ -d "${INSTALL_DIR}/lib" ]] && mv "${INSTALL_DIR}/lib" "${INSTALL_DIR}/lib.old"
+    mv "${INSTALL_DIR}/lib.new" "${INSTALL_DIR}/lib"
+    mv -f "${INSTALL_DIR}/setup.sh.new" "${INSTALL_DIR}/setup.sh"
+    rm -rf "${INSTALL_DIR}/lib.old"
+    lib_manifest_set '.install.source_dir' "$src"
   fi
   ln -sfn "${INSTALL_DIR}/setup.sh" "$BIN_LINK"
   lib_ok "Installed to ${INSTALL_DIR}; use '${BIN_LINK} <command>' from anywhere"
+}
+
+# =============================================================================
+#  self-update - refresh the installed copy from the checkout it came from
+# =============================================================================
+lib_selfupdate_main() {
+  local src="" before="" after="" a=""
+  while (($# > 0)); do
+    a="$1"; shift
+    case "$a" in
+      --from) src="${1:-}"; shift ;;
+      -h|--help) printf 'Usage: lompstack self-update [--from /path/to/checkout]\n'; return 0 ;;
+      *) lib_die "Unknown option for self-update: ${a}" "" "self-update [--from /path/to/checkout]" ;;
+    esac
+  done
+  lib_require_tools
+  lib_require_installed
+  [[ -n "$src" ]] || src="$(lib_manifest_get '.install.source_dir')"
+  [[ -n "$src" ]] || src="$SCRIPT_DIR"
+  [[ -d "$src" && -f "${src}/setup.sh" ]] || lib_die "No usable checkout found at '${src}'" \
+    "the directory lompstack was installed from is gone or was never recorded" \
+    "clone it again and point at it: lompstack self-update --from /opt/lompstack"
+  if [[ "$src" == "$INSTALL_DIR" ]]; then
+    lib_die "The installed copy is its own source" "there is no separate checkout to update from" \
+      "git clone the repository, then: lompstack self-update --from /path/to/clone"
+  fi
+
+  if [[ -d "${src}/.git" ]] && lib_have git; then
+    before="$(git -C "$src" rev-parse --short HEAD 2>/dev/null || printf 'unknown')"
+    lib_info "Fetching the latest revision into ${src}"
+    lib_run git -C "$src" pull --ff-only \
+      || lib_die "git pull failed in ${src}" "local edits or a diverged branch" "inspect it: git -C ${src} status"
+    after="$(git -C "$src" rev-parse --short HEAD 2>/dev/null || printf 'unknown')"
+    if [[ "$before" == "$after" ]]; then lib_ok "Already at the latest revision (${after})"
+    else lib_ok "Checkout updated: ${before} -> ${after}"; fi
+  else
+    lib_info "${src} is not a git checkout; copying it as it is"
+  fi
+
+  lib_install_self "$src"
+  lib_manifest_set '.install.updated_at' "$(lib_iso_now)"
+  lib_ok "lompstack $("$BIN_LINK" --version 2>/dev/null | head -n1 | awk '{print $2}' || true) is now active"
+  lib_note "Nothing on the server was reconfigured. Run 'sudo lompstack doctor' to check its state."
 }
 
 lib_install_manifest() {

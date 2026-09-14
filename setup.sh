@@ -141,6 +141,8 @@ COMMANDS
   restore <domain> --file <archive>   [--no-db] [--no-files]
   renew-ssl [domain] [opts]     --force --all --staging --wildcard
   update                        Safe package update + ordered service restarts
+  self-update [--from DIR]      Pull the latest lompstack and refresh the installed
+                                copy. Changes nothing on the server itself.
   update-cf-ips                 Refresh Cloudflare IP ranges
   notify [opts]                 --email a@b.c [--smtp-host H --smtp-port P
                                 --smtp-user U --smtp-pass P --smtp-from F]
@@ -261,6 +263,7 @@ main() {
     update-cf-ips)  lib_cf_update_main "${rest[@]}" || exit 1 ;;
     notify)         lib_notify_main "${rest[@]}" ;;
     panel)          lib_panel_main "${rest[@]}" ;;
+    self-update)    lib_selfupdate_main "${rest[@]}" ;;
     logs)           lib_domain_logs_main "${rest[@]}" ;;
     healthcheck)    lib_healthcheck_main "${rest[@]}" ;;   # internal (cron)
     *)
