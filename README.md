@@ -106,11 +106,15 @@ to stay in the clone directory.
 ### 6. Reach the WebAdmin panel
 
 ```bash
-sudo lompstack panel          # prints the exact tunnel command for this server
-sudo lompstack credentials --all   # user admin + the generated password
+sudo lompstack panel
 ```
 
-Run the tunnel command on **your own computer**, then open `https://127.0.0.1:7080`:
+That opens the panel for the address you are connected from, for one hour, and prints the
+URL together with the user name and password. It closes again on its own.
+
+If you would rather not open any port at all, `sudo lompstack panel status` prints an SSH
+tunnel command to run on **your own computer**, after which the panel is at
+`https://127.0.0.1:7080`:
 
 ```bash
 ssh -N -L 7080:127.0.0.1:7080 root@YOUR_SERVER_IP
@@ -199,16 +203,18 @@ sudo ./setup.sh install --admin-access open      # exposed, warned about
 For day-to-day use with a dynamic IP, open the port only while you need it:
 
 ```bash
-sudo lompstack panel                      # status, tunnel command, login hint
-sudo lompstack panel open                 # your current SSH address, 60 minutes
-sudo lompstack panel open --minutes 15    # shorter window
-sudo lompstack panel open --ip 1.2.3.4    # somebody else's address
-sudo lompstack panel close                # back to the configured mode
+sudo lompstack panel                 # opens it for your current SSH address for 60 minutes
+sudo lompstack panel --minutes 15    # shorter window
+sudo lompstack panel --ip 1.2.3.4    # somebody else's address
+sudo lompstack panel status          # current state and the SSH tunnel command
+sudo lompstack panel close           # shut it again right now
 ```
 
-`panel open` rebinds the listener, adds one firewall rule for that single address, and
-schedules a systemd timer that closes everything again on its own. If your address changed
-since yesterday it does not matter: it is read from the SSH session you are already in.
+Bare `panel` prints the URL, the user and the password, so you can paste the address
+straight into a browser. Under the hood it rebinds the listener, adds one firewall rule for
+that single address, and schedules a systemd timer that closes everything again on its own.
+If your address changed since yesterday it does not matter: it is read from the SSH session
+you are already in.
 
 ## How a site is laid out
 

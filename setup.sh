@@ -146,11 +146,13 @@ COMMANDS
                                 --smtp-user U --smtp-pass P --smtp-from F]
                                 --telegram-token T --telegram-chat ID
                                 --webhook URL   --ssh-login on|off  --test  --show
-  panel [status|open|close]     WebAdmin access. "status" prints the ready-to-paste
-                                SSH tunnel command; "open [--ip auto|IP|any]
-                                [--minutes N]" opens the port temporarily (default:
-                                your current SSH address, 60 minutes, auto-closed);
-                                "close" shuts it again. Built for dynamic IPs.
+  panel [open|status|close]     Open the WebAdmin panel. Bare "panel" opens the port
+                                for the address of your current SSH session for 60
+                                minutes and prints the URL, user and password; it
+                                closes again on its own. Options: --ip auto|IP|any,
+                                --minutes N (0 = stay open). "status" shows the
+                                current state and the SSH tunnel command, "close"
+                                shuts it immediately. Built for dynamic IPs.
   logs <domain> [--access|--error] [-n LINES]
   help                          This text
 
@@ -233,7 +235,7 @@ main() {
   # read-only commands (and "notify --send", used by hooks/PAM) do not take the lock
   case "$cmd" in
     list|status|doctor|credentials|logs) ;;
-    panel) [[ "${rest[0]:-status}" == "status" ]] || lib_lock ;;
+    panel) if [[ "${rest[0]:-open}" != "status" ]]; then lib_lock; fi ;;
     notify) [[ " ${rest[*]:-} " == *" --send "* ]] || lib_lock ;;
     *) lib_lock ;;
   esac

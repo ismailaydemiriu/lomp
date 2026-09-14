@@ -454,7 +454,7 @@ lib_install_summary() {
       lib_note "open a tunnel from your own computer:"
       lib_note "  $(lib_ols_admin_tunnel_cmd)"
       lib_note "then browse to $(lib_ols_admin_url)"
-      lib_note "or open the port temporarily: sudo lompstack panel open"
+      lib_note "or just run 'sudo lompstack panel' to open it for your address for an hour"
       ;;
     ip)   lib_print_kv "WebAdmin" "$(lib_ols_admin_url)  (only from ${ADMIN_ALLOWED_IP})" ;;
     open) lib_print_kv "WebAdmin" "$(lib_ols_admin_url)  (reachable from anywhere)" ;;
@@ -586,8 +586,17 @@ lib_panel_open() {
   if [[ "$ip" == "any" ]]; then lib_ufw_rule allow "${ADMIN_PORT}/tcp"
   else lib_ufw_rule allow from "$ip" to any port "$ADMIN_PORT" proto tcp; fi
   _panel_timer_schedule "$minutes"
-  lib_ok "WebAdmin reachable at $(lib_ols_admin_url)$( [[ "$ip" != "any" ]] && printf ' from %s' "$ip")"
-  lib_note "user admin, password: sudo lompstack credentials --all"
+  lib_system_analyze
+  local url pass
+  url="$(lib_ols_admin_url)"
+  pass="$(awk -F= '$1=="PASSWORD"{sub(/^[^=]*=/, ""); print; exit}' "${STATE_DIR}/openlitespeed-admin.info" 2>/dev/null || true)"
+  printf '\n%s%sWebAdmin is open - click or paste this into your browser%s\n' "$C_BLD" "$C_GRN" "$C_RST"
+  printf '\n    %s%s%s\n\n' "$C_BLD" "$url" "$C_RST"
+  lib_print_kv "User"     "admin"
+  lib_print_kv "Password" "${pass:-run: lompstack credentials --all}"
+  lib_print_kv "Open for" "$( [[ "$ip" == "any" ]] && printf 'everyone' || printf '%s' "$ip")$( (( minutes > 0 )) && printf ', %s minute(s)' "$minutes")"
+  printf '\n  Your browser will warn about the certificate: it is self-signed, that is expected.\n'
+  printf '  Close it again at any time with: sudo lompstack panel close\n\n'
   lib_log_write INFO "panel opened for ${ip} for ${minutes} minute(s)"
 }
 
@@ -618,16 +627,31 @@ lib_panel_close() {
 }
 
 lib_panel_main() {
-  local action="${1:-status}"
-  (($# > 0)) && shift
+  local action="open"
+  # "panel", "panel open", "panel --minutes 15" and "panel status" must all work
+  if (($# > 0)); then
+    case "$1" in
+      -h|--help) printf 'Usage: setup.sh panel [open|status|close] [--ip auto|<IP>|any] [--minutes N]\n'; return 0 ;;
+      -*) ;;                       # options without an action: open
+      *)  action="$1"; shift ;;
+    esac
+  fi
   lib_require_tools
   lib_require_installed
   case "$action" in
+    open)
+      # bare "panel" opens it; without an SSH session there is no address to open for,
+      # so fall back to showing the tunnel instructions instead of failing
+      if [[ $# -eq 0 ]] && [[ -z "$(lib_admin_client_ip)" ]]; then
+        lib_warn "Not an SSH session, so there is no address to open the panel for."
+        lib_panel_status
+        return 0
+      fi
+      lib_panel_open "$@"
+      ;;
     status) lib_panel_status ;;
-    open)   lib_panel_open "$@" ;;
     close)  lib_panel_close ;;
-    -h|--help) printf 'Usage: setup.sh panel [status|open|close] [--ip auto|<IP>|any] [--minutes N]\n' ;;
-    *) lib_die "Unknown panel action '${action}'" "expected status, open or close" "setup.sh panel status" ;;
+    *) lib_die "Unknown panel action '${action}'" "expected open, status or close" "setup.sh panel" ;;
   esac
 }
 

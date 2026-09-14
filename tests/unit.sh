@@ -47,6 +47,9 @@ assert_false() { local n="$1"; shift; if "$@"; then fail "$n (expected failure)"
 assert_has()   { if [[ "$3" == *"$2"* ]]; then ok; else fail "$1: missing [$2]"; fi; }
 assert_lacks() { if [[ "$3" != *"$2"* ]]; then ok; else fail "$1: unexpected [$2]"; fi; }
 section() { printf '%s\n' "-- $*"; }
+# Run a function the way the installer does (errexit armed) and report its exit status.
+# A plain "if func; then" would disable errexit and hide exactly the bugs we look for.
+run_isolated() { local rc=0; ( set -Eeuo pipefail; shopt -s lastpipe; "$@" ) >/dev/null 2>&1 || rc=$?; printf '%s' "$rc"; }
 
 # =============================================================================
 section "domain helpers"
@@ -487,11 +490,56 @@ assert_false "vhost removed from conf" lib_ols_conf_block_exists virtualhost exa
 assert_eq "maps removed" "" "$(lib_ols_conf_map_get HTTPS example.com)"
 
 # =============================================================================
+section "php.ini discovery (regression: SIGPIPE from a large phpinfo)"
+mkdir -p "$TMP/fakephp/bin"
+cat >"$TMP/fakephp/bin/php" <<'FAKEPHP'
+#!/usr/bin/env bash
+# stand-in for the LSPHP CLI; --ini is short, -i is deliberately huge
+case "${1:-}" in
+  --ini)
+    [[ "${FAKE_NO_INI_FLAG:-0}" == "1" ]] && exit 0
+    printf 'Configuration File (php.ini) Path: /fake/etc\n'
+    printf 'Loaded Configuration File:         %s\n' "${FAKE_INI:-/fake/etc/php.ini}"
+    printf 'Scan for additional .ini files in: %s\n' "${FAKE_SCAN:-/fake/etc/conf.d}"
+    printf 'Additional .ini files parsed:      (none)\n'
+    ;;
+  -i)
+    printf 'Loaded Configuration File => %s\n' "${FAKE_INI:-/fake/etc/php.ini}"
+    printf 'Scan this dir for additional .ini files => %s\n' "${FAKE_SCAN:-/fake/etc/conf.d}"
+    i=0
+    while (( i < 20000 )); do
+      printf 'filler %s ..........................................................\n' "$i" || exit 255
+      i=$(( i + 1 ))
+    done
+    ;;
+esac
+FAKEPHP
+chmod +x "$TMP/fakephp/bin/php"
+lib_php_cli() { printf '%s/bin/php' "$TMP/fakephp"; }
+assert_eq "ini discovery exits 0 (--ini path)" 0 "$(run_isolated lib_php_ini_paths 8.3)"
+lib_php_ini_paths 8.3
+assert_eq "php.ini parsed from --ini" "/fake/etc/php.ini" "$PHP_INI_FILE"
+assert_eq "scan dir parsed from --ini" "/fake/etc/conf.d" "$PHP_INI_SCAN_DIR"
+export FAKE_NO_INI_FLAG=1
+assert_eq "ini discovery exits 0 (huge -i fallback)" 0 "$(run_isolated lib_php_ini_paths 8.3)"
+lib_php_ini_paths 8.3
+assert_eq "php.ini parsed from -i" "/fake/etc/php.ini" "$PHP_INI_FILE"
+assert_eq "scan dir parsed from -i" "/fake/etc/conf.d" "$PHP_INI_SCAN_DIR"
+unset FAKE_NO_INI_FLAG
+export FAKE_SCAN="(none)"
+lib_php_ini_paths 8.3
+assert_eq "(none) scan dir becomes empty" "" "$PHP_INI_SCAN_DIR"
+unset FAKE_SCAN
+lib_php_cli() { printf '%s/bin/php' "$TMP/does-not-exist"; }
+assert_eq "missing CLI exits 0" 0 "$(run_isolated lib_php_ini_paths 8.3)"
+# shellcheck source=/dev/null
+source "$ROOT/lib/php.sh"
+
+# =============================================================================
 section "renderers must exit 0 (pipefail safety)"
 # Every renderer is used as "renderer | lib_write_file". If a renderer's last statement is a
 # conditional that turns out false, the renderer exits 1 and pipefail aborts the installer.
 # These run with errexit explicitly re-armed, which is how the installer executes them.
-run_isolated() { local rc=0; ( set -Eeuo pipefail; shopt -s lastpipe; "$@" ) >/dev/null 2>&1 || rc=$?; printf '%s' "$rc"; }
 for fn in lib_system_render_sysctl lib_system_render_limits lib_db_render_tuning \
           lib_php_render_ini lib_ols_render_default_vhconf lib_ols_render_default_vhost_block \
           lib_ssl_hook_render lib_ols_admin_address; do

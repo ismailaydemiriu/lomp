@@ -112,12 +112,28 @@ _php_has_ext() {   # modules-list ext
   esac
 }
 
+_php_trim() { local s="$1"; s="${s#"${s%%[![:space:]]*}"}"; printf '%s' "${s%"${s##*[![:space:]]}"}"; }
+
 lib_php_ini_paths() {   # sets PHP_INI_FILE / PHP_INI_SCAN_DIR for a version
-  local cli; cli="$(lib_php_cli "$1")"
+  local cli info
+  cli="$(lib_php_cli "$1")"
   PHP_INI_FILE=""; PHP_INI_SCAN_DIR=""
   [[ -x "$cli" ]] || return 0
-  PHP_INI_FILE="$("$cli" -i 2>/dev/null | awk -F'=> ' '/^Loaded Configuration File/{print $2; exit}' | tr -d ' ')"
-  PHP_INI_SCAN_DIR="$("$cli" -i 2>/dev/null | awk -F'=> ' '/^Scan this dir for additional .ini files/{print $2; exit}' | tr -d ' ')"
+  # The output is captured once and parsed from a variable on purpose. Piping the PHP CLI
+  # straight into an awk that exits on the first match closes the pipe while PHP is still
+  # writing its (very large) phpinfo, PHP turns that EPIPE into exit status 255, and pipefail
+  # propagates it. "--ini" additionally keeps the output to four lines.
+  info="$("$cli" --ini 2>/dev/null || true)"
+  if [[ "$info" == *"Loaded Configuration File"* ]]; then
+    PHP_INI_FILE="$(awk '/^Loaded Configuration File:/{sub(/^[^:]*:[[:space:]]*/, ""); print; exit}' <<<"$info")"
+    PHP_INI_SCAN_DIR="$(awk '/^Scan for additional \.ini files in:/{sub(/^[^:]*:[[:space:]]*/, ""); print; exit}' <<<"$info")"
+  else
+    info="$("$cli" -i 2>/dev/null || true)"
+    PHP_INI_FILE="$(awk -F'=> ' '/^Loaded Configuration File/{print $2; exit}' <<<"$info")"
+    PHP_INI_SCAN_DIR="$(awk -F'=> ' '/^Scan this dir for additional \.ini files/{print $2; exit}' <<<"$info")"
+  fi
+  PHP_INI_FILE="$(_php_trim "$PHP_INI_FILE")"
+  PHP_INI_SCAN_DIR="$(_php_trim "$PHP_INI_SCAN_DIR")"
   [[ "$PHP_INI_FILE" == "(none)" ]] && PHP_INI_FILE=""
   [[ "$PHP_INI_SCAN_DIR" == "(none)" ]] && PHP_INI_SCAN_DIR=""
   return 0
