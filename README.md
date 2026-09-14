@@ -96,23 +96,23 @@ sudo ./setup.sh install --ssh-port 2222
 ### 5. Check the result
 
 ```bash
-sudo lompstack status     # services, versions, resources, sites
-sudo lompstack doctor     # deep health check, exits non-zero if something is broken
+sudo lomp status     # services, versions, resources, sites
+sudo lomp doctor     # deep health check, exits non-zero if something is broken
 ```
 
-After installation the script is available system-wide as `lompstack`, so you do not need
-to stay in the clone directory.
+After installation the script is available system-wide as `lomp` (or the longer
+`lompstack`), so you do not need to stay in the clone directory.
 
 ### 6. Reach the WebAdmin panel
 
 ```bash
-sudo lompstack panel
+sudo lomp panel
 ```
 
 That opens the panel for the address you are connected from, for one hour, and prints the
 URL together with the user name and password. It closes again on its own.
 
-If you would rather not open any port at all, `sudo lompstack panel status` prints an SSH
+If you would rather not open any port at all, `sudo lomp panel status` prints an SSH
 tunnel command to run on **your own computer**, after which the panel is at
 `https://127.0.0.1:7574`:
 
@@ -125,7 +125,7 @@ Credentials live in `/root/.server-setup/` with mode 0600 and are never written 
 ### 7. Add your first site
 
 ```bash
-sudo lompstack add example.com --www
+sudo lomp add example.com --www
 ```
 
 This creates the system user, the directory tree, the vhost, requests a certificate and
@@ -134,9 +134,9 @@ runs a smoke test. Upload your files to `/home/example.com/public_html/`.
 If DNS is not ready yet, add the site without TLS and issue the certificate later:
 
 ```bash
-sudo lompstack add example.com --no-ssl
+sudo lomp add example.com --no-ssl
 # ... point the DNS records at the server, then:
-sudo lompstack renew-ssl example.com
+sudo lomp renew-ssl example.com
 ```
 
 ---
@@ -144,21 +144,21 @@ sudo lompstack renew-ssl example.com
 ## Everyday commands
 
 ```bash
-sudo lompstack add shop.example.com --wordpress          # WordPress with database and cache
-sudo lompstack add api.example.com --proxy 127.0.0.1:3000 # Node/Python app behind OpenLiteSpeed
-sudo lompstack add cdn.example.com --static              # static site, no PHP
-sudo lompstack db shop.example.com                       # create or show the database
-sudo lompstack credentials shop.example.com              # database / WordPress / SSL details
-sudo lompstack list                                      # all sites in a table
-sudo lompstack logs shop.example.com                     # tail access and error logs
-sudo lompstack backup --all --encrypt                    # back up every site
-sudo lompstack restore shop.example.com --file /var/backups/server-setup/shop.example.com/....tar.gz
-sudo lompstack renew-ssl --all                           # renew every certificate
-sudo lompstack panel                                     # open the WebAdmin panel for your address
-sudo lompstack self-update                               # pull the latest lompstack, server untouched
-sudo lompstack optimize                                  # re-measure hardware, show a diff, re-tune
-sudo lompstack update                                    # safe package update, ordered restarts
-sudo lompstack remove old.example.com --keep-db          # remove a site, keep its database
+sudo lomp add shop.example.com --wordpress          # WordPress with database and cache
+sudo lomp add api.example.com --proxy 127.0.0.1:3000 # Node/Python app behind OpenLiteSpeed
+sudo lomp add cdn.example.com --static              # static site, no PHP
+sudo lomp db shop.example.com                       # create or show the database
+sudo lomp credentials shop.example.com              # database / WordPress / SSL details
+sudo lomp list                                      # all sites in a table
+sudo lomp logs shop.example.com                     # tail access and error logs
+sudo lomp backup --all --encrypt                    # back up every site
+sudo lomp restore shop.example.com --file /var/backups/server-setup/shop.example.com/....tar.gz
+sudo lomp renew-ssl --all                           # renew every certificate
+sudo lomp panel                                     # open the WebAdmin panel for your address
+sudo lomp self-update                               # pull the latest lompstack, server untouched
+sudo lomp optimize                                  # re-measure hardware, show a diff, re-tune
+sudo lomp update                                    # safe package update, ordered restarts
+sudo lomp remove old.example.com --keep-db          # remove a site, keep its database
 ```
 
 Global flags work everywhere: `--yes`, `--dry-run`, `--quiet`, `--verbose`, `--no-color`,
@@ -204,11 +204,11 @@ sudo ./setup.sh install --admin-access open      # exposed, warned about
 For day-to-day use with a dynamic IP, open the port only while you need it:
 
 ```bash
-sudo lompstack panel                 # opens it for your current SSH address for 60 minutes
-sudo lompstack panel --minutes 15    # shorter window
-sudo lompstack panel --ip 1.2.3.4    # somebody else's address
-sudo lompstack panel status          # current state and the SSH tunnel command
-sudo lompstack panel close           # shut it again right now
+sudo lomp panel                 # opens it for your current SSH address for 60 minutes
+sudo lomp panel --minutes 15    # shorter window
+sudo lomp panel --ip 1.2.3.4    # somebody else's address
+sudo lomp panel status          # current state and the SSH tunnel command
+sudo lomp panel close           # shut it again right now
 ```
 
 Bare `panel` prints the URL, the user and the password, so you can paste the address
@@ -259,8 +259,8 @@ These names are part of the public contract and stay stable across releases.
 Enable it globally at install time, or per site:
 
 ```bash
-sudo lompstack install --cloudflare
-sudo lompstack add example.com --cloudflare
+sudo lomp install --cloudflare
+sudo lomp add example.com --cloudflare
 ```
 
 The published Cloudflare ranges are downloaded and marked as trusted proxies, and only
@@ -272,7 +272,7 @@ With an API token you also get DNS-01 certificates (including wildcards) for pro
 domains, and Fail2ban bans are mirrored to the Cloudflare edge:
 
 ```bash
-sudo lompstack install --cf-api-token YOUR_TOKEN
+sudo lomp install --cf-api-token YOUR_TOKEN
 ```
 
 The token needs `Zone → DNS → Edit` and `Account → Firewall Access Rules → Edit`, and is
@@ -286,10 +286,10 @@ There is no bundled WAF or ModSecurity: that job belongs to the edge.
 ## Backups
 
 ```bash
-sudo lompstack backup example.com                   # one site
-sudo lompstack backup --all --encrypt --keep 14     # everything, encrypted, keep 14
-sudo lompstack backup --configure-remote            # set up an rsync or rclone target
-sudo lompstack backup --all --remote                # and push them off the box
+sudo lomp backup example.com                   # one site
+sudo lomp backup --all --encrypt --keep 14     # everything, encrypted, keep 14
+sudo lomp backup --configure-remote            # set up an rsync or rclone target
+sudo lomp backup --all --remote                # and push them off the box
 ```
 
 An archive holds `public_html` and `private`, a consistent database dump
@@ -301,7 +301,7 @@ part of any backup.
 Restores take a safety backup of the current state first:
 
 ```bash
-sudo lompstack restore example.com --file /var/backups/server-setup/example.com/example.com-20260914-030000.tar.gz
+sudo lomp restore example.com --file /var/backups/server-setup/example.com/example.com-20260914-030000.tar.gz
 ```
 
 A restore can also rebuild a site that no longer exists on the machine, which makes the
@@ -317,12 +317,12 @@ the recorded state still matches the real configuration. It also greps the log f
 credential leaks. A daily timer runs it and notifies you when something is wrong.
 
 ```bash
-sudo lompstack notify --email you@example.com --smtp-host smtp.example.com \
+sudo lomp notify --email you@example.com --smtp-host smtp.example.com \
      --smtp-port 587 --smtp-user you@example.com --smtp-pass 'app-password' --test
 
-sudo lompstack notify --telegram-token 123456:ABC --telegram-chat 987654321 --test
-sudo lompstack notify --webhook https://hooks.slack.com/services/... --test
-sudo lompstack notify --ssh-login on       # alert on every interactive SSH login
+sudo lomp notify --telegram-token 123456:ABC --telegram-chat 987654321 --test
+sudo lomp notify --webhook https://hooks.slack.com/services/... --test
+sudo lomp notify --ssh-login on       # alert on every interactive SSH login
 ```
 
 You get alerts for: installation finished, backup failed, certificate renewal failed, disk
@@ -396,9 +396,9 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
 
 | Symptom | What to do |
 |---|---|
-| A command failed | The error names the cause, the fix and the log line. Start with `sudo lompstack doctor`. |
+| A command failed | The error names the cause, the fix and the log line. Start with `sudo lomp doctor`. |
 | Certificate not issued | `dig +short example.com` must return the server IP. Behind Cloudflare, use `--cf-api-token` for DNS-01. |
-| Site returns 403 | The hostname is not mapped to a vhost, so the catch-all answered. Check `sudo lompstack list`. |
+| Site returns 403 | The hostname is not mapped to a vhost, so the catch-all answered. Check `sudo lomp list`. |
 | PHP file downloads instead of running | The site was created with `--static`. Recreate it, or check the handler in the vhost. |
 | Locked out after an SSH change | Use the provider's console, `ufw allow 22/tcp`, and remove `/etc/ssh/sshd_config.d/99-server-setup.conf`. |
 

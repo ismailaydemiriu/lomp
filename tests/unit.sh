@@ -11,7 +11,7 @@ cleanup() { rm -rf "$TMP"; }
 
 # ---- globals normally provided by setup.sh (all paths redirected into TMP) --
 SCRIPT_VERSION="test"
-TIMEZONE="Europe/Istanbul"; ADMIN_PORT="7080"; PHP_VERSION="8.3"; ADMIN_ACCESS="tunnel"; ADMIN_ALLOWED_IP=""; DEFAULT_EMAIL=""; SSH_PORT=""
+TIMEZONE="Europe/Istanbul"; ADMIN_PORT="7574"; PHP_VERSION="8.3"; ADMIN_ACCESS="tunnel"; ADMIN_ALLOWED_IP=""; DEFAULT_EMAIL=""; SSH_PORT=""
 DB_BUFFER_PERCENT=""; REDIS_MAX_PERCENT=""; BACKUP_KEEP="7"; BACKUP_SCHEDULE=""; FAIL2BAN_IGNORE_IP=""
 STATE_DIR="$TMP/state"; SITES_ROOT="$TMP/home"; LSWS_HOME="$TMP/lsws"; LOG_FILE="$TMP/server_setup.log"
 BACKUP_ROOT="$TMP/backups"; ACME_ROOT="$TMP/acme"; SSL_DEPLOY_DIR="$TMP/ssl"
@@ -19,7 +19,7 @@ SYSCTL_FILE="$TMP/sysctl.conf"; LIMITS_FILE="$TMP/limits.conf"; MARIADB_TUNED_FI
 FAIL2BAN_JAIL_FILE="$TMP/jail.conf"; FAIL2BAN_WEB_JAIL_FILE="$TMP/jail-web.conf"; CRON_FILE="$TMP/cron"
 FAIL2BAN_FILTER_DIR="$TMP/f2b-filters"
 CERTBOT_DEPLOY_HOOK="$TMP/hook.sh"; LOGROTATE_SITES_FILE="$TMP/lr-sites"; LOGROTATE_SELF_FILE="$TMP/lr-self"
-INSTALL_DIR="$TMP/install"; BIN_LINK="$TMP/server-setup"; LOCK_FILE="$TMP/lock"
+INSTALL_DIR="$TMP/install"; BIN_LINK="$TMP/lompstack"; BIN_SHORT="$TMP/lomp"; LOCK_FILE="$TMP/lock"
 OPT_YES=1 OPT_DRY_RUN=0 OPT_QUIET=1 OPT_VERBOSE=0 OPT_NO_COLOR=1 OPT_JSON=0 OPT_NON_INTERACTIVE=1
 SCRIPT_PATH="$ROOT/setup.sh"; SCRIPT_DIR="$ROOT"
 export TMPDIR="$TMP"
@@ -37,6 +37,11 @@ CAN_CHMOD=0
 : >"$TMP/.permprobe"; chmod 0600 "$TMP/.permprobe" 2>/dev/null || true
 [[ "$(stat -c %a "$TMP/.permprobe" 2>/dev/null || true)" == "600" ]] && CAN_CHMOD=1
 rm -f "$TMP/.permprobe"
+# MSYS under Git Bash copies instead of linking, so symlink assertions only run elsewhere
+CAN_SYMLINK=0
+: >"$TMP/.symtarget"
+ln -sfn "$TMP/.symtarget" "$TMP/.symprobe" 2>/dev/null && [[ -L "$TMP/.symprobe" ]] && CAN_SYMLINK=1
+rm -f "$TMP/.symprobe" "$TMP/.symtarget"
 
 PASS=0; FAIL=0
 ok()   { PASS=$((PASS + 1)); }
@@ -430,21 +435,21 @@ SYS_IPV6=0; ADMIN_ACCESS="tunnel"
 assert_eq "current bind read" "*:7080" "$(lib_ols_admin_current_bind)"
 assert_false "not tunnel-only yet" lib_ols_admin_tunnel_only
 lib_ols_admin_bind 127.0.0.1
-assert_eq "bind rewritten" "127.0.0.1:7080" "$(lib_ols_admin_current_bind)"
+assert_eq "bind rewritten" "127.0.0.1:7574" "$(lib_ols_admin_current_bind)"
 assert_true  "tunnel-only detected" lib_ols_admin_tunnel_only
-assert_eq "admin URL uses localhost" "http://127.0.0.1:7080" "$(lib_ols_admin_url)"
+assert_eq "admin URL uses localhost" "http://127.0.0.1:7574" "$(lib_ols_admin_url)"
 lib_ols_admin_bind 127.0.0.1
 assert_eq "rebinding is idempotent" 0 "$LIB_FILE_CHANGED"
 lib_ols_admin_bind '*'
-assert_eq "bind back to all" "*:7080" "$(lib_ols_admin_current_bind)"
+assert_eq "bind back to all" "*:7574" "$(lib_ols_admin_current_bind)"
 assert_false "no longer tunnel-only" lib_ols_admin_tunnel_only
 assert_eq "admin conf still balanced" 1 "$( _ols_braces_balanced "$LSWS_ADMIN_CONF" && echo 1 || echo 0)"
 assert_eq "secure flag untouched" "0" "$(_ols_block_key "$LSWS_ADMIN_CONF" listener adminListener secure get)"
 
 SYS_SSH_PORTS="22"; SYS_PUBLIC_IPV4="198.51.100.7"; SUDO_USER="deploy"
-assert_eq "tunnel command (default port)" "ssh -N -L 7080:127.0.0.1:7080 deploy@198.51.100.7" "$(lib_ols_admin_tunnel_cmd)"
+assert_eq "tunnel command (default port)" "ssh -N -L 7574:127.0.0.1:7574 deploy@198.51.100.7" "$(lib_ols_admin_tunnel_cmd)"
 SYS_SSH_PORTS="2222 22"
-assert_eq "tunnel command (custom port)" "ssh -N -L 7080:127.0.0.1:7080 -p 2222 deploy@198.51.100.7" "$(lib_ols_admin_tunnel_cmd)"
+assert_eq "tunnel command (custom port)" "ssh -N -L 7574:127.0.0.1:7574 -p 2222 deploy@198.51.100.7" "$(lib_ols_admin_tunnel_cmd)"
 unset SUDO_USER
 
 SSH_CONNECTION="203.0.113.9 51234 10.0.0.5 22"
@@ -647,6 +652,17 @@ printf '# lib a\n' >"$SRC_GOOD/lib/a.sh"
 printf '# lib b\n' >"$SRC_GOOD/lib/b.sh"
 assert_eq "install_self exits 0" 0 "$(run_isolated lib_install_self "$SRC_GOOD")"
 assert_true "setup.sh copied" test -f "${INSTALL_DIR}/setup.sh"
+if (( CAN_SYMLINK )); then
+  assert_true "long command linked" test -L "$BIN_LINK"
+  assert_true "short alias linked" test -L "$BIN_SHORT"
+  assert_eq "both names point at the same script" "$(readlink -f "$BIN_LINK")" "$(readlink -f "$BIN_SHORT")"
+  # an unrelated program owning the short name must not be replaced
+  rm -f "$BIN_SHORT"; printf '#!/bin/sh\necho other\n' >"$BIN_SHORT"
+  lib_install_self "$SRC_GOOD" >/dev/null 2>&1
+  assert_false "a real file at the short name is left alone" test -L "$BIN_SHORT"
+  assert_has "the foreign program survived" "echo other" "$(cat "$BIN_SHORT")"
+  rm -f "$BIN_SHORT"
+fi
 assert_true "lib copied" test -f "${INSTALL_DIR}/lib/a.sh"
 assert_has "copied content is the source" "marker-v1" "$(cat "${INSTALL_DIR}/setup.sh")"
 # compared by suffix: MSYS rewrites absolute paths when handing them to jq

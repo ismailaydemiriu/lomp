@@ -62,6 +62,7 @@ readonly LOGROTATE_SITES_FILE="/etc/logrotate.d/ols-sites"
 readonly LOGROTATE_SELF_FILE="/etc/logrotate.d/server-setup"
 readonly INSTALL_DIR="/usr/local/lib/lompstack"
 readonly BIN_LINK="/usr/local/sbin/lompstack"
+readonly BIN_SHORT="/usr/local/sbin/lomp"      # short alias; cron and hooks use BIN_LINK
 readonly LOCK_FILE="/run/lock/server-setup.lock"
 
 # ---- Global runtime flags ----------------------------------------------------
@@ -101,6 +102,7 @@ setup.sh - production VPS provisioning for OpenLiteSpeed + LSPHP + MariaDB + Red
 
 USAGE
   sudo ./setup.sh <command> [arguments] [global flags]
+  sudo lomp <command>                   # after install: short name, works anywhere
   sudo ./setup.sh domain.com            # shorthand for: add domain.com
 
 COMMANDS

@@ -455,7 +455,15 @@ lib_install_self() {   # [source_dir]
     fi
   fi
   ln -sfn "${INSTALL_DIR}/setup.sh" "$BIN_LINK"
-  lib_ok "Installed to ${INSTALL_DIR}; use '${BIN_LINK} <command>' from anywhere"
+  # short alias, but never clobber an unrelated program that happens to own the name
+  if [[ -e "$BIN_SHORT" && ! -L "$BIN_SHORT" ]]; then
+    lib_warn "${BIN_SHORT} already exists and is not our symlink; short alias not created"
+  elif [[ -L "$BIN_SHORT" && "$(readlink -f "$BIN_SHORT")" != "$(readlink -f "${INSTALL_DIR}/setup.sh")" && -e "$(readlink -f "$BIN_SHORT")" ]]; then
+    lib_warn "${BIN_SHORT} points somewhere else; short alias not created"
+  else
+    ln -sfn "${INSTALL_DIR}/setup.sh" "$BIN_SHORT"
+  fi
+  lib_ok "Installed to ${INSTALL_DIR}; run it as '$(basename "$BIN_SHORT")' or '$(basename "$BIN_LINK")' from anywhere"
 }
 
 # =============================================================================
@@ -467,7 +475,7 @@ lib_selfupdate_main() {
     a="$1"; shift
     case "$a" in
       --from) src="${1:-}"; shift ;;
-      -h|--help) printf 'Usage: lompstack self-update [--from /path/to/checkout]\n'; return 0 ;;
+      -h|--help) printf 'Usage: lomp self-update [--from /path/to/checkout]\n'; return 0 ;;
       *) lib_die "Unknown option for self-update: ${a}" "" "self-update [--from /path/to/checkout]" ;;
     esac
   done
@@ -477,10 +485,10 @@ lib_selfupdate_main() {
   [[ -n "$src" ]] || src="$SCRIPT_DIR"
   [[ -d "$src" && -f "${src}/setup.sh" ]] || lib_die "No usable checkout found at '${src}'" \
     "the directory lompstack was installed from is gone or was never recorded" \
-    "clone it again and point at it: lompstack self-update --from /opt/lompstack"
+    "clone it again and point at it: lomp self-update --from /opt/lompstack"
   if [[ "$src" == "$INSTALL_DIR" ]]; then
     lib_die "The installed copy is its own source" "there is no separate checkout to update from" \
-      "git clone the repository, then: lompstack self-update --from /path/to/clone"
+      "git clone the repository, then: lomp self-update --from /path/to/clone"
   fi
 
   if [[ -d "${src}/.git" ]] && lib_have git; then
@@ -498,7 +506,7 @@ lib_selfupdate_main() {
   lib_install_self "$src"
   lib_manifest_set '.install.updated_at' "$(lib_iso_now)"
   lib_ok "Now running lompstack ${SCRIPT_VERSION}$( [[ -n "$(lib_manifest_get '.install.revision')" ]] && printf ' (%s)' "$(lib_manifest_get '.install.revision')")"
-  lib_note "Nothing on the server was reconfigured. Run 'sudo lompstack doctor' to check its state."
+  lib_note "Nothing on the server was reconfigured. Run 'sudo lomp doctor' to check its state."
 }
 
 lib_install_manifest() {
@@ -533,12 +541,12 @@ lib_install_summary() {
       lib_note "open a tunnel from your own computer:"
       lib_note "  $(lib_ols_admin_tunnel_cmd)"
       lib_note "then browse to $(lib_ols_admin_url)"
-      lib_note "or just run 'sudo lompstack panel' to open it for your address for an hour"
+      lib_note "or just run 'sudo lomp panel' to open it for your address for an hour"
       ;;
     ip)   lib_print_kv "WebAdmin" "$(lib_ols_admin_url)  (only from ${ADMIN_ALLOWED_IP})" ;;
     open) lib_print_kv "WebAdmin" "$(lib_ols_admin_url)  (reachable from anywhere)" ;;
   esac
-  lib_print_kv "WebAdmin login"  "user admin, password: sudo lompstack credentials --all"
+  lib_print_kv "WebAdmin login"  "user admin, password: sudo lomp credentials --all"
   lib_print_kv "Sites root"     "${SITES_ROOT}/<domain>/public_html"
   lib_print_kv "Add a site"     "setup.sh add example.com [--www] [--wordpress] [--proxy 127.0.0.1:3000]"
   lib_print_kv "Health"         "setup.sh status | setup.sh doctor"
@@ -570,16 +578,16 @@ _panel_timer_cancel() {
 
 _panel_timer_schedule() {   # minutes
   local m="$1"
-  (( m > 0 )) || { lib_warn "No automatic close scheduled: run 'lompstack panel close' when you are done"; return 0; }
+  (( m > 0 )) || { lib_warn "No automatic close scheduled: run 'lomp panel close' when you are done"; return 0; }
   if (( OPT_DRY_RUN )); then lib_info "[dry-run] would close the port again automatically in ${m} minute(s)"; return 0; fi
-  lib_have systemd-run || { lib_warn "systemd-run unavailable: the port stays open until 'lompstack panel close'"; return 0; }
+  lib_have systemd-run || { lib_warn "systemd-run unavailable: the port stays open until 'lomp panel close'"; return 0; }
   _panel_timer_cancel
   if systemd-run --quiet --on-active="${m}min" --unit="$PANEL_TIMER_UNIT" \
        --description="lompstack: close the WebAdmin port again" \
        "$(_panel_self)" panel close --yes --quiet >/dev/null 2>&1; then
     lib_ok "The port closes again automatically in ${m} minute(s)"
   else
-    lib_warn "Could not schedule the automatic close; run 'lompstack panel close' when you are done"
+    lib_warn "Could not schedule the automatic close; run 'lomp panel close' when you are done"
   fi
 }
 
@@ -627,14 +635,14 @@ lib_panel_status() {
     lib_print_kv "Auto-close" "scheduled ($(systemctl show "${PANEL_TIMER_UNIT}.timer" -p NextElapseUSecRealtime --value 2>/dev/null || true))"
   fi
   lib_print_kv "URL"             "$(lib_ols_admin_url)"
-  lib_print_kv "Login"           "user admin, password: sudo lompstack credentials --all"
+  lib_print_kv "Login"           "user admin, password: sudo lomp credentials --all"
   printf '\n  %sFrom your own computer, without opening any port:%s\n' "$C_BLD" "$C_RST"
   printf '    %s\n' "$(lib_ols_admin_tunnel_cmd)"
   printf '    then browse to https://127.0.0.1:%s\n' "$ADMIN_PORT"
   printf '\n  %sOr open the port for your current address for a while:%s\n' "$C_BLD" "$C_RST"
-  printf '    sudo lompstack panel open            # your SSH address, 60 minutes\n'
-  printf '    sudo lompstack panel open --minutes 15\n'
-  printf '    sudo lompstack panel close\n\n'
+  printf '    sudo lomp panel open            # your SSH address, 60 minutes\n'
+  printf '    sudo lomp panel open --minutes 15\n'
+  printf '    sudo lomp panel close\n\n'
 }
 
 lib_panel_open() {
@@ -675,7 +683,7 @@ lib_panel_open() {
   lib_print_kv "Password" "${pass:-run: lompstack credentials --all}"
   lib_print_kv "Open for" "$( [[ "$ip" == "any" ]] && printf 'everyone' || printf '%s' "$ip")$( (( minutes > 0 )) && printf ', %s minute(s)' "$minutes")"
   printf '\n  Your browser will warn about the certificate: it is self-signed, that is expected.\n'
-  printf '  Close it again at any time with: sudo lompstack panel close\n\n'
+  printf '  Close it again at any time with: sudo lomp panel close\n\n'
   lib_log_write INFO "panel opened for ${ip} for ${minutes} minute(s)"
 }
 
