@@ -1,0 +1,31 @@
+# Local scratch / earlier drafts - never published
+_old/
+scratch/
+*.local
+
+# Test and runtime artefacts
+*.log
+*.tmp
+*.bak
+*.orig
+*.rej
+tests/out/
+tests/*.out
+
+# Never commit anything that could hold credentials or host state
+*.info
+*.key
+*.pem
+*.crt
+cloudflare.ini
+notify.conf
+manifest.json
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+desktop.ini

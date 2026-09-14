@@ -1,0 +1,624 @@
+#!/usr/bin/env bash
+# lib/install.sh - "install" orchestration (base packages, security, OLS, PHP,
+#                  MariaDB, Redis, SSL infra, optional runtimes, cron, self-install),
+#                  plus "update" and "optimize".
+
+INS_WITH_NODE=0 INS_NODE_MAJOR=20 INS_WITH_PYTHON=0 INS_WITH_NETDATA=0 INS_CLOUDFLARE=0 INS_CF_TOKEN=""
+INS_MARIADB="" INS_REDIS_PERSIST=0 INS_AUTO_REBOOT=0 INS_SKIP_UPGRADE=0 INS_BACKUP_SCHEDULE=""
+
+# =============================================================================
+#  Arguments
+# =============================================================================
+lib_install_parse_args() {
+  local a
+  while (($# > 0)); do
+    a="$1"; shift
+    case "$a" in
+      --php)             PHP_VERSION="${1:-}"; shift ;;
+      --timezone)        TIMEZONE="${1:-}"; shift ;;
+      --admin-ip)        ADMIN_ALLOWED_IP="${1:-}"; shift ;;
+      --email)           DEFAULT_EMAIL="${1:-}"; shift ;;
+      --ssh-port)        SSH_PORT="${1:-}"; shift ;;
+      --with-node)       INS_WITH_NODE=1 ;;
+      --node)            INS_NODE_MAJOR="${1:-20}"; INS_WITH_NODE=1; shift ;;
+      --with-python)     INS_WITH_PYTHON=1 ;;
+      --with-netdata)    INS_WITH_NETDATA=1 ;;
+      --cloudflare)      INS_CLOUDFLARE=1 ;;
+      --cf-api-token)    INS_CF_TOKEN="${1:-}"; shift ;;
+      --mariadb)         INS_MARIADB="${1:-}"; shift ;;
+      --redis-persist)   INS_REDIS_PERSIST=1 ;;
+      --backup-schedule) INS_BACKUP_SCHEDULE="${1:-}"; shift ;;
+      --backup-keep)     BACKUP_KEEP="${1:-7}"; shift ;;
+      --db-buffer-percent)  DB_BUFFER_PERCENT="${1:-}"; shift ;;
+      --redis-max-percent)  REDIS_MAX_PERCENT="${1:-}"; shift ;;
+      --fail2ban-ignore-ip) FAIL2BAN_IGNORE_IP="${1:-}"; shift ;;
+      --auto-reboot)     INS_AUTO_REBOOT=1 ;;
+      --skip-upgrade)    INS_SKIP_UPGRADE=1 ;;
+      --non-interactive) OPT_NON_INTERACTIVE=1 ;;
+      -h|--help)         lib_usage; exit 0 ;;
+      *) lib_die "Unknown option for install: ${a}" "" "see: setup.sh help" ;;
+    esac
+  done
+  lib_php_valid_version "$PHP_VERSION" || lib_die "Invalid --php '${PHP_VERSION}'" "expected e.g. 8.3" "--php 8.3"
+  [[ "$ADMIN_PORT" =~ ^[0-9]{2,5}$ ]] || lib_die "Invalid ADMIN_PORT '${ADMIN_PORT}'" "" "set a numeric port"
+  [[ -z "$SSH_PORT" || ( "$SSH_PORT" =~ ^[0-9]{1,5}$ && "$SSH_PORT" -ge 1 && "$SSH_PORT" -le 65535 ) ]] || lib_die "Invalid --ssh-port '${SSH_PORT}'" "" "--ssh-port 2222"
+  [[ -z "$ADMIN_ALLOWED_IP" || "$ADMIN_ALLOWED_IP" =~ ^[0-9a-fA-F.:/]+$ ]] || lib_die "Invalid --admin-ip '${ADMIN_ALLOWED_IP}'" "" "--admin-ip 1.2.3.4 or 1.2.3.0/24"
+  [[ "$BACKUP_KEEP" =~ ^[0-9]+$ ]] || lib_die "Invalid backup keep count '${BACKUP_KEEP}'" "" "--backup-keep 7"
+  [[ "$INS_NODE_MAJOR" =~ ^[0-9]{2}$ ]] || lib_die "Invalid --node '${INS_NODE_MAJOR}'" "" "--node 20"
+  [[ -n "$INS_BACKUP_SCHEDULE" ]] || INS_BACKUP_SCHEDULE="$BACKUP_SCHEDULE"
+  # Re-runs: keep previously chosen values when the flag is not repeated (idempotent re-run)
+  if [[ -s "$STATE_DIR/manifest.json" ]] && lib_have jq; then
+    [[ -n "$ADMIN_ALLOWED_IP" ]]   || ADMIN_ALLOWED_IP="$(lib_manifest_get '.params.admin_ip')"
+    [[ -n "$DEFAULT_EMAIL" ]]      || DEFAULT_EMAIL="$(lib_manifest_get '.params.email')"
+    [[ -n "$INS_BACKUP_SCHEDULE" ]] || INS_BACKUP_SCHEDULE="$(lib_manifest_get '.params.backup_schedule')"
+    [[ -n "$FAIL2BAN_IGNORE_IP" ]] || FAIL2BAN_IGNORE_IP="$(lib_manifest_get '.params.fail2ban_ignore_ip')"
+    [[ -n "$DB_BUFFER_PERCENT" ]]  || DB_BUFFER_PERCENT="$(lib_manifest_get '.params.db_buffer_percent')"
+    [[ -n "$REDIS_MAX_PERCENT" ]]  || REDIS_MAX_PERCENT="$(lib_manifest_get '.params.redis_max_percent')"
+    [[ "$(lib_manifest_get '.params.redis_persist')" == "true" ]] && INS_REDIS_PERSIST=1
+    [[ "$(lib_manifest_get '.params.auto_reboot')" == "true" ]] && INS_AUTO_REBOOT=1
+    [[ "$(lib_manifest_get '.components.netdata')" == "true" ]] && INS_WITH_NETDATA=1
+    [[ -n "$(lib_manifest_get '.components.node')" ]] && INS_WITH_NODE=1
+    [[ -n "$(lib_manifest_get '.components.python')" ]] && INS_WITH_PYTHON=1
+  fi
+  return 0
+}
+
+# =============================================================================
+#  install
+# =============================================================================
+lib_install_main() {
+  lib_install_parse_args "$@"
+  lib_require_tools
+  lib_state_init
+  local rerun=0
+  lib_installed && rerun=1
+  (( rerun )) && lib_info "Server was provisioned on $(lib_manifest_get '.installed_at') - verifying and repairing the configuration (idempotent re-run)"
+  local total=20
+  lib_steps_begin "$total"
+
+  lib_step "System analysis"
+  lib_system_analyze
+  lib_system_report
+  lib_system_profile
+  lib_system_profile_report
+  (( SYS_RAM_MB < 900 )) && lib_warn "Less than 1 GB RAM: expect tight limits (MariaDB buffer pool ${CALC_DB_BUFFER_MB} MB)"
+  case "$SYS_ARCH" in amd64|arm64) ;; *) lib_warn "Architecture ${SYS_ARCH} is not covered by the LiteSpeed repository; installation may fail" ;; esac
+  (( OPT_DRY_RUN )) && lib_warn "DRY RUN: nothing will be changed; the plan below shows what a real run would do"
+
+  lib_step "Base packages and system upgrade"
+  lib_install_base_packages
+
+  lib_step "Timezone and NTP"
+  lib_system_timezone_apply
+  lib_system_ntp_apply
+
+  lib_step "Kernel parameters, limits and swap"
+  lib_system_sysctl_apply
+  lib_system_limits_apply
+  lib_system_swap_ensure
+
+  lib_step "Unattended security updates"
+  lib_install_unattended
+
+  lib_step "Firewall (UFW)"
+  lib_install_ufw
+
+  lib_step "SSH hardening"
+  lib_install_ssh_harden
+
+  lib_step "Fail2ban"
+  lib_install_fail2ban
+
+  lib_step "OpenLiteSpeed repository and package"
+  lib_ols_repo_setup
+  lib_ols_install
+
+  lib_step "PHP (LSPHP ${PHP_VERSION})"
+  lib_php_install "$PHP_VERSION"
+  lib_php_cli_links "$PHP_VERSION"
+  lib_manifest_set '.components.php.default' "$PHP_VERSION"
+
+  lib_step "OpenLiteSpeed configuration and WebAdmin"
+  lib_ols_admin_setup
+  lib_ols_configure_server
+  (( OPT_DRY_RUN )) || lib_ols_running || lib_ols_restart
+  [[ -n "$ADMIN_ALLOWED_IP" ]] || lib_warn "WebAdmin port ${ADMIN_PORT} is reachable from ANY IP (no --admin-ip given). Restrict it: setup.sh install --admin-ip <your IP>"
+
+  lib_step "MariaDB"
+  lib_db_install "$INS_MARIADB"
+  lib_db_secure
+  lib_db_apply_tuning
+
+  lib_step "Redis"
+  lib_redis_install "$INS_REDIS_PERSIST"
+
+  lib_step "SSL infrastructure (certbot)"
+  [[ -n "$INS_CF_TOKEN" ]] && lib_cf_store_token "$INS_CF_TOKEN"
+  lib_ssl_install
+
+  lib_step "Cloudflare real-IP mode"
+  if (( INS_CLOUDFLARE )) || lib_cf_enabled; then lib_cf_enable; else lib_info "Cloudflare mode disabled (enable with --cloudflare)"; fi
+
+  lib_step "Optional runtimes (Node.js / Python / Netdata)"
+  (( INS_WITH_NODE ))    && lib_install_node
+  (( INS_WITH_PYTHON ))  && lib_install_python
+  (( INS_WITH_NETDATA )) && lib_install_netdata
+  (( INS_WITH_NODE || INS_WITH_PYTHON || INS_WITH_NETDATA )) || lib_info "none requested (--with-node / --with-python / --with-netdata)"
+
+  lib_step "Log rotation"
+  lib_install_logrotate
+  lib_domain_logrotate_regen
+  lib_domain_fail2ban_regen
+
+  lib_step "Scheduled tasks and self-installation"
+  lib_install_self
+  lib_install_cron
+
+  lib_step "Manifest"
+  lib_install_manifest "$rerun"
+
+  lib_step "Summary"
+  lib_install_summary "$rerun"
+}
+
+# -----------------------------------------------------------------------------
+lib_install_base_packages() {
+  lib_apt_update
+  if (( INS_SKIP_UPGRADE )); then
+    lib_info "apt upgrade skipped (--skip-upgrade)"
+  elif (( OPT_DRY_RUN )); then
+    lib_info "[dry-run] would run apt-get upgrade"
+  else
+    lib_info "Upgrading installed packages (this can take a while)..."
+    lib_run apt-get -y -q -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold upgrade \
+      || lib_warn "apt-get upgrade reported errors (see log); continuing"
+  fi
+  lib_apt_install curl wget ca-certificates gnupg lsb-release jq unzip tar gzip rsync openssl python3 cron logrotate \
+    dnsutils acl htop ufw fail2ban unattended-upgrades \
+    || lib_die "Base package installation failed" "apt error" "check network / apt sources and re-run"
+  lib_ok "Base packages present"
+}
+
+lib_install_unattended() {
+  local reboot="false"; (( INS_AUTO_REBOOT )) && reboot="true"
+  printf 'APT::Periodic::Update-Package-Lists "1";\nAPT::Periodic::Unattended-Upgrade "1";\nAPT::Periodic::Download-Upgradeable-Packages "1";\nAPT::Periodic::AutocleanInterval "7";\n' \
+    | lib_write_file /etc/apt/apt.conf.d/20auto-upgrades 0644 root:root
+  cat <<EOF | lib_write_file /etc/apt/apt.conf.d/52server-setup-unattended 0644 root:root
+// Managed by lompstack - security updates only, no automatic reboot unless --auto-reboot
+#clear Unattended-Upgrade::Allowed-Origins;
+Unattended-Upgrade::Allowed-Origins {
+  "\${distro_id}:\${distro_codename}-security";
+  "\${distro_id}ESMApps:\${distro_codename}-apps-security";
+  "\${distro_id}ESM:\${distro_codename}-infra-security";
+};
+Unattended-Upgrade::Automatic-Reboot "${reboot}";
+Unattended-Upgrade::Automatic-Reboot-Time "04:30";
+Unattended-Upgrade::Remove-Unused-Dependencies "true";
+Unattended-Upgrade::Remove-Unused-Kernel-Packages "true";
+Unattended-Upgrade::MinimalSteps "true";
+Unattended-Upgrade::SyslogEnable "true";
+EOF
+  lib_systemctl enable unattended-upgrades >/dev/null 2>&1 || true
+  lib_ok "unattended-upgrades: security updates only, automatic reboot ${reboot} (reboot-required is reported by the daily healthcheck)"
+}
+
+lib_install_ufw() {
+  local p
+  lib_apt_install ufw
+  # never "ufw reset": existing rules are kept, ours are added idempotently
+  lib_ufw_rule default deny incoming
+  lib_ufw_rule default allow outgoing
+  for p in $SYS_SSH_PORTS $SSH_PORT; do lib_ufw_rule allow "${p}/tcp"; done
+  lib_ufw_rule allow 80/tcp
+  lib_ufw_rule allow 443/tcp
+  lib_ufw_rule allow 443/udp
+  if [[ -n "$ADMIN_ALLOWED_IP" ]]; then
+    lib_ufw_rule allow from "$ADMIN_ALLOWED_IP" to any port "$ADMIN_PORT" proto tcp
+    (( INS_WITH_NETDATA )) && lib_ufw_rule allow from "$ADMIN_ALLOWED_IP" to any port 19999 proto tcp
+  else
+    lib_ufw_rule allow "${ADMIN_PORT}/tcp"
+  fi
+  if (( ! OPT_DRY_RUN )); then
+    if ! ufw status 2>/dev/null | head -n1 | grep -q 'Status: active'; then
+      ufw show added 2>/dev/null | grep -qE "allow ${SYS_SSH_PORTS%% *}/tcp" || lib_die "Refusing to enable UFW without an SSH allow rule" "SSH port ${SYS_SSH_PORTS} rule missing" "add it manually: ufw allow ${SYS_SSH_PORTS%% *}/tcp"
+      lib_run ufw --force enable || lib_die "ufw enable failed" "" "check 'ufw status' and the log"
+    fi
+    lib_systemctl enable ufw >/dev/null 2>&1 || true
+  fi
+  lib_manifest_set_json '.components.ufw' true
+  lib_ok "UFW active: SSH ${SYS_SSH_PORTS}${SSH_PORT:+ + $SSH_PORT}, 80/tcp, 443/tcp+udp, WebAdmin ${ADMIN_PORT}$( [[ -n "$ADMIN_ALLOWED_IP" ]] && printf ' (only from %s)' "$ADMIN_ALLOWED_IP")"
+}
+
+lib_install_ssh_harden() {
+  local dropin="/etc/ssh/sshd_config.d/99-server-setup.conf" login_user h keys_ok=0 content prev="" had_prev=0
+  local ports_before="$SYS_SSH_PORTS" port_changed=0
+  if [[ ! -f /etc/ssh/sshd_config ]] || ! lib_have sshd; then
+    lib_warn "openssh-server is not installed (/etc/ssh/sshd_config missing); SSH hardening skipped"
+    return 0
+  fi
+  login_user="${SUDO_USER:-root}"
+  for h in "$(getent passwd "$login_user" 2>/dev/null | cut -d: -f6)" /root; do
+    [[ -n "$h" && -s "${h}/.ssh/authorized_keys" ]] && keys_ok=1
+  done
+  content="# Managed by lompstack (sshd drop-in; sshd -t verified before activation)"$'\n'
+  content+="PubkeyAuthentication yes"$'\n'"PermitEmptyPasswords no"$'\n'"X11Forwarding no"$'\n'"MaxAuthTries 4"$'\n'
+  content+="LoginGraceTime 30"$'\n'"ClientAliveInterval 300"$'\n'"ClientAliveCountMax 2"$'\n'
+  if (( keys_ok )); then
+    content+="PasswordAuthentication no"$'\n'"PermitRootLogin prohibit-password"$'\n'
+  else
+    lib_warn "No authorized_keys found for ${login_user} (or root): password authentication stays ENABLED. Add a key, then re-run install."
+  fi
+  if [[ -n "$SSH_PORT" ]] && [[ " ${SYS_SSH_PORTS} " != *" ${SSH_PORT} "* ]]; then
+    content+="Port ${SSH_PORT}"$'\n'
+    port_changed=1
+  fi
+  if ! grep -qE '^[[:space:]]*Include[[:space:]]+/etc/ssh/sshd_config\.d/\*\.conf' /etc/ssh/sshd_config 2>/dev/null; then
+    lib_warn "sshd_config has no Include for sshd_config.d; adding it"
+    { printf 'Include /etc/ssh/sshd_config.d/*.conf\n'; cat /etc/ssh/sshd_config; } | lib_write_file /etc/ssh/sshd_config 0644 root:root
+  fi
+  [[ -f "$dropin" ]] && { prev="$(lib_mktemp)"; cp "$dropin" "$prev"; had_prev=1; }
+  lib_mkdir /etc/ssh/sshd_config.d 0755 root:root
+  printf '%s' "$content" | lib_write_file "$dropin" 0644 root:root
+  if (( ! LIB_FILE_CHANGED )); then lib_ok "SSH hardening already in place"; return 0; fi
+  (( OPT_DRY_RUN )) && return 0
+  if ! sshd -t >>"$LOG_FILE" 2>&1; then
+    lib_error "sshd -t rejected the new configuration; restoring the previous one"
+    if (( had_prev )); then cp "$prev" "$dropin"; else rm -f "$dropin"; fi
+    lib_die "SSH configuration test failed (previous configuration restored, SSH untouched)" "see 'sshd -t' output in the log" "fix /etc/ssh/sshd_config and re-run"
+  fi
+  if (( port_changed )); then
+    lib_info "Switching SSH to port ${SSH_PORT} (old port(s) ${ports_before} stay allowed in UFW until you remove them)"
+    lib_systemctl daemon-reload
+    if lib_service_active ssh.socket; then lib_systemctl restart ssh.socket || true; fi
+    lib_systemctl restart ssh || lib_systemctl restart sshd || true
+    sleep 2
+    if ! lib_port_listening "$SSH_PORT"; then
+      lib_error "sshd is not listening on ${SSH_PORT}; reverting"
+      if (( had_prev )); then cp "$prev" "$dropin"; else rm -f "$dropin"; fi
+      lib_systemctl daemon-reload; lib_service_active ssh.socket && lib_systemctl restart ssh.socket; lib_systemctl restart ssh || true
+      lib_die "SSH port change failed and was reverted" "sshd did not bind port ${SSH_PORT}" "check 'journalctl -u ssh' and 'ss -tlnp'"
+    fi
+    lib_ok "SSH listening on port ${SSH_PORT} - test a NEW connection before closing this one: ssh -p ${SSH_PORT} ${login_user}@${SYS_PUBLIC_IPV4:-<ip>}"
+    lib_note "afterwards remove the old rule: ufw delete allow ${ports_before%% *}/tcp"
+  else
+    lib_systemctl reload ssh || lib_systemctl reload sshd || true
+    lib_ok "SSH hardened (keys: $( (( keys_ok )) && printf 'password auth disabled, root prohibit-password' || printf 'password auth kept'))"
+  fi
+}
+
+lib_install_fail2ban() {
+  local ignore="127.0.0.1/8 ::1" ports
+  [[ -n "$ADMIN_ALLOWED_IP" ]] && ignore+=" ${ADMIN_ALLOWED_IP}"
+  [[ -n "$FAIL2BAN_IGNORE_IP" ]] && ignore+=" ${FAIL2BAN_IGNORE_IP}"
+  ports="$(printf '%s' "${SYS_SSH_PORTS} ${SSH_PORT}" | tr -s ' ' '\n' | sed '/^$/d' | sort -un | paste -sd, -)"
+  lib_apt_install fail2ban
+  cat <<EOF | lib_write_file "$FAIL2BAN_JAIL_FILE" 0644 root:root
+# Managed by lompstack - base jails (web jails live in $(basename "$FAIL2BAN_WEB_JAIL_FILE"))
+[DEFAULT]
+backend = systemd
+ignoreip = ${ignore}
+bantime = 1h
+findtime = 10m
+maxretry = 5
+
+[sshd]
+enabled = true
+port = ${ports}
+maxretry = 5
+
+[recidive]
+enabled = true
+backend = auto
+logpath = /var/log/fail2ban.log
+banaction = %(banaction_allports)s
+bantime = 1w
+findtime = 1d
+maxretry = 5
+EOF
+  local changed="$LIB_FILE_CHANGED"
+  lib_cf_fail2ban_action_write
+  lib_domain_fail2ban_regen
+  lib_systemctl enable fail2ban >/dev/null 2>&1 || true
+  if (( ! OPT_DRY_RUN )); then
+    if lib_service_active fail2ban; then (( changed )) && { lib_run fail2ban-client reload || lib_warn "fail2ban reload failed"; }
+    else lib_systemctl restart fail2ban || lib_warn "fail2ban failed to start (journalctl -u fail2ban)"; fi
+  fi
+  lib_manifest_set_json '.components.fail2ban' true
+  lib_ok "Fail2ban: sshd (port ${ports}) + recidive, ignoreip ${ignore}"
+}
+
+lib_install_logrotate() {
+  cat <<EOF | lib_write_file "$LOGROTATE_SELF_FILE" 0644 root:root
+# Managed by lompstack
+${LOG_FILE} {
+  weekly
+  rotate 12
+  compress
+  delaycompress
+  missingok
+  notifempty
+  dateext
+  create 0600 root root
+}
+EOF
+  if ! grep -rqs '/var/log/mysql' /etc/logrotate.d/ 2>/dev/null; then
+    cat <<EOF | lib_write_file /etc/logrotate.d/server-setup-mariadb-slow 0644 root:root
+# Managed by lompstack - MariaDB slow query log
+${DB_SLOW_LOG} {
+  weekly
+  rotate 8
+  compress
+  delaycompress
+  missingok
+  notifempty
+  copytruncate
+  dateext
+}
+EOF
+  fi
+  lib_ok "logrotate configured (${LOGROTATE_SELF_FILE}, ${LOGROTATE_SITES_FILE})"
+}
+
+lib_install_cron() {
+  lib_cron_set healthcheck "15 6 * * * root ${BIN_LINK} healthcheck"
+  if [[ -n "$INS_BACKUP_SCHEDULE" ]]; then
+    lib_backup_schedule "$INS_BACKUP_SCHEDULE" "$(lib_manifest_get '.backup.schedule_flags')"
+  fi
+  lib_cf_enabled && lib_cf_schedule
+  lib_ok "Scheduled tasks in ${CRON_FILE} (healthcheck daily 06:15$( lib_cf_enabled && printf ', cloudflare ips weekly')$( [[ -n "$INS_BACKUP_SCHEDULE" ]] && printf ', backups %s' "$INS_BACKUP_SCHEDULE"))"
+}
+
+lib_install_self() {
+  if (( OPT_DRY_RUN )); then lib_info "[dry-run] would install a copy to ${INSTALL_DIR} and link ${BIN_LINK}"; return 0; fi
+  mkdir -p "${INSTALL_DIR}/lib" && chmod 0755 "$INSTALL_DIR"
+  if [[ "$SCRIPT_DIR" != "$INSTALL_DIR" ]]; then
+    install -m 0755 "${SCRIPT_DIR}/setup.sh" "${INSTALL_DIR}/setup.sh"
+    rsync -a --delete "${SCRIPT_DIR}/lib/" "${INSTALL_DIR}/lib/"
+    chmod 0644 "${INSTALL_DIR}"/lib/*.sh
+  fi
+  ln -sfn "${INSTALL_DIR}/setup.sh" "$BIN_LINK"
+  lib_ok "Installed to ${INSTALL_DIR}; use '${BIN_LINK} <command>' from anywhere"
+}
+
+lib_install_manifest() {
+  local rerun="$1"
+  (( OPT_DRY_RUN )) && return 0
+  lib_manifest_set '.version' "$SCRIPT_VERSION"
+  (( rerun )) || lib_manifest_set '.installed_at' "$(lib_iso_now)"
+  [[ -n "$(lib_manifest_get '.installed_at')" ]] || lib_manifest_set '.installed_at' "$(lib_iso_now)"
+  lib_manifest_set '.last_install_run' "$(lib_iso_now)"
+  lib_manifest_set_json '.os' "$(jq -n --arg id "$OS_ID" --arg v "$OS_VERSION_ID" --arg c "$OS_CODENAME" --arg a "$SYS_ARCH" '{id:$id, version:$v, codename:$c, arch:$a}')"
+  lib_manifest_set '.components.openlitespeed' "$(lib_ols_version)"
+  lib_manifest_set '.components.mariadb' "$(lib_db_version)"
+  lib_manifest_set '.components.redis' "$(lib_redis_version)"
+  lib_manifest_set_json '.params' "$(jq -n --arg tz "$TIMEZONE" --arg ap "$ADMIN_PORT" --arg ai "$ADMIN_ALLOWED_IP" --arg em "$DEFAULT_EMAIL" \
+      --arg ssh "${SYS_SSH_PORTS}${SSH_PORT:+ $SSH_PORT}" --arg php "$PHP_VERSION" --arg keep "$BACKUP_KEEP" --arg sched "$INS_BACKUP_SCHEDULE" \
+      --argjson rp "$( (( INS_REDIS_PERSIST )) && printf 'true' || printf 'false')" --argjson ar "$( (( INS_AUTO_REBOOT )) && printf 'true' || printf 'false')" \
+      --arg f2b "$FAIL2BAN_IGNORE_IP" --arg dbp "$DB_BUFFER_PERCENT" --arg rdp "$REDIS_MAX_PERCENT" \
+      '{timezone:$tz, admin_port:$ap, admin_ip:$ai, email:$em, ssh_ports:$ssh, php:$php, backup_keep:$keep, backup_schedule:$sched,
+        redis_persist:$rp, auto_reboot:$ar, fail2ban_ignore_ip:$f2b, db_buffer_percent:$dbp, redis_max_percent:$rdp}')"
+  lib_manifest_set_json '.profile' "$(lib_system_profile_json)"
+  lib_ok "Manifest updated (${STATE_DIR}/manifest.json)"
+}
+
+lib_install_summary() {
+  local rerun="$1"
+  printf '\n%s%s=== Installation %s ===%s\n' "$C_BLD" "$C_GRN" "$( (( rerun )) && printf 'verified' || printf 'completed')" "$C_RST"
+  lib_print_kv "WebAdmin"       "$(lib_ols_admin_url)  (credentials: ${STATE_DIR}/openlitespeed-admin.info, or: setup.sh credentials --all)"
+  lib_print_kv "Sites root"     "${SITES_ROOT}/<domain>/public_html"
+  lib_print_kv "Add a site"     "setup.sh add example.com [--www] [--wordpress] [--proxy 127.0.0.1:3000]"
+  lib_print_kv "Health"         "setup.sh status | setup.sh doctor"
+  lib_print_kv "Notifications"  "$(lib_notify_channels)  (setup.sh notify --email you@example.com ...)"
+  lib_print_kv "Log"            "$LOG_FILE"
+  lib_system_reboot_required && lib_warn "A reboot is required to finish kernel/package updates (reboot at your convenience)."
+  (( OPT_DRY_RUN )) && lib_warn "DRY RUN finished - no changes were made."
+  printf '\n'
+  (( OPT_DRY_RUN )) || lib_notify_send "Installation $( (( rerun )) && printf 'verified' || printf 'completed')" \
+    "setup.sh ${SCRIPT_VERSION} finished on $(hostname). OLS $(lib_ols_version), PHP $(lib_php_summary_line), MariaDB $(lib_db_version), Redis $(lib_redis_version)." || true
+}
+
+# =============================================================================
+#  Optional runtimes
+# =============================================================================
+lib_install_node() {
+  local list="/etc/apt/sources.list.d/nodesource.list"
+  lib_apt_key_install "https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key" /etc/apt/keyrings/nodesource.gpg
+  printf 'deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_%s.x nodistro main\n' "$INS_NODE_MAJOR" | lib_write_file "$list" 0644 root:root
+  (( LIB_FILE_CHANGED )) && LIB_APT_UPDATED=0
+  lib_apt_install nodejs || lib_die "Node.js installation failed" "apt error" "check the NodeSource repository"
+  (( OPT_DRY_RUN )) && { lib_info "[dry-run] would install PM2 + pm2-logrotate and register pm2 with systemd"; return 0; }
+  if ! lib_have pm2; then lib_run npm install -g pm2 || lib_die "PM2 installation failed" "npm error" "npm install -g pm2"; fi
+  lib_run pm2 startup systemd -u root --hp /root || lib_warn "pm2 startup failed (see log)"
+  lib_run pm2 install pm2-logrotate || lib_warn "pm2-logrotate could not be installed"
+  lib_run pm2 set pm2-logrotate:max_size 10M || true
+  lib_run pm2 set pm2-logrotate:retain 14 || true
+  lib_run pm2 save --force || true
+  lib_systemd_override pm2-root "LimitNOFILE=65535" "LimitNPROC=8192"
+  lib_manifest_set '.components.node' "$(node -v 2>/dev/null || true)"
+  lib_ok "Node.js $(node -v 2>/dev/null) + PM2 $(pm2 -v 2>/dev/null) ready (apps: setup.sh add app.example.com --proxy 127.0.0.1:3000; keep app files in /home/<domain>/app)"
+}
+
+lib_install_python() {
+  lib_apt_install python3 python3-venv python3-pip || lib_die "Python installation failed" "apt error" "check the log"
+  lib_manifest_set '.components.python' "$(python3 --version 2>/dev/null | awk '{print $2}')"
+  lib_ok "Python $(python3 --version 2>/dev/null | awk '{print $2}') with venv/pip (policy: one venv per app under /home/<domain>/app/.venv, no global pip installs)"
+}
+
+_ini_set() {   # file section key value  (simple INI editor, keeps other content)
+  local file="$1" section="$2" key="$3" value="$4" tmp
+  tmp="$(lib_mktemp)"
+  if [[ -f "$file" ]]; then cp "$file" "$tmp"; else : >"$tmp"; fi
+  awk -v s="$section" -v k="$key" -v v="$value" '
+    BEGIN{ insec=0; done=0; found=0 }
+    /^[[:space:]]*\[/ { if (insec && !done) { print "    " k " = " v; done=1 } ; insec = ($0 ~ "^[[:space:]]*\\[" s "\\][[:space:]]*$"); if (insec) found=1 }
+    { if (insec && !done && $0 ~ "^[[:space:]]*#?[[:space:]]*" k "[[:space:]]*=") { print "    " k " = " v; done=1; next } print }
+    END{ if (!found) { print "[" s "]"; print "    " k " = " v } else if (!done) print "    " k " = " v }' "$tmp" >"${tmp}.2"
+  lib_write_file "$file" <"${tmp}.2"
+  rm -f "$tmp" "${tmp}.2"
+}
+
+lib_install_netdata() {
+  local conf="" d ks
+  if ! lib_have netdata && [[ ! -x /opt/netdata/bin/netdata && ! -x /usr/sbin/netdata ]]; then
+    if (( OPT_DRY_RUN )); then lib_info "[dry-run] would install Netdata via the official kickstart script"; return 0; fi
+    ks="$(lib_mktemp)"
+    curl -fsSL --max-time 60 -o "$ks" https://get.netdata.cloud/kickstart.sh || lib_die "Netdata kickstart download failed" "network" "retry later"
+    lib_run bash "$ks" --stable-channel --disable-telemetry --non-interactive --dont-wait || lib_die "Netdata installation failed" "kickstart error" "see the log"
+  fi
+  for d in /etc/netdata /opt/netdata/etc/netdata; do [[ -d "$d" ]] && { conf="${d}/netdata.conf"; break; }; done
+  if [[ -n "$conf" ]]; then
+    _ini_set "$conf" web "bind to" "$( [[ -n "$ADMIN_ALLOWED_IP" ]] && printf '*' || printf '127.0.0.1')"
+    _ini_set "$conf" web "allow connections from" "localhost${ADMIN_ALLOWED_IP:+ $ADMIN_ALLOWED_IP}"
+    _ini_set "$conf" web "allow dashboard from" "localhost${ADMIN_ALLOWED_IP:+ $ADMIN_ALLOWED_IP}"
+    (( OPT_DRY_RUN )) || lib_systemctl restart netdata || lib_warn "netdata restart failed"
+  fi
+  lib_manifest_set_json '.components.netdata' true
+  lib_ok "Netdata on port 19999: localhost${ADMIN_ALLOWED_IP:+ + $ADMIN_ALLOWED_IP}$( [[ -z "$ADMIN_ALLOWED_IP" ]] && printf ' (use an SSH tunnel: ssh -L 19999:127.0.0.1:19999 ...)')"
+}
+
+# =============================================================================
+#  update
+# =============================================------------------------------
+_ver_report_line() { printf '  %-16s %-18s -> %s\n' "$1" "${2:-none}" "${3:-none}"; }
+
+lib_update_main() {
+  lib_require_tools
+  lib_require_installed
+  lib_system_analyze --no-net
+  lib_steps_begin 6
+  local ts snap before_ols before_db before_redis before_php after_ols after_db after_redis after_php
+  ts="$(lib_ts)"
+
+  lib_step "Configuration backups"
+  snap="${STATE_DIR}/archive/update-${ts}"
+  if (( ! OPT_DRY_RUN )); then
+    mkdir -p "$snap" && chmod 0700 "$snap"
+    tar -czf "${snap}/etc-configs.tar.gz" -C / etc/mysql etc/redis etc/ssh etc/fail2ban etc/ufw etc/sysctl.d etc/logrotate.d etc/cron.d 2>/dev/null || true
+    lib_ols_is_installed && lib_ols_snapshot_take >/dev/null
+    for d in "$LSWS_HOME"/lsphp[0-9][0-9]/etc; do [[ -d "$d" ]] && tar -czf "${snap}/$(basename "$(dirname "$d")")-etc.tar.gz" -C "$(dirname "$d")" etc 2>/dev/null || true; done
+  fi
+  lib_ok "Configs archived under ${snap}"
+
+  lib_step "Versions before"
+  before_ols="$(lib_ols_version)"; before_db="$(lib_db_version)"; before_redis="$(lib_redis_version)"; before_php="$(lib_php_summary_line)"
+  lib_info "OLS ${before_ols:-none}, MariaDB ${before_db:-none}, Redis ${before_redis:-none}, PHP ${before_php}"
+
+  lib_step "Package update"
+  LIB_APT_UPDATED=0
+  lib_apt_update
+  if (( OPT_DRY_RUN )); then
+    lib_info "[dry-run] upgradable packages:"; apt list --upgradable 2>/dev/null | sed 's/^/        /' | head -n 40 || true
+  else
+    lib_run apt-get -y -q -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold upgrade || lib_die "apt-get upgrade failed" "see the log" "fix apt problems (apt-get -f install) and re-run"
+    lib_run apt-get -y -q autoremove || true
+  fi
+
+  lib_step "Versions after"
+  after_ols="$(lib_ols_version)"; after_db="$(lib_db_version)"; after_redis="$(lib_redis_version)"; after_php="$(lib_php_summary_line)"
+  _ver_report_line "OpenLiteSpeed" "$before_ols" "$after_ols"
+  _ver_report_line "MariaDB" "$before_db" "$after_db"
+  _ver_report_line "Redis" "$before_redis" "$after_redis"
+  _ver_report_line "PHP" "$before_php" "$after_php"
+  if [[ -n "$before_db" && "${before_db%%.*}" != "${after_db%%.*}" ]]; then lib_warn "MariaDB MAJOR version changed (${before_db} -> ${after_db}); run mariadb-upgrade if not done automatically"; fi
+  lib_note "Major version jumps are never performed automatically. MariaDB: setup.sh install --mariadb <ver>; PHP: setup.sh install --php <ver> (or add --php per site)."
+
+  lib_step "Service restarts (mariadb -> redis -> lsws) with health checks"
+  if (( OPT_DRY_RUN )); then lib_info "[dry-run] would restart services whose packages changed"
+  else
+    if [[ "$before_db" != "$after_db" ]] && lib_db_installed; then
+      lib_systemctl restart mariadb; lib_db_wait_ready 60 || lib_die "MariaDB unhealthy after update" "journalctl -u mariadb" "restore ${snap}/etc-configs.tar.gz if needed"
+      lib_have mariadb-upgrade && lib_run mariadb-upgrade --protocol=socket --socket="$DB_SOCKET" || true
+      lib_ok "MariaDB restarted and healthy"
+    else lib_ok "MariaDB unchanged (no restart)"; fi
+    if [[ "$before_redis" != "$after_redis" ]] && lib_redis_installed; then
+      lib_systemctl restart "$REDIS_SERVICE"; sleep 1; lib_redis_ping || lib_die "Redis unhealthy after update" "journalctl -u redis-server" ""
+      lib_ok "Redis restarted and healthy"
+    else lib_ok "Redis unchanged (no restart)"; fi
+    if [[ "$before_ols" != "$after_ols" || "$before_php" != "$after_php" ]] && lib_ols_is_installed; then
+      lib_ols_config_test || lib_die "OpenLiteSpeed config test failed after update" "$OLS_TEST_OUTPUT" "inspect ${LSWS_HOME}/logs/error.log"
+      lib_ols_restart; lib_ols_wait_ready 40 || lib_die "OpenLiteSpeed unhealthy after update" "journalctl -u lsws" ""
+      lib_php_restart_workers
+      lib_ok "OpenLiteSpeed restarted and healthy"
+    else lib_ok "OpenLiteSpeed/PHP unchanged (no restart)"; fi
+  fi
+
+  lib_step "Housekeeping"
+  lib_cf_enabled && { lib_cf_update_ips || true; }
+  lib_install_self
+  lib_manifest_set '.components.openlitespeed' "$after_ols"
+  lib_manifest_set '.components.mariadb' "$after_db"
+  lib_manifest_set '.components.redis' "$after_redis"
+  lib_manifest_set '.last_update' "$(lib_iso_now)"
+  lib_system_reboot_required && lib_warn "Reboot required to activate the new kernel/libraries."
+  lib_ok "Update finished"
+}
+
+# =============================================================================
+#  optimize
+# =============================================================================
+_opt_diff() {   # title file  (new content on stdin) -> prints diff, returns 0 when changes exist
+  local title="$1" file="$2" new
+  new="$(lib_mktemp)"; cat >"$new"
+  if [[ -f "$file" ]] && cmp -s "$new" "$file"; then rm -f "$new"; return 1; fi
+  printf '\n%s--- %s (%s)%s\n' "$C_BLD" "$title" "$file" "$C_RST"
+  if [[ -f "$file" ]]; then diff -u "$file" "$new" | tail -n +3 | head -n 80 || true; else printf '(new file, %s lines)\n' "$(wc -l <"$new" | tr -d ' ')"; fi
+  rm -f "$new"
+  return 0
+}
+
+lib_optimize_main() {
+  lib_require_tools
+  lib_require_installed
+  lib_system_analyze
+  lib_system_report
+  lib_system_profile
+  lib_system_profile_report
+  local changes=() ver
+  lib_heading "Proposed changes"
+  lib_system_render_sysctl | _opt_diff "Kernel parameters" "$SYSCTL_FILE" && changes+=(sysctl)
+  lib_system_render_limits | _opt_diff "Limits" "$LIMITS_FILE" && changes+=(limits)
+  for ver in $(lib_php_installed_versions); do
+    lib_php_ini_paths "$ver"
+    if [[ -n "$PHP_INI_SCAN_DIR" ]]; then
+      lib_php_render_ini | _opt_diff "PHP ${ver}" "${PHP_INI_SCAN_DIR%/}/99-server-setup.ini" && changes+=("php:${ver}")
+    fi
+  done
+  lib_db_installed && { lib_db_render_tuning | _opt_diff "MariaDB" "$MARIADB_TUNED_FILE" && changes+=(mariadb); }
+  if lib_redis_installed && [[ -n "$(lib_redis_password)" ]]; then
+    lib_redis_render_conf "$(lib_redis_password)" "$( [[ "$(lib_manifest_get '.params.redis_persist')" == "true" ]] && printf 1 || printf 0)" \
+      | _opt_diff "Redis" "$REDIS_INCLUDE" && changes+=(redis)
+  fi
+  if lib_ols_is_installed; then
+    lib_ols_tx_begin
+    lib_ols_tx_apply_server_settings
+    lib_cf_enabled && lib_cf_tx_apply 1
+    if ! cmp -s "$OLS_TX_FILE" "$LSWS_CONF"; then
+      printf '\n%s--- OpenLiteSpeed (%s)%s\n' "$C_BLD" "$LSWS_CONF" "$C_RST"
+      lib_ols_tx_diff | tail -n +3 | head -n 80
+      changes+=(ols)
+    fi
+    lib_ols_tx_abort
+  fi
+  if ((${#changes[@]} == 0)); then lib_ok "Everything is already tuned for this hardware; nothing to do."; return 0; fi
+  printf '\n'
+  lib_confirm "Apply these changes (${changes[*]})?" y || { lib_info "No changes applied."; return 0; }
+  local c
+  for c in "${changes[@]}"; do
+    case "$c" in
+      sysctl)  lib_system_sysctl_apply ;;
+      limits)  lib_system_limits_apply ;;
+      php:*)   lib_php_write_ini "${c#php:}"; lib_php_restart_workers ;;
+      mariadb) lib_db_apply_tuning ;;
+      redis)   lib_redis_install "$( [[ "$(lib_manifest_get '.params.redis_persist')" == "true" ]] && printf 1 || printf 0)" ;;
+      ols)
+        lib_ols_change_begin
+        lib_ols_tx_begin
+        lib_ols_tx_apply_server_settings
+        lib_cf_enabled && lib_cf_tx_apply 1
+        lib_ols_tx_commit
+        lib_ols_change_commit "optimize" ;;
+    esac
+  done
+  (( OPT_DRY_RUN )) || lib_manifest_set_json '.profile' "$(lib_system_profile_json)"
+  lib_ok "Optimisation applied"
+}

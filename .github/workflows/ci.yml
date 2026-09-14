@@ -1,0 +1,87 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  lint:
+    name: shellcheck + syntax
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck
+          shellcheck --version
+
+      - name: Syntax check (bash -n)
+        run: |
+          for f in setup.sh lib/*.sh tests/*.sh; do
+            bash -n "$f" || { echo "SYNTAX FAIL: $f"; exit 1; }
+          done
+          echo "all files parse"
+
+      - name: ShellCheck (errors must be zero)
+        run: shellcheck -S error -x setup.sh lib/*.sh tests/*.sh
+
+      - name: ShellCheck (warnings, informational)
+        continue-on-error: true
+        run: shellcheck -S warning -x setup.sh lib/*.sh
+
+  unit:
+    name: unit tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq jq
+          jq --version
+          bash --version | head -1
+
+      - name: Run unit tests (gawk)
+        run: bash tests/unit.sh
+
+      - name: Run unit tests (mawk)
+        run: |
+          sudo apt-get install -y -qq mawk
+          mkdir -p "$RUNNER_TEMP/mawk"
+          printf '#!/bin/sh\nexec /usr/bin/mawk "$@"\n' > "$RUNNER_TEMP/mawk/awk"
+          chmod +x "$RUNNER_TEMP/mawk/awk"
+          PATH="$RUNNER_TEMP/mawk:$PATH" awk -W version 2>&1 | head -1
+          PATH="$RUNNER_TEMP/mawk:$PATH" bash tests/unit.sh
+
+  dryrun:
+    name: install --dry-run (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq jq
+
+      - name: Dry run must change nothing and exit 0
+        run: |
+          sudo bash setup.sh install --dry-run --non-interactive --no-color \
+            --admin-ip 203.0.113.5 --email ci@example.com \
+            --backup-schedule "daily 03:00" --cloudflare | tee dryrun.out
+          test ! -e /root/.server-setup || { echo "dry-run created state dir"; exit 1; }
+          test ! -e /usr/local/lsws     || { echo "dry-run installed OLS"; exit 1; }
+          test ! -e /etc/cron.d/server-setup || { echo "dry-run wrote cron"; exit 1; }
+          grep -q '20/20' dryrun.out || { echo "dry-run did not reach the last step"; exit 1; }
+          ! grep -qE '\[fail\]|unbound variable' dryrun.out

@@ -1,0 +1,728 @@
+#!/usr/bin/env bash
+# lib/domain.sh - sites: add / remove / list / logs / credentials, per-site state,
+#                 users & directories, WordPress, logrotate + fail2ban regeneration.
+
+# ---- per-site state (loaded from domain.json or set by "add") ---------------
+D_DOMAIN="" D_IDENT="" D_USER="" D_GROUP="" D_HOME="" D_MODE="php" D_PHP="" D_PHP_CHILDREN=""
+D_MEMORY="" D_UPLOAD="" D_PROXY="" D_STATIC_PATHS="/static/,/assets/,/uploads/" D_WS_PATH=""
+D_WWW=0 D_WWW_PRIMARY=0 D_SSL=0 D_SSL_WANTED=1 D_SSL_WILDCARD=0 D_HSTS_PRELOAD=0 D_CLOUDFLARE=0
+D_EMAIL="" D_CREATED="" D_STATUS="" D_DB_NAME="" D_DB_USER="" D_WP=0 D_BACKUP_LAST="" D_STAGING=0
+# ---- add-only options ---------------------------------------------------------
+DOM_OPT_WP_TITLE="" DOM_OPT_WP_ADMIN="admin" DOM_OPT_WP_EMAIL="" DOM_OPT_WP_LOCALE="en_US" DOM_OPT_WITH_DB=0
+DOMAIN_CREATED_HOME=0
+DOMAIN_CREATED_USER=0
+
+WPCLI_PHAR="${INSTALL_DIR}/wp-cli.phar"
+WPCLI_BIN="/usr/local/bin/wp"
+
+# =============================================================================
+#  State
+# =============================================================================
+lib_domain_state_reset() {
+  D_DOMAIN="" D_IDENT="" D_USER="" D_GROUP="" D_HOME="" D_MODE="php" D_PHP="" D_PHP_CHILDREN=""
+  D_MEMORY="" D_UPLOAD="" D_PROXY="" D_STATIC_PATHS="/static/,/assets/,/uploads/" D_WS_PATH=""
+  D_WWW=0 D_WWW_PRIMARY=0 D_SSL=0 D_SSL_WANTED=1 D_SSL_WILDCARD=0 D_HSTS_PRELOAD=0 D_CLOUDFLARE=0
+  D_EMAIL="" D_CREATED="" D_STATUS="" D_DB_NAME="" D_DB_USER="" D_WP=0 D_BACKUP_LAST="" D_STAGING=0
+}
+
+_d_bool() { [[ "$1" == "true" ]] && printf '1' || printf '0'; }
+_d_json_bool() { (( ${1:-0} )) && printf 'true' || printf 'false'; }
+
+# lib_domain_state_load domain  (returns 1 when not registered)
+lib_domain_state_load() {
+  local domain="$1" f
+  f="$(lib_domain_json "$domain")"
+  lib_domain_state_reset
+  [[ -s "$f" ]] || return 1
+  D_DOMAIN="$(lib_json_get "$f" '.domain')"
+  D_IDENT="$(lib_json_get "$f" '.ident')"
+  D_USER="$(lib_json_get "$f" '.user')"
+  D_GROUP="$(lib_json_get "$f" '.group')"
+  D_HOME="$(lib_json_get "$f" '.home')"
+  D_MODE="$(lib_json_get "$f" '.mode')"
+  D_PHP="$(lib_json_get "$f" '.php.version')"
+  D_PHP_CHILDREN="$(lib_json_get "$f" '.php.children')"
+  D_MEMORY="$(lib_json_get "$f" '.php.memory_limit')"
+  D_UPLOAD="$(lib_json_get "$f" '.php.upload_max')"
+  D_PROXY="$(lib_json_get "$f" '.proxy.target')"
+  D_STATIC_PATHS="$(lib_json_get "$f" '.proxy.static_paths')"
+  D_WS_PATH="$(lib_json_get "$f" '.proxy.websocket_path')"
+  D_WWW="$(_d_bool "$(lib_json_get "$f" '.www')")"
+  D_WWW_PRIMARY="$(_d_bool "$(lib_json_get "$f" '.www_primary')")"
+  D_SSL="$(_d_bool "$(lib_json_get "$f" '.ssl.enabled')")"
+  D_SSL_WANTED="$(_d_bool "$(lib_json_get "$f" '.ssl.wanted')")"
+  D_SSL_WILDCARD="$(_d_bool "$(lib_json_get "$f" '.ssl.wildcard')")"
+  D_HSTS_PRELOAD="$(_d_bool "$(lib_json_get "$f" '.ssl.hsts_preload')")"
+  D_CLOUDFLARE="$(_d_bool "$(lib_json_get "$f" '.cloudflare')")"
+  D_EMAIL="$(lib_json_get "$f" '.email')"
+  D_CREATED="$(lib_json_get "$f" '.created_at')"
+  D_STATUS="$(lib_json_get "$f" '.status')"
+  D_DB_NAME="$(lib_json_get "$f" '.db.name')"
+  D_DB_USER="$(lib_json_get "$f" '.db.user')"
+  D_WP="$(_d_bool "$(lib_json_get "$f" '.wordpress')")"
+  D_BACKUP_LAST="$(lib_json_get "$f" '.backup.last')"
+  [[ -z "$D_MODE" ]] && D_MODE="php"
+  [[ -z "$D_HOME" ]] && D_HOME="$(lib_domain_home "$domain")"
+  [[ -z "$D_STATIC_PATHS" ]] && D_STATIC_PATHS="/static/,/assets/,/uploads/"
+  return 0
+}
+
+lib_domain_state_json() {
+  jq -n \
+    --arg domain "$D_DOMAIN" --arg ident "$D_IDENT" --arg user "$D_USER" --arg group "$D_GROUP" --arg home "$D_HOME" \
+    --arg mode "$D_MODE" --arg php "$D_PHP" --arg children "$D_PHP_CHILDREN" --arg mem "$D_MEMORY" --arg up "$D_UPLOAD" \
+    --arg proxy "$D_PROXY" --arg spaths "$D_STATIC_PATHS" --arg ws "$D_WS_PATH" \
+    --argjson www "$(_d_json_bool "$D_WWW")" --argjson wwwp "$(_d_json_bool "$D_WWW_PRIMARY")" \
+    --argjson ssl "$(_d_json_bool "$D_SSL")" --argjson sslw "$(_d_json_bool "$D_SSL_WANTED")" \
+    --argjson wild "$(_d_json_bool "$D_SSL_WILDCARD")" --argjson hsts "$(_d_json_bool "$D_HSTS_PRELOAD")" \
+    --argjson cf "$(_d_json_bool "$D_CLOUDFLARE")" --arg email "$D_EMAIL" --arg created "$D_CREATED" \
+    --arg status "$D_STATUS" --arg dbn "$D_DB_NAME" --arg dbu "$D_DB_USER" --argjson wp "$(_d_json_bool "$D_WP")" \
+    --arg blast "$D_BACKUP_LAST" --arg ts "$(lib_iso_now)" --arg ver "$SCRIPT_VERSION" \
+    '{domain:$domain, ident:$ident, user:$user, group:$group, home:$home, mode:$mode,
+      php:{version:$php, children:$children, memory_limit:$mem, upload_max:$up},
+      proxy:{target:$proxy, static_paths:$spaths, websocket_path:$ws},
+      www:$www, www_primary:$wwwp,
+      ssl:{enabled:$ssl, wanted:$sslw, wildcard:$wild, hsts_preload:$hsts},
+      cloudflare:$cf, email:$email, created_at:$created, status:$status,
+      db:(if $dbn == "" then null else {name:$dbn, user:$dbu} end),
+      wordpress:$wp, backup:{last:$blast}, updated_at:$ts, script_version:$ver}
+     | del(.. | nulls)'
+}
+
+lib_domain_state_save() {
+  local dir f tmp
+  dir="$(lib_domain_state_dir "$D_DOMAIN")"; f="${dir}/domain.json"
+  if (( OPT_DRY_RUN )); then lib_debug "dry-run: state for ${D_DOMAIN} not written"; return 0; fi
+  mkdir -p "$dir" && chmod 0700 "$dir"
+  tmp="$(lib_mktemp)"
+  # keep fields written by other modules (db.*, ssl.expires, backup.last ...)
+  if [[ -s "$f" ]]; then
+    lib_domain_state_json >"${tmp}.new"
+    jq -s '.[0] * .[1]' "$f" "${tmp}.new" >"$tmp"
+    rm -f "${tmp}.new"
+  else
+    lib_domain_state_json >"$tmp"
+  fi
+  chmod 0600 "$tmp" && mv -f "$tmp" "$f"
+}
+
+# =============================================================================
+#  add
+# =============================================================================
+lib_domain_add_usage() {
+  cat <<'EOF'
+Usage: setup.sh add <domain> [options]
+  --email a@b.c        Contact e-mail (Let's Encrypt, vhost adminEmails)
+  --no-ssl             Do not request a certificate (add later with renew-ssl)
+  --www                Serve www.<domain> too; redirects www -> apex
+  --www-primary        With --www: redirect apex -> www instead
+  --php 8.3            PHP version for this site (installed on demand)
+  --php-children N     LSAPI workers for this site (default from profile)
+  --memory 256M        PHP memory_limit           --upload 64M  upload_max_filesize
+  --proxy 127.0.0.1:3000   Reverse proxy to a local app (Node/Python/...)
+  --static-paths "/static/,/assets/"   Paths served by OLS in proxy mode
+  --ws-path /socket.io Proxy WebSocket upgrades on this path (proxy mode)
+  --static             Static site only (no PHP)
+  --wordpress          Install WordPress (creates the database automatically)
+  --with-db            Create a database for the site right away
+  --cloudflare         Enable Cloudflare real-IP mode (global)
+  --wildcard           Also request *.<domain> (DNS-01, needs --cf-api-token)
+  --staging            Use the Let's Encrypt staging CA
+  --hsts-preload       Add "preload" to the HSTS header (irreversible!)
+  --wp-title "Site"  --wp-admin admin  --wp-email a@b.c  --wp-locale en_US
+EOF
+}
+
+lib_domain_parse_add_args() {
+  local a
+  lib_domain_state_reset
+  D_DOMAIN="${1,,}"; shift
+  D_EMAIL="$DEFAULT_EMAIL"
+  D_PHP="$PHP_VERSION"
+  while (($# > 0)); do
+    a="$1"; shift
+    case "$a" in
+      --email)        D_EMAIL="${1:-}"; shift ;;
+      --no-ssl)       D_SSL_WANTED=0 ;;
+      --www)          D_WWW=1 ;;
+      --www-primary)  D_WWW=1; D_WWW_PRIMARY=1 ;;
+      --php)          D_PHP="${1:-}"; shift ;;
+      --php-children) D_PHP_CHILDREN="${1:-}"; shift ;;
+      --memory)       D_MEMORY="${1:-}"; shift ;;
+      --upload)       D_UPLOAD="${1:-}"; shift ;;
+      --proxy)        D_MODE="proxy"; D_PROXY="${1:-}"; shift ;;
+      --static-paths) D_STATIC_PATHS="${1:-}"; shift ;;
+      --ws-path)      D_WS_PATH="${1:-}"; shift ;;
+      --static)       D_MODE="static" ;;
+      --wordpress)    D_MODE="wordpress"; DOM_OPT_WITH_DB=1 ;;
+      --with-db)      DOM_OPT_WITH_DB=1 ;;
+      --cloudflare)   D_CLOUDFLARE=1 ;;
+      --wildcard)     D_SSL_WILDCARD=1 ;;
+      --staging)      D_STAGING=1 ;;
+      --hsts-preload) D_HSTS_PRELOAD=1 ;;
+      --wp-title)     DOM_OPT_WP_TITLE="${1:-}"; shift ;;
+      --wp-admin)     DOM_OPT_WP_ADMIN="${1:-}"; shift ;;
+      --wp-email)     DOM_OPT_WP_EMAIL="${1:-}"; shift ;;
+      --wp-locale)    DOM_OPT_WP_LOCALE="${1:-}"; shift ;;
+      -h|--help)      lib_domain_add_usage; exit 0 ;;
+      *)              lib_domain_add_usage >&2; lib_die "Unknown option for add: ${a}" "" "see the usage above" ;;
+    esac
+  done
+  lib_domain_valid "$D_DOMAIN" || lib_die "Invalid domain name '${D_DOMAIN}'" "not a valid FQDN (use the bare domain, without http:// or paths)" "setup.sh add example.com"
+  [[ "$D_DOMAIN" == www.* ]] && lib_die "Use the apex domain and --www instead of www.${D_DOMAIN#www.}" "" "setup.sh add ${D_DOMAIN#www.} --www"
+  if [[ "$D_MODE" == "proxy" ]]; then
+    [[ "$D_PROXY" =~ ^[A-Za-z0-9.-]+:[0-9]{2,5}$ ]] || lib_die "Invalid --proxy target '${D_PROXY}'" "expected host:port" "--proxy 127.0.0.1:3000"
+    [[ -z "$D_WS_PATH" || "$D_WS_PATH" == /* ]] || lib_die "Invalid --ws-path '${D_WS_PATH}'" "must start with /" "--ws-path /socket.io"
+  fi
+  if [[ "$D_MODE" == "php" || "$D_MODE" == "wordpress" ]]; then
+    lib_php_valid_version "$D_PHP" || lib_die "Invalid PHP version '${D_PHP}'" "expected e.g. 8.3" "--php 8.3"
+    [[ -z "$D_PHP_CHILDREN" || "$D_PHP_CHILDREN" =~ ^[0-9]{1,2}$ ]] || lib_die "Invalid --php-children '${D_PHP_CHILDREN}'" "1..64 expected" "--php-children 6"
+    [[ -z "$D_MEMORY" || "$D_MEMORY" =~ ^[0-9]+[MG]$ ]] || lib_die "Invalid --memory '${D_MEMORY}'" "use e.g. 256M or 1G" "--memory 256M"
+    [[ -z "$D_UPLOAD" || "$D_UPLOAD" =~ ^[0-9]+[MG]$ ]] || lib_die "Invalid --upload '${D_UPLOAD}'" "use e.g. 64M" "--upload 64M"
+  else
+    D_PHP=""; D_PHP_CHILDREN=""; D_MEMORY=""; D_UPLOAD=""
+  fi
+  (( D_SSL_WILDCARD )) && (( ! D_SSL_WANTED )) && lib_die "--wildcard and --no-ssl cannot be combined" "" "drop one of them"
+  D_IDENT="$(lib_domain_ident "$D_DOMAIN")"
+  D_HOME="$(lib_domain_home "$D_DOMAIN")"
+  D_USER="$D_IDENT"; D_GROUP="$D_IDENT"
+  D_STATUS="installing"
+  D_CREATED="$(lib_iso_now)"
+  return 0
+}
+
+lib_domain_add_main() {
+  [[ -n "${1:-}" ]] || { lib_domain_add_usage; lib_die "Domain missing" "" "setup.sh add example.com"; }
+  [[ "$1" == "-h" || "$1" == "--help" ]] && { lib_domain_add_usage; return 0; }
+  lib_require_tools
+  lib_require_installed
+  lib_domain_parse_add_args "$@"
+  local domain="$D_DOMAIN" total=6 http_expect="200|301|302" rc
+  lib_domain_registered "$domain" && lib_die "Site ${domain} already exists" "registered in $(lib_domain_state_dir "$domain")" "use 'setup.sh remove ${domain}' first, or 'renew-ssl' / 'db' to change it"
+  lib_ols_is_installed || lib_die "OpenLiteSpeed is not installed" "run install first" "sudo ./setup.sh install"
+  (( D_SSL_WANTED )) && total=$((total + 1))
+  (( DOM_OPT_WITH_DB )) && total=$((total + 1))
+  [[ "$D_MODE" == "wordpress" ]] && total=$((total + 1))
+  lib_steps_begin "$total"
+  lib_rollback_clear
+  lib_system_profile
+  [[ -z "$D_MEMORY" && -n "$D_PHP" ]] && D_MEMORY="${CALC_PHP_MEMORY_MB}M"
+  [[ -z "$D_UPLOAD" && -n "$D_PHP" ]] && D_UPLOAD="${CALC_PHP_UPLOAD_MB}M"
+  [[ -z "$D_PHP_CHILDREN" && -n "$D_PHP" ]] && D_PHP_CHILDREN="$CALC_PHP_CHILDREN_SITE"
+
+  # ---- 1 preflight ---------------------------------------------------------
+  lib_step "Preflight checks for ${domain} (mode: ${D_MODE})"
+  if [[ -n "$D_PHP" ]]; then lib_php_ensure_version "$D_PHP"; fi
+  if (( D_CLOUDFLARE )) && [[ "$(lib_manifest_get '.cloudflare.enabled')" != "true" ]]; then lib_cf_enable; fi
+  [[ "$(lib_manifest_get '.cloudflare.enabled')" == "true" ]] && D_CLOUDFLARE=1
+  if [[ "$D_MODE" == "wordpress" ]] && ! lib_db_installed; then lib_die "WordPress needs MariaDB" "MariaDB is not installed" "run: setup.sh install"; fi
+  (( OPT_DRY_RUN )) || lib_rollback_push "rm -rf '$(lib_domain_state_dir "$domain")'"
+  lib_domain_state_save
+  lib_ok "Preflight OK (user ${D_USER}, home ${D_HOME})"
+
+  # ---- 2 user + directories ------------------------------------------------
+  lib_step "System user and directory layout"
+  lib_domain_user_ensure
+  lib_domain_dirs_create
+  lib_ok "Directories ready: ${D_HOME}/{public_html,logs,private,backups}"
+
+  # ---- 3 vhost -------------------------------------------------------------
+  lib_step "OpenLiteSpeed virtual host"
+  (( OPT_DRY_RUN )) || lib_rollback_push "lib_ols_vhost_purge '${domain}' 0"
+  lib_domain_apply_config "add vhost ${domain}"
+
+  # ---- 4 smoke test --------------------------------------------------------
+  lib_step "Smoke test (HTTP)"
+  if (( D_WWW && D_WWW_PRIMARY )); then http_expect="301|302"; fi
+  lib_ols_smoke_test "$domain" "$http_expect" || lib_die "Smoke test failed for ${domain}" "${OLS_TEST_OUTPUT}" "check ${LSWS_HOME}/logs/error.log and ${D_HOME}/logs/error.log"
+  if [[ "$D_MODE" == "php" || "$D_MODE" == "wordpress" ]]; then
+    lib_domain_php_probe || lib_die "PHP is not executing for ${domain}" "${OLS_TEST_OUTPUT}" "check ${D_HOME}/logs/error.log and the LSAPI processor (${D_IDENT})"
+  fi
+  lib_ok "Site answers on http://${domain}/"
+
+  # ---- 5 SSL ---------------------------------------------------------------
+  if (( D_SSL_WANTED )); then
+    lib_step "SSL certificate (Let's Encrypt)"
+    lib_domain_add_ssl
+  fi
+
+  # ---- 6 database ----------------------------------------------------------
+  if (( DOM_OPT_WITH_DB )); then
+    lib_step "MariaDB database"
+    lib_db_create_for_domain "$domain"
+    lib_domain_state_load "$domain" >/dev/null 2>&1 || true
+  fi
+
+  # ---- 7 WordPress ---------------------------------------------------------
+  if [[ "$D_MODE" == "wordpress" ]]; then
+    lib_step "WordPress installation"
+    lib_domain_wp_install
+  fi
+
+  # ---- 8 housekeeping ------------------------------------------------------
+  lib_step "Log rotation, fail2ban and scheduled tasks"
+  D_STATUS="active"
+  lib_domain_state_save
+  lib_domain_logrotate_regen
+  lib_domain_fail2ban_regen
+  lib_ok "Housekeeping done"
+
+  # ---- 9 summary -----------------------------------------------------------
+  lib_step "Done"
+  lib_rollback_clear
+  lib_manifest_set '.updated_at' "$(lib_iso_now)"
+  lib_domain_summary
+}
+
+# SSL inside "add": failures are reported, the site stays (renew-ssl later).
+lib_domain_add_ssl() {
+  local rc=0 method="auto"
+  lib_ssl_dns_check "$D_DOMAIN" "$D_WWW" || rc=$?
+  if (( rc == 1 )); then
+    lib_error "DNS for ${D_DOMAIN} does not point to this server: ${SSL_LAST_ERROR}"
+    lib_warn "Certificate skipped. Point the A/AAAA records to ${SYS_PUBLIC_IPV4:-<server IP>} and run: setup.sh renew-ssl ${D_DOMAIN}"
+    return 0
+  elif (( rc == 2 )); then
+    lib_warn "${D_DOMAIN} is proxied by Cloudflare (orange cloud)."
+    if lib_ssl_cf_token_available; then
+      lib_info "Using DNS-01 validation with the stored Cloudflare API token"; method="dns"
+    else
+      lib_warn "HTTP-01 through the Cloudflare proxy may fail; DNS-01 is recommended (setup.sh install --cf-api-token <token>). Trying HTTP-01 anyway..."
+    fi
+  fi
+  if (( D_SSL_WILDCARD )) && ! lib_ssl_cf_token_available; then
+    lib_error "--wildcard needs DNS-01 with a Cloudflare API token (${CF_INI} missing); certificate skipped"
+    return 0
+  fi
+  if lib_ssl_obtain "$D_DOMAIN" "$D_WWW" "$D_SSL_WILDCARD" "$D_STAGING" 0 "$D_EMAIL" "$method"; then
+    (( OPT_DRY_RUN )) && return 0
+    (( OPT_DRY_RUN )) || lib_rollback_push "lib_ssl_delete '${D_DOMAIN}'"
+    D_SSL=1
+    lib_domain_state_save
+    lib_domain_apply_config "enable SSL for ${D_DOMAIN}"
+    if lib_ols_smoke_test "$D_DOMAIN" "200|301|302" https; then lib_ok "HTTPS active: https://${D_DOMAIN}/"
+    else lib_warn "HTTPS smoke test failed (${OLS_TEST_OUTPUT}); check ${D_HOME}/logs/error.log"; fi
+  else
+    lib_error "Certificate could not be obtained: ${SSL_LAST_ERROR}"
+    lib_warn "The site stays on HTTP. Fix the problem and run: setup.sh renew-ssl ${D_DOMAIN}"
+  fi
+  return 0
+}
+
+# =============================================================================
+#  Users, directories, config application, probes
+# =============================================================================
+lib_domain_user_ensure() {
+  local existing_home
+  if getent group "$D_GROUP" >/dev/null 2>&1; then :; else
+    if (( OPT_DRY_RUN )); then lib_info "[dry-run] would create group ${D_GROUP}"; else lib_run groupadd "$D_GROUP" || lib_die "groupadd ${D_GROUP} failed" "" "check /etc/group"; fi
+  fi
+  if id -u "$D_USER" >/dev/null 2>&1; then
+    existing_home="$(getent passwd "$D_USER" | cut -d: -f6)"
+    if [[ "$existing_home" != "$D_HOME" ]]; then
+      lib_die "System user ${D_USER} already exists with home ${existing_home}" "name collision with an unrelated account" "remove/rename that account or choose another domain"
+    fi
+    lib_ok "System user ${D_USER} exists"
+  else
+    if (( OPT_DRY_RUN )); then lib_info "[dry-run] would create user ${D_USER} (home ${D_HOME}, nologin)"
+    else
+      lib_run useradd -M -d "$D_HOME" -s /usr/sbin/nologin -g "$D_GROUP" -c "site ${D_DOMAIN}" "$D_USER" || lib_die "useradd ${D_USER} failed" "" "check /etc/passwd"
+      DOMAIN_CREATED_USER=1
+      lib_rollback_push "userdel '${D_USER}' >/dev/null 2>&1; groupdel '${D_GROUP}' >/dev/null 2>&1"
+    fi
+  fi
+  return 0
+}
+
+lib_domain_dirs_create() {
+  local ols_user; ols_user="$(lib_ols_user)"
+  if [[ ! -d "$D_HOME" ]]; then
+    DOMAIN_CREATED_HOME=1
+    (( OPT_DRY_RUN )) || lib_rollback_push "rm -rf '${D_HOME}'"
+  fi
+  lib_mkdir "$D_HOME" 0711 "${D_USER}:${D_GROUP}"
+  lib_mkdir "${D_HOME}/public_html" 0755 "${D_USER}:${D_GROUP}"
+  lib_mkdir "${D_HOME}/private" 0700 "${D_USER}:${D_GROUP}"
+  lib_mkdir "${D_HOME}/private/sessions" 0700 "${D_USER}:${D_GROUP}"
+  lib_mkdir "${D_HOME}/private/tmp" 0700 "${D_USER}:${D_GROUP}"
+  lib_mkdir "${D_HOME}/backups" 0700 "${D_USER}:${D_GROUP}"
+  lib_mkdir "${D_HOME}/logs" 0750 "root:${D_GROUP}"
+  [[ "$D_MODE" == "proxy" ]] && lib_mkdir "${D_HOME}/app" 0750 "${D_USER}:${D_GROUP}"
+  [[ "$D_MODE" == "wordpress" ]] && lib_mkdir "${OLS_CACHE_DIR}/${D_DOMAIN}" 0750 "${ols_user}:$(lib_ols_group)"
+  # OLS worker (nobody) must be able to traverse into public_html
+  (( OPT_DRY_RUN )) || setfacl -m "u:${ols_user}:x" "$D_HOME" 2>/dev/null || true
+  if [[ ! -e "${D_HOME}/public_html/index.html" && ! -e "${D_HOME}/public_html/index.php" ]] && [[ "$D_MODE" != "proxy" ]]; then
+    if (( ! OPT_DRY_RUN )); then
+      cat >"${D_HOME}/public_html/index.html" <<EOF
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>${D_DOMAIN}</title>
+<style>body{font-family:system-ui,sans-serif;margin:10% auto;max-width:40em;color:#333}</style></head>
+<body><h1>${D_DOMAIN}</h1><p>This site was provisioned by server-setup and is waiting for content.</p>
+<p>Upload files to <code>${D_HOME}/public_html/</code>.</p></body></html>
+EOF
+      chown "${D_USER}:${D_GROUP}" "${D_HOME}/public_html/index.html"
+    fi
+  fi
+  return 0
+}
+
+# Render vhconf + register vhost/maps in httpd_config, test and reload (one change set).
+lib_domain_apply_config() {   # [description]
+  local desc="${1:-vhost ${D_DOMAIN}}" script=1
+  [[ "$D_MODE" == "php" || "$D_MODE" == "wordpress" ]] || script=0
+  lib_system_profile
+  lib_ols_change_begin
+  lib_ols_vhconf_write "$D_DOMAIN"
+  lib_ols_tx_begin
+  lib_ols_tx_vhost_add "$D_DOMAIN" "$D_WWW" "$script"
+  lib_ols_tx_commit
+  lib_ols_change_commit "$desc"
+}
+
+# Drop a tiny PHP probe into the docroot, fetch it, remove it.
+lib_domain_php_probe() {
+  (( OPT_DRY_RUN )) && return 0
+  local name f body="" i
+  name="ss-probe-$(lib_random_hex 6).php"
+  f="${D_HOME}/public_html/${name}"
+  printf '<?php echo "server-setup-php-ok:" . PHP_VERSION;\n' >"$f"
+  chown "${D_USER}:${D_GROUP}" "$f"
+  for (( i = 0; i < 5; i++ )); do
+    body="$(curl -s --max-time 15 -H "Host: ${D_DOMAIN}" "http://127.0.0.1/${name}" 2>/dev/null || true)"
+    [[ "$body" == server-setup-php-ok:* ]] && break
+    sleep 2
+  done
+  rm -f "$f"
+  if [[ "$body" == server-setup-php-ok:* ]]; then lib_debug "PHP probe OK (${body#*:})"; return 0; fi
+  OLS_TEST_OUTPUT="PHP probe returned: ${body:0:120}"
+  return 1
+}
+
+# =============================================================================
+#  logrotate / fail2ban regeneration (state -> config)
+# =============================================================================
+lib_domain_logrotate_regen() {
+  local d paths=()
+  while read -r d; do [[ -n "$d" ]] && paths+=("$(lib_domain_home "$d")/logs/*.log"); done < <(lib_domains_list)
+  {
+    printf '# Managed by lompstack - site logs (OpenLiteSpeed rolling is disabled for sites; logrotate owns rotation)\n'
+    if ((${#paths[@]} > 0)); then
+      printf '%s\n' "${paths[@]}"
+      cat <<'EOF'
+{
+  daily
+  missingok
+  rotate 14
+  compress
+  delaycompress
+  notifempty
+  copytruncate
+  dateext
+  su root root
+}
+EOF
+    fi
+  } | lib_write_file "$LOGROTATE_SITES_FILE" 0644 root:root
+  return 0
+}
+
+lib_domain_fail2ban_filters_write() {
+  cat <<'EOF' | lib_write_file /etc/fail2ban/filter.d/server-setup-wp-login.conf 0644 root:root
+# Managed by lompstack - WordPress login / xmlrpc brute force (OpenLiteSpeed combined access log)
+[Definition]
+failregex = ^<HOST> \S+ \S+ \[[^\]]+\] "POST /+(?:wp-login\.php|xmlrpc\.php)[^"]*" (?:200|403)
+ignoreregex =
+EOF
+  cat <<'EOF' | lib_write_file /etc/fail2ban/filter.d/server-setup-web-probe.conf 0644 root:root
+# Managed by lompstack - vulnerability scanners probing well-known paths
+[Definition]
+failregex = ^<HOST> \S+ \S+ \[[^\]]+\] "(?:GET|POST|HEAD) /+(?:\.env|\.git|\.aws|\.ssh|wp-config\.php|phpmyadmin|pma|adminer|cgi-bin|vendor/phpunit|wp-content/plugins/[^/]+/[^"]*\.php)[^"]*" (?:403|404)
+ignoreregex =
+EOF
+  return 0
+}
+
+lib_domain_fail2ban_regen() {
+  local d logs=() enabled=true
+  lib_pkg_installed fail2ban || return 0
+  while read -r d; do [[ -n "$d" ]] && logs+=("$(lib_domain_home "$d")/logs/access.log"); done < <(lib_domains_list)
+  ((${#logs[@]} == 0)) && { enabled=false; logs=("/dev/null"); }
+  lib_domain_fail2ban_filters_write
+  local cf_action; cf_action="$(lib_cf_fail2ban_action_lines)"
+  {
+    printf '# Managed by lompstack - web jails (regenerated on add/remove)\n\n'
+    printf '[server-setup-wp-login]\nenabled = %s\nfilter = server-setup-wp-login\nbackend = auto\nport = http,https\nmaxretry = 10\nfindtime = 10m\nbantime = 1h\nlogpath = %s\n' "$enabled" "$(lib_join $'\n          ' "${logs[@]}")"
+    [[ -n "$cf_action" ]] && printf '%s\n' "$cf_action"
+    printf '\n[server-setup-web-probe]\nenabled = %s\nfilter = server-setup-web-probe\nbackend = auto\nport = http,https\nmaxretry = 5\nfindtime = 10m\nbantime = 6h\nlogpath = %s\n' "$enabled" "$(lib_join $'\n          ' "${logs[@]}")"
+    [[ -n "$cf_action" ]] && printf '%s\n' "$cf_action"
+  } | lib_write_file "$FAIL2BAN_WEB_JAIL_FILE" 0600 root:root
+  if (( LIB_FILE_CHANGED )) && (( ! OPT_DRY_RUN )) && lib_service_active fail2ban; then
+    lib_run fail2ban-client reload || lib_warn "fail2ban reload failed (see log)"
+  fi
+  return 0
+}
+
+# =============================================================================
+#  WordPress
+# =============================================================================
+lib_domain_wpcli_ensure() {
+  local tmp sha
+  if [[ -x "$WPCLI_PHAR" && -x "$WPCLI_BIN" ]]; then return 0; fi
+  if (( OPT_DRY_RUN )); then lib_info "[dry-run] would install wp-cli into ${WPCLI_PHAR}"; return 0; fi
+  lib_info "Installing wp-cli..."
+  mkdir -p "$INSTALL_DIR"
+  tmp="$(lib_mktemp -d)"
+  curl -fsSL --retry 3 --max-time 120 -o "${tmp}/wp-cli.phar" "https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar" \
+    && curl -fsSL --retry 3 --max-time 60 -o "${tmp}/wp-cli.phar.sha512" "https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar.sha512" \
+    || lib_die "wp-cli download failed" "network problem" "retry later"
+  sha="$(awk '{print $1}' "${tmp}/wp-cli.phar.sha512")"
+  [[ "$(sha512sum "${tmp}/wp-cli.phar" | awk '{print $1}')" == "$sha" ]] || lib_die "wp-cli checksum mismatch" "corrupted download" "retry later"
+  install -m 0755 "${tmp}/wp-cli.phar" "$WPCLI_PHAR"
+  cat >"$WPCLI_BIN" <<EOF
+#!/usr/bin/env bash
+# Managed by lompstack - wp-cli launcher (set WP_CLI_PHP to pick a PHP CLI)
+exec "\${WP_CLI_PHP:-$(lib_php_cli "$(lib_php_default_version)")}" "${WPCLI_PHAR}" "\$@"
+EOF
+  chmod 0755 "$WPCLI_BIN"
+  lib_ok "wp-cli installed"
+}
+
+_wp() {   # run wp-cli as the site user
+  runuser -u "$D_USER" -- env HOME="$D_HOME" WP_CLI_PHP="$(lib_php_cli "$D_PHP")" WP_CLI_CACHE_DIR="${D_HOME}/private/.wp-cli/cache" \
+    "$WPCLI_BIN" --path="${D_HOME}/public_html" "$@"
+}
+
+lib_domain_wp_install() {
+  local docroot="${D_HOME}/public_html" url scheme="http" host="$D_DOMAIN" title admin email pass info
+  info="$(lib_domain_state_dir "$D_DOMAIN")/wp.info"
+  lib_domain_wpcli_ensure
+  lib_db_info_load "$D_DOMAIN" || lib_die "WordPress needs a database" "db.info missing" "run: setup.sh db ${D_DOMAIN}"
+  (( D_SSL )) && scheme="https"
+  (( D_WWW && D_WWW_PRIMARY )) && host="www.${D_DOMAIN}"
+  url="${scheme}://${host}"
+  title="${DOM_OPT_WP_TITLE:-$D_DOMAIN}"
+  admin="${DOM_OPT_WP_ADMIN:-admin}"
+  email="${DOM_OPT_WP_EMAIL:-${D_EMAIL:-admin@${D_DOMAIN}}}"
+  if (( OPT_DRY_RUN )); then lib_info "[dry-run] would download and install WordPress (${DOM_OPT_WP_LOCALE}) at ${url}"; return 0; fi
+  if [[ -f "${docroot}/wp-config.php" ]]; then
+    lib_warn "WordPress already present in ${docroot}; skipping download/install"
+  else
+    rm -f "${docroot}/index.html"
+    lib_run _wp core download --locale="$DOM_OPT_WP_LOCALE" --force || lib_die "WordPress download failed" "network / wp-cli error" "see the log"
+    lib_run_secret "wp config create (db ${DBI_NAME})" _wp config create --dbname="$DBI_NAME" --dbuser="$DBI_USER" --dbpass="$DBI_PASS" \
+      --dbhost=localhost --dbcharset=utf8mb4 --skip-check \
+      --extra-php <<<"define('DISABLE_WP_CRON', true);
+define('FS_METHOD', 'direct');" || lib_die "wp config create failed" "database credentials or wp-cli error" "see the log"
+    pass="$(lib_random_password 20)"
+    lib_run_secret "wp core install (${url})" _wp core install --url="$url" --title="$title" --admin_user="$admin" --admin_password="$pass" \
+      --admin_email="$email" --skip-email || lib_die "WordPress installation failed" "wp core install error" "see the log; database reachable?"
+    lib_run _wp rewrite structure '/%postname%/' --hard || lib_warn "could not set permalink structure"
+    lib_run _wp plugin install litespeed-cache --activate || lib_warn "LiteSpeed Cache plugin could not be installed (no network?)"
+    lib_run _wp option update timezone_string "$TIMEZONE" || true
+    {
+      printf '# WordPress admin for %s - created %s\n' "$D_DOMAIN" "$(lib_iso_now)"
+      printf 'WP_URL=%s\nWP_ADMIN_USER=%s\nWP_ADMIN_PASS=%s\nWP_ADMIN_EMAIL=%s\nWP_LOCALE=%s\nWP_PATH=%s\n' "$url" "$admin" "$pass" "$email" "$DOM_OPT_WP_LOCALE" "$docroot"
+    } >"$info"
+    chmod 0600 "$info"
+    lib_ok "WordPress installed at ${url} (admin credentials in ${info})"
+  fi
+  chown -R "${D_USER}:${D_GROUP}" "$docroot"
+  find "$docroot" -type d -exec chmod 0755 {} + 2>/dev/null || true
+  find "$docroot" -type f -exec chmod 0644 {} + 2>/dev/null || true
+  [[ -f "${docroot}/wp-config.php" ]] && chmod 0640 "${docroot}/wp-config.php"
+  lib_mkdir "${OLS_CACHE_DIR}/${D_DOMAIN}" 0750 "$(lib_ols_user):$(lib_ols_group)"
+  lib_cron_set "wpcron:${D_DOMAIN}" "*/5 * * * * ${D_USER} cd ${docroot} && WP_CLI_PHP=$(lib_php_cli "$D_PHP") ${WPCLI_BIN} --path=${docroot} cron event run --due-now --quiet >/dev/null 2>&1"
+  D_WP=1
+  lib_domain_state_save
+}
+
+# =============================================================================
+#  summary / credentials / list / logs
+# =============================================================================
+lib_domain_summary() {
+  local sslline
+  sslline="$(lib_ssl_status_line "$D_DOMAIN")"
+  (( D_SSL )) || sslline="not active$( (( D_SSL_WANTED )) && printf ' (run: setup.sh renew-ssl %s)' "$D_DOMAIN")"
+  printf '\n%s%sSite %s is ready%s\n' "$C_BLD" "$C_GRN" "$D_DOMAIN" "$C_RST"
+  lib_print_kv "URL"         "$( (( D_SSL )) && printf 'https' || printf 'http')://${D_DOMAIN}/$( (( D_WWW )) && printf '  (+ www)')"
+  lib_print_kv "Mode"        "${D_MODE}${D_PROXY:+ -> $D_PROXY}"
+  lib_print_kv "Document root" "${D_HOME}/public_html"
+  lib_print_kv "System user" "${D_USER} (upload with: chown -R ${D_USER}:${D_GROUP})"
+  [[ -n "$D_PHP" ]] && lib_print_kv "PHP" "${D_PHP} (memory ${D_MEMORY}, upload ${D_UPLOAD}, workers ${D_PHP_CHILDREN})"
+  lib_print_kv "Logs"        "${D_HOME}/logs/access.log, error.log  (setup.sh logs ${D_DOMAIN})"
+  lib_print_kv "SSL"         "$sslline"
+  [[ -n "$D_DB_NAME" ]] && lib_print_kv "Database" "${D_DB_NAME} (setup.sh credentials ${D_DOMAIN})"
+  (( D_WP )) && lib_print_kv "WordPress" "admin credentials: setup.sh credentials ${D_DOMAIN}"
+  printf '\n'
+}
+
+lib_domain_credentials_main() {
+  local target="${1:-}" d
+  [[ -n "$target" ]] || lib_die "Usage: setup.sh credentials <domain>|--all" "" "setup.sh credentials example.com"
+  lib_require_tools
+  if [[ "$target" == "--all" ]]; then
+    lib_domain_credentials_server
+    while read -r d; do [[ -n "$d" ]] && lib_domain_credentials_show "$d"; done < <(lib_domains_list)
+    return 0
+  fi
+  target="${target,,}"
+  lib_domain_registered "$target" || lib_die "Site ${target} is not registered" "" "setup.sh list"
+  lib_domain_credentials_show "$target"
+}
+
+lib_domain_credentials_server() {
+  local info="${STATE_DIR}/openlitespeed-admin.info"
+  printf '\n%sOpenLiteSpeed WebAdmin%s\n' "$C_BLD" "$C_RST"
+  if [[ -s "$info" ]]; then
+    lib_system_analyze --no-net
+    lib_print_kv "URL"      "$(lib_ols_admin_url)"
+    lib_print_kv "User"     "$(awk -F= '$1=="USER"{print $2}' "$info")"
+    lib_print_kv "Password" "$(awk -F= '$1=="PASSWORD"{sub(/^[^=]*=/,""); print}' "$info")"
+  else
+    lib_note "not configured"
+  fi
+  lib_redis_show
+}
+
+lib_domain_credentials_show() {
+  local domain="$1" info
+  lib_domain_state_load "$domain" || return 0
+  printf '\n%s== %s ==%s\n' "$C_BLD" "$domain" "$C_RST"
+  lib_print_kv "Mode / status" "${D_MODE} / ${D_STATUS}"
+  lib_print_kv "Home"          "${D_HOME}  (public_html, private, logs, backups)"
+  lib_print_kv "System user"   "${D_USER}:${D_GROUP}"
+  [[ -n "$D_PHP" ]] && lib_print_kv "PHP" "${D_PHP} (memory ${D_MEMORY}, upload ${D_UPLOAD}, workers ${D_PHP_CHILDREN})"
+  [[ -n "$D_PROXY" ]] && lib_print_kv "Proxy target" "$D_PROXY"
+  lib_print_kv "SSL"           "$( (( D_SSL )) && lib_ssl_status_line "$domain" || printf 'not active')"
+  lib_db_show "$domain"
+  info="$(lib_domain_state_dir "$domain")/wp.info"
+  if [[ -s "$info" ]]; then
+    printf '%sWordPress%s\n' "$C_BLD" "$C_RST"
+    lib_print_kv "URL"      "$(awk -F= '$1=="WP_URL"{print $2}' "$info")/wp-admin/"
+    lib_print_kv "Admin"    "$(awk -F= '$1=="WP_ADMIN_USER"{print $2}' "$info")"
+    lib_print_kv "Password" "$(awk -F= '$1=="WP_ADMIN_PASS"{sub(/^[^=]*=/,""); print}' "$info")"
+    printf '\n'
+  fi
+  if [[ -n "$(lib_redis_password)" ]]; then lib_print_kv "Redis" "127.0.0.1:6379 (password: setup.sh credentials --all)"; fi
+}
+
+lib_domain_list_main() {
+  local d rows=() json=0 mode php ssl last status
+  [[ "${1:-}" == "--json" ]] && json=1
+  (( OPT_JSON )) && json=1
+  lib_require_tools
+  if (( json )); then
+    local files=()
+    while read -r d; do [[ -n "$d" ]] && files+=("$(lib_domain_json "$d")"); done < <(lib_domains_list)
+    if ((${#files[@]} == 0)); then printf '[]\n'; else jq -s '.' "${files[@]}"; fi
+    return 0
+  fi
+  printf '%s%-28s %-10s %-5s %-24s %-22s %-10s%s\n' "$C_BLD" "DOMAIN" "MODE" "PHP" "SSL" "LAST BACKUP" "STATUS" "$C_RST"
+  while read -r d; do
+    [[ -n "$d" ]] || continue
+    lib_domain_state_load "$d" || continue
+    ssl="$( (( D_SSL )) && lib_ssl_status_line "$d" || printf -- '-')"
+    last="${D_BACKUP_LAST:--}"
+    status="$D_STATUS"
+    [[ -d "$D_HOME/public_html" ]] || status="${status} (missing dir!)"
+    printf '%-28s %-10s %-5s %-24s %-22s %-10s\n' "$d" "$D_MODE" "${D_PHP:--}" "${ssl:0:24}" "${last:0:22}" "$status"
+    rows+=("$d")
+  done < <(lib_domains_list)
+  ((${#rows[@]} == 0)) && printf '(no sites yet - add one with: setup.sh add example.com)\n'
+  printf '\n%s%d site(s); files under %s/<domain>/public_html%s\n' "$C_DIM" "${#rows[@]}" "$SITES_ROOT" "$C_RST"
+}
+
+lib_domain_logs_main() {
+  local domain="${1:-}" which="both" lines=50 a files=()
+  [[ -n "$domain" ]] || lib_die "Usage: setup.sh logs <domain> [--access|--error] [-n LINES]" "" "setup.sh logs example.com"
+  shift
+  while (($# > 0)); do
+    a="$1"; shift
+    case "$a" in
+      --access) which="access" ;;
+      --error)  which="error" ;;
+      -n)       lines="${1:-50}"; shift ;;
+      *)        lib_die "Unknown option for logs: ${a}" "" "logs <domain> [--access|--error] [-n LINES]" ;;
+    esac
+  done
+  domain="${domain,,}"
+  lib_domain_registered "$domain" || lib_die "Site ${domain} is not registered" "" "setup.sh list"
+  local dir; dir="$(lib_domain_home "$domain")/logs"
+  [[ "$which" != "error" ]]  && files+=("${dir}/access.log")
+  [[ "$which" != "access" ]] && files+=("${dir}/error.log")
+  for a in "${files[@]}"; do [[ -f "$a" ]] || touch "$a" 2>/dev/null || true; done
+  printf '%sFollowing %s (Ctrl-C to stop)%s\n' "$C_DIM" "${files[*]}" "$C_RST"
+  exec tail -n "$lines" -F "${files[@]}"
+}
+
+# =============================================================================
+#  remove
+# =============================================================================
+lib_domain_remove_main() {
+  local domain="${1:-}" keep_db=0 keep_files=0 keep_ssl=0 a
+  [[ -n "$domain" ]] || lib_die "Usage: setup.sh remove <domain> [--keep-db] [--keep-files] [--keep-ssl]" "" "setup.sh remove example.com"
+  shift
+  while (($# > 0)); do
+    a="$1"; shift
+    case "$a" in
+      --keep-db)    keep_db=1 ;;
+      --keep-files) keep_files=1 ;;
+      --keep-ssl)   keep_ssl=1 ;;
+      *)            lib_die "Unknown option for remove: ${a}" "" "remove <domain> [--keep-db] [--keep-files] [--keep-ssl]" ;;
+    esac
+  done
+  domain="${domain,,}"
+  lib_require_tools
+  lib_domain_registered "$domain" || lib_die "Site ${domain} is not registered" "" "setup.sh list"
+  lib_domain_state_load "$domain"
+  printf '\n%sThis will remove %s%s\n' "$C_BLD" "$domain" "$C_RST"
+  lib_note "vhost + listener maps (archived), $( (( keep_files )) && printf 'files KEPT' || printf "files ${D_HOME} DELETED"), $( (( keep_db )) && printf 'database KEPT' || printf 'database DROPPED'), $( (( keep_ssl )) && printf 'certificate KEPT' || printf 'certificate deleted')"
+  lib_note "a safety backup (files + database) is written to ${BACKUP_ROOT}/${domain}/ first"
+  lib_confirm "Continue?" n || lib_die "Removal cancelled" "" "re-run with --yes to skip the question"
+  lib_steps_begin 7
+  lib_rollback_clear
+
+  lib_step "Scheduled tasks"
+  lib_cron_remove "wpcron:${domain}"
+  lib_ok "cron entries cleaned"
+
+  lib_step "OpenLiteSpeed configuration"
+  lib_ols_vhost_purge "$domain" 1
+  lib_ok "vhost removed and archived under ${STATE_DIR}/archive/vhosts/"
+
+  lib_step "Safety backup"
+  if [[ -d "$D_HOME" ]]; then
+    if lib_backup_domain "$domain" --tag pre-remove --keep 0; then lib_ok "safety backup written"; else lib_warn "safety backup FAILED (continuing because you confirmed the removal)"; fi
+  else
+    lib_info "home directory missing; nothing to back up"
+  fi
+
+  lib_step "Database"
+  if (( keep_db )); then lib_info "database kept (--keep-db)"; else lib_db_drop_for_domain "$domain"; fi
+
+  lib_step "Certificate"
+  if (( keep_ssl )); then lib_info "certificate kept (--keep-ssl)"; else lib_ssl_delete "$domain"; lib_ok "certificate removed"; fi
+
+  lib_step "Files and system user"
+  if (( keep_files )); then
+    lib_info "files and user kept (--keep-files)"
+  else
+    lib_rm "$D_HOME"
+    lib_rm "${OLS_CACHE_DIR}/${domain}"
+    if (( ! OPT_DRY_RUN )) && id -u "$D_USER" >/dev/null 2>&1; then
+      pkill -u "$D_USER" >/dev/null 2>&1 || true
+      lib_run userdel "$D_USER" || lib_warn "userdel ${D_USER} failed"
+      getent group "$D_GROUP" >/dev/null 2>&1 && { lib_run groupdel "$D_GROUP" || true; }
+    fi
+    lib_ok "files and user removed"
+  fi
+
+  lib_step "State and housekeeping"
+  if (( ! OPT_DRY_RUN )); then
+    mkdir -p "${STATE_DIR}/archive/domains" && chmod 0700 "${STATE_DIR}/archive/domains"
+    mv "$(lib_domain_state_dir "$domain")" "${STATE_DIR}/archive/domains/${domain}.$(lib_ts)" 2>/dev/null || rm -rf "$(lib_domain_state_dir "$domain")"
+  fi
+  lib_domain_logrotate_regen
+  lib_domain_fail2ban_regen
+  lib_manifest_set '.updated_at' "$(lib_iso_now)"
+  printf '\n%s%sRemoved %s%s  (state archived in %s/archive/domains/, backup in %s/%s/)\n\n' "$C_BLD" "$C_GRN" "$domain" "$C_RST" "$STATE_DIR" "$BACKUP_ROOT" "$domain"
+}

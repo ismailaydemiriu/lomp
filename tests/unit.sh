@@ -1,0 +1,411 @@
+#!/usr/bin/env bash
+# tests/unit.sh - offline unit tests for the pure bash/awk logic of setup.sh.
+# Runs without root and without network on any machine with bash 5, awk, jq, openssl.
+#   bash tests/unit.sh
+set -Eeuo pipefail
+shopt -s lastpipe
+HERE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+ROOT="$(dirname "$HERE")"
+TMP="$(mktemp -d "${TMPDIR:-/tmp}/ss-unit.XXXXXX")"
+cleanup() { rm -rf "$TMP"; }
+
+# ---- globals normally provided by setup.sh (all paths redirected into TMP) --
+SCRIPT_VERSION="test"
+TIMEZONE="Europe/Istanbul"; ADMIN_PORT="7080"; PHP_VERSION="8.3"; ADMIN_ALLOWED_IP=""; DEFAULT_EMAIL=""; SSH_PORT=""
+DB_BUFFER_PERCENT=""; REDIS_MAX_PERCENT=""; BACKUP_KEEP="7"; BACKUP_SCHEDULE=""; FAIL2BAN_IGNORE_IP=""
+STATE_DIR="$TMP/state"; SITES_ROOT="$TMP/home"; LSWS_HOME="$TMP/lsws"; LOG_FILE="$TMP/server_setup.log"
+BACKUP_ROOT="$TMP/backups"; ACME_ROOT="$TMP/acme"; SSL_DEPLOY_DIR="$TMP/ssl"
+SYSCTL_FILE="$TMP/sysctl.conf"; LIMITS_FILE="$TMP/limits.conf"; MARIADB_TUNED_FILE="$TMP/60-tuned.cnf"
+FAIL2BAN_JAIL_FILE="$TMP/jail.conf"; FAIL2BAN_WEB_JAIL_FILE="$TMP/jail-web.conf"; CRON_FILE="$TMP/cron"
+CERTBOT_DEPLOY_HOOK="$TMP/hook.sh"; LOGROTATE_SITES_FILE="$TMP/lr-sites"; LOGROTATE_SELF_FILE="$TMP/lr-self"
+INSTALL_DIR="$TMP/install"; BIN_LINK="$TMP/server-setup"; LOCK_FILE="$TMP/lock"
+OPT_YES=1 OPT_DRY_RUN=0 OPT_QUIET=1 OPT_VERBOSE=0 OPT_NO_COLOR=1 OPT_JSON=0 OPT_NON_INTERACTIVE=1
+SCRIPT_PATH="$ROOT/setup.sh"; SCRIPT_DIR="$ROOT"
+export TMPDIR="$TMP"
+for m in common system ols php db ssl domain cloudflare backup monitor install; do
+  # shellcheck source=/dev/null
+  source "$ROOT/lib/$m.sh"
+done
+trap cleanup EXIT
+mkdir -p "$STATE_DIR" "$LSWS_HOME/conf/vhosts" "$SITES_ROOT"; : >"$LOG_FILE"
+chown() { return 0; }   # no lsadm/site users on the test machine
+
+PASS=0; FAIL=0
+ok()   { PASS=$((PASS + 1)); }
+fail() { FAIL=$((FAIL + 1)); printf 'FAIL: %s\n' "$*" >&2; }
+assert_eq()    { if [[ "$2" == "$3" ]]; then ok; else fail "$1: expected [$2] got [$3]"; fi; }
+assert_true()  { local n="$1"; shift; if "$@"; then ok; else fail "$n"; fi; }
+assert_false() { local n="$1"; shift; if "$@"; then fail "$n (expected failure)"; else ok; fi; }
+assert_has()   { if [[ "$3" == *"$2"* ]]; then ok; else fail "$1: missing [$2]"; fi; }
+assert_lacks() { if [[ "$3" != *"$2"* ]]; then ok; else fail "$1: unexpected [$2]"; fi; }
+section() { printf '%s\n' "-- $*"; }
+
+# =============================================================================
+section "domain helpers"
+assert_true  "valid example.com"       lib_domain_valid example.com
+assert_true  "valid sub.example.co.uk" lib_domain_valid sub.example.co.uk
+assert_true  "valid uppercase"         lib_domain_valid EXAMPLE.COM
+assert_false "invalid leading dash"    lib_domain_valid -bad.com
+assert_false "invalid no dot"          lib_domain_valid localhost
+assert_false "invalid double dot"      lib_domain_valid a..b.com
+assert_false "invalid underscore"      lib_domain_valid exa_mple.com
+assert_eq "ident example.com" "example_com" "$(lib_domain_ident example.com)"
+assert_eq "ident digits first" "s_123_com" "$(lib_domain_ident 123.com)"
+assert_eq "ident dashes" "my_site_co_uk" "$(lib_domain_ident my-site.co.uk)"
+assert_eq "ident length" 28 "$(lib_domain_ident averyveryveryverylongdomainname.example.com | wc -c | tr -d ' ')"
+assert_eq "size 64M" 64 "$(lib_size_to_mb 64M)"
+assert_eq "size 1G" 1024 "$(lib_size_to_mb 1G)"
+assert_eq "size empty" 0 "$(lib_size_to_mb "")"
+assert_true "version ge" lib_version_ge 10.11.2 10.6
+assert_false "version lt" lib_version_ge 10.6.12 10.11
+assert_eq "human mb" "2.0 GB" "$(lib_human_mb 2048)"
+assert_eq "password length" 32 "$(lib_random_password | wc -c | tr -d ' ')"
+is_alnum20() { [[ "$1" =~ ^[A-Za-z0-9]{20}$ ]]; }
+assert_true "password alnum" is_alnum20 "$(lib_random_password 20)"
+
+# =============================================================================
+section "secret masking"
+m() { printf '%s' "$1" | lib_mask_secrets; }
+assert_eq "mask password=" "password=********" "$(m 'password=abc123')"
+assert_eq "mask PASSWORD: quoted" "PASSWORD: '********'" "$(m "PASSWORD: 'abc123'")"
+assert_eq "mask identified by" "IDENTIFIED BY '********'" "$(m "IDENTIFIED BY 'S3cr3t!'")"
+assert_eq "mask bearer" "Authorization: Bearer ********" "$(m 'Authorization: Bearer abcDEF.123-x')"
+assert_eq "mask cf token" "dns_cloudflare_api_token = ********" "$(m 'dns_cloudflare_api_token = q1w2e3r4')"
+assert_eq "mask pass:" "-pass pass:********" "$(m '-pass pass:hunter2')"
+assert_eq "mask telegram url" "https://api.telegram.org/bot********/sendMessage" "$(m 'https://api.telegram.org/bot123:ABC/sendMessage')"
+assert_eq "no false positive" "wrote /etc/ssh/sshd_config.d/99-server-setup.conf" "$(m 'wrote /etc/ssh/sshd_config.d/99-server-setup.conf')"
+assert_eq "no mask PasswordAuthentication" "PasswordAuthentication no" "$(m 'PasswordAuthentication no')"
+
+# =============================================================================
+section "OpenLiteSpeed config editing (awk)"
+cat >"$LSWS_CONF" <<'EOF'
+#
+# PLAIN TEXT CONFIGURATION FILE
+#
+serverName
+user                             nobody
+group                            nogroup
+showVersionNumber                0
+adminEmails                      root@localhost
+
+tuning{
+    maxConnections               10000
+    maxSSLConnections            10000
+    keepAliveTimeout             5
+    quicEnable                   1
+}
+
+accessControl{
+	allow                                   ALL
+	deny
+}
+
+extProcessor lsphp{
+    type                            lsapi
+    address                         uds://tmp/lshttpd/lsphp.sock
+    env                             PHP_LSAPI_CHILDREN=10
+    path                            fcgi-bin/lsphp
+}
+
+scriptHandler{
+    add lsapi:lsphp  php
+}
+
+virtualHost Example{
+    vhRoot                   Example/
+    configFile               conf/vhosts/Example/vhconf.conf
+    setUIDMode               0
+}
+
+listener Default{
+    address                  *:8088
+    secure                   0
+    map                      Example *
+}
+
+module cache {
+    ls_enabled          1
+    enableCache         0
+}
+EOF
+lib_ols_tx_begin
+assert_eq "top get showVersionNumber" "0" "$(lib_ols_tx_top_get showVersionNumber)"
+assert_eq "top get user" "nobody" "$(lib_ols_tx_top_get user)"
+assert_eq "top get missing" "" "$(lib_ols_tx_top_get httpdWorkers)"
+lib_ols_tx_top_set httpdWorkers 2
+assert_eq "top set new key" "2" "$(lib_ols_tx_top_get httpdWorkers)"
+assert_true "new key placed before first block" bash -c "awk '/^httpdWorkers/{k=NR} /^tuning/{t=NR} END{exit !(k && t && k<t)}' '$OLS_TX_FILE'"
+lib_ols_tx_top_set showVersionNumber 0
+assert_eq "top set existing (idempotent)" "1" "$(grep -c '^showVersionNumber' "$OLS_TX_FILE")"
+lib_ols_tx_top_set adminEmails "admin@example.com"
+assert_eq "top set existing value" "admin@example.com" "$(lib_ols_tx_top_get adminEmails)"
+assert_eq "block get tuning key" "10000" "$(lib_ols_tx_block_get tuning "" maxConnections)"
+lib_ols_tx_block_set tuning "" maxConnections 5000
+assert_eq "block set tuning key" "5000" "$(lib_ols_tx_block_get tuning "" maxConnections)"
+lib_ols_tx_block_set tuning "" totalInMemCacheSize 64M
+assert_eq "block set new tuning key" "64M" "$(lib_ols_tx_block_get tuning "" totalInMemCacheSize)"
+assert_eq "tuning still one block" "1" "$(grep -c '^tuning' "$OLS_TX_FILE")"
+assert_true  "block exists case-insensitive" lib_ols_tx_block_exists virtualhost Example
+assert_true  "block exists extprocessor" lib_ols_tx_block_exists extprocessor lsphp
+assert_false "block not exists" lib_ols_tx_block_exists virtualhost Nope
+assert_eq "extprocessor path get" "fcgi-bin/lsphp" "$(lib_ols_tx_block_get extprocessor lsphp path)"
+lib_ols_tx_block_set extprocessor lsphp path /usr/local/lsws/lsphp83/bin/lsphp
+assert_eq "extprocessor path set" "/usr/local/lsws/lsphp83/bin/lsphp" "$(lib_ols_tx_block_get extprocessor lsphp path)"
+assert_eq "listener Default address" "*:8088" "$(lib_ols_tx_block_get listener Default address)"
+lib_ols_tx_block_remove virtualhost Example
+assert_false "block removed" lib_ols_tx_block_exists virtualhost Example
+assert_true  "other blocks intact after remove" lib_ols_tx_block_exists listener Default
+lib_ols_tx_block_remove listener Default
+assert_false "listener removed" lib_ols_tx_block_exists listener Default
+assert_true "braces balanced after edits" _ols_braces_balanced "$OLS_TX_FILE"
+
+SYS_IPV6=0
+_ols_tx_listeners_ensure
+assert_true "listener HTTP created" lib_ols_tx_block_exists listener HTTP
+assert_true "listener HTTPS created" lib_ols_tx_block_exists listener HTTPS
+assert_eq "HTTP address" "*:80" "$(lib_ols_tx_block_get listener HTTP address)"
+assert_eq "HTTPS sslProtocol" "24" "$(lib_ols_tx_block_get listener HTTPS sslProtocol)"
+assert_eq "HTTPS default map" "*" "$(lib_ols_tx_map_get HTTPS _default)"
+_ols_tx_listeners_ensure
+assert_eq "listeners ensure idempotent" "1" "$(grep -c '^listener HTTPS' "$OLS_TX_FILE")"
+assert_eq "map lines not duplicated" "1" "$(awk '/^listener HTTPS/,/^}/' "$OLS_TX_FILE" | grep -c 'map ')"
+lib_ols_tx_map_set HTTP example.com "example.com, www.example.com"
+assert_eq "map set" "example.com, www.example.com" "$(lib_ols_tx_map_get HTTP example.com)"
+lib_ols_tx_map_set HTTP example.com "example.com"
+assert_eq "map replace" "example.com" "$(lib_ols_tx_map_get HTTP example.com)"
+assert_eq "map count" "2" "$(awk '/^listener HTTP \{/,/^}/' "$OLS_TX_FILE" | grep -c 'map ')"
+lib_ols_tx_map_del HTTP example.com
+assert_eq "map del" "" "$(lib_ols_tx_map_get HTTP example.com)"
+assert_eq "default map kept" "*" "$(lib_ols_tx_map_get HTTP _default)"
+lib_ols_render_extprocessor 8.3 12 | lib_ols_tx_block_put extprocessor lsphp83
+assert_eq "extprocessor put" "12" "$(lib_ols_tx_block_get extprocessor lsphp83 maxConns)"
+lib_ols_render_extprocessor 8.3 6 | lib_ols_tx_block_put extprocessor lsphp83
+assert_eq "extprocessor replace" "6" "$(lib_ols_tx_block_get extprocessor lsphp83 maxConns)"
+assert_eq "extprocessor single" "1" "$(grep -c '^extprocessor lsphp83' "$OLS_TX_FILE")"
+assert_eq "block names" "$(printf 'lsphp\nlsphp83')" "$(_ols_block_names "$OLS_TX_FILE" extprocessor)"
+assert_true "braces balanced after listeners" _ols_braces_balanced "$OLS_TX_FILE"
+lib_ols_tx_commit
+assert_eq "commit changed" "1" "$OLS_CONF_CHANGED"
+assert_true "committed file balanced" _ols_braces_balanced "$LSWS_CONF"
+lib_ols_tx_begin; lib_ols_tx_commit
+assert_eq "commit idempotent" "0" "$OLS_CONF_CHANGED"
+assert_eq "conf vhosts after edits" "" "$(lib_ols_conf_vhosts)"
+
+# heredoc awareness
+cat >"$TMP/vh.conf" <<'EOF'
+docRoot                   $VH_ROOT/public_html/
+rewrite  {
+  enable                  1
+  rules                   <<<END_rules
+RewriteCond %{HTTPS} !on
+RewriteRule ^(.*)$ https://%{HTTP_HOST}$1 [R=301,L]
+# a stray { brace } inside the heredoc must be ignored
+  END_rules
+}
+context / {
+  location                $VH_ROOT/public_html/
+  allowBrowse             1
+}
+EOF
+assert_true "heredoc braces balanced" _ols_braces_balanced "$TMP/vh.conf"
+assert_eq "span skips heredoc" "2 9" "$(_ols_span "$TMP/vh.conf" rewrite "")"
+assert_eq "context key after heredoc" "1" "$(_ols_block_key "$TMP/vh.conf" context / allowBrowse get)"
+printf 'a {\n  b {\n}\n' >"$TMP/bad.conf"
+assert_false "unbalanced detected" _ols_braces_balanced "$TMP/bad.conf"
+
+# =============================================================================
+section "profile calculation"
+SYS_ANALYZED=1; SYS_RAM_MB=4096; SYS_RAM_AVAIL_MB=3000; SYS_CPU_CORES=2; SYS_DISK_TYPE=ssd; SYS_SWAP_MB=0
+lib_system_profile
+assert_eq "db buffer pct 4G" 40 "$CALC_DB_BUFFER_PCT"
+assert_eq "db buffer mb" 1632 "$CALC_DB_BUFFER_MB"
+assert_eq "db log mb" 408 "$CALC_DB_LOG_MB"
+assert_eq "db max conn" 256 "$CALC_DB_MAX_CONN"
+assert_eq "db io cap ssd" 1000 "$CALC_DB_IO_CAP"
+assert_eq "redis mb" 327 "$CALC_REDIS_MB"
+assert_eq "php memory" 256 "$CALC_PHP_MEMORY_MB"
+assert_eq "opcache" 192 "$CALC_OPCACHE_MB"
+assert_eq "ols workers" 2 "$CALC_OLS_WORKERS"
+assert_eq "ols max conn" 5000 "$CALC_OLS_MAX_CONN"
+assert_eq "no swap needed at 4G" 0 "$CALC_SWAP_MB"
+assert_true "php children sane" bash -c "(( $CALC_PHP_CHILDREN_SITE >= 2 && $CALC_PHP_CHILDREN_SITE <= 8 && $CALC_PHP_CHILDREN_TOTAL >= $CALC_PHP_CHILDREN_SITE ))"
+SYS_RAM_MB=1024; SYS_DISK_TYPE=nvme; lib_system_profile
+assert_eq "db buffer pct 1G" 25 "$CALC_DB_BUFFER_PCT"
+assert_eq "swap 1G" 2048 "$CALC_SWAP_MB"
+assert_eq "io cap nvme" 2000 "$CALC_DB_IO_CAP"
+assert_eq "redis min 64" 64 "$CALC_REDIS_MB"
+SYS_RAM_MB=512; lib_system_profile; assert_eq "swap 512M" 1024 "$CALC_SWAP_MB"
+DB_BUFFER_PERCENT=60; SYS_RAM_MB=8192; lib_system_profile
+assert_eq "db pct override" 60 "$CALC_DB_BUFFER_PCT"; assert_eq "db mb override" 4912 "$CALC_DB_BUFFER_MB"
+DB_BUFFER_PERCENT=""; SYS_RAM_MB=4096; SYS_DISK_TYPE=ssd; lib_system_profile
+out="$(lib_db_render_tuning)"
+assert_has "tuning buffer pool" "innodb_buffer_pool_size         = 1632M" "$out"
+assert_has "tuning max conn" "max_connections                 = 256" "$out"
+assert_has "tuning bind" "bind-address                    = 127.0.0.1" "$out"
+out="$(lib_php_render_ini)"
+assert_has "php ini memory" "memory_limit = 256M" "$out"
+assert_has "php ini opcache" "opcache.memory_consumption = 192" "$out"
+assert_has "php ini tz" "date.timezone = Europe/Istanbul" "$out"
+out="$(lib_redis_render_conf secretpass 0)"
+assert_has "redis pass" "requirepass secretpass" "$out"
+assert_has "redis maxmemory" "maxmemory 327mb" "$out"
+assert_has "redis no persistence" 'save ""' "$out"
+out="$(lib_redis_render_conf secretpass 1)"
+assert_has "redis persistence" "appendonly yes" "$out"
+out="$(lib_system_render_sysctl)"; assert_has "sysctl header" "Managed by lompstack" "$out"
+out="$(lib_system_render_limits)"; assert_has "limits nofile" "nofile  1048576" "$out"
+
+# =============================================================================
+section "vhost templates"
+lib_domain_state_reset
+D_DOMAIN="example.com"; D_IDENT="example_com"; D_USER="example_com"; D_GROUP="example_com"; D_HOME="$SITES_ROOT/example.com"
+D_MODE="php"; D_PHP="8.3"; D_PHP_CHILDREN=4; D_MEMORY="256M"; D_UPLOAD="64M"; D_WWW=1; D_SSL=1; D_HSTS_PRELOAD=0; D_EMAIL="a@example.com"
+out="$(lib_ols_render_vhconf)"; printf '%s\n' "$out" >"$TMP/php.vhconf"
+assert_true "php vhconf balanced" _ols_braces_balanced "$TMP/php.vhconf"
+assert_has "php extprocessor" "extprocessor example_com {" "$out"
+assert_has "php extUser" "extUser                 example_com" "$out"
+assert_has "php post size" "post_max_size 72M" "$out"
+assert_has "php sessions path" "session.save_path $SITES_ROOT/example.com/private/sessions" "$out"
+assert_has "www alias" "vhAliases                 www.example.com" "$out"
+assert_has "www redirect" 'RewriteCond %{HTTP_HOST} ^www\.example\.com$ [NC]' "$out"
+assert_has "https redirect" 'RewriteRule ^(.*)$ https://%{HTTP_HOST}$1 [R=301,L]' "$out"
+assert_has "hsts" "Strict-Transport-Security: max-age=31536000; includeSubDomains" "$out"
+assert_lacks "no preload" "preload" "$out"
+assert_has "vhssl" "vhssl  {" "$out"
+assert_has "vhssl key" "keyFile                 $SSL_DEPLOY_DIR/example.com/privkey.pem" "$out"
+assert_has "dotfile block" 'RewriteRule ^/?\.(?!well-known/) - [F,L]' "$out"
+assert_has "acme context" "context /.well-known/acme-challenge/ {" "$out"
+assert_eq "rewrite heredoc terminated" "1" "$(grep -c '^  END_rules$' "$TMP/php.vhconf")"
+assert_eq "extraHeaders heredoc terminated" "1" "$(grep -c '^  END_extraHeaders$' "$TMP/php.vhconf")"
+D_SSL=0; D_WWW=0; D_MODE="static"
+out="$(lib_ols_render_vhconf)"; printf '%s\n' "$out" >"$TMP/static.vhconf"
+assert_true "static vhconf balanced" _ols_braces_balanced "$TMP/static.vhconf"
+assert_lacks "static no scripthandler" "scripthandler" "$out"
+assert_lacks "static no vhssl" "vhssl" "$out"
+assert_lacks "static no https redirect" "https://%{HTTP_HOST}" "$out"
+D_MODE="proxy"; D_PROXY="127.0.0.1:3000"; D_WS_PATH="/socket.io"
+out="$(lib_ols_render_vhconf)"; printf '%s\n' "$out" >"$TMP/proxy.vhconf"
+assert_true "proxy vhconf balanced" _ols_braces_balanced "$TMP/proxy.vhconf"
+assert_has "proxy extprocessor" "extprocessor example_com_proxy {" "$out"
+assert_has "proxy context" "handler                 example_com_proxy" "$out"
+assert_has "proxy static ctx" "context /static/ {" "$out"
+assert_has "websocket" "websocket /socket.io {" "$out"
+D_MODE="wordpress"; D_PHP="8.3"
+out="$(lib_ols_render_vhconf)"; printf '%s\n' "$out" >"$TMP/wp.vhconf"
+assert_true "wp vhconf balanced" _ols_braces_balanced "$TMP/wp.vhconf"
+assert_has "wp cache module" "module cache {" "$out"
+assert_has "wp htaccess" "autoLoadHtaccess        1" "$out"
+lib_ols_render_default_vhconf >"$TMP/default.vhconf"
+assert_true "default vhconf balanced" _ols_braces_balanced "$TMP/default.vhconf"
+lib_ols_render_vhost_block example.com 1 >"$TMP/vhblock.conf"
+assert_true "vhost block balanced" _ols_braces_balanced "$TMP/vhblock.conf"
+assert_has "vhost block root" "vhRoot                  $SITES_ROOT/example.com/" "$(cat "$TMP/vhblock.conf")"
+lib_ssl_hook_render >"$TMP/hook.sh"
+assert_true "deploy hook parses" bash -n "$TMP/hook.sh"
+
+# =============================================================================
+section "state / manifest / cron / files"
+lib_state_init
+assert_true "manifest valid" lib_json_valid "$STATE_DIR/manifest.json"
+lib_manifest_set '.params.timezone' 'Europe/Istanbul'
+assert_eq "manifest get" "Europe/Istanbul" "$(lib_manifest_get '.params.timezone')"
+lib_manifest_set_json '.cloudflare.enabled' true
+assert_eq "manifest json bool" "true" "$(lib_manifest_get '.cloudflare.enabled')"
+assert_true "cf enabled helper" lib_cf_enabled
+lib_domain_state_reset
+D_DOMAIN="example.com"; D_IDENT="example_com"; D_USER="example_com"; D_GROUP="example_com"; D_HOME="$SITES_ROOT/example.com"
+D_MODE="php"; D_PHP="8.3"; D_PHP_CHILDREN=4; D_MEMORY="256M"; D_UPLOAD="64M"; D_WWW=1; D_SSL_WANTED=1; D_STATUS="active"; D_CREATED="2025-01-01T00:00:00Z"
+lib_domain_state_save
+assert_true "domain registered" lib_domain_registered example.com
+lib_json_set "$(lib_domain_json example.com)" '.db = {name:"example_com", user:"example_com"}'
+lib_domain_state_reset
+assert_true "state load" lib_domain_state_load example.com
+assert_eq "state php" "8.3" "$D_PHP"; assert_eq "state www" "1" "$D_WWW"; assert_eq "state ssl" "0" "$D_SSL"
+assert_eq "state db merged" "example_com" "$D_DB_NAME"; assert_eq "state memory" "256M" "$D_MEMORY"
+D_SSL=1; lib_domain_state_save; lib_domain_state_load example.com
+assert_eq "state ssl saved" "1" "$D_SSL"; assert_eq "state db kept after save" "example_com" "$D_DB_NAME"
+assert_eq "domains list" "example.com" "$(lib_domains_list)"
+lib_cron_set healthcheck "15 6 * * * root $BIN_LINK healthcheck"
+assert_true "cron has" lib_cron_has healthcheck
+assert_has "cron shell header" "SHELL=/bin/bash" "$(cat "$CRON_FILE")"
+lib_cron_set healthcheck "30 6 * * * root $BIN_LINK healthcheck"
+assert_eq "cron replaced" "1" "$(grep -c 'server-setup:healthcheck' "$CRON_FILE")"
+assert_has "cron new schedule" "30 6 * * *" "$(cat "$CRON_FILE")"
+lib_cron_set "wpcron:example.com" "*/5 * * * * example_com true"
+lib_cron_remove healthcheck
+assert_false "cron removed" lib_cron_has healthcheck
+assert_true "cron other kept" lib_cron_has "wpcron:example.com"
+lib_backup_schedule "daily 03:00"
+assert_has "schedule daily" "0 3 * * * root $BIN_LINK backup --all" "$(cat "$CRON_FILE")"
+lib_backup_schedule "weekly sun 04:30"
+assert_has "schedule weekly" "30 4 * * 0 root" "$(cat "$CRON_FILE")"
+lib_backup_schedule "hourly"; assert_has "schedule hourly" "7 * * * * root" "$(cat "$CRON_FILE")"
+lib_backup_schedule "15 2 * * *"; assert_has "schedule raw" "15 2 * * * root" "$(cat "$CRON_FILE")"
+assert_false "schedule invalid" bash -c "$(declare -f lib_backup_schedule lib_die lib_log_write lib_mask_secrets lib_rollback_run lib_log_line_no lib_cron_set lib_manifest_set lib_ok); lib_backup_schedule bogus 2>/dev/null"
+printf 'hello\n' | lib_write_file "$TMP/wf.txt"
+assert_eq "write new" 1 "$LIB_FILE_CHANGED"; assert_eq "write content" "hello" "$(cat "$TMP/wf.txt")"
+printf 'hello\n' | lib_write_file "$TMP/wf.txt"
+assert_eq "write unchanged" 0 "$LIB_FILE_CHANGED"
+printf 'world\n' | lib_write_file "$TMP/wf.txt"
+assert_eq "write changed" 1 "$LIB_FILE_CHANGED"; assert_eq "write content 2" "world" "$(cat "$TMP/wf.txt")"
+assert_true "backup archived" bash -c "ls '$STATE_DIR'/archive/configs/*wf.txt* >/dev/null 2>&1"
+OPT_DRY_RUN=1; printf 'dry\n' | lib_write_file "$TMP/wf.txt"; OPT_DRY_RUN=0
+assert_eq "dry-run flagged" 1 "$LIB_FILE_CHANGED"; assert_eq "dry-run untouched" "world" "$(cat "$TMP/wf.txt")"
+printf 'a = 1\n;b = 2\n' >"$TMP/kv.ini"
+lib_set_kv "$TMP/kv.ini" a 5; lib_set_kv "$TMP/kv.ini" b 7; lib_set_kv "$TMP/kv.ini" c 9
+assert_eq "set_kv result" "$(printf 'a = 5\nb = 7\nc = 9')" "$(cat "$TMP/kv.ini")"
+lib_append_line_once "$TMP/kv.ini" "include x"; lib_append_line_once "$TMP/kv.ini" "include x"
+assert_eq "append once" 1 "$(grep -c '^include x$' "$TMP/kv.ini")"
+_ini_set "$TMP/nd.conf" web "bind to" "127.0.0.1"; _ini_set "$TMP/nd.conf" web "bind to" "*"; _ini_set "$TMP/nd.conf" web "allow connections from" "localhost"
+assert_eq "ini set" "$(printf '[web]\n    bind to = *\n    allow connections from = localhost')" "$(cat "$TMP/nd.conf")"
+lib_domain_logrotate_regen
+assert_has "logrotate site path" "$SITES_ROOT/example.com/logs/*.log" "$(cat "$LOGROTATE_SITES_FILE")"
+assert_has "logrotate copytruncate" "copytruncate" "$(cat "$LOGROTATE_SITES_FILE")"
+mkdir -p "$TMP/f2b"; mv_filter_dir="$TMP/f2b"
+lib_domain_fail2ban_filters_write 2>/dev/null || true
+
+# =============================================================================
+section "cloudflare access control"
+printf '# cf\n173.245.48.0/20\n103.21.244.0/22\n2400:cb00::/32\n' >"$CF_IPS_FILE"
+lib_ols_tx_begin; lib_cf_tx_apply 1
+assert_eq "cf useIpInProxyHeader" "2" "$(lib_ols_tx_top_get useIpInProxyHeader)"
+assert_eq "cf allow list" "ALL, 173.245.48.0/20T, 103.21.244.0/22T, 2400:cb00::/32T" "$(lib_ols_tx_block_get accessControl "" allow)"
+lib_cf_tx_apply 0
+assert_eq "cf disabled header" "0" "$(lib_ols_tx_top_get useIpInProxyHeader)"
+assert_eq "cf disabled allow" "ALL" "$(lib_ols_tx_block_get accessControl "" allow)"
+lib_ols_tx_abort
+if command -v python3 >/dev/null 2>&1; then
+  assert_true  "ip in cf range" lib_ip_in_cidr_list 173.245.50.1 "$CF_IPS_FILE"
+  assert_false "ip not in cf range" lib_ip_in_cidr_list 8.8.8.8 "$CF_IPS_FILE"
+  assert_true  "ipv6 in cf range" lib_ip_in_cidr_list 2400:cb00::1 "$CF_IPS_FILE"
+fi
+
+# =============================================================================
+section "add argument parsing"
+lib_domain_parse_add_args Example.COM --www --php 8.3 --memory 512M --upload 128M --email a@b.c
+assert_eq "parse domain lower" "example.com" "$D_DOMAIN"; assert_eq "parse www" 1 "$D_WWW"; assert_eq "parse memory" "512M" "$D_MEMORY"
+assert_eq "parse ident" "example_com" "$D_IDENT"; assert_eq "parse home" "$SITES_ROOT/example.com" "$D_HOME"
+lib_domain_parse_add_args app.example.com --proxy 127.0.0.1:3000 --ws-path /ws --no-ssl
+assert_eq "parse proxy mode" "proxy" "$D_MODE"; assert_eq "parse proxy target" "127.0.0.1:3000" "$D_PROXY"; assert_eq "parse no-ssl" 0 "$D_SSL_WANTED"; assert_eq "parse proxy php cleared" "" "$D_PHP"
+lib_domain_parse_add_args blog.example.com --wordpress --wp-locale tr_TR
+assert_eq "parse wp mode" "wordpress" "$D_MODE"; assert_eq "parse wp db" 1 "$DOM_OPT_WITH_DB"; assert_eq "parse wp locale" "tr_TR" "$DOM_OPT_WP_LOCALE"
+PARSE_FNS="$(declare -f lib_domain_parse_add_args lib_domain_state_reset lib_domain_valid lib_domain_add_usage lib_die lib_log_write lib_mask_secrets lib_rollback_run lib_log_line_no lib_php_valid_version lib_domain_ident lib_domain_home lib_iso_now)"
+assert_false "parse bad memory" bash -c "${PARSE_FNS}; DEFAULT_EMAIL=; PHP_VERSION=8.3; SITES_ROOT=/home; STATE_DIR=/tmp; lib_domain_parse_add_args x.com --memory 256 2>/dev/null"
+assert_false "parse www domain" bash -c "${PARSE_FNS}; DEFAULT_EMAIL=; PHP_VERSION=8.3; SITES_ROOT=/home; STATE_DIR=/tmp; lib_domain_parse_add_args www.x.com 2>/dev/null"
+assert_true  "parse ok in subshell" bash -c "${PARSE_FNS}; DEFAULT_EMAIL=; PHP_VERSION=8.3; SITES_ROOT=/home; STATE_DIR=/tmp; lib_domain_parse_add_args ok.example.com --static 2>/dev/null"
+
+# =============================================================================
+section "config test (structural)"
+lib_ols_tx_begin; lib_ols_tx_vhost_add example.com 1 1; lib_ols_tx_commit
+assert_eq "vhost map http" "example.com, www.example.com" "$(lib_ols_conf_map_get HTTP example.com)"
+assert_false "config test fails on missing vhconf" lib_ols_config_test
+assert_has "config test message" "configFile" "$OLS_TEST_OUTPUT"
+mkdir -p "$LSWS_VHOSTS_DIR/example.com"; cp "$TMP/php.vhconf" "$LSWS_VHOSTS_DIR/example.com/vhconf.conf"
+assert_true "config test passes" lib_ols_config_test
+lib_ols_tx_begin; lib_ols_tx_vhost_remove example.com; lib_ols_tx_commit
+assert_false "vhost removed from conf" lib_ols_conf_block_exists virtualhost example.com
+assert_eq "maps removed" "" "$(lib_ols_conf_map_get HTTPS example.com)"
+
+printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
+if (( FAIL > 0 )); then exit 1; fi
+exit 0
