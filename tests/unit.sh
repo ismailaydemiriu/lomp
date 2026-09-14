@@ -11,7 +11,7 @@ cleanup() { rm -rf "$TMP"; }
 
 # ---- globals normally provided by setup.sh (all paths redirected into TMP) --
 SCRIPT_VERSION="test"
-TIMEZONE="Europe/Istanbul"; ADMIN_PORT="7574"; PHP_VERSION="8.3"; ADMIN_ACCESS="tunnel"; ADMIN_ALLOWED_IP=""; DEFAULT_EMAIL=""; SSH_PORT=""
+TIMEZONE="Europe/Istanbul"; ADMIN_PORT="7080"; PHP_VERSION="8.3"; ADMIN_ACCESS="tunnel"; ADMIN_ALLOWED_IP=""; DEFAULT_EMAIL=""; SSH_PORT=""
 DB_BUFFER_PERCENT=""; REDIS_MAX_PERCENT=""; BACKUP_KEEP="7"; BACKUP_SCHEDULE=""; FAIL2BAN_IGNORE_IP=""
 STATE_DIR="$TMP/state"; SITES_ROOT="$TMP/home"; LSWS_HOME="$TMP/lsws"; LOG_FILE="$TMP/server_setup.log"
 BACKUP_ROOT="$TMP/backups"; ACME_ROOT="$TMP/acme"; SSL_DEPLOY_DIR="$TMP/ssl"
@@ -435,21 +435,21 @@ SYS_IPV6=0; ADMIN_ACCESS="tunnel"
 assert_eq "current bind read" "*:7080" "$(lib_ols_admin_current_bind)"
 assert_false "not tunnel-only yet" lib_ols_admin_tunnel_only
 lib_ols_admin_bind 127.0.0.1
-assert_eq "bind rewritten" "127.0.0.1:7574" "$(lib_ols_admin_current_bind)"
+assert_eq "bind rewritten" "127.0.0.1:7080" "$(lib_ols_admin_current_bind)"
 assert_true  "tunnel-only detected" lib_ols_admin_tunnel_only
-assert_eq "admin URL uses localhost" "http://127.0.0.1:7574" "$(lib_ols_admin_url)"
+assert_eq "admin URL uses localhost" "http://127.0.0.1:7080" "$(lib_ols_admin_url)"
 lib_ols_admin_bind 127.0.0.1
 assert_eq "rebinding is idempotent" 0 "$LIB_FILE_CHANGED"
 lib_ols_admin_bind '*'
-assert_eq "bind back to all" "*:7574" "$(lib_ols_admin_current_bind)"
+assert_eq "bind back to all" "*:7080" "$(lib_ols_admin_current_bind)"
 assert_false "no longer tunnel-only" lib_ols_admin_tunnel_only
 assert_eq "admin conf still balanced" 1 "$( _ols_braces_balanced "$LSWS_ADMIN_CONF" && echo 1 || echo 0)"
 assert_eq "secure flag untouched" "0" "$(_ols_block_key "$LSWS_ADMIN_CONF" listener adminListener secure get)"
 
 SYS_SSH_PORTS="22"; SYS_PUBLIC_IPV4="198.51.100.7"; SUDO_USER="deploy"
-assert_eq "tunnel command (default port)" "ssh -N -L 7574:127.0.0.1:7574 deploy@198.51.100.7" "$(lib_ols_admin_tunnel_cmd)"
+assert_eq "tunnel command (default port)" "ssh -N -L 7080:127.0.0.1:7080 deploy@198.51.100.7" "$(lib_ols_admin_tunnel_cmd)"
 SYS_SSH_PORTS="2222 22"
-assert_eq "tunnel command (custom port)" "ssh -N -L 7574:127.0.0.1:7574 -p 2222 deploy@198.51.100.7" "$(lib_ols_admin_tunnel_cmd)"
+assert_eq "tunnel command (custom port)" "ssh -N -L 7080:127.0.0.1:7080 -p 2222 deploy@198.51.100.7" "$(lib_ols_admin_tunnel_cmd)"
 unset SUDO_USER
 
 SSH_CONNECTION="203.0.113.9 51234 10.0.0.5 22"
