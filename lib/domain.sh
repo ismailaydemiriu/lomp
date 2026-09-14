@@ -347,8 +347,20 @@ lib_domain_dirs_create() {
   lib_mkdir "${D_HOME}/private/tmp" 0700 "${D_USER}:${D_GROUP}"
   lib_mkdir "${D_HOME}/backups" 0700 "${D_USER}:${D_GROUP}"
   lib_mkdir "${D_HOME}/logs" 0750 "root:${D_GROUP}"
-  [[ "$D_MODE" == "proxy" ]] && lib_mkdir "${D_HOME}/app" 0750 "${D_USER}:${D_GROUP}"
-  [[ "$D_MODE" == "wordpress" ]] && lib_mkdir "${OLS_CACHE_DIR}/${D_DOMAIN}" 0750 "${ols_user}:$(lib_ols_group)"
+  if [[ "$D_MODE" == "proxy" ]]; then
+    lib_mkdir "${D_HOME}/app" 0750 "${D_USER}:${D_GROUP}"
+    # every static context in the vhost points at one of these; OpenLiteSpeed rejects the
+    # whole configuration with "path is not accessible" if the directory is missing
+    local p
+    for p in ${D_STATIC_PATHS//,/ }; do
+      [[ "$p" == /*/ ]] || continue
+      lib_mkdir "${D_HOME}/public_html${p}" 0755 "${D_USER}:${D_GROUP}"
+    done
+  fi
+  if [[ "$D_MODE" == "wordpress" ]]; then
+    lib_mkdir "${OLS_CACHE_DIR}/${D_DOMAIN}" 0750 "${ols_user}:$(lib_ols_group)"
+  fi
+  lib_ols_acme_root_ensure
   # OLS worker (nobody) must be able to traverse into public_html
   (( OPT_DRY_RUN )) || setfacl -m "u:${ols_user}:x" "$D_HOME" 2>/dev/null || true
   if [[ ! -e "${D_HOME}/public_html/index.html" && ! -e "${D_HOME}/public_html/index.php" ]] && [[ "$D_MODE" != "proxy" ]]; then

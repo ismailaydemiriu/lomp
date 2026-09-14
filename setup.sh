@@ -38,7 +38,7 @@ FAIL2BAN_IGNORE_IP=""        # extra IPs/CIDRs fail2ban must never ban
 # =============================================================================
 
 # ---- Target versions (informational, shown by --version) --------------------
-readonly TARGET_OLS_VERSION="1.8.x (LiteSpeed official repository)"
+readonly TARGET_OLS_VERSION="latest stable from the LiteSpeed official repository (1.9.x at the time of writing)"
 readonly TARGET_MARIADB_JAMMY="10.6 (Ubuntu 22.04 package)"
 readonly TARGET_MARIADB_NOBLE="10.11 (Ubuntu 24.04 package)"
 

@@ -60,8 +60,16 @@ lib_ols_install() {
   lib_systemctl enable "$OLS_SERVICE" >/dev/null 2>&1 || true
   lib_mkdir "$LSWS_VHOSTS_DIR" 0750 lsadm:lsadm
   lib_mkdir "$OLS_CACHE_DIR" 0750 "$(lib_ols_user):$(lib_ols_group)"
-  lib_mkdir "${OLS_DEFAULT_ROOT}/html" 0755 root:root
+  # owned by the server user: a root-owned docRoot makes OpenLiteSpeed log a uid/gid warning
+  lib_mkdir "${OLS_DEFAULT_ROOT}/html" 0755 "$(lib_ols_user):$(lib_ols_group)"
+  lib_ols_acme_root_ensure
   return 0
+}
+
+# The shared ACME webroot is referenced by every generated vhost, including the catch-all,
+# so it has to exist before any configuration test runs - not only when certbot is set up.
+lib_ols_acme_root_ensure() {
+  lib_mkdir "${ACME_ROOT}/.well-known/acme-challenge" 0755 root:root
 }
 
 # =============================================================================
@@ -976,6 +984,7 @@ lib_ols_configure_server() {
     lib_info "[dry-run] OpenLiteSpeed is not installed yet; server configuration would be generated after installation"
     return 0
   fi
+  lib_ols_acme_root_ensure
   lib_ols_default_cert_ensure
   local pending="$OLS_PENDING_RELOAD"     # e.g. WebAdmin port changed by lib_ols_admin_setup
   lib_ols_change_begin

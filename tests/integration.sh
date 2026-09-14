@@ -21,6 +21,7 @@ SETUP="${ROOT}/setup.sh"
 
 TEST_DOMAIN="${TEST_DOMAIN:-itest-lompstack.example.com}"
 TEST_DOMAIN2="${TEST_DOMAIN2:-itest2-lompstack.example.com}"
+TEST_DOMAIN3="${TEST_DOMAIN3:-itest3-lompstack.example.com}"
 STATE_DIR="/root/.server-setup"
 LSWS_HOME="/usr/local/lsws"
 LOG_FILE="/var/log/server_setup.log"
@@ -236,6 +237,24 @@ check_not "private/ is outside the document root" test "$(http_code "$TEST_DOMAI
 printf 'secret\n' >"/home/${TEST_DOMAIN}/public_html/.env"
 check_not "dotfiles are blocked" test "$(http_code "$TEST_DOMAIN" /.env)" = "200"
 rm -f "/home/${TEST_DOMAIN}/public_html/.env"
+
+# =============================================================================
+step "T06b reverse-proxy site (its static contexts must exist on disk)"
+# =============================================================================
+rc="$(run_setup addproxy add "$TEST_DOMAIN3" --proxy 127.0.0.1:3000 --no-ssl --non-interactive --no-color --yes)"
+check_eq "add --proxy exits 0" 0 "$rc"
+check "OpenLiteSpeed accepts the proxy configuration" "${LSWS_HOME}/bin/openlitespeed" -t
+check "static context directory exists" test -d "/home/${TEST_DOMAIN3}/public_html/static"
+check "assets context directory exists" test -d "/home/${TEST_DOMAIN3}/public_html/assets"
+check "application directory created" test -d "/home/${TEST_DOMAIN3}/app"
+proxy_code="$(http_code "$TEST_DOMAIN3")"
+check "proxy answers 50x while the backend is down" bash -c "[[ '$proxy_code' =~ ^(500|502|503)$ ]]"
+note "proxy returned HTTP ${proxy_code} (nothing is listening on 127.0.0.1:3000, which is expected)"
+check_eq "the PHP site is unaffected" "200" "$(http_code "$TEST_DOMAIN")"
+rc="$(run_setup removeproxy remove "$TEST_DOMAIN3" --yes --no-color)"
+check_eq "proxy site removed" 0 "$rc"
+check_not "proxy files removed" test -e "/home/${TEST_DOMAIN3}"
+check "OpenLiteSpeed still healthy after removal" "${LSWS_HOME}/bin/openlitespeed" -t
 
 # =============================================================================
 step "T07  database for the site"

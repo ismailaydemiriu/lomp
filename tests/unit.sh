@@ -568,6 +568,47 @@ done
 lib_domain_state_reset
 
 # =============================================================================
+section "every configured path is created (regression: path is not accessible)"
+# OpenLiteSpeed refuses the whole configuration when a context points at a directory that
+# does not exist. This walks the rendered configuration, resolves the OLS variables and
+# asserts the installer really creates every path it references.
+ACME_ROOT="$TMP/acme"; OLS_CACHE_DIR="$TMP/cachedata"; OLS_DEFAULT_ROOT="$TMP/lsws/_default"
+config_paths() { awk '$1=="location" || $1=="docRoot" || $1=="storagePath" {print $2}'; }
+
+lib_ols_acme_root_ensure
+lib_mkdir "${OLS_DEFAULT_ROOT}/html" 0755
+missing=""
+while read -r p; do
+  [[ -n "$p" ]] || continue
+  p="${p//'$VH_ROOT'/$OLS_DEFAULT_ROOT}"
+  [[ -e "$p" ]] || missing+="${p} "
+done < <(lib_ols_render_default_vhconf | config_paths)
+assert_eq "catch-all vhost: every path exists" "" "$missing"
+
+for _mode in php static proxy wordpress; do
+  lib_domain_state_reset
+  D_DOMAIN="paths-${_mode}.example.com"; D_IDENT="paths_${_mode}"
+  D_USER="paths_user"; D_GROUP="paths_user"   # chown is stubbed out in this suite
+  D_HOME="$SITES_ROOT/${D_DOMAIN}"; D_MODE="$_mode"
+  [[ "$_mode" == "proxy" ]] && D_PROXY="127.0.0.1:3000"
+  [[ "$_mode" == "php" || "$_mode" == "wordpress" ]] && { D_PHP="8.3"; D_MEMORY="256M"; D_UPLOAD="64M"; D_PHP_CHILDREN=4; }
+  lib_domain_dirs_create >/dev/null 2>&1
+  missing=""
+  while read -r p; do
+    [[ -n "$p" ]] || continue
+    p="${p//'$VH_ROOT'/$D_HOME}"
+    p="${p//'$VH_NAME'/$D_DOMAIN}"
+    [[ -e "$p" ]] || missing+="${p} "
+  done < <(lib_ols_render_vhconf | config_paths)
+  assert_eq "${_mode} site: every path exists" "" "$missing"
+done
+assert_true "proxy static dir created" test -d "${SITES_ROOT}/paths-proxy.example.com/public_html/static"
+assert_true "proxy app dir created" test -d "${SITES_ROOT}/paths-proxy.example.com/app"
+assert_true "wordpress cache dir created" test -d "${OLS_CACHE_DIR}/paths-wordpress.example.com"
+assert_true "acme webroot created" test -d "${ACME_ROOT}/.well-known/acme-challenge"
+lib_domain_state_reset
+
+# =============================================================================
 section "shell pitfalls (static)"
 # A group that ends in "[[ ... ]] && cmd" exits 1 when the test is false. Feeding such a
 # group into a pipeline makes pipefail kill the whole script. This regression guard exists
