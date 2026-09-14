@@ -140,22 +140,22 @@ _menu_ask() {   # _menu_ask VAR "prompt" ["default"]
   _out="${ans:-$def}"
 }
 
+# One compact line of context, so the whole menu still fits an 80x24 terminal.
 _menu_header() {
-  local sites=0 d=""
+  local sites=0 d="" svc="" label=""
   while read -r d; do [[ -n "$d" ]] && sites=$((sites + 1)); done < <(lib_domains_list)
-  printf '\n'
-  _menu_rule
-  printf ' %s%slompstack%s  %s   %s sites\n' "$C_BLD" "$C_CYN" "$C_RST" "$(hostname -s 2>/dev/null || hostname)" "$sites"
-  printf ' '
-  local svc="" label=""
+  printf '\n %s%slompstack%s  %s  %s site(s) ' "$C_BLD" "$C_CYN" "$C_RST" "$(hostname -s 2>/dev/null || hostname)" "$sites"
   for svc in lsws:web mariadb:db redis-server:cache fail2ban:f2b; do
     label="${svc#*:}"; svc="${svc%%:*}"
-    if lib_service_active "$svc"; then printf ' %s%s up%s ' "$C_GRN" "$label" "$C_RST"
-    else printf ' %s%s DOWN%s ' "$C_RED" "$label" "$C_RST"; fi
+    if lib_service_active "$svc"; then printf ' %s%s:up%s' "$C_GRN" "$label" "$C_RST"
+    else printf ' %s%s:DOWN%s' "$C_RED" "$label" "$C_RST"; fi
   done
   printf '\n'
   _menu_rule
 }
+
+_menu_group() { printf ' %s%s%s\n' "$C_BLD" "$1" "$C_RST"; }
+_menu_item()  { printf '  %s%2s%s) %s\n' "$C_CYN" "$1" "$C_RST" "$2"; }
 
 # =============================================================================
 #  Menu shown before the server is provisioned
@@ -163,15 +163,13 @@ _menu_header() {
 _menu_not_installed() {
   local choice="" email=""
   while true; do
-    printf '\n'
+    printf '\n %s%slompstack%s  this server is not provisioned yet\n' "$C_BLD" "$C_CYN" "$C_RST"
     _menu_rule
-    printf ' %s%slompstack%s  this server is not provisioned yet\n' "$C_BLD" "$C_CYN" "$C_RST"
-    _menu_rule
-    printf '  1) Install the server (OpenLiteSpeed, PHP, MariaDB, Redis, firewall)\n'
-    printf '  2) Show what the installation would do, changing nothing (dry run)\n'
-    printf '  3) Command reference\n'
-    printf '  0) Exit\n\n'
-    printf '%sChoice: %s' "$C_BLD" "$C_RST"
+    _menu_item 1 "Install the server (OpenLiteSpeed, PHP, MariaDB, Redis, firewall)"
+    _menu_item 2 "Show what the installation would do, changing nothing (dry run)"
+    _menu_item 3 "Command reference"
+    _menu_item 0 "Exit"
+    printf '\n%sChoice: %s' "$C_BLD" "$C_RST"
     read -r choice </dev/tty || return 0
     case "$choice" in
       1) _menu_ask email "E-mail for Let's Encrypt and alerts" "$DEFAULT_EMAIL"
@@ -199,17 +197,28 @@ lib_menu_main() {
   local choice="" domain="" answer=""
   while true; do
     _menu_header
-    printf '  %sSites%s\n' "$C_BLD" "$C_RST"
-    printf '   1) List sites          2) Add a site        3) Site credentials\n'
-    printf '   4) Site logs           5) Create database   6) Remove a site\n'
-    printf '  %sServer%s\n' "$C_BLD" "$C_RST"
-    printf '   7) Status              8) Health check      9) Open WebAdmin panel\n'
-    printf '  10) Renew certificates 11) Back up sites    12) Restore a site\n'
-    printf '  %sMaintenance%s\n' "$C_BLD" "$C_RST"
-    printf '  13) Update packages    14) Update lompstack 15) Re-tune to hardware\n'
-    printf '  16) Notifications      17) Command reference\n'
-    printf '   0) Exit\n\n'
-    printf '%sChoice: %s' "$C_BLD" "$C_RST"
+    _menu_group "SITES"
+    _menu_item  1 "List sites"
+    _menu_item  2 "Add a site"
+    _menu_item  3 "Site credentials"
+    _menu_item  4 "Site logs"
+    _menu_item  5 "Create database"
+    _menu_item  6 "Remove a site"
+    _menu_group "SERVER"
+    _menu_item  7 "Status"
+    _menu_item  8 "Health check"
+    _menu_item  9 "Open WebAdmin panel"
+    _menu_item 10 "Renew certificates"
+    _menu_item 11 "Back up sites"
+    _menu_item 12 "Restore a site"
+    _menu_group "MAINTENANCE"
+    _menu_item 13 "Update packages"
+    _menu_item 14 "Update lompstack"
+    _menu_item 15 "Re-tune to hardware"
+    _menu_item 16 "Notifications"
+    _menu_item 17 "Command reference"
+    _menu_item  0 "Exit"
+    printf '\n%sChoice: %s' "$C_BLD" "$C_RST"
     read -r choice </dev/tty || return 0
 
     case "$choice" in
