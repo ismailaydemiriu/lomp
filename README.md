@@ -99,9 +99,16 @@ sudo ./setup.sh install --ssh-port 2222
 ### 5. Check the result
 
 ```bash
+sudo lomp            # interactive menu
 sudo lomp status     # services, versions, resources, sites
 sudo lomp doctor     # deep health check, exits non-zero if something is broken
 ```
+
+Running `lomp` with no arguments on a terminal opens a menu covering the everyday
+operations: add or remove a site, credentials, logs, backups, the panel, updates. Every
+entry just runs the corresponding command, so nothing is hidden from you. Piped or with
+`--non-interactive` it prints the command reference instead, so scripts and cron are
+unaffected.
 
 After installation the script is available system-wide as `lomp` (or the longer
 `lompstack`), so you do not need to stay in the clone directory.
@@ -392,6 +399,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
 | `lib/cloudflare.sh` | Trusted proxy ranges, real client IP, API token, edge bans |
 | `lib/backup.sh` | Backup, restore, retention, encryption, remotes, scheduling |
 | `lib/monitor.sh` | `status`, `doctor`, health check, notifications |
+| `lib/menu.sh` | Command reference and the interactive menu |
 
 ---
 

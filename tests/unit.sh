@@ -23,7 +23,7 @@ INSTALL_DIR="$TMP/install"; BIN_LINK="$TMP/lompstack"; BIN_SHORT="$TMP/lomp"; LO
 OPT_YES=1 OPT_DRY_RUN=0 OPT_QUIET=1 OPT_VERBOSE=0 OPT_NO_COLOR=1 OPT_JSON=0 OPT_NON_INTERACTIVE=1
 SCRIPT_PATH="$ROOT/setup.sh"; SCRIPT_DIR="$ROOT"
 export TMPDIR="$TMP"
-for m in common system ols php db ssl domain cloudflare backup monitor install; do
+for m in common system ols php db ssl domain cloudflare backup monitor install menu; do
   # shellcheck source=/dev/null
   source "$ROOT/lib/$m.sh"
 done
@@ -684,6 +684,19 @@ printf 'if then fi\n' >"$SRC_BAD/lib/broken.sh"
 assert_eq "a checkout that does not parse is refused" 1 "$(run_isolated lib_install_self "$SRC_BAD")"
 assert_has "the good installation survived" "marker-v2" "$(cat "${INSTALL_DIR}/setup.sh")"
 assert_false "the broken module was not installed" test -f "${INSTALL_DIR}/lib/broken.sh"
+
+# =============================================================================
+section "interactive menu"
+# The menu must never hijack a non-interactive run: cron, pipes and --non-interactive
+# have to keep getting the ordinary help output instead of a prompt nobody can answer.
+menu_out="$(lib_menu_main 2>&1)"
+assert_has "no terminal falls back to help" "USAGE" "$menu_out"
+assert_has "help mentions the menu" "Interactive menu" "$menu_out"
+assert_eq "menu exits 0 without a terminal" 0 "$(run_isolated lib_menu_main)"
+OPT_NON_INTERACTIVE=1
+assert_eq "menu exits 0 when non-interactive" 0 "$(run_isolated lib_menu_main)"
+OPT_NON_INTERACTIVE=1   # the suite runs non-interactive throughout
+assert_has "command name prefers the short alias" "lomp" "$(_menu_cmd_name)"
 
 # =============================================================================
 section "shell pitfalls (static)"

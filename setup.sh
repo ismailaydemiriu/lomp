@@ -88,96 +88,11 @@ _ss_load_module() {
   # shellcheck source=/dev/null
   source "$file"
 }
-for _m in common system ols php db ssl domain cloudflare backup monitor install; do
+for _m in common system ols php db ssl domain cloudflare backup monitor install menu; do
   _ss_load_module "$_m"
 done
 unset _m
 
-# =============================================================================
-#  Help
-# =============================================================================
-lib_usage() {
-  cat <<'EOF'
-setup.sh - production VPS provisioning for OpenLiteSpeed + LSPHP + MariaDB + Redis
-
-USAGE
-  sudo ./setup.sh <command> [arguments] [global flags]
-  sudo lomp <command>                   # after install: short name, works anywhere
-  sudo ./setup.sh domain.com            # shorthand for: add domain.com
-
-COMMANDS
-  install [opts]                Provision the server (idempotent, re-run safe)
-      --php 8.3                 Default LSPHP version
-      --timezone Europe/Istanbul
-      --admin-port 7080         WebAdmin port (OpenLiteSpeed default; any free port works)
-      --admin-access MODE       WebAdmin reachability: tunnel (default) | ip | open
-      --admin-ip 1.2.3.4        YOUR address (not the server's); implies --admin-access ip
-                                Use "auto" to take it from the current SSH session
-      --email admin@x.com       Default e-mail (Let's Encrypt / notifications)
-      --ssh-port 2222           Change SSH port (UFW is opened first)
-      --non-interactive         Never ask questions, use defaults
-      --with-node [--node 20]   Node.js LTS (NodeSource) + PM2 + PM2 logrotate
-      --with-python             python3-venv + pip (venv-per-app policy)
-      --with-netdata            Netdata bound to localhost (+ admin IP)
-      --cloudflare              Trust Cloudflare proxies (real client IP)
-      --cf-api-token TOKEN      Store Cloudflare API token (DNS-01 / fail2ban)
-      --mariadb 11.4            Install MariaDB from the official repository
-      --redis-persist           Enable Redis persistence (default: cache only)
-      --backup-schedule "daily 03:00"
-      --auto-reboot             Allow unattended-upgrades to reboot
-      --skip-upgrade            Skip apt upgrade during install
-  add <domain> [opts]           Create a site (user, dirs, vhost, SSL)
-      --email a@b.c  --no-ssl  --www  --www-primary  --php 8.3
-      --memory 256M  --upload 64M  --php-children N
-      --proxy 127.0.0.1:3000  --static  --wordpress  --cloudflare
-      --wildcard  --staging  --hsts-preload
-      --wp-title "Title" --wp-admin admin --wp-email a@b.c --wp-locale en_US
-  db <domain>                   Create (or show) the MariaDB database for a site
-  remove <domain> [opts]        Remove a site  (--keep-db --keep-files --keep-ssl)
-  list                          Table of sites (--json)
-  status                        Services, versions, resources, sites (--json)
-  doctor                        Deep health check (--json, --quiet)
-  credentials <domain>|--all    Show stored credentials (never logged)
-  optimize                      Re-measure the system and re-tune (shows a diff)
-  backup <domain>|--all [opts]  --remote --encrypt --keep N --dry-run
-         --configure-remote     Configure rsync/rclone destination
-  restore <domain> --file <archive>   [--no-db] [--no-files]
-  renew-ssl [domain] [opts]     --force --all --staging --wildcard
-  update                        Safe package update + ordered service restarts
-  self-update [--from DIR]      Pull the latest lompstack and refresh the installed
-                                copy. Changes nothing on the server itself.
-  update-cf-ips                 Refresh Cloudflare IP ranges
-  notify [opts]                 --email a@b.c [--smtp-host H --smtp-port P
-                                --smtp-user U --smtp-pass P --smtp-from F]
-                                --telegram-token T --telegram-chat ID
-                                --webhook URL   --ssh-login on|off  --test  --show
-  panel [open|status|close]     Open the WebAdmin panel. Bare "panel" opens the port
-                                for the address of your current SSH session for 60
-                                minutes and prints the URL, user and password; it
-                                closes again on its own. Options: --ip auto|IP|any,
-                                --minutes N (0 = stay open). "status" shows the
-                                current state and the SSH tunnel command, "close"
-                                shuts it immediately. Built for dynamic IPs.
-  logs <domain> [--access|--error] [-n LINES]
-  help                          This text
-
-GLOBAL FLAGS
-  --yes / -y        Assume yes for confirmations
-  --dry-run         Show what would change; touch nothing
-  --quiet / -q      Only warnings and errors
-  --verbose / -v    Show command output
-  --no-color        Disable colours
-  --json            Machine-readable output (status, doctor, list)
-  --non-interactive Never prompt (defaults are used)
-  --version         Show script and target component versions
-
-PATHS
-  Sites          /home/<domain>/{public_html,logs,private,backups}
-  State          /root/.server-setup/   (0700; credentials live here)
-  Log            /var/log/server_setup.log
-  Backups        /var/backups/server-setup/
-EOF
-}
 
 lib_version() {
   cat <<EOF
@@ -217,7 +132,12 @@ _ss_parse_globals "$@"
 #  Dispatcher
 # =============================================================================
 main() {
-  local cmd="${ARGS[0]:-help}"
+  local cmd="${ARGS[0]:-}"
+  # a bare "lomp" on a terminal opens the menu; piped or non-interactive it prints help,
+  # so scripts and cron keep getting predictable output
+  if [[ -z "$cmd" ]]; then
+    if [[ -t 0 && -t 1 ]] && (( ! OPT_NON_INTERACTIVE )); then cmd="menu"; else cmd="help"; fi
+  fi
   local -a rest=()
   if ((${#ARGS[@]} > 1)); then rest=("${ARGS[@]:1}"); fi
 
@@ -239,7 +159,7 @@ main() {
 
   # read-only commands (and "notify --send", used by hooks/PAM) do not take the lock
   case "$cmd" in
-    list|status|doctor|credentials|logs) ;;
+    list|status|doctor|credentials|logs|menu) ;;
     panel) if [[ "${rest[0]:-open}" != "status" ]]; then lib_lock; fi ;;
     notify) [[ " ${rest[*]:-} " == *" --send "* ]] || lib_lock ;;
     *) lib_lock ;;
@@ -266,6 +186,7 @@ main() {
     update-cf-ips)  lib_cf_update_main "${rest[@]}" || exit 1 ;;
     notify)         lib_notify_main "${rest[@]}" ;;
     panel)          lib_panel_main "${rest[@]}" ;;
+    menu)           lib_menu_main "${rest[@]}" ;;
     self-update)    lib_selfupdate_main "${rest[@]}" ;;
     logs)           lib_domain_logs_main "${rest[@]}" ;;
     healthcheck)    lib_healthcheck_main "${rest[@]}" ;;   # internal (cron)
