@@ -10,7 +10,7 @@ INS_MARIADB="" INS_REDIS_PERSIST=0 INS_AUTO_REBOOT=0 INS_SKIP_UPGRADE=0 INS_BACK
 #  Arguments
 # =============================================================================
 lib_install_parse_args() {
-  local a=""
+  local a="" _p=""
   while (($# > 0)); do
     a="$1"; shift
     case "$a" in
@@ -18,6 +18,7 @@ lib_install_parse_args() {
       --timezone)        TIMEZONE="${1:-}"; shift ;;
       --admin-ip)        ADMIN_ALLOWED_IP="${1:-}"; ADMIN_ACCESS="ip"; shift ;;
       --admin-access)    ADMIN_ACCESS="${1:-}"; shift ;;
+      --admin-port)      ADMIN_PORT="${1:-}"; shift ;;
       --email)           DEFAULT_EMAIL="${1:-}"; shift ;;
       --ssh-port)        SSH_PORT="${1:-}"; shift ;;
       --with-node)       INS_WITH_NODE=1 ;;
@@ -41,7 +42,17 @@ lib_install_parse_args() {
     esac
   done
   lib_php_valid_version "$PHP_VERSION" || lib_die "Invalid --php '${PHP_VERSION}'" "expected e.g. 8.3" "--php 8.3"
-  [[ "$ADMIN_PORT" =~ ^[0-9]{2,5}$ ]] || lib_die "Invalid ADMIN_PORT '${ADMIN_PORT}'" "" "set a numeric port"
+  [[ "$ADMIN_PORT" =~ ^[0-9]{2,5}$ ]] && (( ADMIN_PORT >= 1024 && ADMIN_PORT <= 65535 )) \
+    || lib_die "Invalid --admin-port '${ADMIN_PORT}'" "expected a port between 1024 and 65535" "--admin-port 7574"
+  # unquoted on purpose: SYS_SSH_PORTS can hold several ports. An "if" body, not a
+  # trailing "&&", so the loop cannot end on a false test and return 1 under errexit.
+  for _p in 80 443 3306 6379 ${SYS_SSH_PORTS:-22}; do
+    if [[ "$ADMIN_PORT" == "$_p" ]]; then
+      lib_die "--admin-port ${ADMIN_PORT} is already used by another service" \
+        "the WebAdmin panel cannot share a port with the web server, database, cache or SSH" \
+        "pick a free port, e.g. --admin-port 7574"
+    fi
+  done
   [[ -z "$SSH_PORT" || ( "$SSH_PORT" =~ ^[0-9]{1,5}$ && "$SSH_PORT" -ge 1 && "$SSH_PORT" -le 65535 ) ]] || lib_die "Invalid --ssh-port '${SSH_PORT}'" "" "--ssh-port 2222"
   case "$ADMIN_ACCESS" in
     tunnel|ip|open) ;;
@@ -232,6 +243,12 @@ EOF
 lib_install_ufw() {
   local p=""
   lib_apt_install ufw
+  # a previous run may have opened a different WebAdmin port; that rule has to go
+  local old_port=""; old_port="$(lib_manifest_get '.params.admin_port')"
+  if [[ -n "$old_port" && "$old_port" != "$ADMIN_PORT" ]]; then
+    lib_info "WebAdmin port changed ${old_port} -> ${ADMIN_PORT}; removing the old firewall rule"
+    lib_ufw_delete_port_rules "$old_port"
+  fi
   # never "ufw reset": existing rules are kept, ours are added idempotently
   lib_ufw_rule default deny incoming
   lib_ufw_rule default allow outgoing
@@ -871,6 +888,7 @@ _opt_diff() {   # title file  (new content on stdin) -> prints diff, returns 0 w
 lib_optimize_main() {
   lib_require_tools
   lib_require_installed
+  lib_ols_service_repair
   lib_system_analyze
   lib_system_report
   lib_system_profile

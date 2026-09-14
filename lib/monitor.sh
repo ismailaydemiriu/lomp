@@ -276,7 +276,13 @@ _doc_add() {   # STATUS name detail
 _doc_check_services() {
   local svc=""
   if lib_ols_is_installed; then
-    lib_ols_running && _doc_add OK "openlitespeed" "running $(lib_ols_version)" || _doc_add FAIL "openlitespeed" "service lsws is not active (systemctl status lsws)"
+    if lib_ols_running; then
+      _doc_add OK "openlitespeed" "running $(lib_ols_version)"
+    elif lib_port_listening 80; then
+      _doc_add FAIL "openlitespeed" "serving, but systemd lost track of the unit; nothing supervises it (fix: lompstack optimize, or systemctl stop lsws && systemctl start lsws)"
+    else
+      _doc_add FAIL "openlitespeed" "service lsws is not active (systemctl status lsws)"
+    fi
     if lib_ols_config_test; then _doc_add OK "ols config test" "openlitespeed -t passed"
     else _doc_add FAIL "ols config test" "${OLS_TEST_OUTPUT:0:160}"; fi
   else

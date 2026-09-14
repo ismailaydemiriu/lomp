@@ -396,11 +396,40 @@ lib_ols_config_test() {
 
 lib_ols_running() { lib_service_active "$OLS_SERVICE"; }
 
+# "systemctl reload lsws" runs ExecReload, which is "lswsctrl restart": a graceful restart
+# that replaces the main process. systemd goes on tracking the old PID, sees it exit and
+# marks the unit inactive while OpenLiteSpeed keeps serving. The unit then supervises
+# nothing, "systemctl status" lies, and a later stop leaves orphans. A restart keeps
+# systemd's view of the service correct, and its ExecStop already drains connections.
 lib_ols_reload() {
-  if lib_ols_running; then lib_systemctl reload "$OLS_SERVICE"; else lib_systemctl start "$OLS_SERVICE"; fi
+  if lib_ols_running; then lib_systemctl restart "$OLS_SERVICE"; else lib_systemctl start "$OLS_SERVICE"; fi
 }
 
 lib_ols_restart() { lib_systemctl restart "$OLS_SERVICE"; }
+
+# The server answers but systemd does not own it any more (see above, or somebody ran
+# lswsctrl by hand). Put the two back in sync.
+lib_ols_service_desynced() {
+  lib_ols_is_installed || return 1
+  lib_service_active "$OLS_SERVICE" && return 1
+  lib_port_listening 80
+}
+
+lib_ols_service_repair() {
+  (( OPT_DRY_RUN )) && return 0
+  lib_ols_service_desynced || return 0
+  lib_warn "OpenLiteSpeed is serving but systemd has lost track of the unit; re-attaching it"
+  if [[ -x "${LSWS_HOME}/bin/lswsctrl" ]]; then lib_run "${LSWS_HOME}/bin/lswsctrl" stop || true; fi
+  lib_systemctl stop "$OLS_SERVICE" || true
+  sleep 1
+  lib_systemctl start "$OLS_SERVICE" || true
+  if lib_ols_wait_ready 40 && lib_service_active "$OLS_SERVICE"; then
+    lib_ok "OpenLiteSpeed is back under systemd control"
+  else
+    lib_warn "OpenLiteSpeed did not re-attach cleanly; check: systemctl status lsws"
+  fi
+  return 0
+}
 
 # Wait until the service is active, is listening on port 80 and answers an HTTP request.
 lib_ols_wait_ready() {
@@ -985,6 +1014,7 @@ lib_ols_configure_server() {
     lib_info "[dry-run] OpenLiteSpeed is not installed yet; server configuration would be generated after installation"
     return 0
   fi
+  lib_ols_service_repair
   lib_ols_acme_root_ensure
   lib_ols_default_cert_ensure
   # e.g. the WebAdmin port was just changed by lib_ols_admin_setup

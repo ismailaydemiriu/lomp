@@ -114,10 +114,10 @@ URL together with the user name and password. It closes again on its own.
 
 If you would rather not open any port at all, `sudo lompstack panel status` prints an SSH
 tunnel command to run on **your own computer**, after which the panel is at
-`https://127.0.0.1:7080`:
+`https://127.0.0.1:7574`:
 
 ```bash
-ssh -N -L 7080:127.0.0.1:7080 root@YOUR_SERVER_IP
+ssh -N -L 7574:127.0.0.1:7574 root@YOUR_SERVER_IP
 ```
 
 Credentials live in `/root/.server-setup/` with mode 0600 and are never written to the log.
@@ -183,7 +183,7 @@ Global flags work everywhere: `--yes`, `--dry-run`, `--quiet`, `--verbose`, `--n
 
 ## WebAdmin access
 
-The OpenLiteSpeed panel is a login form on port 7080. Leaving it open to the internet is an
+The OpenLiteSpeed panel is a login form, served on port 7574 (the stock 7080 is scanned constantly). Leaving it open to the internet is an
 invitation, and pinning it to one IP address does not work for the many administrators whose
 home connection gets a new address every day. So there are three modes, and the safe one is
 the default.

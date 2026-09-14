@@ -18,7 +18,7 @@ readonly SCRIPT_VERSION="1.0.0"
 #  USER CONFIGURATION - adjust to taste (command-line flags override these)
 # =============================================================================
 TIMEZONE="Europe/Istanbul"
-ADMIN_PORT="7080"            # OpenLiteSpeed WebAdmin port
+ADMIN_PORT="7574"           # OpenLiteSpeed WebAdmin port (7080 is the well-known default and is scanned)
 PHP_VERSION="8.3"            # default LSPHP version (e.g. 8.2, 8.3, 8.4)
 ADMIN_ACCESS="tunnel"        # how the WebAdmin panel is reachable:
                              #   tunnel = closed to the internet, use an SSH tunnel (safest,
@@ -107,6 +107,7 @@ COMMANDS
   install [opts]                Provision the server (idempotent, re-run safe)
       --php 8.3                 Default LSPHP version
       --timezone Europe/Istanbul
+      --admin-port 7574         WebAdmin port (default 7574; 7080 is scanned constantly)
       --admin-access MODE       WebAdmin reachability: tunnel (default) | ip | open
       --admin-ip 1.2.3.4        YOUR address (not the server's); implies --admin-access ip
                                 Use "auto" to take it from the current SSH session
