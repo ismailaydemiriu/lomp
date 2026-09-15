@@ -317,6 +317,18 @@ _doc_check_services() {
   else
     _doc_add OK "webadmin exposure" "restricted (${admin_rules} firewall rule(s) for port ${ADMIN_PORT})"
   fi
+  # Running now is not the same as coming back after a reboot. Every "systemctl enable" in
+  # this tool is written "|| true", so a failure there is invisible - and on a real install
+  # "systemctl enable lsws" did fail, which would have left the server with no web server
+  # after the next boot and nothing anywhere saying so.
+  for svc in "$OLS_SERVICE" mariadb "$REDIS_SERVICE" fail2ban ufw; do
+    lib_service_exists "$svc" || continue
+    if lib_service_enabled "$svc"; then
+      _doc_add OK "${svc} at boot" "enabled"
+    else
+      _doc_add FAIL "${svc} at boot" "not enabled: it will NOT start after a reboot (systemctl enable ${svc})"
+    fi
+  done
   for svc in unattended-upgrades; do
     if [[ "$(apt-config dump 2>/dev/null | awk -F'"' '/^APT::Periodic::Unattended-Upgrade /{print $2}')" == "1" ]]; then _doc_add OK "$svc" "enabled (security updates)"; else _doc_add WARN "$svc" "not enabled"; fi
   done

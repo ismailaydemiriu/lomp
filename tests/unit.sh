@@ -970,6 +970,41 @@ assert_eq "no piped group ends in a conditional" "" "$pitfalls"
 # "|| true". This shipped: "sshd -T" exits 255 on stock Ubuntu 24.04.
 procsub="$(grep -nE '< <\(.*\|' "$ROOT/setup.sh" "$ROOT"/lib/*.sh | grep -v '|| true)$' || true)"
 assert_eq "a piped process substitution ends in || true" "" "$procsub"
+# Sibling of the guard above, on the other side of the substitution. "var=$( (( x )) && cmd )"
+# exits 1 whenever the test is false: the substitution's last command failed, and a plain
+# assignment adopts its status, so errexit kills the run. Harmless in an ARGUMENT position
+# (lib_ok "... $( (( x )) && printf ... )") because there the status is discarded - so only
+# assignments are flagged, and only when the substitution carries no || fallback.
+# This shipped in lib_domain_summary and killed "add" after the site was already live.
+condsub="$(for f in "$ROOT/setup.sh" "$ROOT"/lib/*.sh "$ROOT"/tests/*.sh; do
+  awk -v F="$f" '
+    /^[[:space:]]*#/ { next }
+    # The substitution must belong to the assignment VALUE: either right after "=", or
+    # inside its opening double quote. Without that, "VAR=1 some-command $( (( x )) && ... )"
+    # matches too - and that is an environment prefix, not an assignment, so the status
+    # belongs to the command and is never adopted.
+    match($0, /[A-Za-z_][A-Za-z0-9_]*[+]?=("[^"]*)?\$\([[:space:]]*(\(\(|\[\[)/) {
+      rest = substr($0, RSTART)
+      if (index(rest, "&&") > 0 && index(rest, "||") == 0) printf "%s:%d: %s\n", F, NR, $0
+    }
+  ' "$f"
+done)"
+assert_eq "no assignment takes its status from a conditional substitution" "" "$condsub"
+
+# ...and the function that had it must survive every combination for real
+lib_domain_state_reset
+D_DOMAIN="sum.example.com"; D_MODE="php"; D_HOME="${SITES_ROOT}/sum.example.com"
+D_USER="sum_example_com"; D_GROUP="sum_example_com"; D_PHP="8.3"
+D_SSL=0; D_SSL_WANTED=0
+assert_eq "summary exits 0 when SSL was never wanted"        0 "$(run_isolated lib_domain_summary)"
+D_SSL_WANTED=1
+assert_eq "summary exits 0 when SSL is wanted but not active" 0 "$(run_isolated lib_domain_summary)"
+assert_has "and it tells you how to get one" "renew-ssl" "$(lib_domain_summary 2>&1)"
+D_SSL=1
+assert_eq "summary exits 0 when SSL is active"                0 "$(run_isolated lib_domain_summary)"
+D_WWW=1; D_WP=1; D_DB_NAME="sum_db"
+assert_eq "summary exits 0 for a www WordPress site"         0 "$(run_isolated lib_domain_summary)"
+lib_domain_state_reset
 
 # =============================================================================
 section "SSH port detection (regression: a failing probe printed a fatal error)"
