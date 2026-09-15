@@ -1391,6 +1391,10 @@ lib_domain_state_load app.example.com; lib_domain_state_save
 assert_true "a domain.json save keeps .app" lib_app_state_load app.example.com
 assert_false "a site without .app runs none" lib_app_state_load nothing-here.example.com
 D_HOME="$SITES_ROOT/app.example.com"   # Git Bash rewrites paths passed to jq.exe; keep ours
+# no site users here: run "as the site user" in a subshell in that directory instead
+_orig_as="$(declare -f _app_as)"
+assert_has "_app_as starts from an empty environment" "env -i" "$_orig_as"
+_app_as() { local dir="$1"; shift; ( cd "$dir" && "$@" ); }
 
 APP_SCRIPT=""; APP_START="npm start"
 printf '{"scripts":{"start":"node dist/server.js --color"}}' >"$D_HOME/app/package.json"
@@ -1457,11 +1461,9 @@ eval "$_orig_holder"
 
 # apply: files as the site user, the unit, then the service - with systemd and pm2 stubbed
 APP_UNIT_DIR="$TMP/systemd"; mkdir -p "$APP_UNIT_DIR"
-_orig_as="$(declare -f _app_as)"; _orig_sc="$(declare -f lib_systemctl)"; _orig_act="$(declare -f lib_service_active)"
+_orig_sc="$(declare -f lib_systemctl)"; _orig_act="$(declare -f lib_service_active)"
 _orig_en="$(declare -f lib_service_enabled)"; _orig_wait="$(declare -f lib_app_wait_port)"; _orig_lock="$(declare -f _app_site_lock)"
 _orig_tools="$(declare -f lib_require_tools)"
-assert_has "_app_as starts from an empty environment" "env -i" "$_orig_as"
-_app_as() { local dir="$1"; shift; ( cd "$dir" && "$@" ); }
 _sc_calls=""; lib_systemctl() { _sc_calls+="$* "; return 0; }
 lib_service_active() { return 1; }; lib_service_enabled() { return 1; }
 lib_app_wait_port() { return 0; }; _app_site_lock() { return 0; }; lib_require_tools() { return 0; }
@@ -1516,6 +1518,16 @@ assert_eq    "arguments that look like options stay arguments" '{"script":"npm",
 assert_eq "runuser only through _app_as" "1" "$(grep -c 'runuser' "$ROOT/lib/app.sh")"
 assert_eq "pm2 output that carries the environment never goes to the log" "" \
   "$(grep -nE 'lib_run[^|;]*pm2[^|;]*(jlist|env|show|describe)' "$ROOT"/lib/*.sh || true)"
+# /proc/<pid>/cmdline is readable by every user: another site must never see these values
+assert_lacks "application variables never reach jq's command line" '--argjson env' "$(declare -f lib_app_render_ecosystem)"
+assert_eq "root never reads the app directory with jq (the site user controls it)" "" \
+  "$(grep -nE 'jq[^|]*\$\{?D_HOME\}?/app' "$ROOT/lib/app.sh" || true)"
+_orig_write="$(declare -f _app_write_as_user)"
+_app_write_as_user() { cat >/dev/null; return 1; }
+APP_ENABLED=1; lib_app_apply
+assert_eq "a home the app files cannot be written to is reported, not fatal" "failed" "$APP_RESULT"
+assert_eq "and apply exits 0 with errexit armed" 0 "$(run_isolated lib_app_apply)"
+eval "$_orig_write"
 eval "$_orig_as"; eval "$_orig_sc"; eval "$_orig_act"; eval "$_orig_en"; eval "$_orig_wait"; eval "$_orig_lock"; eval "$_orig_tools"
 unset -f pm2
 lib_json_set "$(lib_domain_json app.example.com)" 'del(.app)'

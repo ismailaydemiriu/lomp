@@ -9,8 +9,10 @@
 #          /home/<domain>/.pm2/lomp.env               0600, the same values for builds
 #          /home/<domain>/.pm2/logs/web-{out,error}.log
 #
-# Inside a site's home lompstack acts as the site user (_app_as): root never writes into a
-# directory that user controls, and nothing from root's environment reaches the application.
+# Inside a site's home lompstack acts as the site user (_app_as): root neither writes into nor
+# reads from a directory that user controls, and nothing from root's environment reaches the
+# application. Secret values never travel on a command line (/proc/<pid>/cmdline is readable
+# by every user): they go through standard input or a process's own environment.
 
 APP_UNIT_DIR="${APP_UNIT_DIR:-/etc/systemd/system}"
 APP_PORT_MIN=3000
@@ -85,6 +87,19 @@ _app_write_as_user() {   # path
 _app_prepare_home() {
   (( OPT_DRY_RUN )) && return 0
   _app_as "$D_HOME" sh -c 'umask 077 && mkdir -p .pm2/logs'
+}
+
+# Is there a regular file at this path inside the home? Asked as the site user, so a link the
+# user placed there cannot make root look at anything else.
+_app_user_file() {   # path relative to the home
+  _app_as "$D_HOME" test -f "$1" 2>/dev/null
+}
+
+# A script from the application's package.json, read as the site user, limited in size and
+# time (a FIFO named package.json must not hang a root command).
+_app_package_script() {   # name -> the script ("" when there is none)
+  _app_as "$D_HOME" timeout 5 head -c 1048576 -- app/package.json 2>/dev/null \
+    | jq -r --arg n "$1" '.scripts[$n] // empty' 2>/dev/null || true
 }
 
 # One change to a site's application at a time. A deploy can take minutes, so this is a
@@ -208,8 +223,6 @@ lib_app_port_conflict() {   # port [own domain] -> why it cannot be used, or sta
 # =============================================================================
 #  Rendering
 # =============================================================================
-# When "npm start" is plain "node <file> [args]", PM2 runs node itself: it then watches the
-# application's memory instead of npm's, and signals reach the app without npm in between.
 # JSON array of strings, built from stdin. Never through jq's own argument list: an
 # application argument such as "--port=3000" would be read as one of jq's options.
 _app_json_words() {   # words...
@@ -217,11 +230,12 @@ _app_json_words() {   # words...
   printf '%s\n' "$@" | jq -R . | jq -cs .
 }
 
-_app_npm_start_node() {   # app dir -> {script, args} JSON, or status 1
-  local pkg="$1/package.json" s="" file="" rest=""
+# When "npm start" is plain "node <file> [args]", PM2 runs node itself: it then watches the
+# application's memory instead of npm's, and signals reach the app without npm in between.
+_app_npm_start_node() {   # -> {script, args} JSON, or status 1
+  local s="" file="" rest=""
   local -a words=()
-  [[ -f "$pkg" && ! -L "$pkg" ]] || return 1
-  s="$(jq -r '.scripts.start // empty' "$pkg" 2>/dev/null || true)"
+  s="$(_app_package_script start)"
   [[ "$s" =~ ^node[[:space:]]+([A-Za-z0-9._/-]+)(([[:space:]]+[A-Za-z0-9._/:=@+-]+)*)[[:space:]]*$ ]] || return 1
   file="${BASH_REMATCH[1]}"; rest="${BASH_REMATCH[2]}"
   if [[ "$file" == -* ]] || ! lib_app_script_valid "$file"; then return 1; fi
@@ -234,7 +248,7 @@ lib_app_command_json() {   # -> {script, args} for PM2 (the app in APP_*, the si
   local -a words=()
   if [[ -n "$APP_SCRIPT" ]]; then jq -cn --arg s "$APP_SCRIPT" '{script: $s, args: []}'; return 0; fi
   if [[ "$APP_START" == "npm start" ]]; then
-    resolved="$(_app_npm_start_node "${D_HOME}/app" || true)"
+    resolved="$(_app_npm_start_node || true)"
     if [[ -n "$resolved" ]]; then printf '%s' "$resolved"; return 0; fi
   fi
   read -r -a words <<<"$APP_START"
@@ -244,16 +258,15 @@ lib_app_command_json() {   # -> {script, args} for PM2 (the app in APP_*, the si
 
 # Is there code to run yet? Sets APP_RESULT_MSG when there is not.
 lib_app_runnable() {
-  local dir="${D_HOME}/app"
   if [[ -n "$APP_SCRIPT" ]]; then
-    if [[ -f "${dir}/${APP_SCRIPT}" ]]; then return 0; fi
-    APP_RESULT_MSG="${dir}/${APP_SCRIPT} does not exist yet"
+    if _app_user_file "app/${APP_SCRIPT}"; then return 0; fi
+    APP_RESULT_MSG="${D_HOME}/app/${APP_SCRIPT} does not exist yet"
     return 1
   fi
   case "$APP_START" in
     npm\ *|yarn\ *|pnpm\ *|npx\ *)
-      if [[ -f "${dir}/package.json" ]]; then return 0; fi
-      APP_RESULT_MSG="there is no package.json in ${dir} yet"
+      if _app_user_file app/package.json; then return 0; fi
+      APP_RESULT_MSG="there is no package.json in ${D_HOME}/app yet"
       return 1 ;;
   esac
   return 0
@@ -298,10 +311,12 @@ EOF
 
 # filter_env: the application gets exactly this environment and nothing inherited from
 # whoever ran pm2. exec_mode fork without "instances" (instances silently means cluster mode).
+# The variables reach jq through its environment, not its argument list.
 lib_app_render_ecosystem() {   # command JSON, environment JSON
-  jq -n --argjson cmd "$1" --argjson env "${2:-}" \
+  LOMP_APP_ECO_ENV="${2:-}" jq -n --argjson cmd "$1" \
     --arg home "$D_HOME" --arg port "$APP_PORT" --arg mem "$APP_MEMORY" --arg enabled "$APP_ENABLED" --arg path "$APP_PATH_ENV" \
-    '{apps: (if $enabled != "1" then [] else [
+    '(($ENV.LOMP_APP_ECO_ENV // "") | if . == "" then {} else fromjson end) as $env
+     | {apps: (if $enabled != "1" then [] else [
         {name: "web", cwd: ($home + "/app"), script: $cmd.script, args: $cmd.args,
          exec_mode: "fork", filter_env: true, vizion: false, autorestart: true, merge_logs: true, time: true,
          out_file: ($home + "/.pm2/logs/web-out.log"), error_file: ($home + "/.pm2/logs/web-error.log"),
@@ -358,8 +373,9 @@ _app_stop_service() {   # unit
 }
 
 # Bring the site's PM2 in line with its state: ecosystem and env file (as the site user), the
-# systemd unit, then the process. An application problem is reported in APP_RESULT, never by
-# failing: "add" must not undo a site because its application does not start yet.
+# systemd unit, then the process. An application problem, including a home the site user has
+# made unwritable, is reported in APP_RESULT and never fails the command: "add" must not undo
+# a site because its application does not start.
 lib_app_apply() {   # [restart]
   local restart="${1:-}" unit="" ufile="" pm2="" cmd="" env="" eco="" eco_changed=0 unit_changed=0 info=""
   unit="$(lib_app_unit_name "$D_IDENT")"; ufile="$(lib_app_unit_file "$D_IDENT")"
@@ -370,12 +386,18 @@ lib_app_apply() {   # [restart]
     if (( ! OPT_DRY_RUN )); then APP_RESULT="failed"; APP_RESULT_MSG="PM2 is not installed (setup.sh install --with-node)"; return 0; fi
     pm2="/usr/bin/pm2"
   fi
-  _app_prepare_home
+  if ! _app_prepare_home; then
+    APP_RESULT="failed"; APP_RESULT_MSG="could not create ${D_HOME}/.pm2 as ${D_USER}"; return 0
+  fi
   cmd="$(lib_app_command_json)"
   env="$(lib_app_env_json "$D_DOMAIN")"
-  lib_app_render_ecosystem "$cmd" "$env" | _app_write_as_user "$eco"
+  if ! lib_app_render_ecosystem "$cmd" "$env" | _app_write_as_user "$eco"; then
+    APP_RESULT="failed"; APP_RESULT_MSG="could not write ${eco} as ${D_USER}"; return 0
+  fi
   eco_changed="$APP_FILE_CHANGED"
-  lib_app_render_envfile "$env" | _app_write_as_user "${D_HOME}/.pm2/lomp.env"
+  if ! lib_app_render_envfile "$env" | _app_write_as_user "${D_HOME}/.pm2/lomp.env"; then
+    APP_RESULT="failed"; APP_RESULT_MSG="could not write ${D_HOME}/.pm2/lomp.env as ${D_USER}"; return 0
+  fi
   lib_app_render_unit "$pm2" | lib_write_file "$ufile" 0644 root:root
   if (( LIB_FILE_CHANGED )); then unit_changed=1; lib_systemctl daemon-reload; fi
 
@@ -426,19 +448,24 @@ _app_report() {   # [soft]
 # Install the dependencies and build, as the site user, with the application's environment
 # loaded from its env file, so no value ever appears on a command line.
 lib_app_build() {   # -> status; APP_BUILD_ERROR says why
-  local dir="${D_HOME}/app" install="" run="npm run" script="" rc=0
+  local dir="${D_HOME}/app" files="" install="" run="npm run" script="" rc=0
   APP_BUILD_ERROR=""
-  if [[ ! -f "${dir}/package.json" || -L "${dir}/package.json" ]]; then APP_BUILD_ERROR="there is no package.json in ${dir}"; return 1; fi
-  if [[ -f "${dir}/pnpm-lock.yaml" ]]; then install="corepack pnpm install --frozen-lockfile"; run="corepack pnpm run"
-  elif [[ -f "${dir}/yarn.lock" ]]; then install="corepack yarn install"; run="corepack yarn run"
-  elif [[ -f "${dir}/package-lock.json" || -f "${dir}/npm-shrinkwrap.json" ]]; then install="npm ci --include=dev"
+  # which of these exist, asked as the site user
+  files=" $(_app_as "$D_HOME" sh -c 'cd app 2>/dev/null || exit 0
+    for f in package.json pnpm-lock.yaml yarn.lock package-lock.json npm-shrinkwrap.json; do
+      if [ -f "$f" ] && [ ! -L "$f" ]; then printf "%s " "$f"; fi
+    done' 2>/dev/null || true) "
+  if [[ "$files" != *" package.json "* ]]; then APP_BUILD_ERROR="there is no package.json in ${dir}"; return 1; fi
+  if [[ "$files" == *" pnpm-lock.yaml "* ]]; then install="corepack pnpm install --frozen-lockfile"; run="corepack pnpm run"
+  elif [[ "$files" == *" yarn.lock "* ]]; then install="corepack yarn install"; run="corepack yarn run"
+  elif [[ "$files" == *" package-lock.json "* || "$files" == *" npm-shrinkwrap.json "* ]]; then install="npm ci --include=dev"
   else install="npm install --include=dev"; fi
   if [[ "$install" == corepack* ]] && ! lib_have corepack; then
     APP_BUILD_ERROR="the project uses ${install#corepack }, which needs corepack (npm install -g corepack)"
     return 1
   fi
   script="$install"
-  if [[ -n "$(jq -r '.scripts.build // empty' "${dir}/package.json" 2>/dev/null || true)" ]]; then script+=" && ${run} build"; fi
+  if [[ -n "$(_app_package_script build)" ]]; then script+=" && ${run} build"; fi
   if (( OPT_DRY_RUN )); then lib_info "[dry-run] would run as ${D_USER} in ${dir}: ${script}"; return 0; fi
   lib_info "As ${D_USER} in ${dir}: ${script}"
   _app_as "$dir" bash -c 'set -a; if [ -f "$HOME/.pm2/lomp.env" ]; then . "$HOME/.pm2/lomp.env"; fi; set +a
@@ -452,6 +479,7 @@ export NODE_ENV="${NODE_ENV:-production}"
 #  Lifecycle hooks used by add / remove / restore
 # =============================================================================
 lib_app_provision_new() {   # the site in D_*, the options in APP_OPT_*
+  _app_site_lock "$D_DOMAIN"   # a deploy of the same site takes no global lock
   APP_PORT="$APP_OPT_PORT"; APP_SCRIPT="$APP_OPT_SCRIPT"; APP_START="$APP_OPT_START"; APP_MEMORY=""; APP_ENABLED=1
   if [[ -z "$APP_START" && -z "$APP_SCRIPT" ]]; then APP_START="npm start"; fi
   lib_app_state_write "$D_DOMAIN"
@@ -490,7 +518,7 @@ lib_app_restore() {   # the site in D_*
   if lib_app_env_json "$D_DOMAIN" | jq -e '.DB_HOST == "127.0.0.1"' >/dev/null 2>&1; then
     lib_db_tcp_account_ensure "$D_DOMAIN" || lib_warn "could not restore the TCP login of the database user (setup.sh app env ${D_DOMAIN} import-db)"
   fi
-  if (( APP_ENABLED )) && [[ -f "${D_HOME}/app/package.json" ]]; then
+  if (( APP_ENABLED )) && _app_user_file app/package.json; then
     lib_app_build || lib_warn "dependencies of ${D_DOMAIN} could not be installed: ${APP_BUILD_ERROR}"
   fi
   lib_app_apply
@@ -613,6 +641,9 @@ lib_app_restart() {   # domain
   _app_report
 }
 
+# Runs without the global lock (setup.sh) because a build can take minutes. The only
+# domain.json write here is enabling a stopped app, which a concurrent backup could in theory
+# overwrite with its own update; the next start or deploy writes it again.
 lib_app_deploy() {   # domain
   _app_load_site "${1:-}"
   _app_site_lock "$D_DOMAIN"
