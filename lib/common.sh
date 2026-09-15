@@ -797,6 +797,12 @@ lib_cron_replace_prefix() {   # id prefix
   if [[ -f "$CRON_FILE" ]]; then awk -v m="$marker" 'index($0, m) == 0' "$CRON_FILE" >"$tmp"; fi
   while IFS=$'\t' read -r id entry; do
     [[ -n "$id" && -n "$entry" ]] || continue
+    # cron ignores a whole file that holds one line it cannot parse - and this file also
+    # carries the backups, the certificate renewals and the health check
+    if ! [[ "$entry" =~ ^(@[a-z]+|[^[:space:]]+([[:space:]]+[^[:space:]]+){4})[[:space:]]+[a-z_][a-z0-9_-]*[[:space:]]+[^[:space:]] ]]; then
+      lib_warn "not writing a cron entry that cron could not parse (${id})"
+      continue
+    fi
     n=$((n + 1))
     printf '%s # server-setup:%s\n' "$entry" "$id" >>"${tmp}.entries"
   done

@@ -71,6 +71,12 @@ Usage: setup.sh app list [--json]
 EOF
 }
 
+# An option whose value is missing at the end of the command line: say so, rather than let
+# "shift" fail and print the report of an unexpected failure.
+_app_need_value() {   # option, how many arguments are left, usage
+  (( $2 > 0 )) || lib_die "${1} needs a value" "" "$3"
+}
+
 lib_app_main() {
   local action="${1:-list}"
   if (($# > 0)); then shift; fi
@@ -102,12 +108,19 @@ _app_as() {   # dir cmd...   (the site in D_*)
     PATH="$APP_PATH_ENV" LANG="C.UTF-8" "$@" 200>&- 201>&- )
 }
 
+# What a file inside the site's home holds, read as the site user and bounded in time and
+# size: the user owns these files, and a named pipe would otherwise hang a root command that
+# holds the lock, a huge one exhaust its memory.
+_app_read_as_user() {   # path
+  _app_as "$D_HOME" timeout 5 head -c 262144 -- "$1" 2>/dev/null || true
+}
+
 # stdin -> file, written by the site user (0600, temporary name then rename).
 # APP_FILE_CHANGED says whether the content differed.
 _app_write_as_user() {   # path
   local path="$1" new="" old=""
   new="$(cat; printf x)"; new="${new%x}"
-  old="$(_app_as "$D_HOME" cat -- "$path" 2>/dev/null || true; printf x)"; old="${old%x}"
+  old="$(_app_read_as_user "$path"; printf x)"; old="${old%x}"
   APP_FILE_CHANGED=0
   if [[ "$new" == "$old" ]]; then return 0; fi
   APP_FILE_CHANGED=1
@@ -115,7 +128,9 @@ _app_write_as_user() {   # path
     (( OPT_QUIET )) || printf '%s[dry ]%s  would write %s as %s (contents not shown)\n' "$C_MAG" "$C_RST" "$path" "$D_USER"
     return 0
   fi
-  printf '%s' "$new" | _app_as "$D_HOME" sh -c 'umask 077 && cat >"$1.lomp-tmp" && mv -f "$1.lomp-tmp" "$1"' _ "$path"
+  # noclobber over the temporary name: a pipe or a link the user left there fails the write
+  # instead of blocking it or sending the content somewhere else
+  printf '%s' "$new" | _app_as "$D_HOME" sh -c 'umask 077 && rm -f "$1.lomp-tmp" && set -C && cat >"$1.lomp-tmp" && mv -f "$1.lomp-tmp" "$1"' _ "$path"
 }
 
 # umask rather than "mkdir -m": the directories are private from the moment they exist
@@ -477,20 +492,32 @@ lib_app_render_envfile() {   # environment JSON -> sourceable lines
 # The script cron starts for a scheduled job, written into the home by the site user. No
 # secret in it: the values come from the env file when a run starts. The lock is held by the
 # script itself, so a process the job leaves behind cannot block the next runs.
-lib_app_render_job() {   # worker JSON
+lib_app_render_job() {   # worker JSON -> status 1 when that worker is not fit to run
   local name="" start="" cwd="" timeout="" cmd=""
   local -a words=()
-  name="$(jq -r '.name' <<<"$1")"; start="$(jq -r '.start' <<<"$1")"
+  name="$(jq -r '.name // empty' <<<"$1")"; start="$(jq -r '.start // empty' <<<"$1")"
   cwd="$(jq -r '.cwd // "app"' <<<"$1")"; timeout="$(jq -r '.timeout // empty' <<<"$1")"
   timeout="${timeout:-$APP_JOB_TIMEOUT_DEFAULT}"
+  # this becomes a script and a cron line, so nothing goes in unchecked - not even from a
+  # hand-edited domain.json or an archive written by another version
+  lib_app_worker_name_valid "$name" || return 1
+  lib_app_start_valid "$start" || return 1
+  lib_app_cwd_valid "$cwd" || return 1
+  lib_app_timeout_valid "$timeout" || return 1
+  # a schedule cron would refuse means this job cannot run at all: it gets no script either
+  [[ -z "$(jq -r '.cron // empty' <<<"$1")" ]] || lib_app_cron_valid "$(jq -r '.cron' <<<"$1")" || return 1
   read -r -a words <<<"$start"
+  ((${#words[@]} > 0)) || return 1
   cmd="$(printf '%q ' "${words[@]}")"
   cat <<EOF
 #!/bin/bash
 # Managed by lompstack - scheduled job "${name}" of ${D_DOMAIN}; rewritten on every change.
 # cron starts it as ${D_USER}: one run at a time, stopped after ${timeout}, output in the job log.
 exec >>"${D_HOME}/.pm2/logs/${name}-job.log" 2>&1
-exec 9>"${D_HOME}/.pm2/jobs/${name}.lock"
+exec 9>"${D_HOME}/.pm2/jobs/${name}.lock" || {
+  printf '== %s ${name} cannot take its lock file\n' "\$(date -Is)"
+  exit 1
+}
 if ! flock -n 9; then
   printf '== %s ${name} skipped: the previous run is still going\n' "\$(date -Is)"
   exit 0
@@ -502,16 +529,23 @@ set +a
 export HOME="${D_HOME}" PATH="${APP_PATH_ENV}" LANG=C.UTF-8 NODE_ENV="\${NODE_ENV:-production}"
 printf '== %s ${name} started\n' "\$(date -Is)"
 rc=0
-timeout -k 60 ${timeout} ${cmd% } 9>&- || rc=\$?
+timeout -k 60 "${timeout}" ${cmd% } 9>&- || rc=\$?
 printf '== %s ${name} finished with status %s\n' "\$(date -Is)" "\$rc"
 exit "\$rc"
 EOF
 }
 
-# The /etc/cron.d line of a job. cron takes an unescaped % for the end of the command.
+# The /etc/cron.d line of a job, or status 1 when that worker must not go into cron at all.
+# The schedule and the name are checked again here, at the last gate before the shared file:
+# "worker add" is not the only way state gets there (a restored archive, a hand-edited
+# domain.json), and one line cron cannot parse makes it ignore the whole file - the backups,
+# the certificate renewals and the health check in it included.
+# cron also takes an unescaped % for the end of the command.
 lib_app_job_line() {   # worker JSON
   local name="" sched="" cmd=""
-  name="$(jq -r '.name' <<<"$1")"; sched="$(jq -r '.cron' <<<"$1")"
+  name="$(jq -r '.name // empty' <<<"$1")"; sched="$(jq -r '.cron // empty' <<<"$1")"
+  lib_app_worker_name_valid "$name" || return 1
+  lib_app_cron_valid "$sched" || return 1
   cmd="/bin/bash ${D_HOME}/.pm2/jobs/${name}.sh"
   printf '%s %s %s' "$sched" "$D_USER" "${cmd//%/\\%}"
 }
@@ -561,27 +595,50 @@ _app_stop_service() {   # unit
   return 0
 }
 
-# The processes to start again and to delete, one "start NAME" or "delete NAME" per line:
-# new ones and those whose definition changed, those no longer wanted, and on a restart every
-# process (or only the one named). The ecosystems carry the environment, so they reach jq
-# through its environment.
-_app_process_changes() {   # old ecosystem, new ecosystem, restart ("" | restart), only ("" | name)
-  LOMP_APP_ECO_OLD="$1" LOMP_APP_ECO_NEW="$2" jq -rn --arg restart "$3" --arg only "$4" '
-    ($ENV.LOMP_APP_ECO_OLD | try fromjson catch {apps: []}) as $o
-    | ($ENV.LOMP_APP_ECO_NEW | fromjson) as $n
-    | (($o.apps // []) | map({key: .name, value: .}) | from_entries) as $old
-    | ($n.apps | map(.name)) as $names
-    | ((($o.apps // []) | map(.name) | map(select(. as $x | $names | index($x) | not)) | .[] | "delete " + .),
-       ($n.apps[] | select(($restart == "restart" and ($only == "" or $only == .name)) or $old[.name] != .) | "start " + .name))'
+# The names PM2 has right now, from its own process list ("" when it is not running)
+_app_running_names() {   # jlist
+  [[ -n "$1" ]] || return 0
+  jq -r '[.[]? | select(type == "object") | .name? // empty] | join(" ")' <<<"$1" 2>/dev/null || true
+}
+
+# The processes to start again and to delete, one "start NAME" or "delete NAME" per line: new
+# ones, those whose definition changed, those PM2 lost, those no longer wanted, and on a
+# restart every process (or only the one named).
+# What runs comes from PM2 itself, not only from the ecosystem file: that file lives in the
+# site's home, and its user could otherwise hide a process from "stop" by rewriting it. The
+# ecosystems go through files rather than jq's environment or arguments - they carry the
+# application's variables, and an environment string is capped at 128 KiB.
+_app_process_changes() {   # old ecosystem, new ecosystem, restart ("" | restart), only ("" | name), running names
+  local of="" nf="" rc=0
+  of="$(lib_mktemp)"; nf="$(lib_mktemp)"
+  printf '%s' "$1" >"$of"; printf '%s' "$2" >"$nf"
+  jq -rn --rawfile o "$of" --rawfile n "$nf" --arg restart "$3" --arg only "$4" --arg running "${5:-}" '
+    def apps: if type == "object" then (.apps? // []) else [] end
+              | if type == "array" then map(select(type == "object" and (.name? | type) == "string")) else [] end;
+    (($o | try fromjson catch {}) | apps) as $old
+    | (($n | fromjson) | apps) as $new
+    | ($old | map({key: .name, value: .}) | from_entries) as $oldmap
+    | ($new | map(.name)) as $names
+    | ($running | split(" ") | map(select(length > 0))) as $up
+    | ($up | map({key: ., value: true}) | from_entries) as $upmap
+    | ((($up + ($old | map(.name))) | unique | map(select(. as $x | $names | index($x) | not)) | .[] | "delete " + .),
+       ($new[] | select(($restart == "restart" and ($only == "" or $only == .name))
+                        or $oldmap[.name] != . or ($upmap[.name] | not)) | "start " + .name))' || rc=$?
+  rm -f "$of" "$nf"
+  return "$rc"
 }
 
 # Every job's script, written by the site user
 _app_jobs_write() {   # workers JSON -> status
-  local w="" name=""
+  local w="" name="" script=""
   while IFS= read -r w <&3; do
     [[ -n "$w" ]] || continue
-    name="$(jq -r '.name' <<<"$w")"
-    lib_app_render_job "$w" | _app_write_as_user "${D_HOME}/.pm2/jobs/${name}.sh" || return 1
+    name="$(jq -r '.name // empty' <<<"$w")"
+    if ! lib_app_worker_name_valid "$name" || ! script="$(lib_app_render_job "$w")"; then
+      lib_warn "the scheduled job ${name:-(unnamed)} of ${D_DOMAIN} is not valid; it gets no script (setup.sh app worker ${D_DOMAIN} list)"
+      continue
+    fi
+    printf '%s\n' "$script" | _app_write_as_user "${D_HOME}/.pm2/jobs/${name}.sh" || return 1
   done 3< <(jq -c '.[] | select((.cron // "") != "")' <<<"$1" || true)
   return 0
 }
@@ -589,10 +646,15 @@ _app_jobs_write() {   # workers JSON -> status
 # The cron entries of the site's enabled jobs, in a single write of the shared cron file.
 # Only for commands that hold the global lock: "app deploy" runs without it and never comes here.
 _app_jobs_sync() {   # the site in D_*
-  local w="" entries=""
+  local w="" entries="" name="" line=""
   while IFS= read -r w <&3; do
     [[ -n "$w" ]] || continue
-    entries+="$(printf 'job:%s:%s\t%s' "$D_DOMAIN" "$(jq -r '.name' <<<"$w")" "$(lib_app_job_line "$w")")"$'\n'
+    name="$(jq -r '.name // empty' <<<"$w")"
+    if ! line="$(lib_app_job_line "$w")"; then
+      lib_warn "the scheduled job ${name:-(unnamed)} of ${D_DOMAIN} is not valid and stays out of cron (setup.sh app worker ${D_DOMAIN} list)"
+      continue
+    fi
+    entries+="$(printf 'job:%s:%s\t%s' "$D_DOMAIN" "$name" "$line")"$'\n'
   done 3< <(jq -c '.[] | select((.cron // "") != "" and .enabled != false)' <<<"$(lib_app_workers_json "$D_DOMAIN")" || true)
   printf '%s' "$entries" | lib_cron_replace_prefix "job:${D_DOMAIN}:"
 }
@@ -604,7 +666,7 @@ _app_jobs_sync() {   # the site in D_*
 # process when it should run; otherwise the workers.
 lib_app_apply() {   # [restart [process]]
   local restart="${1:-}" only="${2:-}" unit="" ufile="" pm2="" cmd="" env="" workers="" eco="" old="" new=""
-  local unit_changed=0 web=0 procs=0 waiting="" action="" name="" failed="" info=""
+  local unit_changed=0 web=0 procs=0 waiting="" action="" name="" failed="" info="" changes=""
   unit="$(lib_app_unit_name "$D_IDENT")"; ufile="$(lib_app_unit_file "$D_IDENT")"
   eco="${D_HOME}/.pm2/lomp.ecosystem.json"
   APP_RESULT=""; APP_RESULT_MSG=""
@@ -622,7 +684,7 @@ lib_app_apply() {   # [restart [process]]
   cmd="$(lib_app_command_json)"
   env="$(lib_app_env_json "$D_DOMAIN")"
   workers="$(lib_app_workers_json "$D_DOMAIN")"
-  old="$(_app_as "$D_HOME" cat -- "$eco" 2>/dev/null || true)"
+  old="$(_app_read_as_user "$eco")"
   if ! new="$(lib_app_render_ecosystem "$cmd" "$env" "$workers" "$web")" || ! printf '%s\n' "$new" | _app_write_as_user "$eco"; then
     APP_RESULT="failed"; APP_RESULT_MSG="could not write ${eco} as ${D_USER}"; return 0
   fi
@@ -654,12 +716,17 @@ lib_app_apply() {   # [restart [process]]
   elif (( unit_changed )); then
     if ! lib_systemctl restart "$unit"; then APP_RESULT="failed"; APP_RESULT_MSG="${unit} did not restart (journalctl -u ${unit})"; return 0; fi
   else
+    if ! changes="$(_app_process_changes "$old" "$new" "$restart" "$only" "$(_app_running_names "$(_app_jlist)")")"; then
+      APP_RESULT="failed"; APP_RESULT_MSG="could not work out which processes to restart (setup.sh app status ${D_DOMAIN})"; return 0
+    fi
     # delete + start, not reload: a reload keeps the old script, cwd and removed variables
-    while read -r action name <&3; do
+    while read -r action name; do
       [[ -n "$name" ]] || continue
+      # PM2's list is the site user's to write: only names lompstack itself could have given
+      [[ "$name" == "web" ]] || lib_app_worker_name_valid "$name" || continue
       _app_pm2 delete "$name" >/dev/null 2>&1 || true
       if [[ "$action" == "start" ]] && ! lib_run _app_pm2 start "$eco" --only "$name"; then failed+=" ${name}"; fi
-    done 3< <(_app_process_changes "$old" "$new" "$restart" "$only" || true)
+    done <<<"$changes"
   fi
   if (( web )); then
     if [[ " ${failed} " == *" web "* ]]; then
@@ -1020,7 +1087,8 @@ lib_app_list() {   # [--json]
       state="${st:-not in PM2}"
     elif ! lib_app_runnable; then state="waiting for code"
     else state="service down"; fi
-    wstat="$(_app_workers_status "$(lib_app_workers_json "$d")" "$jl")"
+    wstat="$(_app_workers_status "$(lib_app_workers_json "$d")" "$jl" || printf '[]')"
+    [[ -n "$wstat" ]] || wstat="[]"
     if (( json )); then
       rows="$(jq -cn --argjson a "$rows" --arg d "$d" --arg port "$APP_PORT" --arg state "$state" --arg en "$APP_ENABLED" \
         --arg cpu "${cpu:-0}" --arg mem "${mem:-0}" --arg up "${up:-0}" --arg rs "${rs:-0}" --arg git "$APP_GIT_URL" --argjson wk "$wstat" \
@@ -1084,7 +1152,7 @@ _app_parse_process() {   # command domain [--process NAME]
   while (($# > 0)); do
     a="$1"; shift
     case "$a" in
-      --process) APP_ONLY="${1:-}"; shift ;;
+      --process) _app_need_value --process $# "setup.sh app ${cmd} <domain> [--process NAME]"; APP_ONLY="$1"; shift ;;
       *) lib_die "Unknown option for app ${cmd}: ${a}" "" "setup.sh app ${cmd} <domain> [--process NAME]" ;;
     esac
   done
@@ -1176,8 +1244,8 @@ lib_app_deploy() {   # domain [--git URL] [--branch B]
   while (($# > 0)); do
     a="$1"; shift
     case "$a" in
-      --git)    url="${1:-}"; shift ;;
-      --branch) branch="${1:-}"; shift ;;
+      --git)    _app_need_value --git $# "setup.sh app deploy <domain> [--git URL [--branch B]]";    url="$1"; shift ;;
+      --branch) _app_need_value --branch $# "setup.sh app deploy <domain> [--git URL [--branch B]]"; branch="$1"; shift ;;
       *) lib_die "Unknown option for app deploy: ${a}" "" "setup.sh app deploy <domain> [--git URL [--branch B]]" ;;
     esac
   done
@@ -1232,8 +1300,8 @@ lib_app_logs() {   # domain [--process NAME] [--out|--error] [-n LINES]
     case "$a" in
       --out)     which="out" ;;
       --error)   which="error" ;;
-      --process) only="${1:-}"; shift ;;
-      -n)        lines="${1:-50}"; shift ;;
+      --process) _app_need_value --process $# "setup.sh app logs <domain> [--process NAME]"; only="$1"; shift ;;
+      -n)        _app_need_value -n $# "setup.sh app logs <domain> [-n LINES]"; lines="$1"; shift ;;
       *) lib_die "Unknown option for app logs: ${a}" "" "setup.sh app logs <domain> [--process NAME] [--out|--error] [-n LINES]" ;;
     esac
   done
@@ -1261,14 +1329,15 @@ lib_app_logs() {   # domain [--process NAME] [--out|--error] [-n LINES]
 
 lib_app_set() {   # domain [--port N] [--start CMD | --script FILE] [--memory 512M|none] [--no-git]
   local domain="${1:-}" a="" port="" start="" script="" mem="" why="" port_changed=0 nogit=0
+  local set_usage="setup.sh app set <domain> [--port N] [--start CMD | --script FILE] [--memory 512M|none] [--no-git]"
   if (($# > 0)); then shift; fi
   while (($# > 0)); do
     a="$1"; shift
     case "$a" in
-      --port)   port="${1:-}"; shift ;;
-      --start)  start="${1:-}"; shift ;;
-      --script) script="${1:-}"; shift ;;
-      --memory) mem="${1:-}"; shift ;;
+      --port)   _app_need_value --port $# "$set_usage";   port="$1"; shift ;;
+      --start)  _app_need_value --start $# "$set_usage";  start="$1"; shift ;;
+      --script) _app_need_value --script $# "$set_usage"; script="$1"; shift ;;
+      --memory) _app_need_value --memory $# "$set_usage"; mem="$1"; shift ;;
       --no-git) nogit=1 ;;
       *) lib_die "Unknown option for app set: ${a}" "" "setup.sh app set <domain> [--port N] [--start CMD | --script FILE] [--memory 512M|none] [--no-git]" ;;
     esac
@@ -1413,7 +1482,7 @@ lib_app_env() {   # domain list [--show] | set NAME | unset NAME... | import-db
 # which carries it, reaches jq through jq's own environment.
 _app_workers_status() {   # workers JSON, PM2 process list ("" when PM2 does not run)
   LOMP_APP_JLIST="${2:-}" jq -c '(($ENV.LOMP_APP_JLIST // "") | try fromjson catch []) as $pl
-    | map(. as $w | (if ($pl | type) == "array" then [$pl[] | select(.name == $w.name)][0] else null end) as $p
+    | map(. as $w | [$pl[]? | select(type == "object") | select(.name? == $w.name)][0] as $p
       | {name, start, cwd: (.cwd // "app"), port, schedule: .cron, timeout, memory, enabled: (.enabled != false),
          kind: (if (.cron // "") == "" then "process" else "job" end),
          status: (if .enabled == false then "stopped" elif (.cron // "") != "" then "scheduled"
@@ -1454,12 +1523,12 @@ lib_app_worker_add() {   # name options...   (the site in D_*)
   while (($# > 0)); do
     a="$1"; shift
     case "$a" in
-      --start)   start="${1:-}"; shift ;;
-      --cwd)     cwd="${1:-}"; shift ;;
-      --port)    port="${1:-}"; shift ;;
-      --memory)  mem="${1:-}"; shift ;;
-      --cron)    cron="${1:-}"; shift ;;
-      --timeout) timeout="${1:-}"; shift ;;
+      --start)   _app_need_value --start $# "$usage";   start="$1"; shift ;;
+      --cwd)     _app_need_value --cwd $# "$usage";     cwd="$1"; shift ;;
+      --port)    _app_need_value --port $# "$usage";    port="$1"; shift ;;
+      --memory)  _app_need_value --memory $# "$usage";  mem="$1"; shift ;;
+      --cron)    _app_need_value --cron $# "$usage";    cron="$1"; shift ;;
+      --timeout) _app_need_value --timeout $# "$usage"; timeout="$1"; shift ;;
       *) lib_die "Unknown option for worker add: ${a}" "" "$usage" ;;
     esac
   done

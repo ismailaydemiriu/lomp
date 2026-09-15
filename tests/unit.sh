@@ -59,7 +59,23 @@ assert_lacks() { if [[ "$3" != *"$2"* ]]; then ok; else fail "$1: unexpected [$2
 section() { printf '%s\n' "-- $*"; }
 # Run a function the way the installer does (errexit armed) and report its exit status.
 # A plain "if func; then" would disable errexit and hide exactly the bugs we look for.
-run_isolated() { local rc=0; ( set -Eeuo pipefail; shopt -s lastpipe; "$@" ) >/dev/null 2>&1 || rc=$?; printf '%s' "$rc"; }
+# The subshell must not be the left side of "||": that suppresses errexit inside it, which is
+# the very failure mode this helper exists to catch. errexit is turned off around the call
+# instead, and put back exactly as it was.
+run_isolated() {
+  local rc=0 armed="" prev=""
+  case "$-" in *e*) armed=1 ;; esac
+  # the ERR trap would report the failing subshell as an unexpected failure and end the
+  # command substitution this runs in, before the status could be printed
+  prev="$(trap -p ERR || true)"
+  trap - ERR
+  set +e
+  ( set -Eeuo pipefail; shopt -s lastpipe; "$@" ) >/dev/null 2>&1
+  rc=$?
+  [[ -z "$armed" ]] || set -e
+  [[ -z "$prev" ]] || eval "$prev"
+  printf '%s' "$rc"
+}
 
 # =============================================================================
 section "domain helpers"
@@ -1748,23 +1764,54 @@ assert_eq "without code for the web process the workers still run" "api queue" \
 _old='{"apps":[{"name":"web","script":"a"},{"name":"queue","script":"q"},{"name":"gone","script":"g"}]}'
 _new='{"apps":[{"name":"web","script":"a"},{"name":"queue","script":"q2"},{"name":"api","script":"n"}]}'
 assert_eq "changes: a removed process goes, a changed or new one starts" "delete gone,start api,start queue," \
-  "$(_app_process_changes "$_old" "$_new" "" "" | sort | tr '\n' ',')"
-assert_eq "changes: nothing changed, nothing happens"   "" "$(_app_process_changes "$_new" "$_new" "" "")"
-assert_eq "changes: a restart starts everything again"  "start api,start queue,start web," "$(_app_process_changes "$_new" "$_new" restart "" | sort | tr '\n' ',')"
-assert_eq "changes: or just the process named"          "start queue" "$(_app_process_changes "$_new" "$_new" restart queue)"
-assert_eq "changes: without an old ecosystem all start" "start api,start queue,start web," "$(_app_process_changes "" "$_new" "" "" | sort | tr '\n' ',')"
+  "$(_app_process_changes "$_old" "$_new" "" "" "web queue gone" | sort | tr '\n' ',')"
+assert_eq "changes: nothing changed, nothing happens"   "" "$(_app_process_changes "$_new" "$_new" "" "" "web queue api")"
+assert_eq "changes: a restart starts everything again"  "start api,start queue,start web," "$(_app_process_changes "$_new" "$_new" restart "" "web queue api" | sort | tr '\n' ',')"
+assert_eq "changes: or just the process named"          "start queue" "$(_app_process_changes "$_new" "$_new" restart queue "web queue api")"
+assert_eq "changes: without an old ecosystem all start" "start api,start queue,start web," "$(_app_process_changes "" "$_new" "" "" "" | sort | tr '\n' ',')"
+# PM2's own list decides what is there. The ecosystem file lives in the site's home, so its
+# user could otherwise hide a process from "stop" by rewriting it, and a process PM2 lost
+# would never come back.
+assert_eq "changes: a forged old ecosystem cannot hide a deletion" "delete queue" \
+  "$(_app_process_changes '{"apps":[{"name":"web","script":"a"}]}' '{"apps":[{"name":"web","script":"a"}]}' "" "" "web queue")"
+assert_eq "changes: a process PM2 lost is started again" "start queue" \
+  "$(_app_process_changes "$_new" "$_new" "" "" "web api")"
+assert_eq "changes: an old ecosystem of the wrong shape is ignored" "start web" \
+  "$(_app_process_changes '[]' '{"apps":[{"name":"web","script":"a"}]}' "" "" "")"
+assert_eq "changes: a corrupt one too"                             "start web" \
+  "$(_app_process_changes 'not json at all' '{"apps":[{"name":"web","script":"a"}]}' "" "" "")"
+# the ecosystems carry every process's variables: too big for an environment variable, so they
+# travel as files
+_bigeco="$(jq -cn '{apps: [range(0;60) | {name: ("w" + tostring), script: "s", env: {BIG: ("x" * 3000)}}]}')"
+_bignames="$(jq -rn '[range(0;60) | "w" + tostring] | join(" ")')"
+assert_eq "changes: an ecosystem larger than an environment variable still reconciles" "" \
+  "$(_app_process_changes "$_bigeco" "$_bigeco" "" "" "$_bignames")"
+assert_eq "a process list of the wrong shape leaves the workers alone" "not running" \
+  "$(_app_workers_status '[{"name":"queue","cron":null,"enabled":true}]' '["a","b"]' | jq -r '.[0].status')"
 
 _job='{"name":"cleanup","start":"npm run cleanup","cwd":"app","cron":"*/5 * * * *","timeout":"30m","enabled":true}'
 _js="$(lib_app_render_job "$_job")"
 printf '%s\n' "$_js" >"$TMP/job.sh"
 assert_true  "the job script is valid bash"             bash -n "$TMP/job.sh"
 assert_has   "one run at a time"                        "flock -n 9" "$_js"
-assert_has   "a run that takes too long is stopped"     "timeout -k 60 30m npm run cleanup 9>&-" "$_js"
+assert_has   "a run that takes too long is stopped"     'timeout -k 60 "30m" npm run cleanup 9>&-' "$_js"
 assert_has   "it runs in the worker's directory"        "cd \"$D_HOME/app\"" "$_js"
 assert_has   "with the application's environment"       ". \"$D_HOME/.pm2/lomp.env\"" "$_js"
 assert_has   "its output goes to the job log"           "$D_HOME/.pm2/logs/cleanup-job.log" "$_js"
 assert_has   "a skipped run says so"                    "cleanup skipped: the previous run is still going" "$_js"
-assert_has   "a job without a timeout gets the default" "timeout -k 60 1h" "$(lib_app_render_job '{"name":"x","start":"node x.js"}')"
+assert_has   "a job without a timeout gets the default" 'timeout -k 60 "1h"' "$(lib_app_render_job '{"name":"x","start":"node x.js"}')"
+assert_has   "a job that cannot take its lock stops"    "cannot take its lock file" "$_js"
+# the last gate before the shared cron file: "worker add" is not the only way state gets here
+# (a restored archive, a hand-edited domain.json), and one line cron cannot parse makes it
+# ignore the whole file - the backups and the certificate renewals in it included
+assert_false "a smuggled command gets no cron line"   lib_app_job_line '{"name":"six","start":"node x.js","cron":"* * * * * root id"}'
+assert_false "and no script"                          lib_app_render_job '{"name":"six","start":"node x.js","cron":"* * * * * root id","timeout":"1h"}'
+assert_false "a name that is a path gets no cron line" lib_app_job_line '{"name":"../../etc/cron.d/evil","start":"node x.js","cron":"* * * * *"}'
+assert_false "a timeout that is a command gets no script" lib_app_render_job '{"name":"x","start":"node x.js","cron":"* * * * *","timeout":"30m; id"}'
+assert_false "a start of only spaces gets no script"      lib_app_render_job '{"name":"x","start":"   ","cron":"* * * * *"}'
+assert_has   "files in the site's home are read with a bound" "timeout 5 head -c" "$(declare -f _app_read_as_user)"
+assert_has   "and written with noclobber, so a planted pipe fails instead of blocking" "set -C" "$(declare -f _app_write_as_user)"
+assert_eq    "root never reads a file of theirs unbounded" "" "$(grep -nE '_app_as "\$D_HOME" cat ' "$ROOT/lib/app.sh" || true)"
 assert_eq    "the cron line runs the script as the site user" "*/5 * * * * work_example_com /bin/bash $D_HOME/.pm2/jobs/cleanup.sh" "$(lib_app_job_line "$_job")"
 assert_has   "a % in the cron line is escaped"          'a\%b' "$(D_HOME="/home/a%b" lib_app_job_line "$_job")"
 
@@ -1786,6 +1833,15 @@ assert_true  "keeps a site whose name merely starts the same"  grep -q 'job:work
 assert_true  "and every other entry"                           grep -q 'wpcron:other.example.com' "$CRON_FILE"
 assert_eq    "the header is there once" "1" "$(grep -c '^SHELL=' "$CRON_FILE")"
 assert_has   "remove clears the site's jobs" 'lib_cron_remove_prefix "job:${domain}:"' "$(declare -f lib_domain_remove_main)"
+# state that was not written by "worker add" (a restored archive, a hand-edited domain.json)
+lib_app_worker_state_set work.example.com '{"name":"evil","start":"node x.js","cwd":"app","port":null,"memory":null,"cron":"* * * * * root id","timeout":"1h","enabled":true}'
+_app_jobs_sync >/dev/null 2>&1
+assert_false "a job cron would choke on never reaches the file" grep -q 'root id' "$CRON_FILE"
+assert_true  "and the sound ones stay"                         grep -q 'job:work.example.com:cleanup' "$CRON_FILE"
+lib_app_worker_state_del work.example.com evil
+printf 'job:work.example.com:bad\t{ "a": 1 }\n' | lib_cron_replace_prefix "job:work.example.com:" >/dev/null 2>&1
+assert_false "an entry that is not schedule + user + command is refused" grep -q '"a": 1' "$CRON_FILE"
+_app_jobs_sync >/dev/null 2>&1
 
 # add and remove, with the service stubbed
 _orig_apply="$(declare -f lib_app_apply)"; _orig_wrep="$(declare -f _app_worker_report)"; _orig_as3="$(declare -f _app_as)"
@@ -1816,6 +1872,8 @@ lib_app_worker_remove mailer >/dev/null 2>&1
 assert_eq "remove: the worker is gone"                  "" "$(jq -r '.[] | select(.name == "mailer") | .name' <<<"$(_wj)")"
 assert_false "remove: and its cron entry"               grep -q 'job:work.example.com:mailer' "$CRON_FILE"
 assert_eq "--process must name a process of the site"   1 "$(run_isolated _app_parse_process start work.example.com --process nope)"
+assert_eq "an option without its value is a usage error" 1 "$(run_isolated lib_app_start work.example.com --process)"
+assert_eq "for worker add as well"                       1 "$(run_isolated lib_app_worker_add mailer --start)"
 assert_eq "a job has no process to restart"             1 "$(run_isolated lib_app_restart work.example.com --process cleanup)"
 _app_set_enabled 0 ""
 assert_eq "stop without --process: the application and every worker" '[false,[false]]' "$(jq -c '[.app.enabled, (.workers | map(.enabled) | unique)]' "$(lib_domain_json work.example.com)")"
