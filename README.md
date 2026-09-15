@@ -187,6 +187,7 @@ sudo lomp add shop.example.com --wordpress          # WordPress with database an
 sudo lomp add api.example.com --proxy 127.0.0.1:3000 # Node/Python app behind OpenLiteSpeed
 sudo lomp add cdn.example.com --static              # static site, no PHP
 sudo lomp db shop.example.com                       # create or show the database
+sudo lomp db list                                   # every site's database, user and size
 sudo lomp credentials shop.example.com              # database / WordPress / SSL details
 sudo lomp list                                      # all sites in a table
 sudo lomp logs shop.example.com                     # tail access and error logs
@@ -215,6 +216,7 @@ Global flags work everywhere: `--yes`, `--dry-run`, `--quiet`, `--verbose`, `--n
 | `--php-children N` | LSAPI workers for this site |
 | `--proxy HOST:PORT` | Reverse proxy mode, TLS terminates in OpenLiteSpeed; add `--ws-path /socket.io` for WebSockets |
 | `--wordpress` | Download and install WordPress, create the database, enable LiteSpeed Cache, register WP-Cron |
+| `--no-db` | Skip the database. Every site otherwise gets its own MariaDB database and user — `example.com` becomes `example_db` / `example_user` with a 32-character random password, printed once when the site is created and available afterwards from `credentials` |
 | `--wildcard` | Also request `*.<domain>` over DNS-01 (needs a stored Cloudflare API token) |
 | `--staging` | Use the Let's Encrypt staging CA while you are testing |
 

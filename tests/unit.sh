@@ -1099,6 +1099,51 @@ assert_eq "a second call is a no-op that still succeeds" 0 "$(run_isolated lib_s
 assert_true "and leaves it in place" test -d "$_psd"
 
 # =============================================================================
+section "per-site database naming and defaults"
+assert_eq "db base is the first label"      "ilahitube_db"   "$(_db_name_base ilahitube.com db 60)"
+assert_eq "user base is the first label"    "ilahitube_user" "$(_db_name_base ilahitube.com user 32)"
+assert_eq "a subdomain uses its own label"  "shop_db"        "$(_db_name_base shop.example.com db 60)"
+assert_eq "dashes become underscores"       "my_site_db"     "$(_db_name_base my-site.com db 60)"
+assert_eq "a leading digit gets a prefix"   "s_123_db"       "$(_db_name_base 123.com db 60)"
+# the label is truncated BEFORE the suffix, so the suffix survives MySQL's 32-char user cap
+_long="$(_db_name_base averyveryverylongdomainnamethatkeepsgoing.com user 32)"
+assert_true  "the user name fits in 32 chars" test "${#_long}" -le 32
+assert_eq    "and still ends in _user" "_user" "${_long: -5}"
+assert_eq    "db and user bases differ" "1" "$([[ "$(_db_name_base x.com db 60)" != "$(_db_name_base x.com user 32)" ]] && echo 1 || echo 0)"
+# every new site gets a database unless it opts out
+lib_domain_parse_add_args a.example.com --no-ssl
+assert_eq "a database is created by default" "1" "$DOM_OPT_WITH_DB"
+DOM_OPT_WITH_DB=1
+lib_domain_parse_add_args b.example.com --no-ssl --no-db
+assert_eq "--no-db opts out" "0" "$DOM_OPT_WITH_DB"
+DOM_OPT_WITH_DB=1
+lib_domain_parse_add_args c.example.com --no-ssl --wordpress
+assert_eq "wordpress still forces one on" "1" "$DOM_OPT_WITH_DB"
+DOM_OPT_WITH_DB=1
+lib_domain_state_reset
+
+# "db list" is new code: it has to survive a host with no MariaDB and a host with no sites,
+# and it must never print a password - those stay behind "credentials".
+_orig_dbinst="$(declare -f lib_db_installed)"; _orig_dbsql="$(declare -f lib_db_sql)"
+lib_db_installed() { return 1; }
+assert_eq "db list exits 0 without MariaDB" 0 "$(run_isolated lib_db_list)"
+# lib_note and lib_ok are suppressed by OPT_QUIET (common.sh:78-83) and this harness runs
+# quiet, so the content assertions below have to ask for what a human actually sees.
+OPT_QUIET=0
+assert_has "and says why" "not installed" "$(lib_db_list 2>&1)"
+OPT_QUIET=1
+assert_eq "under --quiet it stays silent" "" "$(lib_db_list 2>&1)"
+lib_db_installed() { return 0; }
+lib_db_sql() { printf '0\n'; }
+assert_eq "db list exits 0 with MariaDB present" 0 "$(run_isolated lib_db_list)"
+OPT_QUIET=0
+assert_has   "it names the columns" "DATABASE" "$(lib_db_list 2>&1)"
+assert_has   "and points at credentials for passwords" "credentials" "$(lib_db_list 2>&1)"
+assert_lacks "it never prints a password field" "DB password" "$(lib_db_list 2>&1)"
+OPT_QUIET=1
+eval "$_orig_dbinst"; eval "$_orig_dbsql"
+
+# =============================================================================
 section "sshd is only reloaded when it runs as a service"
 # On socket-activated hosts (Ubuntu 24.04 default) ssh.service is inactive and there is
 # nothing to reload, so "systemctl reload ssh" failed rc=1 and "reload sshd" rc=5. Both were

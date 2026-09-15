@@ -8,7 +8,8 @@ D_MEMORY="" D_UPLOAD="" D_PROXY="" D_STATIC_PATHS="/static/,/assets/,/uploads/" 
 D_WWW=0 D_WWW_PRIMARY=0 D_SSL=0 D_SSL_WANTED=1 D_SSL_WILDCARD=0 D_HSTS_PRELOAD=0 D_CLOUDFLARE=0
 D_EMAIL="" D_CREATED="" D_STATUS="" D_DB_NAME="" D_DB_USER="" D_WP=0 D_BACKUP_LAST="" D_STAGING=0
 # ---- add-only options ---------------------------------------------------------
-DOM_OPT_WP_TITLE="" DOM_OPT_WP_ADMIN="admin" DOM_OPT_WP_EMAIL="" DOM_OPT_WP_LOCALE="en_US" DOM_OPT_WITH_DB=0
+# Every new site gets a database and its own MariaDB user by default; --no-db opts out.
+DOM_OPT_WP_TITLE="" DOM_OPT_WP_ADMIN="admin" DOM_OPT_WP_EMAIL="" DOM_OPT_WP_LOCALE="en_US" DOM_OPT_WITH_DB=1
 DOMAIN_CREATED_HOME=0
 DOMAIN_CREATED_USER=0
 
@@ -129,7 +130,8 @@ Usage: setup.sh add <domain> [options]
   --ws-path /socket.io Proxy WebSocket upgrades on this path (proxy mode)
   --static             Static site only (no PHP)
   --wordpress          Install WordPress (creates the database automatically)
-  --with-db            Create a database for the site right away
+  --no-db              Do not create a database (one is created by default)
+  --with-db            Create a database - this is the default, kept for older scripts
   --cloudflare         Enable Cloudflare real-IP mode (global)
   --wildcard           Also request *.<domain> (DNS-01, needs --cf-api-token)
   --staging            Use the Let's Encrypt staging CA
@@ -161,6 +163,7 @@ lib_domain_parse_add_args() {
       --static)       D_MODE="static" ;;
       --wordpress)    D_MODE="wordpress"; DOM_OPT_WITH_DB=1 ;;
       --with-db)      DOM_OPT_WITH_DB=1 ;;
+      --no-db)        DOM_OPT_WITH_DB=0 ;;
       --cloudflare)   D_CLOUDFLARE=1 ;;
       --wildcard)     D_SSL_WILDCARD=1 ;;
       --staging)      D_STAGING=1 ;;
@@ -601,7 +604,16 @@ lib_domain_summary() {
   [[ -n "$D_PHP" ]] && lib_print_kv "PHP" "${D_PHP} (memory ${D_MEMORY}, upload ${D_UPLOAD}, workers ${D_PHP_CHILDREN})"
   lib_print_kv "Logs"        "${D_HOME}/logs/access.log, error.log  (setup.sh logs ${D_DOMAIN})"
   lib_print_kv "SSL"         "$sslline"
-  [[ -n "$D_DB_NAME" ]] && lib_print_kv "Database" "${D_DB_NAME} (setup.sh credentials ${D_DOMAIN})"
+  # The password is shown here deliberately: this is the moment the operator is looking, and
+  # it saves a second command. lib_print_kv writes to stdout only, so nothing here is logged.
+  if lib_db_info_load "$D_DOMAIN"; then
+    lib_print_kv "Database"    "$DBI_NAME"
+    lib_print_kv "DB user"     "$DBI_USER"
+    lib_print_kv "DB password" "$DBI_PASS"
+    lib_print_kv "DB host"     "localhost (socket ${DB_SOCKET})"
+  elif [[ -n "$D_DB_NAME" ]]; then
+    lib_print_kv "Database"    "${D_DB_NAME} (setup.sh credentials ${D_DOMAIN})"
+  fi
   (( D_WP )) && lib_print_kv "WordPress" "admin credentials: setup.sh credentials ${D_DOMAIN}"
   printf '\n'
 }

@@ -223,17 +223,32 @@ _db_unique_name() {   # base kind(db|user) maxlen -> unique identifier
   return 1
 }
 
+# Base name for a site's database or user: the domain's FIRST label plus a suffix, so
+# example.com becomes example_db and example_user. The label is truncated BEFORE the suffix
+# is appended - doing it afterwards would eat the suffix on a long domain (MySQL caps user
+# names at 32) and leave two names that no longer say which is which. Collisions between
+# example.com and example.net are resolved afterwards by _db_unique_name, which appends _2.
+_db_name_base() {   # domain suffix maxlen -> base
+  local suffix="$2" max="$3" label="" id=""
+  label="${1%%.*}"
+  id="$(printf '%s' "${label,,}" | sed -E 's/[^a-z0-9]+/_/g; s/^_+//; s/_+$//')"
+  [[ "$id" =~ ^[a-z] ]] || id="s_${id}"
+  id="${id:0:$(( max - ${#suffix} - 1 ))}"
+  printf '%s_%s' "$id" "$suffix"
+}
+
 # Create DB + user for a registered domain, store credentials (600).
 lib_db_create_for_domain() {
-  local domain="$1" ident="" dbname="" dbuser="" dbpass="" info="" sql=""
+  local domain="$1" dbbase="" userbase="" dbname="" dbuser="" dbpass="" info="" sql=""
   info="$(lib_db_info_file "$domain")"
   if lib_db_info_load "$domain"; then lib_ok "Database already exists for ${domain} (${DBI_NAME})"; return 0; fi
   lib_db_installed || lib_die "MariaDB is not installed" "run install first" "sudo ./setup.sh install"
-  ident="$(lib_domain_ident "$domain")"
-  if (( OPT_DRY_RUN )); then lib_info "[dry-run] would create database/user derived from '${ident}' and store ${info}"; return 0; fi
+  dbbase="$(_db_name_base "$domain" db 60)"
+  userbase="$(_db_name_base "$domain" user 32)"
+  if (( OPT_DRY_RUN )); then lib_info "[dry-run] would create database ${dbbase} with user ${userbase} and store ${info}"; return 0; fi
   lib_db_wait_ready 10 || lib_die "MariaDB not reachable" "service down" "systemctl status mariadb"
-  dbname="$(_db_unique_name "$ident" db 60)"   || lib_die "Could not find a free database name" "too many collisions" "clean up old databases"
-  dbuser="$(_db_unique_name "$ident" user 32)" || lib_die "Could not find a free database user name" "too many collisions" "clean up old users"
+  dbname="$(_db_unique_name "$dbbase" db 60)"     || lib_die "Could not find a free database name" "too many collisions" "clean up old databases"
+  dbuser="$(_db_unique_name "$userbase" user 32)" || lib_die "Could not find a free database user name" "too many collisions" "clean up old users"
   dbpass="$(lib_random_password 32)"
   sql="CREATE DATABASE \`${dbname}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 CREATE USER '${dbuser}'@'localhost' IDENTIFIED BY '${dbpass}';
@@ -322,9 +337,34 @@ FLUSH PRIVILEGES;" || return 1
 }
 
 # "db <domain>" command
+# Every site's database, with sizes but WITHOUT passwords - those stay behind
+# "credentials <domain>", which is the command that says out loud what it is printing.
+lib_db_list() {
+  local d="" size="" n=0
+  lib_db_installed || { lib_note "MariaDB is not installed"; return 0; }
+  printf '\n%s%-28s %-26s %-26s %9s%s\n' "$C_BLD" "SITE" "DATABASE" "USER" "SIZE" "$C_RST"
+  while read -r d; do
+    [[ -n "$d" ]] || continue
+    n=$((n + 1))
+    if lib_db_info_load "$d"; then
+      size="$(lib_db_sql "SELECT IFNULL(ROUND(SUM(data_length+index_length)/1048576,1),0) FROM information_schema.tables WHERE table_schema='${DBI_NAME}'" 2>/dev/null || true)"
+      printf '%-28s %-26s %-26s %6s MB\n' "$d" "$DBI_NAME" "$DBI_USER" "${size:-?}"
+    else
+      printf '%-28s %-26s %-26s %9s\n' "$d" "-" "-" "-"
+    fi
+  done < <(lib_domains_list)
+  if (( n == 0 )); then lib_note "no sites registered yet (setup.sh add example.com)"; fi
+  printf '\n'
+  lib_note "passwords: setup.sh credentials <domain>"
+  return 0
+}
+
 lib_db_main() {
   local domain="${1:-}"
-  [[ -n "$domain" ]] || lib_die "Usage: setup.sh db <domain>" "domain missing" "setup.sh db example.com"
+  if [[ "$domain" == "list" || "$domain" == "--list" ]]; then
+    lib_require_tools; lib_require_installed; lib_db_list; return 0
+  fi
+  [[ -n "$domain" ]] || lib_die "Usage: setup.sh db <domain>|list" "domain missing" "setup.sh db example.com"
   domain="${domain,,}"
   lib_domain_valid "$domain" || lib_die "Invalid domain name '${domain}'" "not a valid FQDN" "use e.g. example.com"
   lib_require_tools

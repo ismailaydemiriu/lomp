@@ -40,10 +40,13 @@ COMMANDS
   add <domain> [opts]           Create a site (user, dirs, vhost, SSL)
       --email a@b.c  --no-ssl  --www  --www-primary  --php 8.3
       --memory 256M  --upload 64M  --php-children N
-      --proxy 127.0.0.1:3000  --static  --wordpress  --cloudflare
+      --proxy 127.0.0.1:3000  --static  --wordpress  --cloudflare  --no-db
       --wildcard  --staging  --hsts-preload
       --wp-title "Title" --wp-admin admin --wp-email a@b.c --wp-locale en_US
+                                Every site gets its own database and MariaDB user
+                                unless --no-db is given.
   db <domain>                   Create (or show) the MariaDB database for a site
+  db list                       Every site's database, user and size (no passwords)
   remove <domain> [opts]        Remove a site  (--keep-db --keep-files --keep-ssl)
   list                          Table of sites (--json)
   status                        Services, versions, resources, sites (--json)
@@ -203,22 +206,23 @@ lib_menu_main() {
     _menu_item  2 "Add a site"
     _menu_item  3 "Site credentials"
     _menu_item  4 "Site logs"
-    _menu_item  5 "Create database"
-    _menu_item  6 "Remove a site"
+    _menu_item  5 "List databases"
+    _menu_item  6 "Create database"
+    _menu_item  7 "Remove a site"
     _menu_group "SERVER"
-    _menu_item  7 "Status"
-    _menu_item  8 "Health check"
-    _menu_item  9 "Open WebAdmin panel"
-    _menu_item 10 "Renew certificates"
-    _menu_item 11 "Back up sites"
-    _menu_item 12 "Restore a site"
+    _menu_item  8 "Status"
+    _menu_item  9 "Health check"
+    _menu_item 10 "Open WebAdmin panel"
+    _menu_item 11 "Renew certificates"
+    _menu_item 12 "Back up sites"
+    _menu_item 13 "Restore a site"
     _menu_group "MAINTENANCE"
-    _menu_item 13 "Update packages"
-    _menu_item 14 "Update lompstack"
-    _menu_item 15 "Re-tune to hardware"
-    _menu_item 16 "Notifications"
-    _menu_item 17 "Optional components (Node.js, Python, Netdata)"
-    _menu_item 18 "Command reference"
+    _menu_item 14 "Update packages"
+    _menu_item 15 "Update lompstack"
+    _menu_item 16 "Re-tune to hardware"
+    _menu_item 17 "Notifications"
+    _menu_item 18 "Optional components (Node.js, Python, Netdata)"
+    _menu_item 19 "Command reference"
     _menu_item  0 "Exit"
     printf '\n%sChoice: %s' "$C_BLD" "$C_RST"
     read -r choice </dev/tty || return 0
@@ -228,20 +232,21 @@ lib_menu_main() {
       2) _menu_add_site ;;
       3) domain="$(_menu_pick_domain)" && _menu_run credentials "$domain" || _menu_pause ;;
       4) domain="$(_menu_pick_domain)" && _menu_run logs "$domain" || _menu_pause ;;
-      5) domain="$(_menu_pick_domain)" && _menu_run db "$domain" || _menu_pause ;;
-      6) _menu_remove_site ;;
-      7) _menu_run status ;;
-      8) _menu_run doctor ;;
-      9) _menu_run panel ;;
-      10) _menu_run renew-ssl --all ;;
-      11) _menu_backup ;;
-      12) _menu_restore ;;
-      13) _menu_run update ;;
-      14) _menu_run self-update ;;
-      15) _menu_run optimize ;;
-      16) _menu_run notify --show ;;
-      17) _menu_runtimes ;;
-      18) lib_usage | ${PAGER:-less} 2>/dev/null || lib_usage; _menu_pause ;;
+      5) _menu_run db list ;;
+      6) domain="$(_menu_pick_domain)" && _menu_run db "$domain" || _menu_pause ;;
+      7) _menu_remove_site ;;
+      8) _menu_run status ;;
+      9) _menu_run doctor ;;
+      10) _menu_run panel ;;
+      11) _menu_run renew-ssl --all ;;
+      12) _menu_backup ;;
+      13) _menu_restore ;;
+      14) _menu_run update ;;
+      15) _menu_run self-update ;;
+      16) _menu_run optimize ;;
+      17) _menu_run notify --show ;;
+      18) _menu_runtimes ;;
+      19) lib_usage | ${PAGER:-less} 2>/dev/null || lib_usage; _menu_pause ;;
       0|q|Q|"") printf '\n'; return 0 ;;
       *) printf '%sPick a number from the list.%s\n' "$C_YEL" "$C_RST" ;;
     esac
