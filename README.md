@@ -185,6 +185,7 @@ sudo lomp renew-ssl example.com
 ```bash
 sudo lomp add shop.example.com --wordpress          # WordPress with database and cache
 sudo lomp add api.example.com --proxy 127.0.0.1:3000 # Node/Python app behind OpenLiteSpeed
+sudo lomp proxy add example.com /api/ 127.0.0.1:3001 # an app under a path of an existing site
 sudo lomp add cdn.example.com --static              # static site, no PHP
 sudo lomp db shop.example.com                       # create or show the database
 sudo lomp db list                                   # every site's database, user and size
@@ -219,6 +220,21 @@ Global flags work everywhere: `--yes`, `--dry-run`, `--quiet`, `--verbose`, `--n
 | `--no-db` | Skip the database. Every site otherwise gets its own MariaDB database and user — `example.com` becomes `example_db` / `example_user` with a 32-character random password, printed once when the site is created and available afterwards from `credentials` |
 | `--wildcard` | Also request `*.<domain>` over DNS-01 (needs a stored Cloudflare API token) |
 | `--staging` | Use the Let's Encrypt staging CA while you are testing |
+
+### Path proxies
+
+Publish an application under a path of any site, next to WordPress, PHP or static files:
+
+```bash
+sudo lomp proxy add example.com /api/ 127.0.0.1:3001   # example.com/api/... -> the app
+sudo lomp proxy list                                   # every path proxy, and whether its app answers
+sudo lomp proxy remove example.com /api/
+```
+
+OpenLiteSpeed forwards the full path, prefix included, so the application must serve its
+routes under `/api`. WebSocket upgrades on that path are passed through as well. The rest of
+the site is untouched, a failed configuration test rolls the change back, and `doctor` warns
+when nothing listens on a target.
 
 ---
 

@@ -3,6 +3,8 @@
 #                 users & directories, WordPress, logrotate + fail2ban regeneration.
 
 # ---- per-site state (loaded from domain.json or set by "add") ---------------
+# D_PATH_PROXIES: one "path target" line per path proxy (.proxies[], written by lib/proxy.sh)
+D_PATH_PROXIES=""
 D_DOMAIN="" D_IDENT="" D_USER="" D_GROUP="" D_HOME="" D_MODE="php" D_PHP="" D_PHP_CHILDREN=""
 D_MEMORY="" D_UPLOAD="" D_PROXY="" D_STATIC_PATHS="/static/,/assets/,/uploads/" D_WS_PATH=""
 D_WWW=0 D_WWW_PRIMARY=0 D_SSL=0 D_SSL_WANTED=1 D_SSL_WILDCARD=0 D_HSTS_PRELOAD=0 D_CLOUDFLARE=0
@@ -20,6 +22,7 @@ WPCLI_BIN="/usr/local/bin/wp"
 #  State
 # =============================================================================
 lib_domain_state_reset() {
+  D_PATH_PROXIES=""
   D_DOMAIN="" D_IDENT="" D_USER="" D_GROUP="" D_HOME="" D_MODE="php" D_PHP="" D_PHP_CHILDREN=""
   D_MEMORY="" D_UPLOAD="" D_PROXY="" D_STATIC_PATHS="/static/,/assets/,/uploads/" D_WS_PATH=""
   D_WWW=0 D_WWW_PRIMARY=0 D_SSL=0 D_SSL_WANTED=1 D_SSL_WILDCARD=0 D_HSTS_PRELOAD=0 D_CLOUDFLARE=0
@@ -48,6 +51,7 @@ lib_domain_state_load() {
   D_PROXY="$(lib_json_get "$f" '.proxy.target')"
   D_STATIC_PATHS="$(lib_json_get "$f" '.proxy.static_paths')"
   D_WS_PATH="$(lib_json_get "$f" '.proxy.websocket_path')"
+  D_PATH_PROXIES="$(jq -r '(.proxies // [])[] | "\(.path) \(.target)"' "$f" 2>/dev/null || true)"
   D_WWW="$(_d_bool "$(lib_json_get "$f" '.www')")"
   D_WWW_PRIMARY="$(_d_bool "$(lib_json_get "$f" '.www_primary')")"
   D_SSL="$(_d_bool "$(lib_json_get "$f" '.ssl.enabled')")"
@@ -647,7 +651,7 @@ lib_domain_credentials_server() {
 }
 
 lib_domain_credentials_show() {
-  local domain="$1" info=""
+  local domain="$1" info="" pp="" pt=""
   lib_domain_state_load "$domain" || return 0
   printf '\n%s== %s ==%s\n' "$C_BLD" "$domain" "$C_RST"
   lib_print_kv "Mode / status" "${D_MODE} / ${D_STATUS}"
@@ -655,6 +659,9 @@ lib_domain_credentials_show() {
   lib_print_kv "System user"   "${D_USER}:${D_GROUP}"
   [[ -n "$D_PHP" ]] && lib_print_kv "PHP" "${D_PHP} (memory ${D_MEMORY}, upload ${D_UPLOAD}, workers ${D_PHP_CHILDREN})"
   [[ -n "$D_PROXY" ]] && lib_print_kv "Proxy target" "$D_PROXY"
+  while read -r pp pt; do
+    if [[ -n "$pp" ]]; then lib_print_kv "Path proxy" "${pp} -> ${pt}"; fi
+  done <<<"$D_PATH_PROXIES"
   lib_print_kv "SSL"           "$( (( D_SSL )) && lib_ssl_status_line "$domain" || printf 'not active')"
   lib_db_show "$domain"
   info="$(lib_domain_state_dir "$domain")/wp.info"

@@ -966,6 +966,26 @@ extprocessor ${D_IDENT}_proxy {
 EOF
   fi
 
+  # ---- path proxies (every mode): example.com/api/ -> another application ------
+  local pp="" pt=""
+  if [[ -n "$D_PATH_PROXIES" ]]; then
+    while read -r pp pt; do
+      [[ -n "$pp" ]] || continue
+      cat <<EOF
+
+extprocessor $(lib_proxy_handler_name "$D_IDENT" "$pp") {
+  type                    proxy
+  address                 ${pt}
+  maxConns                200
+  pcKeepAliveTimeout      1
+  initTimeout             60
+  retryTimeout            0
+  respBuffer              0
+}
+EOF
+    done <<<"$D_PATH_PROXIES"
+  fi
+
   # ---- rewrite rules ------------------------------------------------------
   rules+=$'# server-setup: never expose dotfiles (except ACME), VCS, env and dump files\n'
   rules+=$'RewriteRule ^/?\\.(?!well-known/) - [F,L]\n'
@@ -1012,6 +1032,30 @@ context /.well-known/acme-challenge/ {
   addDefaultCharset       off
 }
 EOF
+  # A path proxy gets its own context plus a websocket block on the IDENTICAL uri, the only
+  # uri OpenLiteSpeed attaches a websocket block to without creating a static context.
+  if [[ -n "$D_PATH_PROXIES" ]]; then
+    while read -r pp pt; do
+      [[ -n "$pp" ]] || continue
+      cat <<EOF
+
+context ${pp} {
+  type                    proxy
+  handler                 $(lib_proxy_handler_name "$D_IDENT" "$pp")
+  addDefaultCharset       off
+  extraHeaders            <<<END_extraHeaders
+X-Content-Type-Options: nosniff
+Referrer-Policy: strict-origin-when-cross-origin
+${hsts:+${hsts}
+}  END_extraHeaders
+}
+
+websocket ${pp} {
+  address                 ${pt}
+}
+EOF
+    done <<<"$D_PATH_PROXIES"
+  fi
   if [[ "$D_MODE" == "proxy" ]]; then
     local p=""
     for p in ${D_STATIC_PATHS//,/ }; do

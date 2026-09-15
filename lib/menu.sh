@@ -47,6 +47,11 @@ COMMANDS
                                 unless --no-db is given.
   db <domain>                   Create (or show) the MariaDB database for a site
   db list                       Every site's database, user and size (no passwords)
+  proxy list [<domain>]         Path proxies of every site and whether their app answers
+  proxy add <domain> <path> <host:port>
+                                Publish an app under a path of an existing site, in any
+                                mode: proxy add example.com /api/ 127.0.0.1:3001
+  proxy remove <domain> <path>  Stop proxying that path
   remove <domain> [opts]        Remove a site  (--keep-db --keep-files --keep-ssl; alias: delete)
   list                          Table of sites (--json)
   status                        Services, versions, resources, sites (--json)

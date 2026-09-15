@@ -23,13 +23,18 @@ INSTALL_DIR="$TMP/install"; BIN_LINK="$TMP/lompstack"; BIN_SHORT="$TMP/lomp"; LO
 OPT_YES=1 OPT_DRY_RUN=0 OPT_QUIET=1 OPT_VERBOSE=0 OPT_NO_COLOR=1 OPT_JSON=0 OPT_NON_INTERACTIVE=1
 SCRIPT_PATH="$ROOT/setup.sh"; SCRIPT_DIR="$ROOT"
 export TMPDIR="$TMP"
-for m in common system ols php db ssl domain cloudflare backup monitor install menu; do
+for m in common system ols php db ssl domain proxy cloudflare backup monitor install menu; do
   # shellcheck source=/dev/null
   source "$ROOT/lib/$m.sh"
 done
 trap cleanup EXIT
 mkdir -p "$STATE_DIR" "$LSWS_HOME/conf/vhosts" "$SITES_ROOT"; : >"$LOG_FILE"
 chown() { return 0; }   # no lsadm/site users on the test machine
+# Git Bash runs the native jq.exe, which writes CRLF unless given -b: a multi-line result then
+# carries a \r at the end of every line but the last. Servers and CI (Linux) are unaffected.
+if [[ "${OSTYPE:-}" == msys* || "${OSTYPE:-}" == cygwin* ]]; then
+  jq() { command jq -b "$@"; }
+fi
 
 # Some filesystems (MSYS/NTFS under Git Bash) ignore chmod, so permission assertions
 # only run where they are meaningful. On Linux and in CI they always run.
@@ -813,7 +818,7 @@ for _mode in php static proxy wordpress; do
     [[ "$_mode" == "php" || "$_mode" == "wordpress" ]] && { D_PHP="8.3"; D_MEMORY="256M"; D_UPLOAD="64M"; D_PHP_CHILDREN=4; }
     assert_eq "vhconf ${_mode} ssl=${_ssl} exits 0" 0 "$(run_isolated lib_ols_render_vhconf)"
     # and with every optional switch on at once
-    D_WWW=1; D_WWW_PRIMARY=1; D_HSTS_PRELOAD=1; D_EMAIL="a@b.c"; D_WS_PATH="/ws"
+    D_WWW=1; D_WWW_PRIMARY=1; D_HSTS_PRELOAD=1; D_EMAIL="a@b.c"; D_WS_PATH="/ws"; D_PATH_PROXIES=$'/api/ 127.0.0.1:3001\n/ws/ 127.0.0.1:3002'
     assert_eq "vhconf ${_mode} ssl=${_ssl} (all options) exits 0" 0 "$(run_isolated lib_ols_render_vhconf)"
   done
 done
@@ -1238,6 +1243,102 @@ LIB_STEP_CURRENT=0
 out="$( ( lib_die "bad flag" "" "" ) 2>&1 || true )"
 assert_lacks "argument errors stay free of it" "doctor" "$out"
 BIN_SHORT="$_bs_save"; BIN_LINK="$_bl_save"
+
+# =============================================================================
+section "path proxies"
+# Git Bash: jq is a native Windows binary and MSYS rewrites every argument that looks like a
+# POSIX path, so "--arg p /api/" arrived as "C:/Program Files/Git/api/". MSYS_NO_PATHCONV
+# would also stop it translating the /tmp file names jq has to open; exclude only the URL
+# prefixes this section uses. Linux ignores the variable.
+export MSYS2_ARG_CONV_EXCL="/api;/ws"
+assert_eq    "path gets both slashes"          "/api/"    "$(lib_proxy_path_normalize api)"
+assert_eq    "nested path kept"                "/api/v1/" "$(lib_proxy_path_normalize /api/v1)"
+assert_eq    "dots inside a segment are fine"  "/v1.2/"   "$(lib_proxy_path_normalize /v1.2/)"
+assert_false "the root is not a path proxy"    lib_proxy_path_normalize /
+assert_false "no ACME path"                    lib_proxy_path_normalize /.well-known/acme-challenge/
+assert_false "no dot segments"                 lib_proxy_path_normalize /api/../etc/
+assert_false "no spaces"                       lib_proxy_path_normalize "/a b/"
+assert_false "no empty segment"                lib_proxy_path_normalize //api/
+assert_true  "target ip:port"                  lib_proxy_target_valid 127.0.0.1:3001
+assert_true  "target host:port"                lib_proxy_target_valid backend.internal:8080
+assert_false "target without a port"           lib_proxy_target_valid 127.0.0.1
+assert_false "target port 0"                   lib_proxy_target_valid 127.0.0.1:0
+assert_false "target port above 65535"         lib_proxy_target_valid 127.0.0.1:70000
+assert_false "target with a scheme"            lib_proxy_target_valid http://127.0.0.1:3001
+_h1="$(lib_proxy_handler_name example_com /api/)"
+is_px_name() { [[ "$1" =~ ^example_com_px_[0-9a-f]{8}$ ]]; }
+assert_true "handler name is site ident + 8-hex path hash" is_px_name "$_h1"
+assert_eq   "handler name is stable" "$_h1" "$(lib_proxy_handler_name example_com /api/)"
+assert_true "different paths get different handlers" test "$_h1" != "$(lib_proxy_handler_name example_com /api2/)"
+
+lib_domain_state_reset
+D_DOMAIN="px.example.com"; D_IDENT="px_example_com"; D_USER="px_example_com"; D_GROUP="px_example_com"
+D_HOME="$SITES_ROOT/px.example.com"; D_MODE="wordpress"; D_PHP="8.3"; D_MEMORY="256M"; D_UPLOAD="64M"; D_PHP_CHILDREN=4
+D_STATUS="active"; D_CREATED="2025-01-01T00:00:00Z"
+lib_domain_state_save
+lib_proxy_state_set px.example.com /ws/ 127.0.0.1:3002
+lib_proxy_state_set px.example.com /api/ 127.0.0.1:3001
+lib_proxy_state_set px.example.com /api/ 127.0.0.1:4001   # the same path again replaces it
+_px_want="$(printf '/api/ 127.0.0.1:4001\n/ws/ 127.0.0.1:3002')"
+lib_domain_state_load px.example.com
+assert_eq "one entry per path, sorted" "$_px_want" "$D_PATH_PROXIES"
+lib_domain_state_save; lib_domain_state_load px.example.com   # what renew-ssl and restore do
+assert_eq "a domain.json save keeps them" "$_px_want" "$D_PATH_PROXIES"
+lib_proxy_state_del px.example.com /api/
+lib_proxy_state_del px.example.com /ws/
+lib_domain_state_load px.example.com
+assert_eq "removing the last one leaves none" "" "$D_PATH_PROXIES"
+assert_eq "as an empty list" "[]" "$(jq -c '.proxies' "$(lib_domain_json px.example.com)")"
+lib_domain_state_save; lib_domain_state_load px.example.com
+assert_eq "and a later save does not bring them back" "" "$D_PATH_PROXIES"
+
+# rendered in every mode, with and without TLS
+D_PATH_PROXIES="$_px_want"
+for _mode in php static proxy wordpress; do
+  D_MODE="$_mode"; D_PROXY=""
+  if [[ "$_mode" == "proxy" ]]; then D_PROXY="127.0.0.1:3000"; fi
+  for _ssl in 0 1; do
+    D_SSL="$_ssl"; _tag="${_mode} ssl=${_ssl}"
+    out="$(lib_ols_render_vhconf)"; printf '%s\n' "$out" >"$TMP/px.vhconf"
+    assert_true "path proxies ${_tag}: balanced" _ols_braces_balanced "$TMP/px.vhconf"
+    assert_has  "path proxies ${_tag}: context" "context /api/ {" "$out"
+    assert_has  "path proxies ${_tag}: handler" "handler                 $(lib_proxy_handler_name px_example_com /api/)" "$out"
+    assert_has  "path proxies ${_tag}: extprocessor" "extprocessor $(lib_proxy_handler_name px_example_com /ws/) {" "$out"
+    assert_has  "path proxies ${_tag}: target" "address                 127.0.0.1:4001" "$out"
+    assert_has  "path proxies ${_tag}: websocket on the identical uri" "websocket /ws/ {" "$out"
+    assert_eq   "path proxies ${_tag}: exits 0" 0 "$(run_isolated lib_ols_render_vhconf)"
+  done
+done
+D_SSL=1; out="$(lib_ols_render_vhconf)"
+assert_eq "hsts on every proxied path too" 3 "$(grep -c '^Strict-Transport-Security' <<<"$out")"
+
+_px_conflict() { lib_proxy_conflict "$@" >/dev/null; }
+D_MODE="proxy"; D_STATIC_PATHS="/static/,/assets/"
+assert_true  "a static path of a proxy site cannot be proxied as well" _px_conflict /static/
+assert_false "any other path can" _px_conflict /api/
+D_MODE="php"
+assert_false "php sites have no static path contexts" _px_conflict /static/
+
+# add/remove end to end, with the configuration step stubbed
+_orig_apply="$(declare -f lib_domain_apply_config)"; _orig_tcp="$(declare -f lib_tcp_open)"; _orig_tools="$(declare -f lib_require_tools)"
+lib_tcp_open() { return 1; }
+lib_require_tools() { return 0; }   # flock is not part of Git Bash
+lib_domain_apply_config() { lib_die "configuration test failed" "" ""; }
+( lib_proxy_add px.example.com /api/ 127.0.0.1:3001 ) >/dev/null 2>&1 || true
+assert_eq "a rejected configuration leaves the state as it was" "[]" "$(jq -c '.proxies' "$(lib_domain_json px.example.com)")"
+lib_domain_apply_config() { return 0; }
+( lib_proxy_add px.example.com api 127.0.0.1:3001 ) >/dev/null 2>&1 || true
+assert_eq "an accepted one is recorded, path normalized" '[{"path":"/api/","target":"127.0.0.1:3001"}]' "$(jq -c '.proxies' "$(lib_domain_json px.example.com)")"
+assert_eq "adding to an unknown site fails"  1 "$(run_isolated lib_proxy_add nosuch.example.com /api/ 127.0.0.1:3001)"
+assert_eq "an invalid target fails"          1 "$(run_isolated lib_proxy_add px.example.com /api/ nope)"
+assert_eq "removing an unknown path fails"   1 "$(run_isolated lib_proxy_remove px.example.com /nope/)"
+( lib_proxy_remove px.example.com /api ) >/dev/null 2>&1 || true
+assert_eq "remove accepts the path without a slash" "[]" "$(jq -c '.proxies' "$(lib_domain_json px.example.com)")"
+assert_eq "an unknown action fails" 1 "$(run_isolated lib_proxy_main frobnicate)"
+eval "$_orig_apply"; eval "$_orig_tcp"; eval "$_orig_tools"
+rm -rf "$(lib_domain_state_dir px.example.com)"
+lib_domain_state_reset
+unset MSYS2_ARG_CONV_EXCL
 
 # =============================================================================
 section "Node.js major version (regression: an install re-run upgraded Node under running apps)"

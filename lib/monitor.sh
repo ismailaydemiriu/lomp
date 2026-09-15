@@ -412,6 +412,12 @@ _doc_check_domains() {
       lib_db_exists "$D_DB_NAME" && _doc_add OK "site ${d}: db" "${D_DB_NAME} present" || _doc_add FAIL "site ${d}: db" "database ${D_DB_NAME} missing"
     fi
     if [[ -n "$D_PHP" ]] && ! lib_php_installed "$D_PHP"; then _doc_add FAIL "site ${d}: php" "LSPHP ${D_PHP} not installed"; fi
+    local pp="" pt=""
+    while read -r pp pt; do
+      [[ -n "$pp" ]] || continue
+      if lib_tcp_open "${pt%:*}" "${pt##*:}"; then _doc_add OK "site ${d}: proxy ${pp}" "${pt} answers"
+      else _doc_add WARN "site ${d}: proxy ${pp}" "nothing listens on ${pt}, so requests to ${pp} get 503"; fi
+    done <<<"$D_PATH_PROXIES"
   done
   for d in "${cfg_vhosts[@]}"; do
     lib_domain_registered "$d" || _doc_add WARN "unmanaged vhost ${d}" "present in httpd_config.conf but not in state"

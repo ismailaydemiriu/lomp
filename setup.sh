@@ -95,7 +95,7 @@ _ss_load_module() {
   # shellcheck source=/dev/null
   source "$file"
 }
-for _m in common system ols php db ssl domain cloudflare backup monitor install menu; do
+for _m in common system ols php db ssl domain proxy cloudflare backup monitor install menu; do
   _ss_load_module "$_m"
 done
 unset _m
@@ -173,6 +173,7 @@ main() {
     list|status|doctor|credentials|logs|menu) ;;
     panel) if [[ "${rest[0]:-open}" != "status" ]]; then lib_lock; fi ;;
     notify) [[ " ${rest[*]:-} " == *" --send "* ]] || lib_lock ;;
+    proxy)  if [[ "${rest[0]:-list}" != "list" && "${rest[0]:-list}" != "help" ]]; then lib_lock; fi ;;
     *) lib_lock ;;
   esac
 
@@ -184,6 +185,7 @@ main() {
     install)        lib_install_main "${rest[@]}" ;;
     add)            lib_domain_add_main "${rest[@]}" ;;
     db)             lib_db_main "${rest[@]}" ;;
+    proxy)          lib_proxy_main "${rest[@]}" ;;
     remove|delete)  lib_domain_remove_main "${rest[@]}" ;;
     list)           lib_domain_list_main "${rest[@]}" ;;
     status)         lib_status_main "${rest[@]}" ;;
