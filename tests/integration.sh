@@ -266,6 +266,46 @@ check_not "proxy files removed" test -e "/home/${TEST_DOMAIN3}"
 check "OpenLiteSpeed still healthy after removal" "${LSWS_HOME}/bin/openlitespeed" -t
 
 # =============================================================================
+step "T06c Node.js site run by PM2, and a path proxy on the PHP site"
+# =============================================================================
+TEST_DOMAIN4="${TEST_DOMAIN4:-itest4-lompstack.example.com}"
+IDENT4="$(printf '%s' "$TEST_DOMAIN4" | sed -E 's/[^a-zA-Z0-9]+/_/g' | cut -c1-28)"
+rc="$(run_setup addnode add "$TEST_DOMAIN4" --node --port 3197 --no-ssl --no-db --non-interactive --no-color --yes)"
+check_eq "add --node exits 0" 0 "$rc"
+check "the PM2 unit is rendered" test -f "/etc/systemd/system/pm2-${IDENT4}.service"
+check "OpenLiteSpeed accepts the Node.js vhost" "${LSWS_HOME}/bin/openlitespeed" -t
+install -d -o "$IDENT4" -g "$IDENT4" -m 0750 "/home/${TEST_DOMAIN4}/app"
+cat >"/home/${TEST_DOMAIN4}/app/server.js" <<'JS'
+require('http').createServer((q, s) => s.end('itest-node-ok ' + q.url + ' ' + require('os').userInfo().username)).listen(Number(process.env.PORT), '127.0.0.1');
+JS
+printf '{"name":"itest","version":"1.0.0","scripts":{"start":"node server.js"}}\n' >"/home/${TEST_DOMAIN4}/app/package.json"
+chown "${IDENT4}:${IDENT4}" "/home/${TEST_DOMAIN4}/app/server.js" "/home/${TEST_DOMAIN4}/app/package.json"
+rc="$(run_setup deploynode app deploy "$TEST_DOMAIN4" --no-color)"
+check_eq "app deploy exits 0" 0 "$rc"
+check "the PM2 service is active" systemctl is-active --quiet "pm2-${IDENT4}"
+check "the PM2 service starts at boot" systemctl is-enabled --quiet "pm2-${IDENT4}"
+check_has "the app answers through OpenLiteSpeed, as the site user" "itest-node-ok /hello ${IDENT4}" \
+  "$(curl -s --max-time 15 -H "Host: ${TEST_DOMAIN4}" http://127.0.0.1/hello || true)"
+check_not "no node or PM2 process runs as root" bash -c "ps -eo user:32,args | awk '\$1 == \"root\" && /(node|PM2)/ && !/awk/' | grep -q ."
+printf 'itest-app-secret-value' | bash "$SETUP" app env "$TEST_DOMAIN4" set ITEST_TOKEN --no-color >"${OUT_DIR}/envnode.out" 2>&1 || true
+check_not "an application variable never reaches the log" grep -qF "itest-app-secret-value" "$LOG_FILE"
+rc="$(run_setup proxyadd proxy add "$TEST_DOMAIN" /api/ 127.0.0.1:3197 --no-color)"
+check_eq "proxy add exits 0" 0 "$rc"
+check_has "/api/ on the PHP site reaches the Node.js app" "itest-node-ok /api/x" \
+  "$(curl -s --max-time 15 -H "Host: ${TEST_DOMAIN}" http://127.0.0.1/api/x || true)"
+check_eq "the PHP site itself still answers 200" "200" "$(http_code "$TEST_DOMAIN")"
+rc="$(run_setup proxyremove proxy remove "$TEST_DOMAIN" /api/ --no-color)"
+check_eq "proxy remove exits 0" 0 "$rc"
+rc="$(run_setup stopnode app stop "$TEST_DOMAIN4" --no-color)"
+check_eq "app stop exits 0" 0 "$rc"
+check_not "a stopped app no longer runs" systemctl is-active --quiet "pm2-${IDENT4}"
+rc="$(run_setup removenode remove "$TEST_DOMAIN4" --yes --no-color)"
+check_eq "Node.js site removed" 0 "$rc"
+check_not "its PM2 unit is gone" test -e "/etc/systemd/system/pm2-${IDENT4}.service"
+check_not "its system user is gone" id -u "$IDENT4"
+check "OpenLiteSpeed still healthy" "${LSWS_HOME}/bin/openlitespeed" -t
+
+# =============================================================================
 step "T07  database for the site"
 # =============================================================================
 rc="$(run_setup db db "$TEST_DOMAIN" --no-color)"

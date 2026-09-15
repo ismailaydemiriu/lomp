@@ -182,6 +182,21 @@ listener Default{
     map                      Example *
 }
 
+vhTemplate centralConfigLog{
+    templateFile             conf/templates/ccl.conf
+    listeners                Default
+}
+
+vhTemplate EasyRailsWithSuEXEC{
+    templateFile             conf/templates/rails.conf
+    listeners                Default
+}
+
+vhTemplate mine{
+    templateFile             conf/templates/mine.conf
+    listeners                HTTP
+}
+
 module cache {
     ls_enabled          1
     enableCache         0
@@ -214,8 +229,14 @@ assert_eq "listener Default address" "*:8088" "$(lib_ols_tx_block_get listener D
 lib_ols_tx_block_remove virtualhost Example
 assert_false "block removed" lib_ols_tx_block_exists virtualhost Example
 assert_true  "other blocks intact after remove" lib_ols_tx_block_exists listener Default
+_ols_tx_drop_stock_templates
+assert_true  "stock templates stay while their listener exists" lib_ols_tx_block_exists vhTemplate centralConfigLog
 lib_ols_tx_block_remove listener Default
 assert_false "listener removed" lib_ols_tx_block_exists listener Default
+_ols_tx_drop_stock_templates
+assert_false "a stock template on the removed listener is dropped" lib_ols_tx_block_exists vhTemplate centralConfigLog
+assert_false "and the other one"                                   lib_ols_tx_block_exists vhTemplate EasyRailsWithSuEXEC
+assert_true  "a template on another listener is kept"              lib_ols_tx_block_exists vhTemplate mine
 assert_true "braces balanced after edits" _ols_braces_balanced "$OLS_TX_FILE"
 
 SYS_IPV6=0

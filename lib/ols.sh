@@ -1216,6 +1216,22 @@ _ols_tx_domain_maps_ensure() {
   done < <(lib_domains_list)
 }
 
+# The stock httpd_config.conf ships two example vhTemplates attached to the "Default"
+# listener. Once that listener is removed they make OpenLiteSpeed log
+#   [config:template:centralConfigLog] Listener [Default] does not exist
+# as an ERROR on every start, and a failed reload then quoted those lines instead of its real
+# cause. Drop them, but only while they still point at a listener that no longer exists.
+_ols_tx_drop_stock_templates() {
+  local tpl=""
+  lib_ols_tx_block_exists listener Default && return 0
+  for tpl in centralConfigLog EasyRailsWithSuEXEC; do
+    if lib_ols_tx_block_exists vhTemplate "$tpl" && [[ "$(lib_ols_tx_block_get vhTemplate "$tpl" listeners)" == "Default" ]]; then
+      lib_ols_tx_block_remove vhTemplate "$tpl"
+    fi
+  done
+  return 0
+}
+
 # Apply tuning + structure to the transaction (used by install and optimize).
 lib_ols_tx_apply_server_settings() {
   local ver="" php_bin=""
@@ -1271,6 +1287,7 @@ EOF
     if [[ "$(lib_ols_tx_block_get listener Default address)" == *:8088 ]]; then lib_ols_tx_block_remove listener Default; fi
   fi
   lib_ols_tx_block_exists virtualhost Example && lib_ols_tx_block_remove virtualhost Example
+  _ols_tx_drop_stock_templates
 
   # catch-all vhost + listeners
   lib_ols_render_default_vhost_block | lib_ols_tx_block_put virtualhost "$OLS_DEFAULT_VHOST"
