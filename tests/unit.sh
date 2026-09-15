@@ -103,6 +103,15 @@ assert_eq "mask json token"       '"token":"********"'               "$(m '"toke
 assert_eq "no mask --admin-ip"    "--admin-ip 203.0.113.5"           "$(m '--admin-ip 203.0.113.5')"
 assert_eq "no mask --backup-keep" "--backup-keep 7"                  "$(m '--backup-keep 7')"
 assert_eq "no mask --admin-port"  "--admin-port 7080"                "$(m '--admin-port 7080')"
+# git remotes and connection strings carry the credential inside the URL itself
+assert_eq "mask url user:secret"      "--git https://oauth2:********@gitlab.com/g/r.git" "$(m '--git https://oauth2:glpat-Ab12Cd34Ef56@gitlab.com/g/r.git')"
+assert_eq "mask token as url user"    "https://********@github.com/o/r.git"              "$(m 'https://ghp_1234567890abcdefghijKLMNOP@github.com/o/r.git')"
+assert_eq "mask connection string"    "mysql://app:********@127.0.0.1:3306/app"          "$(m 'mysql://app:S3cr3tPw@127.0.0.1:3306/app')"
+assert_eq "mask empty-user url"       "redis://:********@127.0.0.1:6379"                 "$(m 'redis://:S3cr3tPw@127.0.0.1:6379')"
+assert_eq "no mask ssh remote user"   "ssh://git@github.com/o/r.git"                     "$(m 'ssh://git@github.com/o/r.git')"
+assert_eq "no mask scp-style remote"  "git@github.com:o/r.git"                           "$(m 'git@github.com:o/r.git')"
+assert_eq "no mask short url user"    "https://bob@bitbucket.org/w/r.git"                "$(m 'https://bob@bitbucket.org/w/r.git')"
+assert_eq "no mask host:port url"     "http://127.0.0.1:3000/health"                     "$(m 'http://127.0.0.1:3000/health')"
 # the doctor leak scan must see exactly what the masker masks, or it reports a clean log
 leak_hit() { grep -Eqi "$(lib_secret_leak_pattern)" <<<"$1"; }
 assert_true  "doctor sees a leaked flag token"   leak_hit "args='--cf-api-token Xv8sQ2pLm9TzR4kWn1bYc7dEf0g'"
@@ -110,6 +119,16 @@ assert_true  "doctor sees a leaked key=value"    leak_hit "password=S3cr3tValue1
 assert_true  "doctor sees a leaked requirepass"  leak_hit "requirepass S3cr3tRedisPass"
 assert_false "doctor ignores a masked line"      leak_hit "args='--cf-api-token ********'"
 assert_false "doctor ignores PasswordAuthentication" leak_hit "PasswordAuthentication no"
+assert_true  "doctor sees credentials in a url"      leak_hit "--git https://oauth2:glpat-Ab12Cd34Ef56@gitlab.com/g/r.git"
+assert_true  "doctor sees a token used as url user"  leak_hit "https://ghp_1234567890abcdefghijKLMNOP@github.com/o/r.git"
+assert_false "doctor ignores a masked url"           leak_hit "https://oauth2:********@gitlab.com/g/r.git"
+assert_false "doctor ignores a masked token url"     leak_hit "https://********@github.com/o/r.git"
+assert_false "doctor ignores an ssh remote"          leak_hit "ssh://git@github.com/o/r.git"
+assert_false "doctor ignores a host:port url"        leak_hit "http://127.0.0.1:3000/health"
+# every masked shape must also be one the leak scan recognises before masking
+for _s in 'https://oauth2:glpat-Ab12Cd34Ef56@gitlab.com/g/r.git' 'https://ghp_1234567890abcdefghijKLMNOP@github.com/o/r.git' 'mysql://app:S3cr3tPw@127.0.0.1:3306/app'; do
+  assert_false "masked form of ${_s%%@*}@... is clean" leak_hit "$(m "$_s")"
+done
 
 # =============================================================================
 section "OpenLiteSpeed config editing (awk)"
@@ -516,7 +535,14 @@ assert_true "proxy vhconf balanced" _ols_braces_balanced "$TMP/proxy.vhconf"
 assert_has "proxy extprocessor" "extprocessor example_com_proxy {" "$out"
 assert_has "proxy context" "handler                 example_com_proxy" "$out"
 assert_has "proxy static ctx" "context /static/ {" "$out"
-assert_has "websocket" "websocket /socket.io {" "$out"
+assert_has   "websocket on the proxied root" "websocket / {" "$out"
+assert_lacks "no websocket context of its own (OLS would make it static)" "websocket /socket.io" "$out"
+assert_has   "proxy pool closes before the app's keep-alive does" "pcKeepAliveTimeout      1" "$out"
+assert_lacks "no 60 s proxy pool" "pcKeepAliveTimeout      60" "$out"
+D_WS_PATH=""
+out="$(lib_ols_render_vhconf)"
+assert_has   "websockets pass without --ws-path too" "websocket / {" "$out"
+D_WS_PATH="/socket.io"
 D_MODE="wordpress"; D_PHP="8.3"
 out="$(lib_ols_render_vhconf)"; printf '%s\n' "$out" >"$TMP/wp.vhconf"
 assert_true "wp vhconf balanced" _ols_braces_balanced "$TMP/wp.vhconf"
@@ -1157,6 +1183,19 @@ assert_has  "List databases is item 5"   '_menu_item  5 "List databases"' "$_men
 assert_has  "and item 5 runs db list"    '5) _menu_run db list ;;' "$_menu_block"
 assert_has  "Create database moved to 6" '6) domain="$(_menu_pick_domain)" && _menu_run db "$domain"' "$_menu_block"
 assert_has  "Status moved to 8"          '8) _menu_run status ;;' "$_menu_block"
+# ... and the same must hold for every other menu built from _menu_item (submenus included)
+_menu_fns="$(grep -oE '^_?[a-z_]+\(\)' "$ROOT/lib/menu.sh" | tr -d '()' | tr '\n' ' ' || true)"
+_menu_checked=0
+for _fn in $_menu_fns; do
+  # one-line functions end on their first line; the others at the first "}" in column 1
+  _body="$(awk -v fn="$_fn" '$0 ~ ("^" fn "\\(\\)") { f = 1; print; if ($0 ~ /[}][[:space:]]*$/) exit; next } f { print } f && /^[}]/ { exit }' "$ROOT/lib/menu.sh")"
+  grep -qE '_menu_item[[:space:]]+[0-9]' <<<"$_body" || continue
+  _menu_checked=$((_menu_checked + 1))
+  _items="$(grep -oE '_menu_item[[:space:]]+[0-9]+' <<<"$_body" | grep -oE '[0-9]+$' | sort -n | uniq | tr '\n' ' ' || true)"
+  _branches="$(grep -oE '^[[:space:]]*[0-9]+(\|[^)]*)?\)' <<<"$_body" | grep -oE '[0-9]+' | sort -n | uniq | tr '\n' ' ' || true)"
+  assert_eq "${_fn}: item numbers and case branches match" "$_items" "$_branches"
+done
+assert_true "every menu was found (main + pre-install at least)" test "$_menu_checked" -ge 2
 
 # =============================================================================
 section "sshd is only reloaded when it runs as a service"
@@ -1199,6 +1238,35 @@ LIB_STEP_CURRENT=0
 out="$( ( lib_die "bad flag" "" "" ) 2>&1 || true )"
 assert_lacks "argument errors stay free of it" "doctor" "$out"
 BIN_SHORT="$_bs_save"; BIN_LINK="$_bl_save"
+
+# =============================================================================
+section "Node.js major version (regression: an install re-run upgraded Node under running apps)"
+# Every "install" re-run called lib_install_node for a server that had Node, with the DEFAULT
+# major: the NodeSource repository was rewritten and the next apt run jumped a major version.
+_mf="$STATE_DIR/manifest.json"; cp "$_mf" "$TMP/manifest.node.save"
+lib_json_set "$_mf" 'del(.params.node_major) | del(.components.node)'
+assert_eq "a server without Node gets the current LTS" "$INS_NODE_DEFAULT_MAJOR" "$(lib_install_node_major_resolve)"
+assert_eq "an explicit --node wins" "22" "$(lib_install_node_major_resolve 22)"
+lib_manifest_set '.components.node' 'v20.18.1'
+assert_eq "a server set up before the major was recorded keeps it" "20" "$(lib_install_node_major_resolve)"
+lib_manifest_set '.params.node_major' '22'
+assert_eq "the recorded major wins over the installed version" "22" "$(lib_install_node_major_resolve)"
+assert_eq "--node still changes it on purpose" "24" "$(lib_install_node_major_resolve 24)"
+assert_eq "install re-run without --node keeps it" "22" "$( ( lib_install_parse_args --with-python --skip-upgrade >/dev/null 2>&1; printf '%s' "$INS_NODE_MAJOR" ) )"
+assert_eq "install --node 24 takes the new one" "24" "$( ( lib_install_parse_args --node 24 --skip-upgrade >/dev/null 2>&1; printf '%s' "$INS_NODE_MAJOR" ) )"
+assert_eq "an invalid --node is refused" 1 "$(run_isolated lib_install_parse_args --node 2x)"
+cp "$TMP/manifest.node.save" "$_mf"
+# PM2 is never started as root any more: every Node site runs its own daemon as its own user
+_node_fn="$(declare -f lib_install_node)"
+assert_lacks "no root pm2 startup unit" "startup systemd -u root" "$_node_fn"
+assert_lacks "no pm2 call that would spawn a root daemon" "pm2 -v" "$_node_fn"
+assert_lacks "no root pm2-logrotate module" "pm2-logrotate" "$_node_fn"
+assert_has   "pm2 pinned to one major" 'pm2@${PM2_MAJOR}' "$_node_fn"
+assert_has   "the major is recorded" ".params.node_major" "$_node_fn"
+
+# =============================================================================
+section "no command replaces itself and skips the EXIT cleanup"
+assert_eq "no 'exec tail' in the libraries" "" "$(grep -nE '^[[:space:]]*exec tail' "$ROOT"/lib/*.sh || true)"
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 if (( FAIL > 0 )); then exit 1; fi

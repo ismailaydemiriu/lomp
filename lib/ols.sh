@@ -949,6 +949,8 @@ EOF
   fi
 
   # ---- reverse proxy ------------------------------------------------------
+  # pcKeepAliveTimeout stays below the backends' own idle timeouts (Node 5 s, gunicorn 2 s):
+  # reusing a pooled connection the application has already closed makes OpenLiteSpeed retry.
   if [[ "$D_MODE" == "proxy" ]]; then
     cat <<EOF
 
@@ -956,7 +958,7 @@ extprocessor ${D_IDENT}_proxy {
   type                    proxy
   address                 ${D_PROXY}
   maxConns                200
-  pcKeepAliveTimeout      60
+  pcKeepAliveTimeout      1
   initTimeout             60
   retryTimeout            0
   respBuffer              0
@@ -1036,14 +1038,16 @@ ${hsts:+${hsts}
 }  END_extraHeaders
 }
 EOF
-    if [[ -n "${D_WS_PATH:-}" ]]; then
-      cat <<EOF
+    # WebSocket upgrades are passed through on every path. OpenLiteSpeed attaches a websocket
+    # block only to the context with the IDENTICAL uri and otherwise creates a new static
+    # context for it (httpvhost.cpp, configWebsocket), so the old "--ws-path /socket.io"
+    # added a static /socket.io context that answered Socket.IO's polling requests with 404.
+    cat <<EOF
 
-websocket ${D_WS_PATH} {
+websocket / {
   address                 ${D_PROXY}
 }
 EOF
-    fi
   else
     cat <<EOF
 

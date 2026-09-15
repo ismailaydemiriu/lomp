@@ -27,7 +27,7 @@ COMMANDS
       --email admin@x.com       Default e-mail (Let's Encrypt / notifications)
       --ssh-port 2222           Change SSH port (UFW is opened first)
       --non-interactive         Never ask questions, use defaults
-      --with-node [--node 20]   Node.js LTS (NodeSource) + PM2 + PM2 logrotate
+      --with-node [--node 24]   Node.js (NodeSource) + PM2; an installed major is kept
       --with-python             python3-venv + pip (venv-per-app policy)
       --with-netdata            Netdata bound to localhost (+ admin IP)
       --cloudflare              Trust Cloudflare proxies (real client IP)
@@ -112,8 +112,14 @@ _menu_pause() {
 _menu_run() {
   local rc=0
   printf '\n%s%s$ %s %s%s\n\n' "$C_BLD" "$C_CYN" "$MENU_CMD" "$*" "$C_RST"
+  # Ctrl-C belongs to the child (stopping a followed log, say). The terminal sends it to the
+  # menu as well, which used to end the whole menu. ':' rather than '' so the child, which
+  # does not inherit a handler, still gets the default action and stops.
+  trap ':' INT
   "$SCRIPT_PATH" "$@" </dev/tty || rc=$?
-  if (( rc != 0 )); then printf '\n%sThat command exited with status %s.%s\n' "$C_YEL" "$rc" "$C_RST"; fi
+  trap - INT
+  if (( rc == 130 )); then printf '\n%sStopped.%s\n' "$C_DIM" "$C_RST"
+  elif (( rc != 0 )); then printf '\n%sThat command exited with status %s.%s\n' "$C_YEL" "$rc" "$C_RST"; fi
   _menu_pause
 }
 
@@ -321,7 +327,7 @@ _menu_runtimes() {
     printf '\n%sChoice: %s' "$C_BLD" "$C_RST"
     read -r choice </dev/tty || return 0
     case "$choice" in
-      1) _menu_ask ver "Node.js major version" "20"
+      1) _menu_ask ver "Node.js major version" "$(lib_install_node_major_resolve)"
          _menu_run install --with-node --node "$ver" --skip-upgrade ;;
       2) _menu_run install --with-python --skip-upgrade ;;
       3) _menu_run install --with-netdata --skip-upgrade ;;

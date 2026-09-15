@@ -49,13 +49,19 @@ lib_mask_secrets() {
     -e 's/(IDENTIFIED[[:space:]]+BY[[:space:]]+["'"'"'])[^"'"'"']*/\1********/Ig' \
     -e 's/(pass:)[^[:space:]]+/\1********/g' \
     -e 's/(Bearer[[:space:]]+)[A-Za-z0-9._~+\/=-]+/\1********/g' \
-    -e 's#(https://api\.telegram\.org/bot)[^/[:space:]]+#\1********#g'
+    -e 's#(https://api\.telegram\.org/bot)[^/[:space:]]+#\1********#g' \
+    -e 's#([a-z][a-z0-9+.-]*://[^/@[:space:]:]*:)[^/@[:space:]]+@#\1********@#Ig' \
+    -e 's#(https?://)[A-Za-z0-9_-]{20,}@#\1********@#Ig'
 }
+# The last two rules cover credentials inside a URL: "scheme://user:secret@host" (git remotes,
+# DATABASE_URL-style connection strings) and a token used as the user name of an https remote
+# ("https://ghp_...@github.com"). Plain user names ("ssh://git@", "https://bob@bitbucket.org")
+# are left alone: they are not secrets, and a token is at least 20 characters long.
 
 # The pattern "doctor" greps the log with. It must cover exactly the shapes
 # lib_mask_secrets masks, or the check reports a clean log while a token sits in it.
 lib_secret_leak_pattern() {
-  printf '%s' '(password|passwd|pass|pwd|secret|token|api[_-]?key|requirepass|auth_pass)["'"'"']?[[:space:]]*[=:][[:space:]]*["'"'"']?[A-Za-z0-9+/=._~-]{8,}|--[a-z0-9-]*(password|pass|secret|token|api[_-]?key|key)[a-z0-9-]*[=[:space:]]+[A-Za-z0-9+/=._~:-]{8,}|^[[:space:]]*(requirepass|password|auth_pass)[[:space:]]+[A-Za-z0-9+/=._~-]{8,}'
+  printf '%s' '(password|passwd|pass|pwd|secret|token|api[_-]?key|requirepass|auth_pass)["'"'"']?[[:space:]]*[=:][[:space:]]*["'"'"']?[A-Za-z0-9+/=._~-]{8,}|--[a-z0-9-]*(password|pass|secret|token|api[_-]?key|key)[a-z0-9-]*[=[:space:]]+[A-Za-z0-9+/=._~:-]{8,}|^[[:space:]]*(requirepass|password|auth_pass)[[:space:]]+[A-Za-z0-9+/=._~-]{8,}|[a-z][a-z0-9+.-]*://[^/@[:space:]:]*:[^*/@[:space:]][^/@[:space:]]{3,}@|https?://[A-Za-z0-9_-]{20,}@'
 }
 
 # Append a line to the log file (masked). Never fails.

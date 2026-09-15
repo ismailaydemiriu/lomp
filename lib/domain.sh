@@ -127,7 +127,7 @@ Usage: setup.sh add <domain> [options]
   --memory 256M        PHP memory_limit           --upload 64M  upload_max_filesize
   --proxy 127.0.0.1:3000   Reverse proxy to a local app (Node/Python/...)
   --static-paths "/static/,/assets/"   Paths served by OLS in proxy mode
-  --ws-path /socket.io Proxy WebSocket upgrades on this path (proxy mode)
+  --ws-path PATH       No longer needed: WebSocket upgrades are proxied on every path
   --static             Static site only (no PHP)
   --wordpress          Install WordPress (creates the database automatically)
   --no-db              Do not create a database (one is created by default)
@@ -180,7 +180,7 @@ lib_domain_parse_add_args() {
   [[ "$D_DOMAIN" == www.* ]] && lib_die "Use the apex domain and --www instead of www.${D_DOMAIN#www.}" "" "setup.sh add ${D_DOMAIN#www.} --www"
   if [[ "$D_MODE" == "proxy" ]]; then
     [[ "$D_PROXY" =~ ^[A-Za-z0-9.-]+:[0-9]{2,5}$ ]] || lib_die "Invalid --proxy target '${D_PROXY}'" "expected host:port" "--proxy 127.0.0.1:3000"
-    [[ -z "$D_WS_PATH" || "$D_WS_PATH" == /* ]] || lib_die "Invalid --ws-path '${D_WS_PATH}'" "must start with /" "--ws-path /socket.io"
+    if [[ -n "$D_WS_PATH" ]]; then lib_note "--ws-path is no longer needed: a proxy site passes WebSocket upgrades on every path"; fi
   fi
   if [[ "$D_MODE" == "php" || "$D_MODE" == "wordpress" ]]; then
     lib_php_valid_version "$D_PHP" || lib_die "Invalid PHP version '${D_PHP}'" "expected e.g. 8.3" "--php 8.3"
@@ -714,7 +714,9 @@ lib_domain_logs_main() {
   [[ "$which" != "access" ]] && files+=("${dir}/error.log")
   for a in "${files[@]}"; do [[ -f "$a" ]] || touch "$a" 2>/dev/null || true; done
   printf '%sFollowing %s (Ctrl-C to stop)%s\n' "$C_DIM" "${files[*]}" "$C_RST"
-  exec tail -n "$lines" -F "${files[@]}"
+  # not "exec": that replaced this process and skipped the EXIT trap, which left the per-run
+  # temporary directory behind every time a log was followed
+  tail -n "$lines" -F "${files[@]}" || true
 }
 
 # =============================================================================

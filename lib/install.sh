@@ -3,7 +3,11 @@
 #                  MariaDB, Redis, SSL infra, optional runtimes, cron, self-install),
 #                  plus "update" and "optimize".
 
-INS_WITH_NODE=0 INS_NODE_MAJOR=20 INS_WITH_PYTHON=0 INS_WITH_NETDATA=0 INS_CLOUDFLARE=0 INS_CF_TOKEN=""
+INS_WITH_NODE=0 INS_NODE_MAJOR="" INS_WITH_PYTHON=0 INS_WITH_NETDATA=0 INS_CLOUDFLARE=0 INS_CF_TOKEN=""
+# Node.js major for a server that has never had Node (Active LTS). A server that already runs
+# Node keeps its own major unless --node asks for another: see lib_install_node_major_resolve.
+INS_NODE_DEFAULT_MAJOR=24
+PM2_MAJOR=7   # installed once per server; every Node site runs its own PM2 daemon as the site user
 INS_MARIADB="" INS_REDIS_PERSIST=0 INS_AUTO_REBOOT=0 INS_SKIP_UPGRADE=0 INS_BACKUP_SCHEDULE=""
 INS_ADMIN_ACCESS_SET=0   # was --admin-access / --admin-ip given on THIS run?
 
@@ -23,7 +27,7 @@ lib_install_parse_args() {
       --email)           DEFAULT_EMAIL="${1:-}"; shift ;;
       --ssh-port)        SSH_PORT="${1:-}"; shift ;;
       --with-node)       INS_WITH_NODE=1 ;;
-      --node)            INS_NODE_MAJOR="${1:-20}"; INS_WITH_NODE=1; shift ;;
+      --node)            INS_NODE_MAJOR="${1:-}"; INS_WITH_NODE=1; shift ;;
       --with-python)     INS_WITH_PYTHON=1 ;;
       --with-netdata)    INS_WITH_NETDATA=1 ;;
       --cloudflare)      INS_CLOUDFLARE=1 ;;
@@ -84,7 +88,6 @@ lib_install_parse_args() {
   fi
   [[ "$ADMIN_ACCESS" == "ip" ]] || ADMIN_ALLOWED_IP=""
   [[ "$BACKUP_KEEP" =~ ^[0-9]+$ ]] || lib_die "Invalid backup keep count '${BACKUP_KEEP}'" "" "--backup-keep 7"
-  [[ "$INS_NODE_MAJOR" =~ ^[0-9]{2}$ ]] || lib_die "Invalid --node '${INS_NODE_MAJOR}'" "" "--node 20"
   [[ -n "$INS_BACKUP_SCHEDULE" ]] || INS_BACKUP_SCHEDULE="$BACKUP_SCHEDULE"
   # Re-runs: keep previously chosen values when the flag is not repeated (idempotent re-run)
   if [[ -s "$STATE_DIR/manifest.json" ]] && lib_have jq; then
@@ -109,6 +112,8 @@ lib_install_parse_args() {
     [[ -n "$(lib_manifest_get '.components.node')" ]] && INS_WITH_NODE=1
     [[ -n "$(lib_manifest_get '.components.python')" ]] && INS_WITH_PYTHON=1
   fi
+  INS_NODE_MAJOR="$(lib_install_node_major_resolve "$INS_NODE_MAJOR")"
+  [[ "$INS_NODE_MAJOR" =~ ^[0-9]{2}$ ]] || lib_die "Invalid --node '${INS_NODE_MAJOR}'" "expected a major version such as ${INS_NODE_DEFAULT_MAJOR}" "--node ${INS_NODE_DEFAULT_MAJOR}"
   return 0
 }
 
@@ -820,22 +825,44 @@ lib_panel_main() {
 # =============================================================================
 #  Optional runtimes
 # =============================================================================
+# The Node.js major to use: --node wins; otherwise the major this server was set up with
+# (.params.node_major, or read from the installed version on servers set up before it was
+# recorded); a server that never had Node gets INS_NODE_DEFAULT_MAJOR.
+lib_install_node_major_resolve() {   # [explicit major]
+  local v="${1:-}"
+  if [[ -z "$v" && -s "${STATE_DIR}/manifest.json" ]] && lib_have jq; then
+    v="$(lib_manifest_get '.params.node_major')"
+    if [[ -z "$v" ]]; then
+      v="$(lib_manifest_get '.components.node')"
+      v="${v#v}"; v="${v%%.*}"
+    fi
+  fi
+  printf '%s' "${v:-$INS_NODE_DEFAULT_MAJOR}"
+}
+
+# Version of the globally installed PM2, read from its package.json. Never "pm2 -v": a pm2
+# command connects to its daemon first and starts one if none runs - here, as root.
+lib_pm2_version() {
+  local root=""
+  root="$(npm root -g 2>/dev/null || true)"
+  if [[ -n "$root" && -f "${root}/pm2/package.json" ]]; then jq -r '.version // empty' "${root}/pm2/package.json" 2>/dev/null || true; fi
+  return 0
+}
+
 lib_install_node() {
   local list="/etc/apt/sources.list.d/nodesource.list"
   lib_apt_key_install "https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key" /etc/apt/keyrings/nodesource.gpg
   printf 'deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_%s.x nodistro main\n' "$INS_NODE_MAJOR" | lib_write_file "$list" 0644 root:root
   (( LIB_FILE_CHANGED )) && LIB_APT_UPDATED=0
   lib_apt_install nodejs || lib_die "Node.js installation failed" "apt error" "check the NodeSource repository"
-  (( OPT_DRY_RUN )) && { lib_info "[dry-run] would install PM2 + pm2-logrotate and register pm2 with systemd"; return 0; }
-  if ! lib_have pm2; then lib_run npm install -g pm2 || lib_die "PM2 installation failed" "npm error" "npm install -g pm2"; fi
-  lib_run pm2 startup systemd -u root --hp /root || lib_warn "pm2 startup failed (see log)"
-  lib_run pm2 install pm2-logrotate || lib_warn "pm2-logrotate could not be installed"
-  lib_run pm2 set pm2-logrotate:max_size 10M || true
-  lib_run pm2 set pm2-logrotate:retain 14 || true
-  lib_run pm2 save --force || true
-  lib_systemd_override pm2-root "LimitNOFILE=65535" "LimitNPROC=8192"
+  lib_manifest_set '.params.node_major' "$INS_NODE_MAJOR"
+  # Only the PM2 package is installed here. No PM2 daemon runs as root: every Node site gets
+  # its own, started by systemd as that site's user.
+  (( OPT_DRY_RUN )) && { lib_info "[dry-run] would install PM2 ${PM2_MAJOR} (npm install -g pm2@${PM2_MAJOR})"; return 0; }
+  if ! lib_have pm2; then lib_run npm install -g "pm2@${PM2_MAJOR}" || lib_die "PM2 installation failed" "npm error" "npm install -g pm2@${PM2_MAJOR}"; fi
   lib_manifest_set '.components.node' "$(node -v 2>/dev/null || true)"
-  lib_ok "Node.js $(node -v 2>/dev/null) + PM2 $(pm2 -v 2>/dev/null) ready (apps: setup.sh add app.example.com --proxy 127.0.0.1:3000; keep app files in /home/<domain>/app)"
+  lib_manifest_set '.components.pm2' "$(lib_pm2_version)"
+  lib_ok "Node.js $(node -v 2>/dev/null || true) + PM2 $(lib_pm2_version) ready (apps run as their site's own user; publish one with: setup.sh add app.example.com --proxy 127.0.0.1:3000)"
 }
 
 lib_install_python() {

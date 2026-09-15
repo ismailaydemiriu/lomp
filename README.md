@@ -214,7 +214,7 @@ Global flags work everywhere: `--yes`, `--dry-run`, `--quiet`, `--verbose`, `--n
 | `--php 8.2` | Use another LSPHP version for this site; it is installed on demand |
 | `--memory 512M --upload 128M` | Per-site PHP limits, applied in the vhost |
 | `--php-children N` | LSAPI workers for this site |
-| `--proxy HOST:PORT` | Reverse proxy mode, TLS terminates in OpenLiteSpeed; add `--ws-path /socket.io` for WebSockets |
+| `--proxy HOST:PORT` | Reverse proxy mode, TLS terminates in OpenLiteSpeed; WebSocket upgrades (Socket.IO, ws) are passed through on every path, no extra flag needed |
 | `--wordpress` | Download and install WordPress, create the database, enable LiteSpeed Cache, register WP-Cron |
 | `--no-db` | Skip the database. Every site otherwise gets its own MariaDB database and user — `example.com` becomes `example_db` / `example_user` with a 32-character random password, printed once when the site is created and available afterwards from `credentials` |
 | `--wildcard` | Also request `*.<domain>` over DNS-01 (needs a stored Cloudflare API token) |
