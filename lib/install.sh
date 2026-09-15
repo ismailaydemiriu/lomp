@@ -303,6 +303,21 @@ lib_install_ufw() {
   lib_ok "UFW active: SSH ${SYS_SSH_PORTS}${SSH_PORT:+ + $SSH_PORT}, 80/tcp, 443/tcp+udp, ${admin_desc}"
 }
 
+# "sshd -t" refuses to run without its privilege separation directory, and /run is a tmpfs
+# that is empty after every boot. On a socket-activated host - the default on Ubuntu 24.04 -
+# connections are served by ssh@.service instances while ssh.service, the unit that declares
+# RuntimeDirectory=sshd, may never start at all. /run/sshd is then simply absent and EVERY
+# sshd -t fails with "Missing privilege separation directory: /run/sshd", which is a runtime
+# gap rather than anything wrong with the configuration. Create it as systemd would.
+lib_ssh_privsep_dir_ensure() {   # [dir]
+  local d="${1:-/run/sshd}"
+  [[ -d "$d" ]] && return 0
+  mkdir -p "$d" || return 1
+  chmod 0755 "$d" || true
+  chown root:root "$d" 2>/dev/null || true
+  return 0
+}
+
 lib_install_ssh_harden() {
   local dropin="/etc/ssh/sshd_config.d/99-server-setup.conf" login_user="" h="" keys_ok=0 content="" prev="" had_prev=0
   local ports_before="$SYS_SSH_PORTS" port_changed=0
@@ -336,10 +351,27 @@ lib_install_ssh_harden() {
   printf '%s' "$content" | lib_write_file "$dropin" 0644 root:root
   if (( ! LIB_FILE_CHANGED )); then lib_ok "SSH hardening already in place"; return 0; fi
   (( OPT_DRY_RUN )) && return 0
-  if ! sshd -t >>"$LOG_FILE" 2>&1; then
-    lib_error "sshd -t rejected the new configuration; restoring the previous one"
+  local ssh_rc=0 ssh_test="" base_rc=0 base_test=""
+  lib_ssh_privsep_dir_ensure
+  ssh_test="$(sshd -t 2>&1)" || ssh_rc=$?
+  if (( ssh_rc != 0 )); then
+    printf '%s\n' "$ssh_test" >>"$LOG_FILE" 2>/dev/null || true
+    lib_error "sshd -t rejected the configuration; restoring the previous one"
     if (( had_prev )); then cp "$prev" "$dropin"; else rm -f "$dropin"; fi
-    lib_die "SSH configuration test failed (previous configuration restored, SSH untouched)" "see 'sshd -t' output in the log" "fix /etc/ssh/sshd_config and re-run"
+    ssh_test="$(tr '\n' '\t' <<<"$ssh_test" | sed 's/\t$//; s/\t/ | /g')"
+    # Re-test WITHOUT our drop-in. "sshd rejected the file we just wrote" and "this host's
+    # sshd_config was already broken" need different answers, and blaming our own change
+    # for someone else's syntax error sends the operator looking in the wrong file.
+    base_test="$(sshd -t 2>&1)" || base_rc=$?
+    if (( base_rc == 0 )); then
+      lib_die "SSH configuration test failed (previous configuration restored, SSH untouched)" \
+        "sshd rejected the drop-in this tool writes: ${ssh_test:-no output from sshd -t}" \
+        "report the line above; SSH itself is unchanged and still working"
+    fi
+    base_test="$(tr '\n' '\t' <<<"$base_test" | sed 's/\t$//; s/\t/ | /g')"
+    lib_die "This server's SSH configuration was already invalid before this run" \
+      "sshd -t fails with our drop-in removed as well: ${base_test:-no output from sshd -t}" \
+      "fix the file and line sshd names above (check /etc/ssh/sshd_config and /etc/ssh/sshd_config.d/*.conf), then re-run"
   fi
   if (( port_changed )); then
     lib_info "Switching SSH to port ${SSH_PORT} (old port(s) ${ports_before} stay allowed in UFW until you remove them)"

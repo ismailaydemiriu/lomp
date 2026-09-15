@@ -1051,6 +1051,19 @@ rm -rf "$STATE_DIR/domains"
 mv "$STATE_DIR/domains.bak" "$STATE_DIR/domains" 2>/dev/null || mkdir -p "$STATE_DIR/domains"
 
 # =============================================================================
+section "sshd -t needs its privilege separation directory"
+# "Missing privilege separation directory: /run/sshd" failed a real install at step 8 on a
+# socket-activated Ubuntu 24.04 host. /run is a tmpfs and ssh.service - the unit carrying
+# RuntimeDirectory=sshd - never ran, so the directory simply did not exist.
+_psd="$TMP/run-sshd"
+assert_false "absent to begin with" test -d "$_psd"
+assert_eq "creating it succeeds" 0 "$(run_isolated lib_ssh_privsep_dir_ensure "$_psd")"
+assert_true "and it exists" test -d "$_psd"
+if (( CAN_CHMOD )); then assert_eq "mode is 0755" "755" "$(stat -c %a "$_psd")"; fi
+assert_eq "a second call is a no-op that still succeeds" 0 "$(run_isolated lib_ssh_privsep_dir_ensure "$_psd")"
+assert_true "and leaves it in place" test -d "$_psd"
+
+# =============================================================================
 section "failure messages point at doctor"
 _bs_save="$BIN_SHORT"; _bl_save="$BIN_LINK"
 LIB_STEP_CURRENT=0
