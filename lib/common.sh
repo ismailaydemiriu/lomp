@@ -461,17 +461,64 @@ lib_write_file() {
   lib_log_write INFO "wrote ${path}"
 }
 
-lib_mkdir() {   # lib_mkdir path [mode] [owner:group]
-  local path="$1" mode="${2:-}" owner="${3:-}"
+# lib_mkdir path [mode] [owner:group]
+# This runs as root, so it must never follow a symbolic link somebody else could have planted.
+# A site user owns /home/<domain> and can swap any entry below it for a link at any moment -
+# including between a check and the chmod. With "private -> /etc" in place, a re-run "add" or
+# "restore" chmodded and chowned /etc for that user. So below SITES_ROOT no component may be a
+# link, and nowhere may the directory itself be one. Links above that (SITES_ROOT itself,
+# /usr/local/lsws, ...) can only be root's own and are followed as before.
+lib_mkdir() {
+  local path="$1" mode="${2:-}" owner="${3:-}" anchor="" rel="" why="" rc=0
+  # "link/" names the directory behind the link, so a trailing slash hides it from [[ -L ]]
+  while [[ "$path" == ?*/ ]]; do path="${path%/}"; done
   if (( OPT_DRY_RUN )); then
     [[ -d "$path" ]] || { (( OPT_QUIET )) || printf '%s[dry ]%s  would create directory %s\n' "$C_MAG" "$C_RST" "$path"; }
     return 0
   fi
-  mkdir -p "$path"
-  [[ -n "$mode" ]]  && chmod "$mode" "$path"
-  [[ -n "$owner" ]] && chown "$owner" "$path"
+  if [[ -n "${SITES_ROOT:-}" && "$path" == "$SITES_ROOT"/?* ]]; then
+    anchor="$SITES_ROOT"; rel="${path#"$SITES_ROOT"/}"
+  else
+    anchor="$(dirname -- "$path")"; rel="$(basename -- "$path")"
+  fi
+  why="$(_lib_mkdir_walk "$anchor" "$rel" "$mode" "$owner" 2>&1)" || rc=$?
+  if (( rc == 3 )); then
+    lib_die "Refusing to set up ${path}" "$why" \
+      "a link or '..' there could aim a root chmod/chown anywhere; inspect it with: ls -la '$(dirname -- "$path")', use a real directory, then re-run"
+  elif (( rc != 0 )); then
+    lib_die "Could not set up directory ${path}" "${why:-mkdir, chmod or chown failed}" "fix the reported problem and re-run the same command"
+  fi
   return 0
 }
+
+# Create <anchor>/<rel> one component at a time from inside the directory above it, so a name
+# is never resolved again after it was checked, and confirm each step with the kernel's getcwd:
+# the external pwd, because bash's builtin re-reads the path string, which is exactly what a
+# swap defeats. Mode and owner then go to ".", the inode that was verified, not to a name.
+# Exit 3 = the path is unsafe; any other failure is an ordinary error. The reason is printed.
+_lib_mkdir_walk() (   # anchor rel mode owner
+  LIB_ERR_HANDLING=1   # an unexpected failure exits quietly; lib_mkdir reports it
+  local anchor="$1" rel="$2" mode="$3" owner="$4" here="" c="" n=0
+  local -a parts=()
+  if [[ ! -d "$anchor" ]]; then mkdir -p -- "$anchor" || exit 1; fi
+  cd -P -- "$anchor" || exit 1
+  here="$(env pwd -P)" || exit 1
+  IFS=/ read -r -a parts <<<"$rel"
+  for c in ${parts[@]+"${parts[@]}"}; do
+    if [[ -z "$c" || "$c" == "." ]]; then continue; fi
+    if [[ "$c" == ".." ]]; then printf "'..' is not allowed in %s" "$rel"; exit 3; fi
+    here="${here%/}/${c}"
+    if [[ -L "$c" ]]; then printf '%s is a symbolic link' "$here"; exit 3; fi
+    if [[ ! -d "$c" ]]; then mkdir -- "$c" || exit 1; fi
+    cd -P -- "./${c}" || exit 1
+    if [[ "$(env pwd -P)" != "$here" ]]; then printf '%s was replaced while it was being entered' "$here"; exit 3; fi
+    n=$(( n + 1 ))
+  done
+  if (( n == 0 )); then printf 'no directory named in "%s"' "$rel"; exit 1; fi
+  if [[ -n "$mode" ]]; then chmod "$mode" . || exit 1; fi
+  if [[ -n "$owner" ]]; then chown "$owner" . || exit 1; fi
+  exit 0
+)
 
 lib_rm() {      # lib_rm path...   (dry-run aware)
   local p=""

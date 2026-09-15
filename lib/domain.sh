@@ -445,6 +445,15 @@ lib_domain_user_ensure() {
   return 0
 }
 
+# Run a command as the site user, from "/". Writes and mode changes inside a site's home belong
+# here rather than in root: every name below /home/<domain> is under that user's control, and
+# root following one of its links turns "chmod a WordPress file" into "chmod /etc/shadow". As
+# the user, a planted link reaches nothing the user could not already touch. ("/" because
+# runuser keeps root's working directory, and find run by a user who cannot read it does nothing.)
+lib_domain_as_user() {
+  runuser -u "$D_USER" -- env -C / "$@"
+}
+
 lib_domain_dirs_create() {
   local ols_user=""; ols_user="$(lib_ols_user)"
   if [[ ! -d "$D_HOME" ]]; then
@@ -472,17 +481,19 @@ lib_domain_dirs_create() {
     lib_mkdir "${OLS_CACHE_DIR}/${D_DOMAIN}" 0750 "${ols_user}:$(lib_ols_group)"
   fi
   lib_ols_acme_root_ensure
-  # OLS worker (nobody) must be able to traverse into public_html
+  # OLS worker (nobody) must be able to traverse into public_html. Fine as root: the home sits
+  # directly in root's SITES_ROOT, so no part of this path is the site user's to re-point.
   (( OPT_DRY_RUN )) || setfacl -m "u:${ols_user}:x" "$D_HOME" 2>/dev/null || true
   if [[ ! -e "${D_HOME}/public_html/index.html" && ! -e "${D_HOME}/public_html/index.php" ]] && [[ "$D_MODE" != "proxy" ]]; then
     if (( ! OPT_DRY_RUN )); then
-      cat >"${D_HOME}/public_html/index.html" <<EOF
+      # Written by the site user. Root's "cat >" and chown followed an index.html link the user
+      # left in its own docroot - to /etc/ld.so.preload, say - and handed that file over.
+      lib_domain_as_user tee "${D_HOME}/public_html/index.html" >/dev/null <<EOF
 <!doctype html><html lang="en"><head><meta charset="utf-8"><title>${D_DOMAIN}</title>
 <style>body{font-family:system-ui,sans-serif;margin:10% auto;max-width:40em;color:#333}</style></head>
 <body><h1>${D_DOMAIN}</h1><p>This site was provisioned by server-setup and is waiting for content.</p>
 <p>Upload files to <code>${D_HOME}/public_html/</code>.</p></body></html>
 EOF
-      chown "${D_USER}:${D_GROUP}" "${D_HOME}/public_html/index.html"
     fi
   fi
   return 0
@@ -527,14 +538,14 @@ lib_domain_php_probe() {
   local name="" f="" body="" i=""
   name="ss-probe-$(lib_random_hex 6).php"
   f="${D_HOME}/public_html/${name}"
-  printf '<?php echo "server-setup-php-ok:" . PHP_VERSION;\n' >"$f"
-  chown "${D_USER}:${D_GROUP}" "$f"
+  # as the site user: root's chown of a file in the user's docroot follows a link swapped in for it
+  printf '<?php echo "server-setup-php-ok:" . PHP_VERSION;\n' | lib_domain_as_user tee "$f" >/dev/null
   for (( i = 0; i < 5; i++ )); do
     body="$(curl -s --max-time 15 -H "Host: ${D_DOMAIN}" "http://127.0.0.1/${name}" 2>/dev/null || true)"
     [[ "$body" == server-setup-php-ok:* ]] && break
     sleep 2
   done
-  rm -f "$f"
+  lib_domain_as_user rm -f -- "$f"
   if [[ "$body" == server-setup-php-ok:* ]]; then lib_debug "PHP probe OK (${body#*:})"; return 0; fi
   OLS_TEST_OUTPUT="PHP probe returned: ${body:0:120}"
   return 1
@@ -673,7 +684,7 @@ lib_domain_wp_install() {
   if [[ -f "${docroot}/wp-config.php" ]]; then
     lib_warn "WordPress already present in ${docroot}; skipping download/install"
   else
-    rm -f "${docroot}/index.html"
+    lib_domain_as_user rm -f -- "${docroot}/index.html"
     lib_run _wp core download --locale="$DOM_OPT_WP_LOCALE" --force || lib_die "WordPress download failed" "network / wp-cli error" "see the log"
     lib_run_secret "wp config create (db ${DBI_NAME})" _wp config create --dbname="$DBI_NAME" --dbuser="$DBI_USER" --dbpass="$DBI_PASS" \
       --dbhost=localhost --dbcharset=utf8mb4 --skip-check \
@@ -695,10 +706,16 @@ define('FS_METHOD', 'direct');" || lib_die "wp config create failed" "database c
     chmod 0600 "$info"
     lib_ok "WordPress installed at ${url} (admin credentials in ${info})"
   fi
+  # Handing the files to the site user needs root, and chown -R is safe for it: it changes a link
+  # itself and never descends through one. (A hard link to a root file would still be changed,
+  # which the kernel's fs.protected_hardlinks=1 - Ubuntu's default - stops the user creating.)
+  # The modes are another matter: find hands chmod path names, and the user can re-point a
+  # directory in them between the listing and the chmod. The user owns every file by now, so
+  # that part runs as the user.
   chown -R "${D_USER}:${D_GROUP}" "$docroot"
-  find "$docroot" -type d -exec chmod 0755 {} + 2>/dev/null || true
-  find "$docroot" -type f -exec chmod 0644 {} + 2>/dev/null || true
-  [[ -f "${docroot}/wp-config.php" ]] && chmod 0640 "${docroot}/wp-config.php"
+  lib_domain_as_user find "$docroot" -type d -exec chmod 0755 {} + 2>/dev/null || true
+  lib_domain_as_user find "$docroot" -type f -exec chmod 0644 {} + 2>/dev/null || true
+  [[ -f "${docroot}/wp-config.php" ]] && lib_domain_as_user chmod 0640 "${docroot}/wp-config.php"
   lib_mkdir "${OLS_CACHE_DIR}/${D_DOMAIN}" 0750 "$(lib_ols_user):$(lib_ols_group)"
   lib_cron_set "wpcron:${D_DOMAIN}" "*/5 * * * * ${D_USER} cd ${docroot} && WP_CLI_PHP=$(lib_php_cli "$D_PHP") ${WPCLI_BIN} --path=${docroot} cron event run --due-now --quiet >/dev/null 2>&1"
   D_WP=1

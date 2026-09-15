@@ -30,6 +30,14 @@ done
 trap cleanup EXIT
 mkdir -p "$STATE_DIR" "$LSWS_HOME/conf/vhosts" "$SITES_ROOT"; : >"$LOG_FILE"
 chown() { return 0; }   # no lsadm/site users on the test machine
+# nor can the suite switch users: run the command as whoever runs the tests, and keep a record
+RUNUSER_LOG="$TMP/runuser.log"
+runuser() {
+  printf '%s\n' "$*" >>"$RUNUSER_LOG"
+  [[ "${1:-}" == "-u" && -n "${2:-}" && "${3:-}" == "--" ]] || return 1
+  shift 3
+  "$@"
+}
 # Git Bash runs the native jq.exe, which writes CRLF unless given -b: a multi-line result then
 # carries a \r at the end of every line but the last. Servers and CI (Linux) are unaffected.
 if [[ "${OSTYPE:-}" == msys* || "${OSTYPE:-}" == cygwin* ]]; then
@@ -3269,6 +3277,118 @@ unset -f ss
 # =============================================================================
 section "no command replaces itself and skips the EXIT cleanup"
 assert_eq "no 'exec tail' in the libraries" "" "$(grep -nE '^[[:space:]]*exec tail' "$ROOT"/lib/*.sh || true)"
+
+# =============================================================================
+section "lib_mkdir never follows a link below a site home"
+# A site user owns /home/<domain> and can swap any entry there for a symbolic link, while
+# lib_mkdir runs as root whenever "add" or "restore" meets an existing home. With
+# "private -> /etc" in place it chmodded and chowned /etc for that user.
+lib_rollback_clear
+_lh="$SITES_ROOT/links.example.com"
+assert_eq "nested directories are created" 0 "$(run_isolated lib_mkdir "${_lh}/private/sessions/" 0700)"
+assert_true "a trailing slash is accepted" test -d "${_lh}/private/sessions"
+if (( CAN_CHMOD )); then assert_eq "the mode lands on the last directory" "700" "$(stat -c %a "${_lh}/private/sessions")"; fi
+assert_eq "an existing directory is fine" 0 "$(run_isolated lib_mkdir "${_lh}/private" 0700)"
+OPT_DRY_RUN=1; lib_mkdir "${_lh}/dry-run" 0700; OPT_DRY_RUN=0
+assert_false "dry-run creates nothing" test -e "${_lh}/dry-run"
+: >"${_lh}/a-file"
+assert_eq "a file in the way is an error" 1 "$(run_isolated lib_mkdir "${_lh}/a-file/sub")"
+assert_eq "a path climbing out with .. is refused" 1 "$(run_isolated lib_mkdir "${_lh}/private/../../escaped")"
+assert_false "and nothing is created outside the home" test -e "${SITES_ROOT}/escaped"
+assert_has "the refusal says why" "'..' is not allowed" "$( ( lib_mkdir "${_lh}/private/../../escaped" ) 2>&1 || true )"
+if (( CAN_SYMLINK )); then
+  _victim="$TMP/victim"; mkdir -p "$_victim"; chmod 0751 "$_victim" 2>/dev/null || true
+  ln -s "$_victim" "${_lh}/logs"
+  assert_eq "the directory itself may not be a link" 1 "$(run_isolated lib_mkdir "${_lh}/logs" 0750)"
+  assert_has "and the refusal names it" "${_lh}/logs is a symbolic link" "$( ( lib_mkdir "${_lh}/logs" 0750 ) 2>&1 || true )"
+  rm -rf "${_lh}/private"; ln -s "$_victim" "${_lh}/private"
+  assert_eq "nor may a directory above it" 1 "$(run_isolated lib_mkdir "${_lh}/private/sessions" 0700)"
+  assert_false "nothing is created through the link" test -e "${_victim}/sessions"
+  # proxy static paths end in "/", and "link/" is the directory behind the link
+  mkdir -p "${_lh}/public_html"; ln -s "$_victim" "${_lh}/public_html/static"
+  assert_eq "a trailing slash does not hide a link" 1 "$(run_isolated lib_mkdir "${_lh}/public_html/static/" 0755)"
+  # the reported flow: the directory setup of "add" or "restore" meeting that home again
+  lib_domain_state_reset
+  D_DOMAIN="links.example.com"; D_IDENT="links_example_com"; D_USER="links_example_com"; D_GROUP="links_example_com"
+  D_HOME="$_lh"; D_MODE="php"
+  assert_eq "the site directory setup refuses the planted link" 1 "$(run_isolated lib_domain_dirs_create)"
+  lib_domain_state_reset
+  # outside the site homes the directory itself still may not be a link: the OLS cache
+  # directory belongs to nobody and the vhost directory to lsadm...
+  mkdir -p "$TMP/cache-owner"; ln -s "$_victim" "$TMP/cache-owner/links.example.com"
+  assert_eq "a link outside the site homes is refused too" 1 "$(run_isolated lib_mkdir "$TMP/cache-owner/links.example.com" 0750)"
+  if (( CAN_CHMOD )); then assert_eq "no attempt reached the link target" "751" "$(stat -c %a "$_victim")"; fi
+  # ...while links in root's own part of a path are followed as before
+  mkdir -p "$TMP/lsws-real"; ln -s "$TMP/lsws-real" "$TMP/lsws-link"
+  assert_eq "a linked parent such as /usr/local/lsws still works" 0 "$(run_isolated lib_mkdir "$TMP/lsws-link/conf/vhosts/x" 0750)"
+  assert_true "and the directory lands behind it" test -d "$TMP/lsws-real/conf/vhosts/x"
+  _sites_save="$SITES_ROOT"; ln -s "$SITES_ROOT" "$TMP/home-link"; SITES_ROOT="$TMP/home-link"
+  assert_eq "so does a SITES_ROOT that is itself a link" 0 "$(run_isolated lib_mkdir "$SITES_ROOT/moved.example.com/public_html" 0755)"
+  SITES_ROOT="$_sites_save"
+fi
+
+# =============================================================================
+section "writes inside a site home run as the site user"
+# Root must not create, chmod or unpack files below /home/<domain> either: "cat > index.html"
+# through a link the user left there creates whatever file it names, and a chmod through one
+# reaches /etc/shadow. The suite cannot switch users, so it checks each step goes to runuser.
+lib_rollback_clear
+lib_domain_state_reset
+D_DOMAIN="asuser.example.com"; D_IDENT="asuser_example_com"; D_USER="asuser_example_com"; D_GROUP="asuser_example_com"
+D_HOME="$SITES_ROOT/asuser.example.com"; D_MODE="php"; D_PHP="8.3"
+_as="-u asuser_example_com -- env -C /"
+: >"$RUNUSER_LOG"
+assert_eq "the directory setup exits 0" 0 "$(run_isolated lib_domain_dirs_create)"
+assert_true "the placeholder page is written" test -s "${D_HOME}/public_html/index.html"
+assert_has "by the site user" "${_as} tee ${D_HOME}/public_html/index.html" "$(cat "$RUNUSER_LOG")"
+
+curl() { printf 'server-setup-php-ok:8.3'; }
+: >"$RUNUSER_LOG"
+assert_eq "the PHP probe exits 0" 0 "$(run_isolated lib_domain_php_probe)"
+assert_has "its file is written by the site user" "${_as} tee ${D_HOME}/public_html/ss-probe-" "$(cat "$RUNUSER_LOG")"
+assert_has "and removed by it" "${_as} rm -f -- ${D_HOME}/public_html/ss-probe-" "$(cat "$RUNUSER_LOG")"
+assert_eq "nothing is left behind" "" "$(find "${D_HOME}/public_html" -name 'ss-probe-*')"
+unset -f curl
+
+# WordPress already present: only the ownership and permission pass runs
+_wpbin_save="$WPCLI_BIN"; WPCLI_BIN="$TMP/wp-launcher"
+mkdir -p "$INSTALL_DIR"; printf '#!/bin/sh\n' >"$WPCLI_PHAR"; printf '#!/bin/sh\n' >"$WPCLI_BIN"
+chmod 0755 "$WPCLI_PHAR" "$WPCLI_BIN"
+lib_domain_state_save
+printf 'DB_NAME=asuser_db\nDB_USER=asuser_user\nDB_PASS=unused\n' >"$(lib_db_info_file "$D_DOMAIN")"
+mkdir -p "${D_HOME}/public_html/wp-content"; printf '<?php\n' >"${D_HOME}/public_html/wp-config.php"
+chmod 0700 "${D_HOME}/public_html/wp-content" 2>/dev/null || true
+: >"$RUNUSER_LOG"
+assert_eq "the WordPress permission pass exits 0" 0 "$(run_isolated lib_domain_wp_install)"
+_log="$(cat "$RUNUSER_LOG")"
+assert_has "directory modes are set by the site user" "${_as} find ${D_HOME}/public_html -type d -exec chmod 0755 {} +" "$_log"
+assert_has "file modes too"                           "${_as} find ${D_HOME}/public_html -type f -exec chmod 0644 {} +" "$_log"
+assert_has "and wp-config.php"                        "${_as} chmod 0640 ${D_HOME}/public_html/wp-config.php" "$_log"
+if (( CAN_CHMOD )); then
+  assert_eq "a directory is normalised"  "755" "$(stat -c %a "${D_HOME}/public_html/wp-content")"
+  assert_eq "wp-config.php ends at 0640" "640" "$(stat -c %a "${D_HOME}/public_html/wp-config.php")"
+fi
+WPCLI_BIN="$_wpbin_save"
+rm -f "$(lib_db_info_file "$D_DOMAIN")"   # a database would need a real dump below
+
+# restore: take a real backup, change a file, restore, and look at who unpacked it
+_orig_rt="$(declare -f lib_require_tools)"; _orig_ri="$(declare -f lib_require_installed)"
+lib_require_tools() { return 0; }; lib_require_installed() { return 0; }
+mkdir -p "${D_HOME}/public_html/sub"; printf 'v1\n' >"${D_HOME}/public_html/sub/page.html"
+assert_eq "a backup of the site is taken" 0 "$(run_isolated lib_backup_domain "$D_DOMAIN" --keep 0)"
+_archives=("${BACKUP_ROOT}/${D_DOMAIN}"/*.tar.gz)
+printf 'v2\n' >"${D_HOME}/public_html/sub/page.html"
+: >"$RUNUSER_LOG"
+assert_eq "restore exits 0" 0 "$(run_isolated lib_restore_main "$D_DOMAIN" --file "${_archives[0]}")"
+assert_eq "the archived content is back" "v1" "$(cat "${D_HOME}/public_html/sub/page.html")"
+# The home in the logged line is not spelled out: under Git Bash it round-trips through native
+# jq in domain.json and comes back as a C:\ path, so match only the mangling-proof ends - the
+# runuser+env-C prefix (this ran as the site user) and the stdin-extract flags.
+_rlog="$(cat "$RUNUSER_LOG")"
+assert_has "restore unpacks as the site user" "${_as} tar -C" "$_rlog"
+assert_has "and does so by extracting the archive" "-xzpf -" "$_rlog"
+eval "$_orig_rt"; eval "$_orig_ri"
+lib_domain_state_reset
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 if (( FAIL > 0 )); then exit 1; fi

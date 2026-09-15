@@ -369,10 +369,15 @@ lib_restore_main() {
   if (( ! no_files )) && [[ -s "${work}/x/files.tar.gz" ]]; then
     if (( OPT_DRY_RUN )); then lib_info "[dry-run] would extract files into ${D_HOME}"
     else
-      tar -C "$D_HOME" -xzf "${work}/x/files.tar.gz" || lib_die "File restore failed" "tar error" "check disk space"
+      # Unpacked as the site user, not as root. The files land in a home that user controls, and
+      # when root unpacked them, a link planted there - or swapped in mid-extraction - let it write
+      # the archive's files, modes included, anywhere on the system. Handing over what is already
+      # there stays root's job and goes first, so tar can replace those files; chown -R changes
+      # links rather than following them.
       chown -R "${D_USER}:${D_GROUP}" "${D_HOME}/public_html" "${D_HOME}/private" 2>/dev/null || true
       if [[ -d "${D_HOME}/app" ]]; then chown -R "${D_USER}:${D_GROUP}" "${D_HOME}/app" 2>/dev/null || true; fi
       if [[ -d "${D_HOME}/.ssh" ]]; then chown -R "${D_USER}:${D_GROUP}" "${D_HOME}/.ssh" 2>/dev/null || true; fi
+      lib_domain_as_user tar -C "$D_HOME" -xzpf - <"${work}/x/files.tar.gz" || lib_die "File restore failed" "tar error" "check disk space"
       lib_ok "Files restored into ${D_HOME}"
     fi
   fi
