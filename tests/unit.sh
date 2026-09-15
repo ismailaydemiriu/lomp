@@ -771,6 +771,30 @@ pitfalls="$(for f in "$ROOT/setup.sh" "$ROOT"/lib/*.sh "$ROOT"/tests/*.sh; do
   ' "$f"
 done)"
 assert_eq "no piped group ends in a conditional" "" "$pitfalls"
+# A process substitution runs in its own subshell, and "set -E" hands that subshell the ERR
+# trap. When a probe inside it fails, the trap prints a full "FAILED: command exited with
+# status 255" report in the middle of a perfectly healthy run. Every such probe is optional
+# by construction (the caller has a default), so a pipeline inside "< <(...)" must end in
+# "|| true". This shipped: "sshd -T" exits 255 on stock Ubuntu 24.04.
+procsub="$(grep -nE '< <\(.*\|' "$ROOT/setup.sh" "$ROOT"/lib/*.sh | grep -v '|| true)$' || true)"
+assert_eq "a piped process substitution ends in || true" "" "$procsub"
+
+# =============================================================================
+section "SSH port detection (regression: a failing probe printed a fatal error)"
+sshd() { printf 'sshd: no matching key exchange method\n' >&2; return 255; }
+ss()   { return 127; }   # minimal container: iproute2 not installed
+saved_conn="${SSH_CONNECTION:-}"; unset SSH_CONNECTION
+err="$(lib_ssh_ports 2>&1 >/dev/null)"
+assert_eq "broken probes print nothing" "" "$err"
+assert_eq "falls back to port 22" "22" "$(lib_ssh_ports 2>/dev/null)"
+assert_eq "lib_ssh_ports still exits 0" 0 "$(run_isolated lib_ssh_ports)"
+SSH_CONNECTION="203.0.113.5 50000 10.0.0.1 2222"
+assert_eq "the active connection's port wins" "2222" "$(lib_ssh_ports 2>/dev/null)"
+assert_eq "still exits 0 with a connection" 0 "$(run_isolated lib_ssh_ports)"
+sshd() { printf 'port 22\nport 2200\npermitrootlogin no\n'; }
+assert_eq "ports from sshd -T are merged and sorted" "22 2200 2222" "$(lib_ssh_ports 2>/dev/null)"
+unset -f sshd ss
+if [[ -n "$saved_conn" ]]; then SSH_CONNECTION="$saved_conn"; else unset SSH_CONNECTION; fi
 
 # =============================================================================
 section "lib_join (regression: multi-character separators)"

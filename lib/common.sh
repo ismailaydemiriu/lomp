@@ -836,10 +836,20 @@ lib_ssh_ports() {
     p="$(awk '{print $4}' <<<"$SSH_CONNECTION")"
     [[ "$p" =~ ^[0-9]+$ ]] && ports+=("$p")
   fi
+  # "|| true" is load-bearing. A process substitution runs in its own subshell that
+  # inherits the ERR trap (set -E), so when a probe here fails the trap prints a full
+  # "FAILED: command exited with status 255" report in the middle of a healthy install.
+  # And these probes DO fail on healthy hosts: "sshd -T" exits 255 whenever the config has
+  # a Match block it cannot evaluate without -C (Ubuntu 24.04 ships one), and "ss" is
+  # absent in minimal containers. A failure here only means "this source has no answer".
   if lib_have sshd; then
-    while read -r p; do [[ "$p" =~ ^[0-9]+$ ]] && ports+=("$p"); done < <(sshd -T 2>/dev/null | awk '$1=="port"{print $2}')
+    while read -r p; do
+      if [[ "$p" =~ ^[0-9]+$ ]]; then ports+=("$p"); fi
+    done < <(sshd -T 2>/dev/null | awk '$1=="port"{print $2}' || true)
   fi
-  while read -r p; do [[ "$p" =~ ^[0-9]+$ ]] && ports+=("$p"); done < <(ss -tlnpH 2>/dev/null | awk '/sshd/{split($4,a,":"); print a[length(a)]}')
+  while read -r p; do
+    if [[ "$p" =~ ^[0-9]+$ ]]; then ports+=("$p"); fi
+  done < <(ss -tlnpH 2>/dev/null | awk '/sshd/{split($4,a,":"); print a[length(a)]}' || true)
   ((${#ports[@]} == 0)) && ports+=(22)
   printf '%s\n' "${ports[@]}" | sort -un | tr '\n' ' ' | sed 's/ $//'
 }
