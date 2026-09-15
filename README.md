@@ -60,6 +60,18 @@ NVMe, SSD or spinning rust all feed into the OpenLiteSpeed, PHP, MariaDB and Red
 
 ## Installation
 
+### Quick start
+
+On a bare Ubuntu 22.04 / 24.04 server, as root. Clone and provision in one line:
+
+```bash
+apt-get update && apt-get install -y git && git clone https://github.com/ismailaydemiriu/lomp.git /opt/lomp && cd /opt/lomp && chmod +x setup.sh && ./setup.sh install --email you@example.com --backup-schedule "daily 03:00"
+```
+
+Put your own address in `--email`; it is used for Let's Encrypt and for alerts. The
+step-by-step version below explains what each part does and how to preview the whole run
+first with `--dry-run`.
+
 ### 1. Connect to the server
 
 ```bash
