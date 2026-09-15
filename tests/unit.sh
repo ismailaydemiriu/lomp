@@ -355,11 +355,47 @@ unset -f lib_ols_snapshot_take lib_ols_is_installed
 # -- a restore must never nest the saved tree inside the new one -------------
 mkdir -p "$TMP/live/sub"; : >"$TMP/live/keep"
 mkdir -p "$TMP/newconf"; : >"$TMP/newconf/fresh"
+OLS_REJECTED_DIR=""
 _ols_swap_dir "$TMP/live" "$TMP/newconf"
 assert_true  "live tree replaced"   test -f "$TMP/live/fresh"
 assert_false "old tree not kept"    test -f "$TMP/live/keep"
 assert_false "no .failed debris"    test -e "$TMP/live.failed"
 assert_false "nothing nested"       test -e "$TMP/live/live.failed"
+# the rejected configuration is the only copy of what was tried; keep it for diagnosis
+mkdir -p "${LSWS_HOME}/conf2"; : >"${LSWS_HOME}/conf2/rejected-marker"
+mkdir -p "$TMP/newconf2"; : >"$TMP/newconf2/fresh"
+OLS_REJECTED_DIR="$TMP/rejected"; mkdir -p "$OLS_REJECTED_DIR"
+_ols_swap_dir "${LSWS_HOME}/conf2" "$TMP/newconf2"
+assert_true  "rejected config kept for diagnosis" test -f "${OLS_REJECTED_DIR}/conf2/rejected-marker"
+assert_false "and not left beside the live tree"  test -e "${LSWS_HOME}/conf2.failed"
+OLS_REJECTED_DIR=""; rm -rf "${LSWS_HOME}/conf2" "$TMP/rejected"
+
+# -- a port conflict must name the culprit -----------------------------------
+# OpenLiteSpeed refuses to start at all when it cannot bind the WebAdmin listener, so
+# "Address already in use" on that port took the whole web server down with a generic
+# "did not come back after the reload" and no mention of the port.
+ss() { printf 'LISTEN 0 100 127.0.0.1:7080 0.0.0.0:* users:(("lshttpd",pid=1234,fd=7))\n'; }
+assert_eq "the holder is named" "lshttpd (pid 1234)" "$(lib_port_holder 7080)"
+assert_eq "a free port has no holder" "" "$(lib_port_holder 9999)"
+ss() { printf 'LISTEN 0 100 [::]:7080 [::]:* users:(("caddy",pid=77,fd=3))\n'; }
+assert_eq "IPv6 listeners are seen too" "caddy (pid 77)" "$(lib_port_holder 7080)"
+ss() { return 0; }
+assert_eq "nothing listening" "" "$(lib_port_holder 7080)"
+unset -f ss
+# OpenLiteSpeed's own reason must reach the failure message
+mkdir -p "${LSWS_HOME}/logs"
+cat >"${LSWS_HOME}/logs/error.log" <<'EOF'
+2026-09-15 16:29:41.623910 [INFO] [30920] [Module: modcompress 1.1] has been initialized successfully
+2026-09-15 16:29:45.626111 [ERROR] [30920] HttpListener::start(): Can't listen at address adminListener: Address already in use!
+2026-09-15 16:29:45.626284 [ERROR] [30920] Fatal error in configuration, exit!
+EOF
+ols_err="$(lib_ols_recent_errors 2)"
+assert_has "the real reason is extracted" "Address already in use" "$ols_err"
+assert_has "and the fatal line too" "Fatal error in configuration" "$ols_err"
+assert_lacks "timestamps stripped" "2026-09-15" "$ols_err"
+assert_lacks "info lines excluded" "modcompress" "$ols_err"
+rm -f "${LSWS_HOME}/logs/error.log"
+assert_eq "no log, no noise" "" "$(lib_ols_recent_errors)"
 
 # -- config test must not be stricter than OpenLiteSpeed ---------------------
 assert_eq "SERVER_ROOT expanded" "${LSWS_HOME}/conf/vhosts/Shop/vhconf.conf" \

@@ -23,6 +23,7 @@ OLS_PENDING_RELOAD=0    # set when something changed and OLS must be reloaded
 OLS_CONF_CHANGED=0
 OLS_TEST_OUTPUT=""
 OLS_RESTORE_MSG=""      # what the rollback actually managed to do, for the failure message
+OLS_REJECTED_DIR=""     # where the configuration that was rolled back is kept, for diagnosis
 
 # =============================================================================
 #  Repository & installation
@@ -448,7 +449,7 @@ lib_ols_snapshot_take() {
 # copy-then-unlink and leaves a partial directory behind on ENOSPC), leaving a third state
 # that was neither the old nor the new configuration. Clear the destination every time.
 _ols_swap_dir() {   # live new
-  local live="$1" new="$2" saved="${1}.failed"
+  local live="$1" new="$2" saved="${1}.failed" rel="" tag=""
   rm -rf -- "$saved"
   if [[ -d "$live" ]] && ! mv -- "$live" "$saved"; then return 1; fi
   rm -rf -- "$live"
@@ -458,7 +459,17 @@ _ols_swap_dir() {   # live new
     if [[ -d "$saved" ]]; then mv -- "$saved" "$live" || true; fi
     return 1
   fi
-  rm -rf -- "$saved"
+  # Keep the REJECTED configuration. It is the only copy of what was actually attempted,
+  # and the failure message sends the operator off to find out what was wrong with it -
+  # which used to be impossible, because this is where it was deleted.
+  if [[ -d "$saved" ]]; then
+    if [[ -n "${OLS_REJECTED_DIR:-}" ]]; then
+      rel="${live#"${LSWS_HOME}/"}"; tag="${rel//\//-}"
+      mv -- "$saved" "${OLS_REJECTED_DIR}/${tag}" || rm -rf -- "$saved"
+    else
+      rm -rf -- "$saved"
+    fi
+  fi
   return 0
 }
 
@@ -467,6 +478,8 @@ lib_ols_snapshot_restore() {
   if [[ -z "$snap" || ! -f "$snap" ]]; then lib_warn "no OpenLiteSpeed snapshot available to restore"; return 1; fi
   tmp="$(lib_mktemp -d)"
   if ! tar -xzf "$snap" -C "$tmp"; then lib_warn "snapshot ${snap} is unreadable"; return 1; fi
+  OLS_REJECTED_DIR="${STATE_DIR}/archive/rejected-$(lib_ts)"
+  if ! { mkdir -p "$OLS_REJECTED_DIR" && chmod 0700 "$OLS_REJECTED_DIR"; }; then OLS_REJECTED_DIR=""; fi
   for m in conf admin/conf; do
     [[ -d "${tmp}/${m}" ]] || continue
     n=$((n + 1))
@@ -538,7 +551,54 @@ lib_ols_running() { lib_service_active "$OLS_SERVICE"; }
 # nothing, "systemctl status" lies, and a later stop leaves orphans. A restart keeps
 # systemd's view of the service correct, and its ExecStop already drains connections.
 lib_ols_reload() {
-  if lib_ols_running; then lib_systemctl restart "$OLS_SERVICE"; else lib_systemctl start "$OLS_SERVICE"; fi
+  if lib_ols_running; then lib_systemctl stop "$OLS_SERVICE" || true; fi
+  lib_ols_admin_port_release
+  lib_systemctl start "$OLS_SERVICE"
+}
+
+# OpenLiteSpeed refuses to start AT ALL when it cannot bind its WebAdmin listener:
+#   HttpListener::start(): Can't listen at address adminListener: Address already in use!
+#   [config:admin:listener] No listener is available for admin virtual host!
+#   Fatal error in configuration, exit!
+# So an instance that is still holding that port takes the whole web server down with it -
+# and "systemctl restart" does not guarantee the old process released its sockets before
+# the new one binds. Wait for the port, clear a stale instance, and name the holder if it
+# is something else entirely rather than failing with a generic "did not come back".
+lib_ols_admin_port_release() {   # [timeout seconds]
+  local timeout="${1:-10}" i="" holder=""
+  (( OPT_DRY_RUN )) && return 0
+  [[ -n "${ADMIN_PORT:-}" ]] || return 0
+  for (( i = 0; i < timeout; i++ )); do
+    lib_port_listening "$ADMIN_PORT" || return 0
+    sleep 1
+  done
+  holder="$(lib_port_holder "$ADMIN_PORT")"
+  case "$holder" in
+    *lshttpd*|*litespeed*|*openlitespeed*|*lsws*)
+      lib_warn "A previous OpenLiteSpeed instance still holds port ${ADMIN_PORT} (${holder}); stopping it"
+      if [[ -x "${LSWS_HOME}/bin/lswsctrl" ]]; then lib_run "${LSWS_HOME}/bin/lswsctrl" stop || true; fi
+      pkill -f "^${LSWS_HOME}/bin/" 2>/dev/null || true
+      for (( i = 0; i < 10; i++ )); do
+        lib_port_listening "$ADMIN_PORT" || return 0
+        sleep 1
+      done
+      ;;
+  esac
+  holder="$(lib_port_holder "$ADMIN_PORT")"
+  lib_die "WebAdmin port ${ADMIN_PORT} is still in use${holder:+ by ${holder}}" \
+    "OpenLiteSpeed treats a WebAdmin listener it cannot bind as fatal and refuses to start the web server at all" \
+    "free that port, or install on another one: lomp install --admin-port 7081"
+}
+
+# The last few OpenLiteSpeed errors, for failure messages. Its own log says exactly why it
+# would not start; without this the operator only saw "did not come back after the reload".
+lib_ols_recent_errors() {   # [lines]
+  local n="${1:-4}" f="${LSWS_HOME}/logs/error.log" out=""
+  [[ -r "$f" ]] || { printf ''; return 0; }
+  out="$(grep -aF '[ERROR]' "$f" 2>/dev/null | tail -n "$n" \
+         | sed -E 's/^[0-9-]+ [0-9:.]+ //; s/^\[[0-9]+\] //' \
+         | tr '\n' '\t' | sed 's/\t$//; s/\t/ | /g' || true)"
+  printf '%s' "$out"
 }
 
 lib_ols_restart() { lib_systemctl restart "$OLS_SERVICE"; }
@@ -638,6 +698,9 @@ _ols_restore_or_report() {
     OLS_RESTORE_MSG="no snapshot was available, so nothing could be rolled back and the rejected configuration is still on disk"
   elif lib_ols_snapshot_restore "$snap"; then
     OLS_RESTORE_MSG="the previous configuration was restored from ${snap}"
+    if [[ -n "${OLS_REJECTED_DIR:-}" && -d "${OLS_REJECTED_DIR:-}" ]]; then
+      OLS_RESTORE_MSG="${OLS_RESTORE_MSG}; the rejected one was kept in ${OLS_REJECTED_DIR}"
+    fi
   else
     OLS_RESTORE_MSG="the previous configuration could NOT be restored from ${snap}; the rejected configuration is still on disk"
   fi
@@ -657,12 +720,15 @@ lib_ols_change_commit() {   # [description]
       "inspect ${LOG_FILE} and ${LSWS_HOME}/logs/error.log, then re-run"
   fi
   if ! lib_ols_reload || ! lib_ols_wait_ready 40; then
+    local ols_err=""
+    ols_err="$(lib_ols_recent_errors 4)"   # captured before the restore overwrites the cause
     lib_error "OpenLiteSpeed did not come back after the reload"
+    if [[ -n "$ols_err" ]]; then lib_error "OpenLiteSpeed says: ${ols_err}"; fi
     _ols_restore_or_report
     lib_ols_reload || true
     lib_ols_wait_ready 40 || lib_ols_restart || true
     lib_die "OpenLiteSpeed failed to reload (${desc})" \
-      "the service did not become healthy with the new configuration; ${OLS_RESTORE_MSG}" \
+      "${ols_err:-the service did not become healthy with the new configuration}; ${OLS_RESTORE_MSG}" \
       "systemctl status lsws; tail -n 50 ${LSWS_HOME}/logs/error.log"
   fi
   OLS_PENDING_RELOAD=0

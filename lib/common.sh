@@ -901,6 +901,17 @@ lib_port_listening() {   # lib_port_listening 443 [tcp|udp]
   else ss -tlnH 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${port}\$"; fi
 }
 
+# "name (pid N)" for whoever is listening on a port, or "" when it is free.
+# Used to turn "Address already in use" into a message that names the culprit.
+lib_port_holder() {   # lib_port_holder 7080 [tcp|udp]
+  local port="$1" proto="${2:-tcp}" line="" out=""
+  if [[ "$proto" == "udp" ]]; then line="$(ss -ulnpH 2>/dev/null | awk -v p="[:.]${port}$" '$5 ~ p {print; exit}' || true)"
+  else line="$(ss -tlnpH 2>/dev/null | awk -v p="[:.]${port}$" '$4 ~ p {print; exit}' || true)"; fi
+  [[ -n "$line" ]] || { printf ''; return 0; }
+  out="$(sed -nE 's/.*users:\(\("([^"]+)",pid=([0-9]+).*/\1 (pid \2)/p' <<<"$line")"
+  printf '%s' "${out:-an unidentified process}"
+}
+
 # Run curl and print exactly one three-digit HTTP status code ("000" when the request failed).
 # curl already prints 000 on a connection failure and then exits non-zero, so a naive
 # "|| printf '000'" appends a second one and produces "000000", which every caller then
