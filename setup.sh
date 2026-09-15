@@ -175,7 +175,12 @@ main() {
     notify) [[ " ${rest[*]:-} " == *" --send "* ]] || lib_lock ;;
     proxy)  if [[ "${rest[0]:-list}" != "list" && "${rest[0]:-list}" != "help" ]]; then lib_lock; fi ;;
     # "app deploy" can build for minutes: it takes the site's own lock (lib/app.sh) instead
-    app)    case "${rest[0]:-list}" in list|status|logs|deploy|help|-h|--help) ;; *) lib_lock ;; esac ;;
+    app)    case "${rest[0]:-list}" in
+              list|status|logs|deploy|help|-h|--help) ;;
+              # listing reads only; a job run by hand is kept from overlapping by its own flock
+              worker) case "${rest[2]:-list}" in list|run|help|-h|--help) ;; *) lib_lock ;; esac ;;
+              *) lib_lock ;;
+            esac ;;
     *) lib_lock ;;
   esac
 

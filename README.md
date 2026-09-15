@@ -187,6 +187,7 @@ sudo lomp add shop.example.com --wordpress          # WordPress with database an
 sudo lomp add api.example.com --proxy 127.0.0.1:3000 # Node/Python app behind OpenLiteSpeed
 sudo lomp proxy add example.com /api/ 127.0.0.1:3001 # an app under a path of an existing site
 sudo lomp add node.example.com --node                # Node.js app run by PM2 (see below)
+sudo lomp app worker node.example.com add queue --start "node worker.js"   # a worker next to it
 sudo lomp add cdn.example.com --static              # static site, no PHP
 sudo lomp db shop.example.com                       # create or show the database
 sudo lomp db list                                   # every site's database, user and size
@@ -244,7 +245,7 @@ A Node.js site is a reverse proxy site whose application lompstack runs for you 
 ```bash
 sudo lomp add app.example.com --node                  # takes a free port from 3000 up
 # put the code into /home/app.example.com/app (owned by the site user), then:
-sudo lomp app deploy app.example.com                  # npm ci (or pnpm / yarn), build, start
+sudo lomp app deploy app.example.com                  # npm ci (or pnpm / yarn), build, restart
 sudo lomp app list                                    # status, CPU, memory, uptime, restarts
 sudo lomp app logs app.example.com                    # follow the application's output
 sudo lomp app restart app.example.com
@@ -272,6 +273,31 @@ URL with a password or token in it is refused: use the deploy key.
   are never written to the log, and `env set` never takes them from the command line.
 - WebSocket upgrades are passed through. Behind OpenLiteSpeed, Express needs
   `app.set('trust proxy', 'loopback')` to see HTTPS and the client's address.
+
+#### Workers and scheduled jobs
+
+Background processes of an application run under the same PM2, as the same user and with the
+same environment:
+
+```bash
+sudo lomp app worker app.example.com add queue --start "node worker.js"         # queue consumer, bot
+sudo lomp app worker app.example.com add ws --start "node ws.js" --port 3101    # one that listens gets PORT
+sudo lomp app worker app.example.com add cleanup --cron "*/15 * * * *" --start "npm run cleanup"
+sudo lomp app worker app.example.com list                                       # status, restarts, schedules
+sudo lomp app worker app.example.com run cleanup                                # run a job now
+sudo lomp app restart app.example.com --process queue                           # one process at a time
+sudo lomp app logs app.example.com --process queue
+```
+
+- A worker that keeps crashing does not take the web process down, and `doctor` reports it.
+- A scheduled job is started by cron, not by PM2. A run never overlaps the previous one, is
+  stopped after `--timeout` (default 1 hour), and writes to `~/.pm2/logs/<name>-job.log`. The
+  schedule is checked before it is written: a single malformed line makes cron ignore the whole
+  file, backups and certificate renewals included.
+- `app stop` and `app start` act on the application and all its workers; `--process web` or
+  `--process <name>` narrows that down. A deploy restarts what runs and leaves what was stopped
+  on purpose stopped.
+- Secrets belong in `app env`, not in `--start`: a start command shows up in every process list.
 
 ---
 
@@ -320,7 +346,7 @@ you are already in.
 ├── logs/                     0750  access.log, error.log (rotated by logrotate)
 ├── backups/                  0700
 ├── app/                      proxy mode only: your Node/Python application
-└── .pm2/                     0700  Node.js sites: PM2 state, ecosystem file, application logs
+└── .pm2/                     0700  Node.js sites: PM2 state, ecosystem file, logs, job scripts
 ```
 
 PHP runs as the site's own user through a per-vhost LSAPI processor, so one compromised
@@ -482,7 +508,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
 | `lib/ssl.sh` | certbot, DNS checks, certificate deployment, renewal hook |
 | `lib/domain.sh` | Site lifecycle, users and directories, WordPress, logrotate and jail regeneration |
 | `lib/proxy.sh` | Path proxies: an application under a path of any site |
-| `lib/app.sh` | Node.js applications: one PM2 daemon per site as the site user, systemd units, deploy, environment |
+| `lib/app.sh` | Node.js applications: one PM2 daemon per site as the site user, systemd units, deploy, environment, workers and scheduled jobs |
 | `lib/cloudflare.sh` | Trusted proxy ranges, real client IP, API token, edge bans |
 | `lib/backup.sh` | Backup, restore, retention, encryption, remotes, scheduling |
 | `lib/monitor.sh` | `status`, `doctor`, health check, notifications |

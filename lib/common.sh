@@ -757,17 +757,21 @@ lib_domains_list() {   # prints registered domains, one per line
 #  Cron (single central file /etc/cron.d/server-setup)
 # =============================================================================
 # lib_cron_set <id> "<schedule> <user> <command>"   ;  lib_cron_remove <id>
+_cron_header_ensure() {   # file
+  if ! grep -q '^SHELL=' "$1" 2>/dev/null; then
+    {
+      printf '# Managed by lompstack - do not edit by hand (entries are regenerated)\n'
+      printf 'SHELL=/bin/bash\nPATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\nMAILTO=""\n'
+      cat "$1"
+    } >"${1}.2" && mv -f "${1}.2" "$1"
+  fi
+}
+
 lib_cron_set() {
   local id="$1" entry="$2" tmp=""
   tmp="$(lib_mktemp)"
   if [[ -f "$CRON_FILE" ]]; then grep -v -- "# server-setup:${id}\$" "$CRON_FILE" >"$tmp" || true; fi
-  if ! grep -q '^SHELL=' "$tmp" 2>/dev/null; then
-    {
-      printf '# Managed by lompstack - do not edit by hand (entries are regenerated)\n'
-      printf 'SHELL=/bin/bash\nPATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\nMAILTO=""\n'
-      cat "$tmp"
-    } >"${tmp}.2" && mv -f "${tmp}.2" "$tmp"
-  fi
+  _cron_header_ensure "$tmp"
   printf '%s # server-setup:%s\n' "$entry" "$id" >>"$tmp"
   lib_write_file "$CRON_FILE" 0644 root:root <"$tmp"
   rm -f "$tmp"
@@ -784,6 +788,27 @@ lib_cron_remove() {
 }
 
 lib_cron_has() { [[ -f "$CRON_FILE" ]] && grep -q -- "# server-setup:${1}\$" "$CRON_FILE"; }
+
+# Replace every entry whose id starts with the prefix (all scheduled jobs of one site, say)
+# with the "id<TAB>entry" lines on stdin, in a single write.
+lib_cron_replace_prefix() {   # id prefix
+  local marker="# server-setup:${1}" tmp="" id="" entry="" n=0
+  tmp="$(lib_mktemp)"
+  if [[ -f "$CRON_FILE" ]]; then awk -v m="$marker" 'index($0, m) == 0' "$CRON_FILE" >"$tmp"; fi
+  while IFS=$'\t' read -r id entry; do
+    [[ -n "$id" && -n "$entry" ]] || continue
+    n=$((n + 1))
+    printf '%s # server-setup:%s\n' "$entry" "$id" >>"${tmp}.entries"
+  done
+  if (( n == 0 )) && [[ ! -f "$CRON_FILE" ]]; then rm -f "$tmp"; return 0; fi
+  _cron_header_ensure "$tmp"
+  if (( n > 0 )); then cat "${tmp}.entries" >>"$tmp"; fi
+  rm -f "${tmp}.entries"
+  lib_write_file "$CRON_FILE" 0644 root:root <"$tmp"
+  rm -f "$tmp"
+}
+
+lib_cron_remove_prefix() { lib_cron_replace_prefix "$1" </dev/null; }   # id prefix
 
 # =============================================================================
 #  Network helpers

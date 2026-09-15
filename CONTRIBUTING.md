@@ -23,8 +23,9 @@ changes is "would a staff SRE run this on their own box".
   function, so a plain `declare` would be function-local).
 - Write files with `lib_write_file` (atomic, backs up the old version, dry-run aware),
   not with `>` redirection.
-- Register cron entries with `lib_cron_set` / `lib_cron_remove`, never by editing
-  `/etc/cron.d/server-setup` directly.
+- Register cron entries with `lib_cron_set` / `lib_cron_remove` (`lib_cron_replace_prefix` for a
+  group, such as one site's jobs), never by editing `/etc/cron.d/server-setup` directly. A
+  schedule must be validated first: cron ignores the whole file when one line is malformed.
 - User-facing text is English; the log file must stay greppable.
 
 ## Before you open a pull request

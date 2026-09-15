@@ -57,8 +57,14 @@ COMMANDS
                                 mode: proxy add example.com /api/ 127.0.0.1:3001
   proxy remove <domain> <path>  Stop proxying that path
   app list                      Node.js applications: status, CPU, memory, restarts (--json)
-  app status|start|stop|restart <domain>
-  app logs <domain> [--out|--error] [-n LINES]
+  app status <domain>
+  app start|stop|restart <domain> [--process NAME]
+  app logs <domain> [--process NAME] [--out|--error] [-n LINES]
+  app worker <domain> list | remove NAME | run NAME
+  app worker <domain> add NAME --start CMD [--cwd DIR] [--port N] [--memory 256M]
+  app worker <domain> add NAME --cron "*/5 * * * *" --start CMD [--timeout 1h]
+                                Workers (queue consumers, bots) run next to the app under
+                                its PM2; with --cron, cron starts a job, one run at a time
   app deploy <domain> [--git URL [--branch B]]
                                 Pull from git (the first time: clone), install dependencies
                                 when they changed, build with a memory limit, restart
@@ -375,6 +381,7 @@ _menu_apps() {
     _menu_item 11 "Path proxies (example.com/api -> an app)"
     _menu_item 12 "Deploy from a Git repository (URL, branch)"
     _menu_item 13 "Deploy key for a private repository"
+    _menu_item 14 "Workers and scheduled jobs (queues, bots, cron)"
     _menu_item  0 "Back"
     printf '\n%sChoice: %s' "$C_BLD" "$C_RST"
     read -r choice </dev/tty || return 0
@@ -392,6 +399,72 @@ _menu_apps() {
       11) _menu_proxies ;;
       12) domain="$(_menu_pick_domain apps)" && _menu_app_git "$domain" || _menu_pause ;;
       13) domain="$(_menu_pick_domain apps)" && _menu_run app deploy-key "$domain" || _menu_pause ;;
+      14) domain="$(_menu_pick_domain apps)" && _menu_workers "$domain" || _menu_pause ;;
+      0|q|Q|"") return 0 ;;
+      *) printf '%sPick a number from the list.%s\n' "$C_YEL" "$C_RST" ;;
+    esac
+  done
+}
+
+# A worker of the site, by number: jobs only with "job", long-running ones with "process".
+_menu_pick_worker() {   # domain [process|job]
+  local -a names=()
+  local n="" i=1 choice=""
+  while IFS= read -r n; do
+    if [[ -n "$n" ]]; then names+=("$n"); fi
+  done < <(jq -r --arg k "${2:-}" '.[] | select($k == "" or (($k == "job") == ((.cron // "") != ""))) | .name' <<<"$(lib_app_workers_json "$1")" || true)
+  if ((${#names[@]} == 0)); then printf '%sThere is nothing to choose from here yet.%s\n' "$C_YEL" "$C_RST" >&2; return 1; fi
+  printf '\n%sWhich one?%s\n' "$C_BLD" "$C_RST" >&2
+  for n in "${names[@]}"; do printf '  %2d) %s\n' "$i" "$n" >&2; i=$((i + 1)); done
+  printf '   0) cancel\n%sNumber: %s' "$C_BLD" "$C_RST" >&2
+  read -r choice </dev/tty || return 1
+  [[ "$choice" =~ ^[0-9]+$ ]] || return 1
+  (( choice >= 1 && choice <= ${#names[@]} )) || return 1
+  printf '%s' "${names[$((choice - 1))]}"
+}
+
+_menu_workers() {   # domain
+  local domain="$1" choice="" name="" start="" cron="" port="" cwd=""
+  local -a args=()
+  while true; do
+    printf '\n %sWORKERS AND JOBS OF %s%s   run as the site user, next to the application\n' "$C_BLD" "$domain" "$C_RST"
+    _menu_rule
+    _menu_item 1 "List"
+    _menu_item 2 "Add a background worker (queue consumer, bot)"
+    _menu_item 3 "Add a scheduled job (cron)"
+    _menu_item 4 "Run a scheduled job now"
+    _menu_item 5 "Follow the logs of one"
+    _menu_item 6 "Restart a worker"
+    _menu_item 7 "Stop one"
+    _menu_item 8 "Start one"
+    _menu_item 9 "Remove one"
+    _menu_item 0 "Back"
+    printf '\n%sChoice: %s' "$C_BLD" "$C_RST"
+    read -r choice </dev/tty || return 0
+    case "$choice" in
+      1) _menu_run app worker "$domain" list ;;
+      2) _menu_ask name "Name (a-z, 0-9 and -)"
+         _menu_ask start "Command, run without a shell (e.g. node worker.js)"
+         _menu_ask cwd "Directory, inside the site's home" "app"
+         _menu_ask port "Port, only if it listens on one"
+         if [[ -n "$name" && -n "$start" ]]; then
+           args=(app worker "$domain" add "$name" --start "$start" --cwd "${cwd:-app}")
+           if [[ -n "$port" ]]; then args+=(--port "$port"); fi
+           _menu_run "${args[@]}"
+         else _menu_pause; fi ;;
+      3) _menu_ask name "Name (a-z, 0-9 and -)"
+         _menu_ask cron "Schedule: minute hour day month weekday" "*/5 * * * *"
+         _menu_ask start "Command, run without a shell (e.g. npm run cleanup)"
+         _menu_ask cwd "Directory, inside the site's home" "app"
+         if [[ -n "$name" && -n "$start" && -n "$cron" ]]; then
+           _menu_run app worker "$domain" add "$name" --cron "$cron" --start "$start" --cwd "${cwd:-app}"
+         else _menu_pause; fi ;;
+      4) name="$(_menu_pick_worker "$domain" job)" && _menu_run app worker "$domain" run "$name" || _menu_pause ;;
+      5) name="$(_menu_pick_worker "$domain")" && _menu_run app logs "$domain" --process "$name" || _menu_pause ;;
+      6) name="$(_menu_pick_worker "$domain" process)" && _menu_run app restart "$domain" --process "$name" || _menu_pause ;;
+      7) name="$(_menu_pick_worker "$domain")" && _menu_run app stop "$domain" --process "$name" || _menu_pause ;;
+      8) name="$(_menu_pick_worker "$domain")" && _menu_run app start "$domain" --process "$name" || _menu_pause ;;
+      9) name="$(_menu_pick_worker "$domain")" && _menu_run app worker "$domain" remove "$name" || _menu_pause ;;
       0|q|Q|"") return 0 ;;
       *) printf '%sPick a number from the list.%s\n' "$C_YEL" "$C_RST" ;;
     esac

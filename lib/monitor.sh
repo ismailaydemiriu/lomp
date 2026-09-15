@@ -449,11 +449,13 @@ _doc_check_log_leaks() {
   [[ "$(stat -c %a "$LOG_FILE" 2>/dev/null)" == "600" ]] || _doc_add WARN "log permissions" "${LOG_FILE} is not 0600"
 }
 
-# Node.js applications: the service starts at boot and runs, the process is online and not
-# crash-looping, and the port is bound to loopback. pm2 is only asked while the service runs:
-# any pm2 command starts a daemon, and one outside systemd would break the unit.
+# Node.js applications: the service starts at boot and runs, every wanted process is online
+# and not crash-looping, the web port is bound to loopback, and every scheduled job has its
+# cron entry. pm2 is only asked while the service runs: any pm2 command starts a daemon, and
+# one outside systemd would break the unit.
 _doc_check_apps() {
-  local d="" unit="" info="" st="" cpu="" mem="" up="" rs="" addr="" n=""
+  local d="" unit="" info="" st="" cpu="" mem="" up="" rs="" addr="" n="" jl="" workers="" web=0 wanted=0
+  local name="" kind="" status="" restarts="" sched=""
   if [[ -f "${APP_UNIT_DIR}/pm2-root.service" ]]; then
     n="$(jq 'length' /root/.pm2/dump.pm2 2>/dev/null || printf '0')"
     if [[ "$n" =~ ^[0-9]+$ ]] && (( n > 0 )); then
@@ -464,28 +466,54 @@ _doc_check_apps() {
     lib_app_state_load "$d" || continue
     lib_domain_state_load "$d" || continue
     unit="$(lib_app_unit_name "$D_IDENT")"
-    if (( ! APP_ENABLED )); then _doc_add OK "app ${d}" "stopped on purpose"; continue; fi
-    if ! lib_app_runnable; then _doc_add WARN "app ${d}" "no code yet: ${APP_RESULT_MSG}"; continue; fi
-    if lib_service_enabled "$unit"; then _doc_add OK "app ${d}: boot" "${unit} enabled"
-    else _doc_add FAIL "app ${d}: boot" "${unit} is not enabled, the app will not start after a reboot (setup.sh app start ${d})"; fi
-    if ! lib_service_active "$unit"; then _doc_add FAIL "app ${d}: service" "${unit} is not running (setup.sh app start ${d})"; continue; fi
-    info="$(_app_process_info web)"
-    st="" cpu="" mem="" up="" rs=""
-    read -r st cpu mem up rs <<<"$info"
-    case "${st:-missing}" in
-      online)  _doc_add OK "app ${d}: process" "online, ${rs:-0} restart(s)" ;;
-      missing) _doc_add FAIL "app ${d}: process" "not in PM2 (setup.sh app restart ${d})" ;;
-      *)       _doc_add FAIL "app ${d}: process" "${st} (setup.sh app logs ${d})" ;;
-    esac
-    if [[ "${rs:-0}" =~ ^[0-9]+$ ]] && (( rs >= 10 )); then
-      _doc_add WARN "app ${d}: restarts" "${rs} restarts, it keeps crashing (setup.sh app logs ${d})"
+    workers="$(lib_app_workers_json "$d")"
+    web=0; wanted=0; jl=""
+    if (( ! APP_ENABLED )); then _doc_add OK "app ${d}" "stopped on purpose"
+    elif ! lib_app_runnable; then _doc_add WARN "app ${d}" "no code yet: ${APP_RESULT_MSG}"
+    else web=1; wanted=1; fi
+    if jq -e 'any(.[]; (.cron // "") == "" and .enabled != false)' <<<"$workers" >/dev/null 2>&1; then wanted=1; fi
+    if (( wanted )); then
+      if lib_service_enabled "$unit"; then _doc_add OK "app ${d}: boot" "${unit} enabled"
+      else _doc_add FAIL "app ${d}: boot" "${unit} is not enabled, the app will not start after a reboot (setup.sh app start ${d})"; fi
+      if lib_service_active "$unit"; then jl="$(_app_jlist)"
+      else _doc_add FAIL "app ${d}: service" "${unit} is not running (setup.sh app start ${d})"; fi
     fi
-    addr="$(ss -tlnH "sport = :${APP_PORT}" 2>/dev/null | awk 'NR == 1 {print $4}' || true)"
-    case "$addr" in
-      "")                    _doc_add FAIL "app ${d}: port" "nothing listens on ${APP_PORT}; the app must listen on process.env.PORT" ;;
-      127.0.0.1:*|\[::1\]:*) _doc_add OK "app ${d}: port" "listens on ${addr}" ;;
-      *)                     _doc_add WARN "app ${d}: port" "listens on ${addr} (every interface): the firewall keeps it private, but bind it to 127.0.0.1" ;;
-    esac
+    if (( web )) && [[ -n "$jl" ]]; then
+      info="$(_app_info_from "$jl" web)"
+      st="" cpu="" mem="" up="" rs=""
+      read -r st cpu mem up rs <<<"$info"
+      case "${st:-missing}" in
+        online)  _doc_add OK "app ${d}: process" "online, ${rs:-0} restart(s)" ;;
+        missing) _doc_add FAIL "app ${d}: process" "not in PM2 (setup.sh app restart ${d})" ;;
+        *)       _doc_add FAIL "app ${d}: process" "${st} (setup.sh app logs ${d})" ;;
+      esac
+      if [[ "${rs:-0}" =~ ^[0-9]+$ ]] && (( rs >= 10 )); then
+        _doc_add WARN "app ${d}: restarts" "${rs} restarts, it keeps crashing (setup.sh app logs ${d})"
+      fi
+      addr="$(ss -tlnH "sport = :${APP_PORT}" 2>/dev/null | awk 'NR == 1 {print $4}' || true)"
+      case "$addr" in
+        "")                    _doc_add FAIL "app ${d}: port" "nothing listens on ${APP_PORT}; the app must listen on process.env.PORT" ;;
+        127.0.0.1:*|\[::1\]:*) _doc_add OK "app ${d}: port" "listens on ${addr}" ;;
+        *)                     _doc_add WARN "app ${d}: port" "listens on ${addr} (every interface): the firewall keeps it private, but bind it to 127.0.0.1" ;;
+      esac
+    fi
+    while IFS=$'\t' read -r name kind status restarts sched <&3; do
+      [[ -n "$name" ]] || continue
+      if [[ "$kind" == job ]]; then
+        if [[ "$status" == stopped ]]; then _doc_add OK "app ${d}: job ${name}" "paused on purpose"
+        elif lib_cron_has "job:${d}:${name}"; then _doc_add OK "app ${d}: job ${name}" "scheduled ${sched}"
+        else _doc_add FAIL "app ${d}: job ${name}" "no cron entry, it never runs (setup.sh app start ${d} --process ${name})"; fi
+        continue
+      fi
+      case "$status" in
+        stopped) _doc_add OK "app ${d}: worker ${name}" "stopped on purpose" ;;
+        online)  _doc_add OK "app ${d}: worker ${name}" "online, ${restarts} restart(s)" ;;
+        *)       if [[ -n "$jl" ]]; then _doc_add FAIL "app ${d}: worker ${name}" "${status} (setup.sh app logs ${d} --process ${name})"; fi ;;
+      esac
+      if [[ "$status" != stopped && "$restarts" =~ ^[0-9]+$ ]] && (( restarts >= 10 )); then
+        _doc_add WARN "app ${d}: worker ${name} restarts" "${restarts} restarts, it keeps crashing (setup.sh app logs ${d} --process ${name})"
+      fi
+    done 3< <(jq -r '.[] | [.name, .kind, .status, (.restarts | tostring), (.schedule // "")] | @tsv' <<<"$(_app_workers_status "$workers" "$jl")" || true)
   done
 }
 

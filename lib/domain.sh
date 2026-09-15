@@ -848,6 +848,7 @@ lib_domain_remove_main() {
 
   lib_step "Scheduled tasks"
   lib_cron_remove "wpcron:${domain}"
+  lib_cron_remove_prefix "job:${domain}:"
   lib_ok "cron entries cleaned"
 
   lib_step "OpenLiteSpeed configuration"

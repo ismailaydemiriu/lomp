@@ -1679,6 +1679,155 @@ rm -rf "$(lib_domain_state_dir git.example.com)"
 lib_domain_state_reset
 
 # =============================================================================
+section "Node.js applications: workers and scheduled jobs"
+assert_true  "worker name: queue"                    lib_app_worker_name_valid queue
+assert_true  "worker name: digits and -"             lib_app_worker_name_valid mail-2
+assert_false "worker name: web is the application"   lib_app_worker_name_valid web
+assert_false "worker name: all would delete all"     lib_app_worker_name_valid all
+assert_false "worker name: upper case"               lib_app_worker_name_valid Queue
+assert_false "worker name: leading digit"            lib_app_worker_name_valid 1queue
+assert_true  "cwd: app/worker"                       lib_app_cwd_valid app/worker
+assert_false "cwd: no parent directory"              lib_app_cwd_valid ../other.example.com
+assert_false "cwd: no absolute path"                 lib_app_cwd_valid /etc
+assert_true  "cron: every five minutes"              lib_app_cron_valid "*/5 * * * *"
+assert_true  "cron: weekdays at 03:30"               lib_app_cron_valid "30 3 * * 1-5"
+assert_true  "cron: lists and ranges with steps"     lib_app_cron_valid "0,30 8-18/2 1,15 * *"
+assert_true  "cron: month and weekday names"         lib_app_cron_valid "0 4 * jan sun"
+assert_true  "cron: Sunday as 7"                     lib_app_cron_valid "0 0 * * 7"
+assert_true  "cron: @daily"                          lib_app_cron_valid "@daily"
+assert_false "cron: four fields"                     lib_app_cron_valid "* * * *"
+assert_false "cron: a sixth field (a user?)"         lib_app_cron_valid "* * * * * root"
+assert_false "cron: a second line"                   lib_app_cron_valid $'* * * * *\n* * * * * root id'
+assert_false "cron: minute 60"                       lib_app_cron_valid "60 * * * *"
+assert_false "cron: hour 24"                         lib_app_cron_valid "0 24 * * *"
+assert_false "cron: day 0"                           lib_app_cron_valid "0 0 0 * *"
+assert_false "cron: step 0"                          lib_app_cron_valid "*/0 * * * *"
+assert_false "cron: a backwards range"               lib_app_cron_valid "30-10 * * * *"
+assert_false "cron: an empty list item"              lib_app_cron_valid "1,,2 * * * *"
+assert_false "cron: a range of names"                lib_app_cron_valid "0 0 * jan-mar *"
+assert_false "cron: @reboot is no schedule"          lib_app_cron_valid "@reboot"
+assert_true  "timeout: 30m"                          lib_app_timeout_valid 30m
+assert_false "timeout: 0"                            lib_app_timeout_valid 0
+assert_false "timeout: words"                        lib_app_timeout_valid "1 hour"
+
+lib_domain_state_reset
+D_DOMAIN="work.example.com"; D_IDENT="work_example_com"; D_USER="work_example_com"; D_GROUP="work_example_com"
+D_HOME="$SITES_ROOT/work.example.com"; D_MODE="proxy"; D_PROXY="127.0.0.1:3400"; D_STATIC_PATHS=""
+D_STATUS="active"; D_CREATED="2025-01-01T00:00:00Z"
+mkdir -p "$D_HOME/app"
+lib_domain_state_save
+APP_PORT=3400; APP_START="npm start"; APP_SCRIPT=""; APP_MEMORY=""; APP_ENABLED=1; APP_GIT_URL=""; APP_GIT_BRANCH=""
+lib_app_state_write work.example.com
+D_HOME="$SITES_ROOT/work.example.com"
+_wj() { lib_app_workers_json work.example.com; }
+lib_app_worker_state_set work.example.com '{"name":"queue","start":"node worker.js --queue=mail","cwd":"app","port":null,"memory":"256M","cron":null,"timeout":null,"enabled":true}'
+lib_app_worker_state_set work.example.com '{"name":"api","start":"node api.js","cwd":"app/api","port":3401,"memory":null,"cron":null,"timeout":null,"enabled":true}'
+lib_app_worker_state_set work.example.com '{"name":"cleanup","start":"npm run cleanup","cwd":"app","port":null,"memory":null,"cron":"*/5 * * * *","timeout":"30m","enabled":true}'
+lib_app_worker_state_set work.example.com '{"name":"paused","start":"node p.js","cwd":"app","port":null,"memory":null,"cron":null,"timeout":null,"enabled":false}'
+assert_eq "workers are kept in name order" "api cleanup paused queue" "$(jq -r 'map(.name) | join(" ")' <<<"$(_wj)")"
+lib_domain_state_load work.example.com; lib_domain_state_save; D_HOME="$SITES_ROOT/work.example.com"
+assert_eq "a domain.json save keeps the workers" "4" "$(jq 'length' <<<"$(_wj)")"
+_orig_holder2="$(declare -f lib_port_holder)"; lib_port_holder() { :; }
+assert_eq "a worker's port belongs to its site" "port 3401 is already used by work.example.com" "$(lib_app_port_conflict 3401 other.example.com || true)"
+
+_weco="$(MSYS_NO_PATHCONV=1 lib_app_render_ecosystem '{"script":"npm","args":["start"]}' '{"API_KEY":"k"}' "$(_wj)" 1)"
+_we() { jq -r "$1" <<<"$_weco"; }
+assert_eq "ecosystem: the web process and the running workers" "web api queue" "$(_we '[.apps[].name] | join(" ")')"
+assert_eq "a scheduled job is no PM2 process"          "0" "$(_we '[.apps[] | select(.name == "cleanup")] | length')"
+assert_eq "a stopped worker is left out"               "0" "$(_we '[.apps[] | select(.name == "paused")] | length')"
+assert_eq "a worker's command is split into words"     'node ["worker.js","--queue=mail"]' "$(_we '.apps[] | select(.name == "queue") | "\(.script) \(.args | tojson)"')"
+assert_eq "a worker without a port gets no PORT"       "null" "$(_we '.apps[] | select(.name == "queue") | .env.PORT')"
+assert_eq "a worker with a port gets it"               "3401" "$(_we '.apps[] | select(.name == "api") | .env.PORT')"
+assert_eq "it runs in its own directory"               "$D_HOME/app/api" "$(_we '.apps[] | select(.name == "api") | .cwd')"
+assert_eq "workers get the application's variables"    "k"    "$(_we '.apps[] | select(.name == "queue") | .env.API_KEY')"
+assert_eq "and their own memory limit"                 "256M" "$(_we '.apps[] | select(.name == "queue") | .max_memory_restart')"
+assert_eq "and their own logs"                         "$D_HOME/.pm2/logs/queue-out.log" "$(_we '.apps[] | select(.name == "queue") | .out_file')"
+assert_eq "without code for the web process the workers still run" "api queue" \
+  "$(MSYS_NO_PATHCONV=1 lib_app_render_ecosystem '{"script":"npm","args":["start"]}' '{}' "$(_wj)" 0 | jq -r '[.apps[].name] | join(" ")')"
+
+_old='{"apps":[{"name":"web","script":"a"},{"name":"queue","script":"q"},{"name":"gone","script":"g"}]}'
+_new='{"apps":[{"name":"web","script":"a"},{"name":"queue","script":"q2"},{"name":"api","script":"n"}]}'
+assert_eq "changes: a removed process goes, a changed or new one starts" "delete gone,start api,start queue," \
+  "$(_app_process_changes "$_old" "$_new" "" "" | sort | tr '\n' ',')"
+assert_eq "changes: nothing changed, nothing happens"   "" "$(_app_process_changes "$_new" "$_new" "" "")"
+assert_eq "changes: a restart starts everything again"  "start api,start queue,start web," "$(_app_process_changes "$_new" "$_new" restart "" | sort | tr '\n' ',')"
+assert_eq "changes: or just the process named"          "start queue" "$(_app_process_changes "$_new" "$_new" restart queue)"
+assert_eq "changes: without an old ecosystem all start" "start api,start queue,start web," "$(_app_process_changes "" "$_new" "" "" | sort | tr '\n' ',')"
+
+_job='{"name":"cleanup","start":"npm run cleanup","cwd":"app","cron":"*/5 * * * *","timeout":"30m","enabled":true}'
+_js="$(lib_app_render_job "$_job")"
+printf '%s\n' "$_js" >"$TMP/job.sh"
+assert_true  "the job script is valid bash"             bash -n "$TMP/job.sh"
+assert_has   "one run at a time"                        "flock -n 9" "$_js"
+assert_has   "a run that takes too long is stopped"     "timeout -k 60 30m npm run cleanup 9>&-" "$_js"
+assert_has   "it runs in the worker's directory"        "cd \"$D_HOME/app\"" "$_js"
+assert_has   "with the application's environment"       ". \"$D_HOME/.pm2/lomp.env\"" "$_js"
+assert_has   "its output goes to the job log"           "$D_HOME/.pm2/logs/cleanup-job.log" "$_js"
+assert_has   "a skipped run says so"                    "cleanup skipped: the previous run is still going" "$_js"
+assert_has   "a job without a timeout gets the default" "timeout -k 60 1h" "$(lib_app_render_job '{"name":"x","start":"node x.js"}')"
+assert_eq    "the cron line runs the script as the site user" "*/5 * * * * work_example_com /bin/bash $D_HOME/.pm2/jobs/cleanup.sh" "$(lib_app_job_line "$_job")"
+assert_has   "a % in the cron line is escaped"          'a\%b' "$(D_HOME="/home/a%b" lib_app_job_line "$_job")"
+
+_orig_lock3="$(declare -f _app_site_lock)"; _orig_tools3="$(declare -f lib_require_tools)"
+_app_site_lock() { return 0; }; lib_require_tools() { return 0; }
+printf 'SHELL=/bin/bash\n' >"$CRON_FILE"
+lib_cron_set "wpcron:other.example.com" "*/5 * * * * other true"
+lib_cron_set "job:work.example.com.evil:x" "* * * * * evil true"
+_app_jobs_sync
+assert_has   "a job gets its cron entry" "*/5 * * * * work_example_com /bin/bash $D_HOME/.pm2/jobs/cleanup.sh # server-setup:job:work.example.com:cleanup" "$(cat "$CRON_FILE")"
+assert_eq    "and only jobs do"          "1" "$(grep -c 'server-setup:job:work.example.com:' "$CRON_FILE")"
+_app_set_enabled 0 cleanup; _app_jobs_sync
+assert_false "a stopped job loses its entry" grep -q 'job:work.example.com:cleanup' "$CRON_FILE"
+_app_set_enabled 1 cleanup; _app_jobs_sync
+assert_true  "and gets it back when started" grep -q 'job:work.example.com:cleanup' "$CRON_FILE"
+lib_cron_remove_prefix "job:work.example.com:"
+assert_false "removing the site's jobs"                        grep -q 'job:work.example.com:' "$CRON_FILE"
+assert_true  "keeps a site whose name merely starts the same"  grep -q 'job:work.example.com.evil:x' "$CRON_FILE"
+assert_true  "and every other entry"                           grep -q 'wpcron:other.example.com' "$CRON_FILE"
+assert_eq    "the header is there once" "1" "$(grep -c '^SHELL=' "$CRON_FILE")"
+assert_has   "remove clears the site's jobs" 'lib_cron_remove_prefix "job:${domain}:"' "$(declare -f lib_domain_remove_main)"
+
+# add and remove, with the service stubbed
+_orig_apply="$(declare -f lib_app_apply)"; _orig_wrep="$(declare -f _app_worker_report)"; _orig_as3="$(declare -f _app_as)"
+lib_app_apply() { APP_RESULT="running"; return 0; }
+_app_worker_report() { return 0; }
+_app_as() { local dir="$1"; shift; ( cd "$dir" && "$@" ); }
+assert_eq "add: --start is required"               1 "$(run_isolated lib_app_worker_add mailer --cwd app)"
+assert_eq "add: a shell command is refused"        1 "$(run_isolated lib_app_worker_add mailer --start "node a.js | tee x")"
+assert_eq "add: a job takes no port"               1 "$(run_isolated lib_app_worker_add mailer --start "node a.js" --cron "* * * * *" --port 3500)"
+assert_eq "add: --timeout needs --cron"            1 "$(run_isolated lib_app_worker_add mailer --start "node a.js" --timeout 5m)"
+assert_eq "add: a schedule cron would reject"      1 "$(run_isolated lib_app_worker_add mailer --start "node a.js" --cron "61 * * * *")"
+assert_eq "add: a name that is taken"              1 "$(run_isolated lib_app_worker_add queue --start "node a.js")"
+assert_eq "add: the application's own port"        1 "$(run_isolated lib_app_worker_add mailer --start "node a.js" --port 3400)"
+assert_eq "add: another worker's port"             1 "$(run_isolated lib_app_worker_add mailer --start "node a.js" --port 3401)"
+assert_eq "add: a directory outside the home"      1 "$(run_isolated lib_app_worker_add mailer --start "node a.js" --cwd ../x)"
+if (( CAN_SYMLINK )); then
+  ln -s "$TMP" "$D_HOME/escape"
+  assert_eq "add: a link that leads out of the home" 1 "$(run_isolated lib_app_worker_add mailer --start "node a.js" --cwd escape)"
+  rm -f "$D_HOME/escape"
+fi
+lib_app_worker_add mailer --start "node mail.js" --cron "0  3 * * *" >/dev/null 2>&1
+assert_eq "add: the job is stored, its schedule tidied" "0 3 * * *" "$(jq -r '.[] | select(.name == "mailer") | .cron' <<<"$(_wj)")"
+assert_eq "add: with the default timeout"               "1h"        "$(jq -r '.[] | select(.name == "mailer") | .timeout' <<<"$(_wj)")"
+assert_true "add: and scheduled" grep -q 'job:work.example.com:mailer' "$CRON_FILE"
+lib_app_worker_remove mailer >/dev/null 2>&1
+assert_eq "remove: the worker is gone"                  "" "$(jq -r '.[] | select(.name == "mailer") | .name' <<<"$(_wj)")"
+assert_false "remove: and its cron entry"               grep -q 'job:work.example.com:mailer' "$CRON_FILE"
+assert_eq "--process must name a process of the site"   1 "$(run_isolated _app_parse_process start work.example.com --process nope)"
+assert_eq "a job has no process to restart"             1 "$(run_isolated lib_app_restart work.example.com --process cleanup)"
+_app_set_enabled 0 ""
+assert_eq "stop without --process: the application and every worker" '[false,[false]]' "$(jq -c '[.app.enabled, (.workers | map(.enabled) | unique)]' "$(lib_domain_json work.example.com)")"
+_app_set_enabled 1 queue
+assert_eq "start --process: that worker alone" '[false,true,false]' \
+  "$(jq -c '[.app.enabled, (.workers[] | select(.name == "queue") | .enabled), (.workers[] | select(.name == "api") | .enabled)]' "$(lib_domain_json work.example.com)")"
+_app_set_enabled 1 web
+assert_eq "--process web: the application alone" 'true false' "$(jq -r '"\(.app.enabled) \(.workers[] | select(.name == "api") | .enabled)"' "$(lib_domain_json work.example.com)")"
+assert_has "setup.sh: listing workers and running a job take no global lock" 'worker) case "${rest[2]:-list}" in list|run|help' "$(cat "$ROOT/setup.sh")"
+eval "$_orig_apply"; eval "$_orig_wrep"; eval "$_orig_as3"; eval "$_orig_lock3"; eval "$_orig_tools3"; eval "$_orig_holder2"
+rm -rf "$(lib_domain_state_dir work.example.com)"
+lib_domain_state_reset
+
+# =============================================================================
 section "Node.js major version (regression: an install re-run upgraded Node under running apps)"
 # Every "install" re-run called lib_install_node for a server that had Node, with the DEFAULT
 # major: the NodeSource repository was rewritten and the next apt run jumped a major version.
