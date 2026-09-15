@@ -1789,9 +1789,11 @@ assert_has   "remove clears the site's jobs" 'lib_cron_remove_prefix "job:${doma
 
 # add and remove, with the service stubbed
 _orig_apply="$(declare -f lib_app_apply)"; _orig_wrep="$(declare -f _app_worker_report)"; _orig_as3="$(declare -f _app_as)"
-lib_app_apply() { APP_RESULT="running"; return 0; }
-_app_worker_report() { return 0; }
-_app_as() { local dir="$1"; shift; ( cd "$dir" && "$@" ); }
+# through eval: a plain definition this far down the file makes shellcheck read the calls to
+# the real lib_app_apply further up as calls to a function that is only defined later (SC2218)
+eval 'lib_app_apply() { APP_RESULT="running"; return 0; }'
+eval '_app_worker_report() { return 0; }'
+eval '_app_as() { local dir="$1"; shift; ( cd "$dir" && "$@" ); }'
 assert_eq "add: --start is required"               1 "$(run_isolated lib_app_worker_add mailer --cwd app)"
 assert_eq "add: a shell command is refused"        1 "$(run_isolated lib_app_worker_add mailer --start "node a.js | tee x")"
 assert_eq "add: a job takes no port"               1 "$(run_isolated lib_app_worker_add mailer --start "node a.js" --cron "* * * * *" --port 3500)"
