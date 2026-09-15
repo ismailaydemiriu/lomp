@@ -1099,6 +1099,24 @@ assert_eq "a second call is a no-op that still succeeds" 0 "$(run_isolated lib_s
 assert_true "and leaves it in place" test -d "$_psd"
 
 # =============================================================================
+section "sshd is only reloaded when it runs as a service"
+# On socket-activated hosts (Ubuntu 24.04 default) ssh.service is inactive and there is
+# nothing to reload, so "systemctl reload ssh" failed rc=1 and "reload sshd" rc=5. Both were
+# logged as errors and then surfaced by "status" as recent problems on a healthy server.
+_orig_sysctl="$(declare -f lib_systemctl)"; _orig_active="$(declare -f lib_service_active)"
+_sc_calls=""; _ssh_active=0
+lib_systemctl() { _sc_calls+="$* "; return 0; }
+lib_service_active() { [[ "$1" == "ssh" && "$_ssh_active" == "1" ]]; }
+assert_eq "socket-activated host still exits 0" 0 "$(run_isolated lib_ssh_reload)"
+_sc_calls=""; lib_ssh_reload >/dev/null 2>&1
+assert_eq "and issues no systemctl call at all" "" "$_sc_calls"
+_ssh_active=1
+_sc_calls=""; lib_ssh_reload >/dev/null 2>&1
+assert_eq "a running service is reloaded once" "reload ssh " "$_sc_calls"
+assert_eq "and that still exits 0" 0 "$(run_isolated lib_ssh_reload)"
+eval "$_orig_sysctl"; eval "$_orig_active"   # restore, later sections use both
+
+# =============================================================================
 section "failure messages point at doctor"
 _bs_save="$BIN_SHORT"; _bl_save="$BIN_LINK"
 LIB_STEP_CURRENT=0

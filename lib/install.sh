@@ -318,6 +318,24 @@ lib_ssh_privsep_dir_ensure() {   # [dir]
   return 0
 }
 
+# A reload only means anything when sshd runs as a long-lived service. Ubuntu 24.04 defaults
+# to socket activation: ssh.service sits inactive, every connection gets a fresh sshd that
+# reads the configuration as it starts, and there is nothing to reload. "systemctl reload ssh"
+# then fails with rc=1 and "reload sshd" with rc=5 (no such unit) - both were logged as
+# [ERROR] and shown by "lomp status" under "Recent problems", which made a perfectly healthy
+# install look broken.
+lib_ssh_reload() {
+  local u=""
+  for u in ssh sshd; do
+    if lib_service_active "$u"; then
+      lib_systemctl reload "$u" || lib_warn "could not reload ${u}; the new settings still apply to new connections"
+      return 0
+    fi
+  done
+  lib_debug "sshd is socket-activated or not running as a service; no reload needed"
+  return 0
+}
+
 lib_install_ssh_harden() {
   local dropin="/etc/ssh/sshd_config.d/99-server-setup.conf" login_user="" h="" keys_ok=0 content="" prev="" had_prev=0
   local ports_before="$SYS_SSH_PORTS" port_changed=0
@@ -388,7 +406,7 @@ lib_install_ssh_harden() {
     lib_ok "SSH listening on port ${SSH_PORT} - test a NEW connection before closing this one: ssh -p ${SSH_PORT} ${login_user}@${SYS_PUBLIC_IPV4:-<ip>}"
     lib_note "afterwards remove the old rule: ufw delete allow ${ports_before%% *}/tcp"
   else
-    lib_systemctl reload ssh || lib_systemctl reload sshd || true
+    lib_ssh_reload
     lib_ok "SSH hardened (keys: $( (( keys_ok )) && printf 'password auth disabled, root prohibit-password' || printf 'password auth kept'))"
   fi
 }
