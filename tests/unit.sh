@@ -1556,6 +1556,68 @@ rm -f "$(lib_app_env_file app.example.com)"
 lib_domain_state_reset
 
 # =============================================================================
+section "Node.js applications: deploy from git"
+assert_true  "git: https"                          lib_app_git_url_valid https://github.com/owner/repo.git
+assert_true  "git: scp-style ssh"                  lib_app_git_url_valid git@github.com:owner/repo.git
+assert_true  "git: ssh URL with a port"            lib_app_git_url_valid ssh://git@git.example.com:2222/owner/repo.git
+assert_true  "git: a local bare repository"        lib_app_git_url_valid file:///srv/repos/app.git
+assert_false "git: a token inside is refused"      lib_app_git_url_valid https://ghp_abcdef1234567890@github.com/owner/repo.git
+assert_false "git: user:password is refused"       lib_app_git_url_valid https://user:secret@gitlab.com/owner/repo.git
+assert_false "git: plain http is refused"          lib_app_git_url_valid http://github.com/owner/repo.git
+assert_false "git: ext:: runs commands, refused"   lib_app_git_url_valid 'ext::sh -c touch% /tmp/x'
+assert_false "git: an option is refused"           lib_app_git_url_valid --upload-pack=touch
+assert_false "git: empty is refused"               lib_app_git_url_valid ""
+assert_true  "branch: main"                        lib_app_git_branch_valid main
+assert_true  "branch: release/1.2"                 lib_app_git_branch_valid release/1.2
+assert_false "branch: an option is refused"        lib_app_git_branch_valid --orphan
+assert_false "branch: .. is refused"               lib_app_git_branch_valid a..b
+assert_true  "install: the first deploy installs"  _app_install_needed abc "" 0
+assert_true  "install: a changed lockfile"         _app_install_needed abc def 1
+assert_true  "install: node_modules missing"       _app_install_needed abc abc 0
+assert_false "install: nothing changed"            _app_install_needed abc abc 1
+assert_eq "git arguments cannot be read as options" "" \
+  "$(grep -nE '_app_git (clone|-C app fetch)' "$ROOT/lib/app.sh" | grep -v -- ' -- ' || true)"
+lib_domain_parse_add_args gitapp.example.com --node --git git@github.com:o/r.git --branch main
+assert_eq "--git is kept for the first deploy" "git@github.com:o/r.git" "$APP_OPT_GIT"
+assert_eq "--branch too" "main" "$APP_OPT_BRANCH"
+assert_eq "--git with a token is refused"   1 "$(run_isolated lib_domain_parse_add_args g.example.com --node --git https://tok_1234567890abcdefghij@github.com/o/r.git)"
+assert_eq "--branch without --git is refused" 1 "$(run_isolated lib_domain_parse_add_args g.example.com --node --branch main)"
+assert_eq "--git without --node is refused" 1 "$(run_isolated lib_domain_parse_add_args g.example.com --git git@github.com:o/r.git)"
+
+# a deploy keeps its output (masked) and records the outcome; a failed step stops the rest
+lib_domain_state_reset
+D_DOMAIN="git.example.com"; D_IDENT="git_example_com"; D_USER="git_example_com"; D_GROUP="git_example_com"
+D_HOME="$SITES_ROOT/git.example.com"; D_MODE="proxy"; D_PROXY="127.0.0.1:3300"; D_STATUS="active"; D_CREATED="2025-01-01T00:00:00Z"
+lib_domain_state_save
+_dj="$(lib_domain_json git.example.com)"; _dlog="$(lib_domain_state_dir git.example.com)/deploy.log"
+_orig_fetch="$(declare -f lib_app_fetch)"; _orig_build="$(declare -f lib_app_build)"
+_quiet_deploy() { lib_app_deploy_run >/dev/null 2>&1; }
+lib_app_fetch() { printf 'cloning https://oauth2:leaked-token-123@example.com/x.git\n'; APP_GIT_COMMIT="abc1234"; return 0; }
+lib_app_build() { printf 'npm ci ok\n'; APP_DEPS_HASH_NEW="hash-1"; return 0; }
+APP_GIT_URL="git@github.com:o/r.git"; APP_GIT_BRANCH="main"; APP_DEPS_HASH=""
+assert_true  "a deploy that works succeeds"      _quiet_deploy
+assert_eq    "the commit is recorded"            "abc1234" "$(jq -r '.app.last_deploy.commit' "$_dj")"
+assert_eq    "the deploy is recorded as ok"      "true"    "$(jq -r '.app.last_deploy.ok' "$_dj")"
+assert_eq    "the dependency hash is remembered" "hash-1"  "$(jq -r '.app.deps_hash' "$_dj")"
+assert_has   "the deploy output is kept"         "npm ci ok" "$(cat "$_dlog")"
+assert_lacks "with secrets masked"               "leaked-token-123" "$(cat "$_dlog")"
+lib_app_build() { printf 'npm ERR! boom\n'; APP_DEPS_HASH_NEW="hash-2"; APP_BUILD_ERROR="npm ci failed"; return 1; }
+assert_false "a failed build fails the deploy"   _quiet_deploy
+assert_eq    "the failure is recorded"           "false"   "$(jq -r '.app.last_deploy.ok' "$_dj")"
+assert_eq    "and the last good hash is kept"    "hash-1"  "$(jq -r '.app.deps_hash' "$_dj")"
+lib_app_fetch() { APP_BUILD_ERROR="clone failed"; return 1; }
+lib_app_build() { printf 'should not run\n'; return 0; }
+assert_false "a failed fetch fails the deploy"   _quiet_deploy
+assert_lacks "and nothing is built after it"     "should not run" "$(cat "$_dlog")"
+APP_GIT_URL=""
+lib_app_build() { printf 'built without git\n'; return 0; }
+assert_true  "without a repository only the build runs" _quiet_deploy
+assert_has   "and its output is kept"            "built without git" "$(cat "$_dlog")"
+eval "$_orig_fetch"; eval "$_orig_build"
+rm -rf "$(lib_domain_state_dir git.example.com)"
+lib_domain_state_reset
+
+# =============================================================================
 section "Node.js major version (regression: an install re-run upgraded Node under running apps)"
 # Every "install" re-run called lib_install_node for a server that had Node, with the DEFAULT
 # major: the NodeSource repository was rewritten and the next apt run jumped a major version.

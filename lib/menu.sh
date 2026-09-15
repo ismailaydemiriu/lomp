@@ -43,9 +43,10 @@ COMMANDS
       --proxy 127.0.0.1:3000  --static  --wordpress  --cloudflare  --no-db
       --wildcard  --staging  --hsts-preload
       --wp-title "Title" --wp-admin admin --wp-email a@b.c --wp-locale en_US
-      --node [--port N] [--start "npm start" | --script dist/main.js]
+      --node [--port N] [--start "npm start" | --script dist/main.js] [--git URL [--branch B]]
                                 Node.js site: PM2 runs the app as the site's user and
-                                OpenLiteSpeed proxies to it (a free port from 3000 up)
+                                OpenLiteSpeed proxies to it (a free port from 3000 up);
+                                with --git the application is deployed right away
                                 Every site gets its own database and MariaDB user
                                 unless --no-db is given.
   db <domain>                   Create (or show) the MariaDB database for a site
@@ -58,7 +59,10 @@ COMMANDS
   app list                      Node.js applications: status, CPU, memory, restarts (--json)
   app status|start|stop|restart <domain>
   app logs <domain> [--out|--error] [-n LINES]
-  app deploy <domain>           Install dependencies, build and restart the application
+  app deploy <domain> [--git URL [--branch B]]
+                                Pull from git (the first time: clone), install dependencies
+                                when they changed, build with a memory limit, restart
+  app deploy-key <domain>       Create or print the site's read-only key for a private repo
   app set <domain> [--port N] [--start CMD | --script FILE] [--memory 512M|none]
   app env <domain> list [--show] | set NAME | unset NAME... | import-db
                                 Values come from stdin or a hidden prompt, never from
@@ -369,6 +373,8 @@ _menu_apps() {
     _menu_item  9 "Environment variables"
     _menu_item 10 "Port, start command, memory limit"
     _menu_item 11 "Path proxies (example.com/api -> an app)"
+    _menu_item 12 "Deploy from a Git repository (URL, branch)"
+    _menu_item 13 "Deploy key for a private repository"
     _menu_item  0 "Back"
     printf '\n%sChoice: %s' "$C_BLD" "$C_RST"
     read -r choice </dev/tty || return 0
@@ -384,10 +390,23 @@ _menu_apps() {
       9) domain="$(_menu_pick_domain apps)" && _menu_app_env "$domain" || _menu_pause ;;
       10) domain="$(_menu_pick_domain apps)" && _menu_app_set "$domain" || _menu_pause ;;
       11) _menu_proxies ;;
+      12) domain="$(_menu_pick_domain apps)" && _menu_app_git "$domain" || _menu_pause ;;
+      13) domain="$(_menu_pick_domain apps)" && _menu_run app deploy-key "$domain" || _menu_pause ;;
       0|q|Q|"") return 0 ;;
       *) printf '%sPick a number from the list.%s\n' "$C_YEL" "$C_RST" ;;
     esac
   done
+}
+
+_menu_app_git() {   # domain
+  local domain="$1" url="" branch=""
+  lib_app_state_load "$domain" || return 0
+  printf '\n%sA private repository needs the deploy key first (item 13).%s\n' "$C_DIM" "$C_RST"
+  _menu_ask url "Repository URL (https://host/owner/repo.git or git@host:owner/repo.git)" "$APP_GIT_URL"
+  if [[ -z "$url" ]]; then _menu_pause; return 0; fi
+  _menu_ask branch "Branch (empty: the repository's default)" "$APP_GIT_BRANCH"
+  if [[ -n "$branch" ]]; then _menu_run app deploy "$domain" --git "$url" --branch "$branch"
+  else _menu_run app deploy "$domain" --git "$url"; fi
 }
 
 _menu_app_env() {   # domain

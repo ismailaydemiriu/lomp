@@ -251,7 +251,16 @@ sudo lomp app restart app.example.com
 printf '%s' 'the-secret' | sudo lomp app env app.example.com set API_KEY
 sudo lomp app env app.example.com import-db           # DB_* and DATABASE_URL of the site's database
 sudo lomp app set app.example.com --script dist/main.js --memory 512M
+sudo lomp app deploy-key app.example.com              # a read-only key for a private repository
+sudo lomp app deploy app.example.com --git git@github.com:owner/repo.git --branch main
 ```
+
+`app deploy --git` clones into the empty app directory the first time; later deploys fetch the
+branch and reset the tracked files to it, and leave files git does not track (uploads, build
+output) alone. Dependencies are reinstalled only when `package.json` or the lockfile changed,
+the build runs with a memory limit so it cannot push the database into the OOM killer, and the
+output of the last deploy is kept with secrets masked (`app status` shows where). A repository
+URL with a password or token in it is refused: use the deploy key.
 
 - Every Node.js site runs its own PM2 daemon as the site's Linux user, started at boot by
   `pm2-<site>.service`. Nothing runs as root, and one site cannot touch another site's

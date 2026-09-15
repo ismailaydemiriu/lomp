@@ -138,6 +138,8 @@ lib_backup_domain() {   # domain [--keep N] [--encrypt] [--remote] [--tag T]
   [[ -d "${D_HOME}/private" ]] && dirs+=(private)
   # a Node.js application's code; its dependencies are reinstalled when it is restored
   [[ -d "${D_HOME}/app" ]] && dirs+=(app)
+  # the site's deploy key, so a restored site can pull its private repository again
+  [[ -d "${D_HOME}/.ssh" ]] && dirs+=(.ssh)
   if ((${#dirs[@]} > 0)); then
     if ! tar -C "$D_HOME" --exclude='private/sessions' --exclude='private/tmp' --exclude='private/.wp-cli' \
           --exclude='public_html/wp-content/cache' --exclude='app/node_modules' --exclude='app/*/node_modules' \
@@ -340,6 +342,7 @@ lib_restore_main() {
       tar -C "$D_HOME" -xzf "${work}/x/files.tar.gz" || lib_die "File restore failed" "tar error" "check disk space"
       chown -R "${D_USER}:${D_GROUP}" "${D_HOME}/public_html" "${D_HOME}/private" 2>/dev/null || true
       if [[ -d "${D_HOME}/app" ]]; then chown -R "${D_USER}:${D_GROUP}" "${D_HOME}/app" 2>/dev/null || true; fi
+      if [[ -d "${D_HOME}/.ssh" ]]; then chown -R "${D_USER}:${D_GROUP}" "${D_HOME}/.ssh" 2>/dev/null || true; fi
       lib_ok "Files restored into ${D_HOME}"
     fi
   fi

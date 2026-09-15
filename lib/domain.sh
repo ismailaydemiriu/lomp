@@ -142,7 +142,11 @@ Usage: setup.sh add <domain> [options]
   --php 8.3            PHP version for this site (installed on demand)
   --php-children N     LSAPI workers for this site (default from profile)
   --memory 256M        PHP memory_limit           --upload 64M  upload_max_filesize
-  --proxy 127.0.0.1:3000   Reverse proxy to a local app (Node/Python/...)
+  --proxy 127.0.0.1:3000   Reverse proxy to an app you run yourself (Node/Python/...)
+  --node               Node.js site: PM2 runs the app as the site's user (see: setup.sh app help)
+  --port N             With --node: the app's port (default: the first free one from 3000)
+  --start "npm start"  With --node: start command, run without a shell  (or --script dist/main.js)
+  --git URL            With --node: deploy from this repository right away (--branch B)
   --static-paths "/static/,/assets/"   Paths served by OLS in proxy mode
   --ws-path PATH       No longer needed: WebSocket upgrades are proxied on every path
   --static             Static site only (no PHP)
@@ -160,7 +164,7 @@ EOF
 lib_domain_parse_add_args() {
   local a="" static_set=0
   lib_domain_state_reset
-  APP_OPT_NODE=0 APP_OPT_PORT="" APP_OPT_START="" APP_OPT_SCRIPT=""
+  APP_OPT_NODE=0 APP_OPT_PORT="" APP_OPT_START="" APP_OPT_SCRIPT="" APP_OPT_GIT="" APP_OPT_BRANCH=""
   D_DOMAIN="${1,,}"; shift
   D_EMAIL="$DEFAULT_EMAIL"
   D_PHP="$PHP_VERSION"
@@ -180,6 +184,8 @@ lib_domain_parse_add_args() {
       --port)         APP_OPT_PORT="${1:-}"; shift ;;
       --start)        APP_OPT_START="${1:-}"; shift ;;
       --script)       APP_OPT_SCRIPT="${1:-}"; shift ;;
+      --git)          APP_OPT_GIT="${1:-}"; shift ;;
+      --branch)       APP_OPT_BRANCH="${1:-}"; shift ;;
       --static-paths) D_STATIC_PATHS="${1:-}"; static_set=1; shift ;;
       --ws-path)      D_WS_PATH="${1:-}"; shift ;;
       --static)       D_MODE="static" ;;
@@ -207,10 +213,15 @@ lib_domain_parse_add_args() {
       "the command runs without a shell: words only, no quotes, pipes or &&" "put it into a package.json script and use --start \"npm run <name>\""
     [[ -z "$APP_OPT_SCRIPT" ]] || lib_app_script_valid "$APP_OPT_SCRIPT" || lib_die "Invalid --script '${APP_OPT_SCRIPT}'" "a file inside the app directory, such as dist/main.js" "--script dist/main.js"
     [[ -z "$APP_OPT_PORT" || "$APP_OPT_PORT" =~ ^[0-9]{4,5}$ ]] || lib_die "Invalid --port '${APP_OPT_PORT}'" "a number between 1024 and 65535" "--port 3000"
+    [[ -z "$APP_OPT_GIT" ]] || lib_app_git_url_valid "$APP_OPT_GIT" || lib_die "Refused repository URL" \
+      "use https://host/owner/repo.git or git@host:owner/repo.git, without a user, password or token inside" \
+      "for a private repository add the site first, then: setup.sh app deploy-key ${D_DOMAIN}"
+    [[ -z "$APP_OPT_BRANCH" ]] || lib_app_git_branch_valid "$APP_OPT_BRANCH" || lib_die "Invalid --branch '${APP_OPT_BRANCH}'" "" "--branch main"
+    [[ -z "$APP_OPT_BRANCH" || -n "$APP_OPT_GIT" ]] || lib_die "--branch needs --git" "" "setup.sh add ${D_DOMAIN} --node --git <url> --branch ${APP_OPT_BRANCH}"
     # a Node.js application serves its own assets: paths served from disk would shadow them
     if (( ! static_set )); then D_STATIC_PATHS=""; fi
-  elif [[ -n "${APP_OPT_PORT}${APP_OPT_START}${APP_OPT_SCRIPT}" ]]; then
-    lib_die "--port, --start and --script belong to --node" "" "setup.sh add ${D_DOMAIN} --node --port 3000"
+  elif [[ -n "${APP_OPT_PORT}${APP_OPT_START}${APP_OPT_SCRIPT}${APP_OPT_GIT}${APP_OPT_BRANCH}" ]]; then
+    lib_die "--port, --start, --script, --git and --branch belong to --node" "" "setup.sh add ${D_DOMAIN} --node --port 3000"
   fi
   if [[ "$D_MODE" == "proxy" ]]; then
     if (( ! APP_OPT_NODE )); then
