@@ -1144,6 +1144,21 @@ OPT_QUIET=1
 eval "$_orig_dbinst"; eval "$_orig_dbsql"
 
 # =============================================================================
+section "main menu: every item has a matching branch"
+# The menu was renumbered when "List databases" went in at 5. An item that moved while its
+# case label did not would silently run the WRONG command - "Remove a site" where the user
+# picked "Status" - and no other test looks at the numbers at all.
+_menu_block="$(awk '/_menu_group "SITES"/{f=1} f{print} f && /^[[:space:]]*esac/{exit}' "$ROOT/lib/menu.sh")"
+_items="$(grep -oE '_menu_item[[:space:]]+[0-9]+' <<<"$_menu_block" | grep -oE '[0-9]+$' | sort -n | tr '\n' ' ')"
+_branches="$(grep -oE '^[[:space:]]*[0-9]+(\|[^)]*)?\)' <<<"$_menu_block" | grep -oE '[0-9]+' | head -n 999 | sort -n | uniq | tr '\n' ' ')"
+assert_true "the main menu block was found" test -n "$_menu_block"
+assert_eq   "item numbers and case branches match" "$_items" "$_branches"
+assert_has  "List databases is item 5"   '_menu_item  5 "List databases"' "$_menu_block"
+assert_has  "and item 5 runs db list"    '5) _menu_run db list ;;' "$_menu_block"
+assert_has  "Create database moved to 6" '6) domain="$(_menu_pick_domain)" && _menu_run db "$domain"' "$_menu_block"
+assert_has  "Status moved to 8"          '8) _menu_run status ;;' "$_menu_block"
+
+# =============================================================================
 section "sshd is only reloaded when it runs as a service"
 # On socket-activated hosts (Ubuntu 24.04 default) ssh.service is inactive and there is
 # nothing to reload, so "systemctl reload ssh" failed rc=1 and "reload sshd" rc=5. Both were

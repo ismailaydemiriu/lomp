@@ -47,7 +47,7 @@ COMMANDS
                                 unless --no-db is given.
   db <domain>                   Create (or show) the MariaDB database for a site
   db list                       Every site's database, user and size (no passwords)
-  remove <domain> [opts]        Remove a site  (--keep-db --keep-files --keep-ssl)
+  remove <domain> [opts]        Remove a site  (--keep-db --keep-files --keep-ssl; alias: delete)
   list                          Table of sites (--json)
   status                        Services, versions, resources, sites (--json)
   doctor                        Deep health check (--json, --quiet)
