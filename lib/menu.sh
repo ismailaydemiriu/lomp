@@ -7,7 +7,8 @@
 
 lib_usage() {
   cat <<'USAGE_EOF'
-setup.sh - production VPS provisioning for OpenLiteSpeed + LSPHP + MariaDB + Redis
+lomp - LOMP stack: Linux + OpenLiteSpeed + MariaDB + PHP (LSPHP), with Redis and TLS.
+       Production VPS provisioning and site management for Ubuntu 22.04 / 24.04.
 
 USAGE
   sudo lomp                             # no arguments: interactive menu

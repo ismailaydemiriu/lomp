@@ -1,8 +1,15 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  setup.sh - Production VPS provisioning & site management
-#  Stack : Ubuntu 22.04 / 24.04, OpenLiteSpeed, LSPHP, MariaDB, Redis,
-#          Let's Encrypt, Fail2ban, UFW, Cloudflare real-IP, backups, monitoring
+#
+#  lomp = the LOMP stack, named the way LAMP and LEMP are:
+#           L  Linux         Ubuntu 22.04 / 24.04
+#           O  OpenLiteSpeed the web server (official LiteSpeed repository)
+#           M  MariaDB       the database
+#           P  PHP           as LSPHP, OpenLiteSpeed's LSAPI build
+#
+#  Stack : the four above, plus Redis, Let's Encrypt, Fail2ban, UFW,
+#          Cloudflare real-IP, backups and monitoring
 #  Layout: setup.sh (entry point) + lib/*.sh (modules, functions prefixed lib_)
 #
 #  Usage : sudo ./setup.sh help

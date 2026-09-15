@@ -1,11 +1,24 @@
-# lompstack
+# lomp
 
-[![CI](https://github.com/ismailaydemiriu/lompstack/actions/workflows/ci.yml/badge.svg)](https://github.com/ismailaydemiriu/lompstack/actions/workflows/ci.yml)
+[![CI](https://github.com/ismailaydemiriu/lomp/actions/workflows/ci.yml/badge.svg)](https://github.com/ismailaydemiriu/lomp/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Ubuntu 22.04 | 24.04](https://img.shields.io/badge/Ubuntu-22.04%20%7C%2024.04-E95420?logo=ubuntu&logoColor=white)](https://ubuntu.com/)
 
-**Linux + OpenLiteSpeed + MariaDB + PHP.** One script turns a bare Ubuntu VPS into a
-production host for dynamic, database-heavy sites, and manages those sites afterwards.
+**LOMP** is the stack this installs, the way LAMP and LEMP name theirs:
+
+| | |
+|---|---|
+| **L** | **Linux** — Ubuntu 22.04 or 24.04 |
+| **O** | **OpenLiteSpeed** — the web server, from the official LiteSpeed repository |
+| **M** | **MariaDB** — the database |
+| **P** | **PHP** — as LSPHP, OpenLiteSpeed's LSAPI build |
+
+LAMP puts Apache in the O slot and LEMP puts Nginx (*engine-x*) there. OpenLiteSpeed gives
+you Apache's `.htaccess` compatibility with event-driven performance closer to Nginx, plus
+HTTP/3 and a built-in page cache — which is why this stack exists as its own letter.
+
+One script turns a bare Ubuntu VPS into a production host for dynamic, database-heavy
+sites, and manages those sites afterwards.
 
 ```bash
 sudo ./setup.sh install --email you@example.com
@@ -57,8 +70,8 @@ ssh root@YOUR_SERVER_IP
 
 ```bash
 apt-get update && apt-get install -y git
-git clone https://github.com/ismailaydemiriu/lompstack.git /opt/lompstack
-cd /opt/lompstack
+git clone https://github.com/ismailaydemiriu/lomp.git /opt/lomp
+cd /opt/lomp
 chmod +x setup.sh
 ```
 
@@ -167,7 +180,7 @@ sudo lomp backup --all --encrypt                    # back up every site
 sudo lomp restore shop.example.com --file /var/backups/server-setup/shop.example.com/....tar.gz
 sudo lomp renew-ssl --all                           # renew every certificate
 sudo lomp panel                                     # open the WebAdmin panel for your address
-sudo lomp self-update                               # pull the latest lompstack, server untouched
+sudo lomp self-update                               # pull the latest code, server untouched
 sudo lomp optimize                                  # re-measure hardware, show a diff, re-tune
 sudo lomp update                                    # safe package update, ordered restarts
 sudo lomp remove old.example.com --keep-db          # remove a site, keep its database

@@ -1,4 +1,4 @@
-# Contributing to lompstack
+# Contributing to lomp
 
 Thanks for taking the time. This project touches production servers, so the bar for
 changes is "would a staff SRE run this on their own box".
@@ -49,7 +49,7 @@ suite runs without root and without network, and CI runs it on Ubuntu 22.04 and 
 
 Include: Ubuntu version, the exact command, the relevant part of
 `/var/log/server_setup.log` (it is already secret-masked, but skim it anyway), and the
-output of `sudo lompstack doctor`.
+output of `sudo lomp doctor`.
 
 ## Security issues
 
