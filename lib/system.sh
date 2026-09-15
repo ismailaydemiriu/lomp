@@ -335,8 +335,22 @@ lib_system_swap_ensure() {
     lib_run dd if=/dev/zero of=/swapfile bs=1M count="$CALC_SWAP_MB" status=none || lib_die "Could not create /swapfile" "disk full?" "free some space"
   fi
   chmod 0600 /swapfile
-  lib_run mkswap /swapfile || lib_die "mkswap failed" "invalid swapfile" "check disk / filesystem"
-  lib_run swapon /swapfile || lib_die "swapon failed" "kernel refused the swapfile (CoW filesystem?)" "create swap manually"
+  # Swap is an optimisation, not a requirement. Two environments this installer otherwise
+  # supports refuse swapon: containers without CAP_SYS_ADMIN, and CoW filesystems such as
+  # btrfs (where fallocate and mkswap both succeed first). Aborting the whole run over it
+  # also used to leave the file behind, and the "exists but inactive" guard above then
+  # skipped swap forever - so on failure the file is removed again.
+  if ! lib_run mkswap /swapfile; then
+    rm -f /swapfile
+    lib_warn "mkswap failed on /swapfile; continuing without swap"
+    return 0
+  fi
+  if ! lib_run swapon /swapfile; then
+    rm -f /swapfile
+    lib_warn "The kernel refused the swapfile (container without CAP_SYS_ADMIN, or a CoW filesystem such as btrfs)."
+    lib_note "Continuing without swap. To add it by hand: see 'man swapon' for your filesystem, or use a swap partition."
+    return 0
+  fi
   lib_append_line_once /etc/fstab "/swapfile none swap sw 0 0"
   SYS_SWAP_MB="$CALC_SWAP_MB"
   lib_ok "Swapfile active ($(lib_human_mb "$CALC_SWAP_MB"))"

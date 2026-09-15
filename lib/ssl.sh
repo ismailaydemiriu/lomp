@@ -232,7 +232,8 @@ lib_ssl_renew_main() {
     local d="" failed=() n=0
     while read -r d; do
       [[ -n "$d" ]] || continue
-      [[ "$(lib_json_get "$(lib_domain_json "$d")" '.ssl.wanted')" == "false" ]] && continue
+      # lib_json_get would turn a literal false into "" (jq's // treats false like null)
+      [[ "$(lib_json_get_raw "$(lib_domain_json "$d")" '.ssl.wanted')" == "false" ]] && continue
       n=$((n + 1))
       lib_heading "renew-ssl ${d}"
       if ! SERVER_SETUP_LOCKED=1 "$SCRIPT_PATH" renew-ssl "$d" --yes $( (( force )) && printf -- '--force') $( (( staging )) && printf -- '--staging') $( (( OPT_QUIET )) && printf -- '--quiet'); then

@@ -57,7 +57,7 @@ http_code() {   # http_code <host> [path]
 }
 
 managed_hashes() {   # fingerprint of every generated config file (manifest excluded: it has timestamps)
-  local f
+  local f=""
   for f in /etc/sysctl.d/99-production-server.conf \
            /etc/security/limits.d/99-production-server.conf \
            /etc/mysql/mariadb.conf.d/60-production-tuned.cnf \
@@ -72,7 +72,9 @@ managed_hashes() {   # fingerprint of every generated config file (manifest excl
            "${LSWS_HOME}/conf/httpd_config.conf" \
            "${LSWS_HOME}/conf/vhosts/_default/vhconf.conf" \
            "${LSWS_HOME}"/lsphp*/etc/php/*/mods-available/99-server-setup.ini; do
-    [[ -f "$f" ]] && sha256sum "$f"
+    # an "if" body, not a trailing "&&": the last item is a glob that may match nothing,
+    # and a false test as the loop's last command makes the loop exit 1 under pipefail
+    if [[ -f "$f" ]]; then sha256sum "$f"; fi
   done | sort
 }
 
@@ -289,7 +291,10 @@ check_has "credentials shows the database password" "$DB_PASS" "$(cat "${OUT_DIR
 check "status --json is valid JSON" bash -c "bash '$SETUP' status --json </dev/null | jq -e . >/dev/null"
 check "list --json is valid JSON"   bash -c "bash '$SETUP' list --json </dev/null | jq -e . >/dev/null"
 check "doctor --json is valid JSON" bash -c "bash '$SETUP' doctor --json </dev/null | jq -e . >/dev/null"
-DOC_FAILS="$(bash "$SETUP" doctor --json </dev/null | jq -r '.summary.fail')"
+# doctor exits 1 when any check fails, which is the case this block exists to report.
+# Capturing the output first keeps errexit+pipefail from killing the suite here.
+DOC_JSON="$(bash "$SETUP" doctor --json </dev/null || true)"
+DOC_FAILS="$(printf '%s' "$DOC_JSON" | jq -r '.summary.fail // "unknown"')"
 check_eq "doctor reports no failures" "0" "$DOC_FAILS"
 if [[ "$DOC_FAILS" != "0" ]]; then bash "$SETUP" doctor --no-color </dev/null | grep FAIL | sed 's/^/         /'; fi
 
@@ -366,7 +371,10 @@ check_eq "catch-all still answers 403" "403" "$(http_code "$TEST_DOMAIN")"
 # =============================================================================
 step "T14  final health"
 # =============================================================================
-DOC_FAILS="$(bash "$SETUP" doctor --json </dev/null | jq -r '.summary.fail')"
+# doctor exits 1 when any check fails, which is the case this block exists to report.
+# Capturing the output first keeps errexit+pipefail from killing the suite here.
+DOC_JSON="$(bash "$SETUP" doctor --json </dev/null || true)"
+DOC_FAILS="$(printf '%s' "$DOC_JSON" | jq -r '.summary.fail // "unknown"')"
 check_eq "doctor reports no failures at the end" "0" "$DOC_FAILS"
 check "status still works" bash -c "bash '$SETUP' status --no-color </dev/null >/dev/null"
 

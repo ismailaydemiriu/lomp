@@ -76,12 +76,18 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y -qq jq
 
       - name: Dry run must change nothing and exit 0
+        # "shell: bash" is what enables pipefail; the default "bash -e {0}" does not set
+        # it, so the status of "setup.sh ... | tee" was tee's and therefore always 0 -
+        # this job could not fail no matter how badly the dry run died.
+        # stderr is redirected into the log because every diagnostic (lib_error, lib_die,
+        # the ERR trap) writes there, which made the "[fail]" grep below a tautology.
+        shell: bash
         run: |
           sudo bash setup.sh install --dry-run --non-interactive --no-color \
             --admin-ip 203.0.113.5 --email ci@example.com \
-            --backup-schedule "daily 03:00" --cloudflare | tee dryrun.out
+            --backup-schedule "daily 03:00" --cloudflare 2>&1 | tee dryrun.out
           test ! -e /root/.server-setup || { echo "dry-run created state dir"; exit 1; }
           test ! -e /usr/local/lsws     || { echo "dry-run installed OLS"; exit 1; }
           test ! -e /etc/cron.d/server-setup || { echo "dry-run wrote cron"; exit 1; }
           grep -q '20/20' dryrun.out || { echo "dry-run did not reach the last step"; exit 1; }
-          ! grep -qE '\[fail\]|unbound variable' dryrun.out
+          ! grep -qE '\[fail\]|unbound variable|FAILED:|Probable cause' dryrun.out

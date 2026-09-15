@@ -156,6 +156,7 @@ main() {
   lib_require_root
   lib_check_os
   lib_log_file_init
+  lib_tmp_root_init      # must run here, not inside $(lib_mktemp): that is a subshell
 
   # read-only commands (and "notify --send", used by hooks/PAM) do not take the lock
   case "$cmd" in

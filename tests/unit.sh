@@ -91,6 +91,25 @@ assert_eq "mask pass:" "-pass pass:********" "$(m '-pass pass:hunter2')"
 assert_eq "mask telegram url" "https://api.telegram.org/bot********/sendMessage" "$(m 'https://api.telegram.org/bot123:ABC/sendMessage')"
 assert_eq "no false positive" "wrote /etc/ssh/sshd_config.d/99-server-setup.conf" "$(m 'wrote /etc/ssh/sshd_config.d/99-server-setup.conf')"
 assert_eq "no mask PasswordAuthentication" "PasswordAuthentication no" "$(m 'PasswordAuthentication no')"
+# Every secret this tool accepts on the command line is SPACE separated, and setup.sh logs
+# the whole argument vector. A key=value-only masker let live tokens into the log.
+assert_eq "mask --cf-api-token"   "args='--cf-api-token ********'"   "$(m "args='--cf-api-token Xv8sQ2pLm9TzR4kWn1bYc7dEf0g'")"
+assert_eq "mask --smtp-pass"      "--smtp-pass ********"             "$(m '--smtp-pass hunter2secret')"
+assert_eq "mask --telegram-token" "--telegram-token ********"        "$(m '--telegram-token 123456:ABCdefGhi')"
+assert_eq "mask --api-key"        "--api-key ********"               "$(m '--api-key abcd1234efgh')"
+assert_eq "mask redis requirepass line" "requirepass ********"       "$(m 'requirepass S3cr3tRedisPass')"
+assert_eq "mask msmtp password line"    "password ********"          "$(m 'password S3cr3tSmtpPass')"
+assert_eq "mask json token"       '"token":"********"'               "$(m '"token":"abcd1234efgh"')"
+assert_eq "no mask --admin-ip"    "--admin-ip 203.0.113.5"           "$(m '--admin-ip 203.0.113.5')"
+assert_eq "no mask --backup-keep" "--backup-keep 7"                  "$(m '--backup-keep 7')"
+assert_eq "no mask --admin-port"  "--admin-port 7080"                "$(m '--admin-port 7080')"
+# the doctor leak scan must see exactly what the masker masks, or it reports a clean log
+leak_hit() { grep -Eqi "$(lib_secret_leak_pattern)" <<<"$1"; }
+assert_true  "doctor sees a leaked flag token"   leak_hit "args='--cf-api-token Xv8sQ2pLm9TzR4kWn1bYc7dEf0g'"
+assert_true  "doctor sees a leaked key=value"    leak_hit "password=S3cr3tValue123"
+assert_true  "doctor sees a leaked requirepass"  leak_hit "requirepass S3cr3tRedisPass"
+assert_false "doctor ignores a masked line"      leak_hit "args='--cf-api-token ********'"
+assert_false "doctor ignores PasswordAuthentication" leak_hit "PasswordAuthentication no"
 
 # =============================================================================
 section "OpenLiteSpeed config editing (awk)"
@@ -721,7 +740,7 @@ section "shell pitfalls (static)"
 # Under set -u a "local x" that is only assigned on some branches aborts the script when it
 # is read on another branch. This bit lib_db_install ("dump: unbound variable") on a real
 # server, so every scalar local must be initialised at declaration.
-bare_locals="$(for f in "$ROOT/setup.sh" "$ROOT"/lib/*.sh; do
+bare_locals="$(for f in "$ROOT/setup.sh" "$ROOT"/lib/*.sh "$ROOT"/tests/*.sh; do
   awk -v F="$f" '
     BEGIN { q = sprintf("%c", 39) }                     # a literal single quote
     /^[[:space:]]*local[[:space:]]+-/ { next }          # typed declarations are left alone
@@ -743,7 +762,7 @@ assert_eq "every scalar local is initialised" "" "$bare_locals"
 # A group that ends in "[[ ... ]] && cmd" exits 1 when the test is false. Feeding such a
 # group into a pipeline makes pipefail kill the whole script. This regression guard exists
 # because exactly that bug reached a real server in lib_domain_fail2ban_regen.
-pitfalls="$(for f in "$ROOT/setup.sh" "$ROOT"/lib/*.sh; do
+pitfalls="$(for f in "$ROOT/setup.sh" "$ROOT"/lib/*.sh "$ROOT"/tests/*.sh; do
   awk -v F="$f" '
     /^[[:space:]]*\}[[:space:]]*\|/ {
       if (prev ~ /(^|[^|&])&&[^&]/ || prev ~ /^[[:space:]]*(\[\[|\(\()/) printf "%s:%d: %s\n", F, prevnr, prev
@@ -752,6 +771,16 @@ pitfalls="$(for f in "$ROOT/setup.sh" "$ROOT"/lib/*.sh; do
   ' "$f"
 done)"
 assert_eq "no piped group ends in a conditional" "" "$pitfalls"
+
+# =============================================================================
+section "lib_join (regression: multi-character separators)"
+assert_eq "single item"        "a"           "$(lib_join ', ' a)"
+assert_eq "no items"           ""            "$(lib_join ', ')"
+assert_eq "one-char separator" "a,b,c"       "$(lib_join ',' a b c)"
+# "local IFS=', '" joins on the comma alone and drops the space - the bug this guards
+assert_eq "two-char separator" "a, b, c"     "$(lib_join ', ' a b c)"
+assert_eq "empty first item"   ", b"         "$(lib_join ', ' '' b)"
+assert_eq "separator with a newline and indent" $'x\n          y' "$(lib_join $'\n          ' x y)"
 
 # =============================================================================
 section "fail2ban jail regeneration (regression: empty Cloudflare action)"
@@ -775,6 +804,33 @@ assert_true "probe filter written" test -s "${FAIL2BAN_FILTER_DIR}/server-setup-
 if (( CAN_CHMOD )); then assert_eq "jail file is 0600" "600" "$(stat -c %a "$FAIL2BAN_WEB_JAIL_FILE")"; fi
 rc=0; ( set -Eeuo pipefail; shopt -s lastpipe; lib_domain_fail2ban_regen ) >/dev/null 2>&1 || rc=$?
 assert_eq "second regen is also clean" 0 "$rc"
+
+# The shape that actually runs in production - several sites plus a Cloudflare token -
+# renders two constructs the empty case never reaches: the indented multi-line "logpath"
+# continuation, and the two-line Cloudflare action block. Both are fail2ban syntax that
+# silently disables a jail when it comes out wrong, so assert on them directly.
+for d in alpha.example beta.example; do
+  mkdir -p "$STATE_DIR/domains/$d" "$SITES_ROOT/$d/logs"
+  printf '{"domain":"%s"}\n' "$d" >"$STATE_DIR/domains/$d/domain.json"
+done
+printf 'dns_cloudflare_api_token = Xv8sQ2pLm9TzR4kWn1bYc7dEf0g\n' >"$CF_INI"
+: >"$CF_F2B_ACTION"
+lib_manifest_set '.cloudflare.account_id' 'acc0123456789'
+assert_eq "regen succeeds with sites and a Cloudflare token" 0 "$(run_isolated lib_domain_fail2ban_regen)"
+out="$(cat "$FAIL2BAN_WEB_JAIL_FILE")"
+assert_has "jails enabled once a site exists" "enabled = true" "$out"
+assert_has "first site logpath" "logpath = ${SITES_ROOT}/alpha.example/logs/access.log" "$out"
+# fail2ban only reads the second path as part of logpath while the line stays indented
+assert_has "second site is an indented continuation" $'\n          '"${SITES_ROOT}/beta.example/logs/access.log" "$out"
+assert_eq "cloudflare action reaches both jails" 2 "$(grep -c 'server-setup-cloudflare' <<<"$out")"
+assert_eq "both jails still inherit action_" 2 "$(grep -c '^action = %(action_)s$' <<<"$out")"
+assert_has "token passed to the action" 'cftoken="Xv8sQ2pLm9TzR4kWn1bYc7dEf0g"' "$out"
+assert_has "account passed to the action" 'cfaccount="acc0123456789"' "$out"
+# the action block belongs to the jail above it; one stray newline moves it into the next
+assert_eq "action stays inside the wp-login jail" "logpath action action_cf [server-setup-web-probe]" \
+  "$(awk '/^logpath/{print "logpath"} /^action = /{print "action"} /server-setup-cloudflare/{print "action_cf"} /^\[server-setup-web-probe\]/{print; exit}' <<<"$out" | tr '\n' ' ' | sed 's/ $//')"
+assert_eq "second regen with sites is also clean" 0 "$(run_isolated lib_domain_fail2ban_regen)"
+if (( CAN_CHMOD )); then assert_eq "jail holding a token is 0600" "600" "$(stat -c %a "$FAIL2BAN_WEB_JAIL_FILE")"; fi
 rm -rf "$STATE_DIR/domains"
 mv "$STATE_DIR/domains.bak" "$STATE_DIR/domains" 2>/dev/null || mkdir -p "$STATE_DIR/domains"
 

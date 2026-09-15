@@ -412,7 +412,7 @@ _doc_check_domains() {
 _doc_check_log_leaks() {
   [[ -f "$LOG_FILE" ]] || { _doc_add OK "log secrets" "no log yet"; return 0; }
   local hits=""
-  hits="$(grep -Eic '(password|passwd|secret|token|api[_-]?key|requirepass)[[:space:]]*[=:][[:space:]]*["'"'"']?[A-Za-z0-9+/=._~-]{8,}' "$LOG_FILE" 2>/dev/null || true)"
+  hits="$(grep -Eic "$(lib_secret_leak_pattern)" "$LOG_FILE" 2>/dev/null || true)"
   hits="${hits:-0}"
   if (( hits > 0 )); then _doc_add FAIL "log secrets" "${hits} line(s) in ${LOG_FILE} look like unmasked credentials"; else _doc_add OK "log secrets" "no credential patterns in ${LOG_FILE}"; fi
   [[ "$(stat -c %a "$LOG_FILE" 2>/dev/null)" == "600" ]] || _doc_add WARN "log permissions" "${LOG_FILE} is not 0600"

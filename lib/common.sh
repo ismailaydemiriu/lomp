@@ -12,7 +12,7 @@ LIB_LOCK_HELD=0
 LIB_ERR_HANDLING=0
 # -g: modules are sourced from inside a function in setup.sh; plain "declare" would be local there
 declare -ga LIB_ROLLBACK_STACK=()
-declare -ga LIB_TMP_FILES=()
+declare -g LIB_TMP_ROOT=""
 OS_ID=""
 OS_VERSION_ID=""
 OS_CODENAME=""
@@ -34,15 +34,28 @@ lib_common_init_colors() {
 lib_ts()      { date '+%Y%m%d-%H%M%S'; }
 lib_iso_now() { date -u '+%Y-%m-%dT%H:%M:%SZ'; }
 
-# Mask secrets in a text stream (stdin -> stdout). Used for every log line.
+# Secrets this tool handles arrive in three shapes, and all three must be masked:
+#   key=value / key:value / "key":"value"   config files, JSON, env
+#   --some-token VALUE                      every secret flag is SPACE separated
+#   requirepass VALUE                       space separated config syntax (redis, msmtp)
+# The flag rule matches any long option whose name contains pass/token/secret/key, so a
+# new secret flag is covered without touching this function. lib_secret_leak_pattern
+# below is the read-side mirror of the same three shapes - keep them in step.
 lib_mask_secrets() {
   sed -E \
-    -e 's/((password|passwd|passwort|pass|pwd|secret|token|api[_-]?key|requirepass|auth_pass|smtp_pass|cftoken|dns_cloudflare_api_token|MYSQL_PWD|REDISCLI_AUTH)[[:space:]]*[=:][[:space:]]*["'"'"']?)[^[:space:]"'"'"']+/\1********/Ig' \
+    -e 's/((password|passwd|passwort|pass|pwd|secret|token|api[_-]?key|requirepass|auth_pass|smtp_pass|cftoken|dns_cloudflare_api_token|MYSQL_PWD|REDISCLI_AUTH)["'"'"']?[[:space:]]*[=:][[:space:]]*["'"'"']?)[^[:space:]"'"'"',}]+/\1********/Ig' \
+    -e 's/(--[a-z0-9-]*(password|passwd|pass|secret|token|api[_-]?key|key)[a-z0-9-]*[=[:space:]]["'"'"']?)[^[:space:]"'"'"',}]+/\1********/Ig' \
+    -e 's/^([[:space:]]*(requirepass|password|auth_pass|smtp_pass|cftoken)[[:space:]]+["'"'"']?)[^[:space:]"'"'"',}]+/\1********/Ig' \
     -e 's/(IDENTIFIED[[:space:]]+BY[[:space:]]+["'"'"'])[^"'"'"']*/\1********/Ig' \
     -e 's/(pass:)[^[:space:]]+/\1********/g' \
     -e 's/(Bearer[[:space:]]+)[A-Za-z0-9._~+\/=-]+/\1********/g' \
-    -e 's#(https://api\.telegram\.org/bot)[^/[:space:]]+#\1********#g' \
-    -e 's/(--password[= ])[^[:space:]]+/\1********/g'
+    -e 's#(https://api\.telegram\.org/bot)[^/[:space:]]+#\1********#g'
+}
+
+# The pattern "doctor" greps the log with. It must cover exactly the shapes
+# lib_mask_secrets masks, or the check reports a clean log while a token sits in it.
+lib_secret_leak_pattern() {
+  printf '%s' '(password|passwd|pass|pwd|secret|token|api[_-]?key|requirepass|auth_pass)["'"'"']?[[:space:]]*[=:][[:space:]]*["'"'"']?[A-Za-z0-9+/=._~-]{8,}|--[a-z0-9-]*(password|pass|secret|token|api[_-]?key|key)[a-z0-9-]*[=[:space:]]+[A-Za-z0-9+/=._~:-]{8,}|^[[:space:]]*(requirepass|password|auth_pass)[[:space:]]+[A-Za-z0-9+/=._~-]{8,}'
 }
 
 # Append a line to the log file (masked). Never fails.
@@ -149,21 +162,31 @@ lib_on_error() {
 }
 trap 'lib_on_error "$?" "$LINENO" "${BASH_SOURCE[0]}" "$BASH_COMMAND"' ERR
 
+# Everything temporary lives inside one per-run directory, which the EXIT trap removes.
+# Registering each file individually cannot work: lib_mktemp is always called as
+# "$(lib_mktemp)", and a command substitution runs in a subshell, so any array the
+# function appended to is discarded the moment it returns.
+lib_tmp_root_init() {
+  [[ -n "${LIB_TMP_ROOT:-}" && -d "${LIB_TMP_ROOT:-}" ]] && return 0
+  LIB_TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/lompstack.XXXXXX")"
+  return 0
+}
+
 lib_cleanup_on_exit() {
-  local f=""
-  for f in "${LIB_TMP_FILES[@]}"; do
-    [[ -e "$f" ]] && rm -rf -- "$f"
-  done
+  # the name guard makes an unset or inherited LIB_TMP_ROOT harmless
+  if [[ -n "${LIB_TMP_ROOT:-}" && -d "${LIB_TMP_ROOT:-}" && "${LIB_TMP_ROOT}" == */lompstack.?????? ]]; then
+    rm -rf -- "$LIB_TMP_ROOT"
+  fi
   return 0
 }
 trap lib_cleanup_on_exit EXIT
 
-# mktemp wrapper that is cleaned up on exit. Usage: f=$(lib_mktemp [-d])
+# mktemp wrapper. Everything it creates is removed on exit. Usage: f=$(lib_mktemp [-d])
 lib_mktemp() {
-  local t=""
-  if [[ "${1:-}" == "-d" ]]; then t="$(mktemp -d "${TMPDIR:-/tmp}/server-setup.XXXXXX")"
-  else t="$(mktemp "${TMPDIR:-/tmp}/server-setup.XXXXXX")"; fi
-  LIB_TMP_FILES+=("$t")
+  local t="" dir="${LIB_TMP_ROOT:-}"
+  [[ -n "$dir" && -d "$dir" ]] || dir="${TMPDIR:-/tmp}"
+  if [[ "${1:-}" == "-d" ]]; then t="$(mktemp -d "${dir}/ss.XXXXXX")"
+  else t="$(mktemp "${dir}/ss.XXXXXX")"; fi
   printf '%s' "$t"
 }
 
@@ -552,7 +575,19 @@ lib_version_ge() { # lib_version_ge 10.11.2 10.6  -> 0 if a >= b
   [[ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -n1)" == "$2" ]]
 }
 
-lib_join() { local IFS="$1"; shift; printf '%s' "$*"; }
+# lib_join <separator> <item>...
+# The separator may be more than one character. The obvious 'local IFS="$1"; printf "%s" "$*"'
+# silently uses only IFS's FIRST character, which turned the fail2ban "logpath" continuation
+# ($'\n' + 10 spaces) into an unindented line - and an unindented continuation makes fail2ban
+# reject the whole jail file, so every host with two or more sites lost its web jails.
+lib_join() {
+  local sep="$1" out="" first=1 item=""
+  shift || return 0
+  for item in "$@"; do
+    if (( first )); then out="$item"; first=0; else out+="${sep}${item}"; fi
+  done
+  printf '%s' "$out"
+}
 
 lib_days_until() {  # epoch -> whole days from now (may be negative)
   local target="$1" now=""
@@ -576,6 +611,16 @@ lib_json_get() {   # lib_json_get file 'filter' -> raw value ("" if null/missing
   local file="$1" filter="$2" v=""
   [[ -s "$file" ]] || { printf ''; return 0; }
   v="$(jq -r "$filter // empty" "$file" 2>/dev/null || true)"
+  printf '%s' "$v"
+}
+
+# Same, but preserving false. jq's "//" treats false like null, so lib_json_get turns a
+# literal false into "" - fine for the _d_bool callers, wrong for any "== false" test.
+lib_json_get_raw() {
+  local file="$1" filter="$2" v=""
+  [[ -s "$file" ]] || { printf ''; return 0; }
+  v="$(jq -r "$filter" "$file" 2>/dev/null || true)"
+  [[ "$v" == "null" ]] && v=""
   printf '%s' "$v"
 }
 

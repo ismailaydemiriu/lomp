@@ -5,6 +5,7 @@
 
 INS_WITH_NODE=0 INS_NODE_MAJOR=20 INS_WITH_PYTHON=0 INS_WITH_NETDATA=0 INS_CLOUDFLARE=0 INS_CF_TOKEN=""
 INS_MARIADB="" INS_REDIS_PERSIST=0 INS_AUTO_REBOOT=0 INS_SKIP_UPGRADE=0 INS_BACKUP_SCHEDULE=""
+INS_ADMIN_ACCESS_SET=0   # was --admin-access / --admin-ip given on THIS run?
 
 # =============================================================================
 #  Arguments
@@ -16,8 +17,8 @@ lib_install_parse_args() {
     case "$a" in
       --php)             PHP_VERSION="${1:-}"; shift ;;
       --timezone)        TIMEZONE="${1:-}"; shift ;;
-      --admin-ip)        ADMIN_ALLOWED_IP="${1:-}"; ADMIN_ACCESS="ip"; shift ;;
-      --admin-access)    ADMIN_ACCESS="${1:-}"; shift ;;
+      --admin-ip)        ADMIN_ALLOWED_IP="${1:-}"; ADMIN_ACCESS="ip"; INS_ADMIN_ACCESS_SET=1; shift ;;
+      --admin-access)    ADMIN_ACCESS="${1:-}"; INS_ADMIN_ACCESS_SET=1; shift ;;
       --admin-port)      ADMIN_PORT="${1:-}"; shift ;;
       --email)           DEFAULT_EMAIL="${1:-}"; shift ;;
       --ssh-port)        SSH_PORT="${1:-}"; shift ;;
@@ -44,9 +45,11 @@ lib_install_parse_args() {
   lib_php_valid_version "$PHP_VERSION" || lib_die "Invalid --php '${PHP_VERSION}'" "expected e.g. 8.3" "--php 8.3"
   [[ "$ADMIN_PORT" =~ ^[0-9]{2,5}$ ]] && (( ADMIN_PORT >= 1024 && ADMIN_PORT <= 65535 )) \
     || lib_die "Invalid --admin-port '${ADMIN_PORT}'" "expected a port between 1024 and 65535" "--admin-port 7574"
-  # unquoted on purpose: SYS_SSH_PORTS can hold several ports. An "if" body, not a
-  # trailing "&&", so the loop cannot end on a false test and return 1 under errexit.
-  for _p in 80 443 3306 6379 ${SYS_SSH_PORTS:-22}; do
+  # lib_ssh_ports is called directly: SYS_SSH_PORTS is still the module default "22" here,
+  # because lib_system_analyze only runs after the arguments are parsed. Unquoted on
+  # purpose (several ports possible); an "if" body, not a trailing "&&", so the loop
+  # cannot end on a false test and return 1 under errexit.
+  for _p in 80 443 3306 6379 $(lib_ssh_ports); do
     if [[ "$ADMIN_PORT" == "$_p" ]]; then
       lib_die "--admin-port ${ADMIN_PORT} is already used by another service" \
         "the WebAdmin panel cannot share a port with the web server, database, cache or SSH" \
@@ -80,7 +83,10 @@ lib_install_parse_args() {
   [[ -n "$INS_BACKUP_SCHEDULE" ]] || INS_BACKUP_SCHEDULE="$BACKUP_SCHEDULE"
   # Re-runs: keep previously chosen values when the flag is not repeated (idempotent re-run)
   if [[ -s "$STATE_DIR/manifest.json" ]] && lib_have jq; then
-    if [[ "$ADMIN_ACCESS" == "tunnel" && -z "$ADMIN_ALLOWED_IP" ]]; then
+    # Only inherit the stored mode when the operator did NOT ask for one. Testing
+    # ADMIN_ACCESS == tunnel cannot tell "not given" from "explicitly tunnel", which made
+    # it impossible to close a panel that had once been opened.
+    if (( ! INS_ADMIN_ACCESS_SET )); then
       local prev_access=""; prev_access="$(lib_manifest_get '.params.admin_access')"
       if [[ -n "$prev_access" ]]; then
         ADMIN_ACCESS="$prev_access"
@@ -689,6 +695,7 @@ lib_panel_open() {
 
 lib_panel_close() {
   local mode="" admin_ip=""
+  lib_system_analyze --no-net
   mode="$(_panel_mode)"
   admin_ip="$(lib_manifest_get '.params.admin_ip')"
   _panel_timer_cancel
