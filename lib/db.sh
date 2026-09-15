@@ -281,13 +281,25 @@ lib_db_show() {   # print credentials (never logged)
   printf '\n'
 }
 
+# Let the site's database user log in over TCP from 127.0.0.1 too. Node.js drivers and ORMs
+# connect to host:port, and with skip-name-resolve a 'localhost' account only matches
+# connections through the socket. MariaDB itself listens on 127.0.0.1 only.
+lib_db_tcp_account_ensure() {   # domain
+  lib_db_info_load "$1" || return 1
+  lib_db_sql_secret "allow ${DBI_USER} to log in from 127.0.0.1" \
+    "CREATE USER IF NOT EXISTS '${DBI_USER}'@'127.0.0.1' IDENTIFIED BY '${DBI_PASS}';
+ALTER USER '${DBI_USER}'@'127.0.0.1' IDENTIFIED BY '${DBI_PASS}';
+GRANT ALL PRIVILEGES ON \`${DBI_NAME}\`.* TO '${DBI_USER}'@'127.0.0.1';
+FLUSH PRIVILEGES;"
+}
+
 lib_db_drop_for_domain() {   # domain [force]
   local domain="$1" info=""
   info="$(lib_db_info_file "$domain")"
   lib_db_info_load "$domain" || return 0
   if (( OPT_DRY_RUN )); then lib_info "[dry-run] would drop database ${DBI_NAME} and user ${DBI_USER}"; return 0; fi
   lib_db_sql_secret "drop database ${DBI_NAME} and user ${DBI_USER}" \
-    "DROP DATABASE IF EXISTS \`${DBI_NAME}\`; DROP USER IF EXISTS '${DBI_USER}'@'localhost'; FLUSH PRIVILEGES;" \
+    "DROP DATABASE IF EXISTS \`${DBI_NAME}\`; DROP USER IF EXISTS '${DBI_USER}'@'localhost'; DROP USER IF EXISTS '${DBI_USER}'@'127.0.0.1'; FLUSH PRIVILEGES;" \
     || lib_warn "could not drop database ${DBI_NAME} (see log)"
   rm -f "$info"
   [[ -s "$(lib_domain_json "$domain")" ]] && lib_json_set "$(lib_domain_json "$domain")" 'del(.db)'

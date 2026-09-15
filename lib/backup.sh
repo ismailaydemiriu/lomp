@@ -124,7 +124,7 @@ lib_backup_domain() {   # domain [--keep N] [--encrypt] [--remote] [--tag T]
   name="${domain}-${tag:+${tag}-}${ts}"
   dest="${BACKUP_ROOT}/${domain}"
   if (( OPT_DRY_RUN )); then
-    lib_info "[dry-run] would create ${dest}/${name}.tar.gz$( (( encrypt )) && printf '.enc') (files: public_html, private; db: ${D_DB_NAME:-none}; vhost; state)$( (( remote )) && printf ' and upload it')"
+    lib_info "[dry-run] would create ${dest}/${name}.tar.gz$( (( encrypt )) && printf '.enc') (files: public_html, private$( [[ -d "${D_HOME}/app" ]] && printf ', app without node_modules'); db: ${D_DB_NAME:-none}; vhost; state)$( (( remote )) && printf ' and upload it')"
     return 0
   fi
   (( encrypt )) && lib_backup_key_ensure
@@ -136,9 +136,12 @@ lib_backup_domain() {   # domain [--keep N] [--encrypt] [--remote] [--tag T]
   local -a dirs=()
   [[ -d "${D_HOME}/public_html" ]] && dirs+=(public_html)
   [[ -d "${D_HOME}/private" ]] && dirs+=(private)
+  # a Node.js application's code; its dependencies are reinstalled when it is restored
+  [[ -d "${D_HOME}/app" ]] && dirs+=(app)
   if ((${#dirs[@]} > 0)); then
     if ! tar -C "$D_HOME" --exclude='private/sessions' --exclude='private/tmp' --exclude='private/.wp-cli' \
-          --exclude='public_html/wp-content/cache' --warning=no-file-changed -czf "${work}/files.tar.gz" "${dirs[@]}" 2>>"$LOG_FILE"; then
+          --exclude='public_html/wp-content/cache' --exclude='app/node_modules' --exclude='app/*/node_modules' \
+          --warning=no-file-changed -czf "${work}/files.tar.gz" "${dirs[@]}" 2>>"$LOG_FILE"; then
       if [[ ! -s "${work}/files.tar.gz" ]]; then BK_ERROR="file archive failed"; rm -rf "$work"; lib_backup_failed "$domain"; return 1; fi
     fi
     parts+=("files.tar.gz")
@@ -153,7 +156,7 @@ lib_backup_domain() {   # domain [--keep N] [--encrypt] [--remote] [--tag T]
   mkdir -p "${work}/conf" "${work}/state"
   vh="${LSWS_VHOSTS_DIR}/${domain}/vhconf.conf"
   [[ -f "$vh" ]] && cp "$vh" "${work}/conf/vhconf.conf" && parts+=("conf/vhconf.conf")
-  for a in domain.json db.info wp.info ssl.info; do
+  for a in domain.json db.info wp.info ssl.info app-env.json; do
     [[ -f "$(lib_domain_state_dir "$domain")/${a}" ]] && cp "$(lib_domain_state_dir "$domain")/${a}" "${work}/state/${a}" && parts+=("state/${a}")
   done
   # ---- manifest + checksums ------------------------------------------------
@@ -336,6 +339,7 @@ lib_restore_main() {
     else
       tar -C "$D_HOME" -xzf "${work}/x/files.tar.gz" || lib_die "File restore failed" "tar error" "check disk space"
       chown -R "${D_USER}:${D_GROUP}" "${D_HOME}/public_html" "${D_HOME}/private" 2>/dev/null || true
+      if [[ -d "${D_HOME}/app" ]]; then chown -R "${D_USER}:${D_GROUP}" "${D_HOME}/app" 2>/dev/null || true; fi
       lib_ok "Files restored into ${D_HOME}"
     fi
   fi
@@ -368,6 +372,9 @@ lib_restore_main() {
     lib_domain_fail2ban_regen
   fi
   lib_rollback_clear
+  # a Node.js site: its dependencies are not in the archive; reinstall them and start it again
+  lib_domain_state_load "$domain" >/dev/null 2>&1 || true
+  lib_app_restore
   lib_ok "Restore of ${domain} finished"
   (( D_SSL )) || lib_note "SSL is not active for ${domain}; run: setup.sh renew-ssl ${domain}"
 }

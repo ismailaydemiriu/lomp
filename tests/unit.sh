@@ -23,7 +23,7 @@ INSTALL_DIR="$TMP/install"; BIN_LINK="$TMP/lompstack"; BIN_SHORT="$TMP/lomp"; LO
 OPT_YES=1 OPT_DRY_RUN=0 OPT_QUIET=1 OPT_VERBOSE=0 OPT_NO_COLOR=1 OPT_JSON=0 OPT_NON_INTERACTIVE=1
 SCRIPT_PATH="$ROOT/setup.sh"; SCRIPT_DIR="$ROOT"
 export TMPDIR="$TMP"
-for m in common system ols php db ssl domain proxy cloudflare backup monitor install menu; do
+for m in common system ols php db ssl domain proxy app cloudflare backup monitor install menu; do
   # shellcheck source=/dev/null
   source "$ROOT/lib/$m.sh"
 done
@@ -1184,10 +1184,10 @@ _items="$(grep -oE '_menu_item[[:space:]]+[0-9]+' <<<"$_menu_block" | grep -oE '
 _branches="$(grep -oE '^[[:space:]]*[0-9]+(\|[^)]*)?\)' <<<"$_menu_block" | grep -oE '[0-9]+' | head -n 999 | sort -n | uniq | tr '\n' ' ')"
 assert_true "the main menu block was found" test -n "$_menu_block"
 assert_eq   "item numbers and case branches match" "$_items" "$_branches"
-assert_has  "List databases is item 5"   '_menu_item  5 "List databases"' "$_menu_block"
-assert_has  "and item 5 runs db list"    '5) _menu_run db list ;;' "$_menu_block"
-assert_has  "Create database moved to 6" '6) domain="$(_menu_pick_domain)" && _menu_run db "$domain"' "$_menu_block"
-assert_has  "Status moved to 8"          '8) _menu_run status ;;' "$_menu_block"
+assert_has  "Databases is item 5"        '_menu_item  5 "Databases"' "$_menu_block"
+assert_has  "and item 5 opens it"        '5) _menu_databases ;;' "$_menu_block"
+assert_has  "Node.js apps is item 6"     '6) _menu_apps ;;' "$_menu_block"
+assert_has  "Status is still item 8"     '8) _menu_run status ;;' "$_menu_block"
 # ... and the same must hold for every other menu built from _menu_item (submenus included)
 _menu_fns="$(grep -oE '^_?[a-z_]+\(\)' "$ROOT/lib/menu.sh" | tr -d '()' | tr '\n' ' ' || true)"
 _menu_checked=0
@@ -1339,6 +1339,188 @@ eval "$_orig_apply"; eval "$_orig_tcp"; eval "$_orig_tools"
 rm -rf "$(lib_domain_state_dir px.example.com)"
 lib_domain_state_reset
 unset MSYS2_ARG_CONV_EXCL
+
+# =============================================================================
+section "Node.js applications (PM2)"
+assert_true  "env name"                       lib_app_env_key_valid API_KEY
+assert_true  "env name with digits"           lib_app_env_key_valid S3_BUCKET_2
+assert_false "lower-case env name"            lib_app_env_key_valid api_key
+assert_false "PORT is set by lompstack"       lib_app_env_key_valid PORT
+assert_false "PATH is set by lompstack"       lib_app_env_key_valid PATH
+assert_false "PM2_* would steer pm2"          lib_app_env_key_valid PM2_HOME
+assert_false "no leading digit"               lib_app_env_key_valid 1KEY
+assert_true  "start: npm start"               lib_app_start_valid "npm start"
+assert_true  "start: args with = and --"      lib_app_start_valid "npm run serve -- --port=3000"
+assert_false "start: no &&"                   lib_app_start_valid "npm run build && npm start"
+assert_false "start: no pipe"                 lib_app_start_valid "node app.js | tee log"
+assert_false "start: no quotes"               lib_app_start_valid "node -e 'x'"
+assert_false "start: no substitution"         lib_app_start_valid 'node $(cat f)'
+assert_true  "script: dist/main.js"           lib_app_script_valid dist/main.js
+assert_false "script: no parent directory"    lib_app_script_valid ../x.js
+assert_false "script: no absolute path"       lib_app_script_valid /etc/x.js
+assert_false "script: no dot segment"         lib_app_script_valid a/./b.js
+
+lib_domain_parse_add_args node.example.com --node --port 3100 --start "npm run serve" --no-ssl
+assert_eq "--node is a proxy site"                      "proxy"         "$D_MODE"
+assert_eq "--node keeps the port"                       "3100"          "$APP_OPT_PORT"
+assert_eq "--node keeps the start command"              "npm run serve" "$APP_OPT_START"
+assert_eq "--node serves no static paths from disk"     ""              "$D_STATIC_PATHS"
+lib_domain_parse_add_args node.example.com --node --static-paths "/public/"
+assert_eq "--static-paths still counts with --node"     "/public/"      "$D_STATIC_PATHS"
+assert_eq "--node with --proxy is refused"   1 "$(run_isolated lib_domain_parse_add_args n.example.com --node --proxy 127.0.0.1:3000)"
+assert_eq "--port without --node is refused" 1 "$(run_isolated lib_domain_parse_add_args n.example.com --port 3100)"
+assert_eq "a shell --start is refused"       1 "$(run_isolated lib_domain_parse_add_args n.example.com --node --start "npm run a && npm run b")"
+
+# the site the rest of this section works on
+lib_domain_state_reset
+D_DOMAIN="app.example.com"; D_IDENT="app_example_com"; D_USER="app_example_com"; D_GROUP="app_example_com"
+D_HOME="$SITES_ROOT/app.example.com"; D_MODE="proxy"; D_PROXY="127.0.0.1:3000"; D_STATIC_PATHS=""
+D_STATUS="active"; D_CREATED="2025-01-01T00:00:00Z"
+mkdir -p "$D_HOME/app"
+lib_domain_state_save
+APP_PORT=3000; APP_START="npm start"; APP_SCRIPT=""; APP_MEMORY=""; APP_ENABLED=1
+lib_app_state_write app.example.com
+APP_PORT=""; APP_START=""; APP_ENABLED=0
+assert_true "state: the site runs an app" lib_app_state_load app.example.com
+assert_eq   "state: port"    "3000"      "$APP_PORT"
+assert_eq   "state: start"   "npm start" "$APP_START"
+assert_eq   "state: enabled" "1"         "$APP_ENABLED"
+APP_ENABLED=0; lib_app_state_write app.example.com; lib_app_state_load app.example.com
+assert_eq   "state: a stopped app stays stopped (false survives the reload)" "0" "$APP_ENABLED"
+lib_domain_state_load app.example.com; lib_domain_state_save
+assert_true "a domain.json save keeps .app" lib_app_state_load app.example.com
+assert_false "a site without .app runs none" lib_app_state_load nothing-here.example.com
+D_HOME="$SITES_ROOT/app.example.com"   # Git Bash rewrites paths passed to jq.exe; keep ours
+
+APP_SCRIPT=""; APP_START="npm start"
+printf '{"scripts":{"start":"node dist/server.js --color"}}' >"$D_HOME/app/package.json"
+assert_eq "npm start that is plain node runs node itself" '{"script":"dist/server.js","args":["--color"]}' "$(lib_app_command_json)"
+printf '{"scripts":{"start":"next start -p 3000"}}' >"$D_HOME/app/package.json"
+assert_eq "anything else stays npm start" '{"script":"npm","args":["start"]}' "$(lib_app_command_json)"
+APP_START="yarn start"
+assert_eq "other commands are split into words" '{"script":"yarn","args":["start"]}' "$(lib_app_command_json)"
+APP_START=""; APP_SCRIPT="dist/main.js"
+assert_eq "--script runs the file" '{"script":"dist/main.js","args":[]}' "$(lib_app_command_json)"
+APP_SCRIPT=""; APP_START="npm start"
+assert_true  "runnable once package.json exists" lib_app_runnable
+rm -f "$D_HOME/app/package.json"
+assert_false "waiting for code without package.json" lib_app_runnable
+APP_SCRIPT="dist/main.js"
+assert_false "waiting for code without the script file" lib_app_runnable
+mkdir -p "$D_HOME/app/dist"; : >"$D_HOME/app/dist/main.js"
+assert_true  "runnable once the script exists" lib_app_runnable
+
+out="$(lib_app_render_unit /usr/bin/pm2)"
+assert_has   "unit runs as the site user"            "User=app_example_com" "$out"
+assert_has   "unit keeps PM2 inside the site"        "Environment=PM2_HOME=$D_HOME/.pm2" "$out"
+assert_has   "unit starts the daemon with ping"      "ExecStart=/usr/bin/pm2 ping" "$out"
+assert_has   "a failing app cannot fail the unit"    "ExecStartPost=-/usr/bin/pm2 start $D_HOME/.pm2/lomp.ecosystem.json" "$out"
+assert_has   "unit hardening"                        "NoNewPrivileges=yes" "$out"
+assert_lacks "never as root"                         "User=root" "$out"
+assert_lacks "no dump/resurrect state"               "resurrect" "$out"
+APP_PORT=3000; APP_MEMORY="512M"; APP_ENABLED=1
+eco="$(MSYS_NO_PATHCONV=1 lib_app_render_ecosystem '{"script":"npm","args":["start"]}' '{"API_KEY":"s3cr3t","NODE_ENV":"staging","PORT":"9999"}')"
+_eco() { jq -r "$1" <<<"$eco"; }
+assert_eq "ecosystem is valid JSON"                   "object"  "$(_eco 'type')"
+assert_eq "one process named web"                     "web"     "$(_eco '.apps[0].name')"
+assert_eq "fork mode"                                 "fork"    "$(_eco '.apps[0].exec_mode')"
+assert_eq "no instances (that would mean cluster)"    "null"    "$(_eco '.apps[0].instances')"
+assert_eq "the inherited environment is filtered out" "true"    "$(_eco '.apps[0].filter_env')"
+assert_eq "cwd is the app directory"                  "$D_HOME/app" "$(_eco '.apps[0].cwd')"
+assert_eq "PORT always comes from lompstack"          "3000"    "$(_eco '.apps[0].env.PORT')"
+assert_eq "user variables are passed"                 "s3cr3t"  "$(_eco '.apps[0].env.API_KEY')"
+assert_eq "NODE_ENV can be overridden"                "staging" "$(_eco '.apps[0].env.NODE_ENV')"
+assert_eq "memory limit"                              "512M"    "$(_eco '.apps[0].max_memory_restart')"
+APP_ENABLED=0
+assert_eq "a stopped app has no process" "0" "$(MSYS_NO_PATHCONV=1 lib_app_render_ecosystem '{"script":"npm","args":["start"]}' '{}' | jq '.apps | length')"
+APP_ENABLED=1; APP_MEMORY=""
+assert_eq "no limit, no limit key" "null" "$(MSYS_NO_PATHCONV=1 lib_app_render_ecosystem '{"script":"npm","args":["start"]}' '{}' | jq '.apps[0].max_memory_restart')"
+envf="$(lib_app_render_envfile '{"A":"it'"'"'s $HOME","B":"x y"}')"
+assert_eq "the env file survives the shell" "it's \$HOME|x y" "$( ( eval "$envf"; printf '%s|%s' "$A" "$B" ) )"
+assert_eq "unit renderer exits 0"      0 "$(run_isolated lib_app_render_unit /usr/bin/pm2)"
+assert_eq "ecosystem renderer exits 0" 0 "$(run_isolated lib_app_render_ecosystem '{"script":"npm","args":[]}' '{}')"
+assert_eq "env file renderer exits 0"  0 "$(run_isolated lib_app_render_envfile '{}')"
+
+# ports: another site's application port and loopback proxy targets are taken
+_orig_holder="$(declare -f lib_port_holder)"
+lib_port_holder() { if [[ "$1" == "3005" ]]; then printf 'node (pid 42)'; fi; }
+assert_eq    "another site's app port is taken" "port 3000 is already used by app.example.com" "$(lib_app_port_conflict 3000 other.example.com || true)"
+assert_false "a site may keep its own port"     lib_app_port_conflict 3000 app.example.com
+assert_has   "a port in use is refused"         "node (pid 42)"          "$(lib_app_port_conflict 3005 || true)"
+assert_has   "MariaDB's port is refused"        "service of this server" "$(lib_app_port_conflict 3306 || true)"
+assert_has   "privileged ports are refused"     "between 1024"           "$(lib_app_port_conflict 80 || true)"
+assert_has   "garbage is refused"               "between 1024"           "$(lib_app_port_conflict 30x0 || true)"
+ss() { return 0; }
+assert_eq "the first free port skips the taken ones" "3001" "$(lib_app_port_pick)"
+unset -f ss
+eval "$_orig_holder"
+
+# apply: files as the site user, the unit, then the service - with systemd and pm2 stubbed
+APP_UNIT_DIR="$TMP/systemd"; mkdir -p "$APP_UNIT_DIR"
+_orig_as="$(declare -f _app_as)"; _orig_sc="$(declare -f lib_systemctl)"; _orig_act="$(declare -f lib_service_active)"
+_orig_en="$(declare -f lib_service_enabled)"; _orig_wait="$(declare -f lib_app_wait_port)"; _orig_lock="$(declare -f _app_site_lock)"
+_orig_tools="$(declare -f lib_require_tools)"
+assert_has "_app_as starts from an empty environment" "env -i" "$_orig_as"
+_app_as() { local dir="$1"; shift; ( cd "$dir" && "$@" ); }
+_sc_calls=""; lib_systemctl() { _sc_calls+="$* "; return 0; }
+lib_service_active() { return 1; }; lib_service_enabled() { return 1; }
+lib_app_wait_port() { return 0; }; _app_site_lock() { return 0; }; lib_require_tools() { return 0; }
+pm2() { return 0; }
+APP_START="npm start"; APP_SCRIPT=""; APP_PORT=3000; APP_ENABLED=1; APP_MEMORY=""
+rm -f "$D_HOME/app/package.json"
+printf '{"API_KEY":"top-s3cr3t-value"}' >"$(lib_app_env_file app.example.com)"
+lib_app_apply
+assert_eq    "no code yet: waiting"                  "waiting" "$APP_RESULT"
+assert_true  "ecosystem written"                     test -s "$D_HOME/.pm2/lomp.ecosystem.json"
+assert_true  "unit written"                          test -s "$APP_UNIT_DIR/pm2-app_example_com.service"
+assert_has   "builds get the values from the env file" "top-s3cr3t-value" "$(cat "$D_HOME/.pm2/lomp.env")"
+if (( CAN_CHMOD )); then assert_eq "the ecosystem is private" "600" "$(stat -c %a "$D_HOME/.pm2/lomp.ecosystem.json")"; fi
+assert_lacks "and nothing was started"               "start" "$_sc_calls"
+printf '{"scripts":{"start":"node server.js"}}' >"$D_HOME/app/package.json"
+_sc_calls=""; lib_app_apply
+assert_eq    "code present: running"                 "running" "$APP_RESULT"
+assert_has   "the unit is enabled"                   "enable pm2-app_example_com" "$_sc_calls"
+assert_has   "and started"                           "start pm2-app_example_com" "$_sc_calls"
+lib_service_active() { return 0; }; lib_service_enabled() { return 0; }
+APP_ENABLED=0; _sc_calls=""; lib_app_apply
+assert_eq    "stopped on purpose"                    "stopped" "$APP_RESULT"
+assert_has   "the service is stopped"                "stop pm2-app_example_com" "$_sc_calls"
+assert_has   "and no longer starts at boot"          "disable pm2-app_example_com" "$_sc_calls"
+rm -f "$D_HOME/.pm2/lomp.ecosystem.json"
+APP_ENABLED=1
+out="$(OPT_DRY_RUN=1 OPT_QUIET=0 lib_app_apply 2>&1)"
+assert_false "a dry run writes no ecosystem"         test -e "$D_HOME/.pm2/lomp.ecosystem.json"
+assert_lacks "and prints no value"                   "top-s3cr3t-value" "$out"
+
+# env: the value comes from stdin, never from the command line, and never reaches the log
+APP_ENABLED=1; lib_app_state_write app.example.com
+printf 'val with spaces & "quotes"\n' | lib_app_env app.example.com set DATABASE_URL >/dev/null 2>&1
+assert_eq "env set stores what stdin gave"          'val with spaces & "quotes"' "$(jq -r '.DATABASE_URL' "$(lib_app_env_file app.example.com)")"
+assert_eq "a value on the command line is refused"  1 "$(run_isolated lib_app_env app.example.com set API_KEY oops)"
+assert_eq "a reserved name is refused"              1 "$(run_isolated lib_app_env app.example.com set PORT </dev/null)"
+lib_app_env app.example.com unset DATABASE_URL >/dev/null 2>&1
+assert_eq "env unset removes it"                    "null" "$(jq -r '.DATABASE_URL' "$(lib_app_env_file app.example.com)")"
+assert_lacks "the log never sees a value"           "val with spaces" "$(cat "$LOG_FILE")"
+
+# remove: the service goes before the files and the user
+lib_domain_state_load app.example.com; D_HOME="$SITES_ROOT/app.example.com"
+_sc_calls=""; lib_app_teardown >/dev/null 2>&1
+assert_has   "the service is disabled and stopped"   "disable --now pm2-app_example_com" "$_sc_calls"
+assert_false "and its unit file deleted"             test -e "$APP_UNIT_DIR/pm2-app_example_com.service"
+lib_domain_logrotate_regen
+assert_has   "PM2 logs are rotated as the site user" "su app_example_com app_example_com" "$(cat "$LOGROTATE_SITES_FILE")"
+assert_has   "the daemon's own log as well"          ".pm2/pm2.log" "$(cat "$LOGROTATE_SITES_FILE")"
+APP_SCRIPT=""; APP_START="npm run serve -- --port=3000"
+assert_eq    "arguments that look like options stay arguments" '{"script":"npm","args":["run","serve","--","--port=3000"]}' "$(lib_app_command_json)"
+
+assert_eq "runuser only through _app_as" "1" "$(grep -c 'runuser' "$ROOT/lib/app.sh")"
+assert_eq "pm2 output that carries the environment never goes to the log" "" \
+  "$(grep -nE 'lib_run[^|;]*pm2[^|;]*(jlist|env|show|describe)' "$ROOT"/lib/*.sh || true)"
+eval "$_orig_as"; eval "$_orig_sc"; eval "$_orig_act"; eval "$_orig_en"; eval "$_orig_wait"; eval "$_orig_lock"; eval "$_orig_tools"
+unset -f pm2
+lib_json_set "$(lib_domain_json app.example.com)" 'del(.app)'
+rm -f "$(lib_app_env_file app.example.com)"
+lib_domain_state_reset
 
 # =============================================================================
 section "Node.js major version (regression: an install re-run upgraded Node under running apps)"

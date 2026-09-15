@@ -214,12 +214,12 @@ lib_status_main() {
       --argjson disk_pct "$SYS_DISK_USED_PCT" --arg load "$SYS_LOAD" --arg uptime "$SYS_UPTIME" --arg reboot "$reboot" \
       --arg cf "$(lib_cf_status_line)" --arg admin "$(lib_panel_status_line)" \
       --arg notify "$(lib_notify_channels)" --arg schedule "$(lib_manifest_get '.backup.schedule')" \
-      --arg last_backup "$last_backup" --argjson sites "$sites" \
+      --arg last_backup "$last_backup" --argjson sites "$sites" --argjson apps "$(lib_app_list --json 2>/dev/null || printf '[]')" \
       '{host:$host, os:$os, script_version:$ver, installed_at:$inst,
         services:{lsws:$lsws, mariadb:$mariadb, redis:$redis, fail2ban:$f2b, ufw:$ufw, certbot_timer:$certbot},
         versions:{openlitespeed:$olsv, php:$phpv, mariadb:$dbv, redis:$redisv},
         resources:{ram_mb:$ram_mb, ram_used_mb:$ram_used_mb, swap_mb:$swap_mb, disk_used_pct:$disk_pct, load:$load, uptime:$uptime, reboot_required:($reboot=="yes")},
-        cloudflare:$cf, webadmin:$admin, notifications:$notify, backup:{schedule:$schedule, last_run:$last_backup}, sites:$sites}'
+        cloudflare:$cf, webadmin:$admin, notifications:$notify, backup:{schedule:$schedule, last_run:$last_backup}, sites:$sites, apps:$apps}'
     return 0
   fi
 
@@ -258,6 +258,14 @@ lib_status_main() {
     printf '    %-28s %-10s php:%-5s ssl:%-24s backup:%s\n' "$d" "$D_MODE" "${D_PHP:--}" "$( (( D_SSL )) && lib_ssl_status_line "$d" || printf 'none')" "${D_BACKUP_LAST:-never}"
   done
   (( n == 0 )) && printf '    (none)\n'
+  local napps=0
+  for d in $(lib_domains_list); do
+    if lib_app_state_load "$d"; then napps=$((napps + 1)); fi
+  done
+  if (( napps > 0 )); then
+    printf '  %sNode.js applications%s\n' "$C_BLD" "$C_RST"
+    lib_app_list 2>/dev/null | sed 's/^/    /' || true
+  fi
   printf '  %sRecent problems in %s%s\n' "$C_BLD" "$LOG_FILE" "$C_RST"
   if [[ -f "$LOG_FILE" ]]; then
     grep -E '\[(ERROR|WARN|ROLLBACK)\]' "$LOG_FILE" 2>/dev/null | tail -n 5 | sed 's/^/    /' || true
@@ -390,9 +398,14 @@ _doc_check_domains() {
       _doc_add FAIL "site ${d}: vhost" "virtualhost block missing in httpd_config.conf (state/config mismatch)"
     fi
     code="$(lib_http_code "http://127.0.0.1/" -H "Host: ${d}")"
+    # a Node.js site answers 503 while its application is stopped on purpose or has no code
+    local app_idle=0
+    if lib_app_state_load "$d" && { (( ! APP_ENABLED )) || ! lib_app_runnable; }; then app_idle=1; fi
     case "$code" in
       200|301|302|303|307|308) _doc_add OK "site ${d}: http" "HTTP ${code}" ;;
-      000|5*) _doc_add FAIL "site ${d}: http" "HTTP ${code}" ;;
+      000|5*)
+        if (( app_idle )); then _doc_add WARN "site ${d}: http" "HTTP ${code}: its application is stopped or has no code yet (setup.sh app status ${d})"
+        else _doc_add FAIL "site ${d}: http" "HTTP ${code}"; fi ;;
       *)      _doc_add WARN "site ${d}: http" "HTTP ${code}" ;;
     esac
     if (( D_SSL )); then
@@ -436,6 +449,46 @@ _doc_check_log_leaks() {
   [[ "$(stat -c %a "$LOG_FILE" 2>/dev/null)" == "600" ]] || _doc_add WARN "log permissions" "${LOG_FILE} is not 0600"
 }
 
+# Node.js applications: the service starts at boot and runs, the process is online and not
+# crash-looping, and the port is bound to loopback. pm2 is only asked while the service runs:
+# any pm2 command starts a daemon, and one outside systemd would break the unit.
+_doc_check_apps() {
+  local d="" unit="" info="" st="" cpu="" mem="" up="" rs="" addr="" n=""
+  if [[ -f "${APP_UNIT_DIR}/pm2-root.service" ]]; then
+    n="$(jq 'length' /root/.pm2/dump.pm2 2>/dev/null || printf '0')"
+    if [[ "$n" =~ ^[0-9]+$ ]] && (( n > 0 )); then
+      _doc_add WARN "pm2 as root" "${n} process(es) from an older install run as root; move each into a site: setup.sh add <domain> --node"
+    fi
+  fi
+  for d in $(lib_domains_list); do
+    lib_app_state_load "$d" || continue
+    lib_domain_state_load "$d" || continue
+    unit="$(lib_app_unit_name "$D_IDENT")"
+    if (( ! APP_ENABLED )); then _doc_add OK "app ${d}" "stopped on purpose"; continue; fi
+    if ! lib_app_runnable; then _doc_add WARN "app ${d}" "no code yet: ${APP_RESULT_MSG}"; continue; fi
+    if lib_service_enabled "$unit"; then _doc_add OK "app ${d}: boot" "${unit} enabled"
+    else _doc_add FAIL "app ${d}: boot" "${unit} is not enabled, the app will not start after a reboot (setup.sh app start ${d})"; fi
+    if ! lib_service_active "$unit"; then _doc_add FAIL "app ${d}: service" "${unit} is not running (setup.sh app start ${d})"; continue; fi
+    info="$(_app_process_info web)"
+    st="" cpu="" mem="" up="" rs=""
+    read -r st cpu mem up rs <<<"$info"
+    case "${st:-missing}" in
+      online)  _doc_add OK "app ${d}: process" "online, ${rs:-0} restart(s)" ;;
+      missing) _doc_add FAIL "app ${d}: process" "not in PM2 (setup.sh app restart ${d})" ;;
+      *)       _doc_add FAIL "app ${d}: process" "${st} (setup.sh app logs ${d})" ;;
+    esac
+    if [[ "${rs:-0}" =~ ^[0-9]+$ ]] && (( rs >= 10 )); then
+      _doc_add WARN "app ${d}: restarts" "${rs} restarts, it keeps crashing (setup.sh app logs ${d})"
+    fi
+    addr="$(ss -tlnH "sport = :${APP_PORT}" 2>/dev/null | awk 'NR == 1 {print $4}' || true)"
+    case "$addr" in
+      "")                    _doc_add FAIL "app ${d}: port" "nothing listens on ${APP_PORT}; the app must listen on process.env.PORT" ;;
+      127.0.0.1:*|\[::1\]:*) _doc_add OK "app ${d}: port" "listens on ${addr}" ;;
+      *)                     _doc_add WARN "app ${d}: port" "listens on ${addr} (every interface): the firewall keeps it private, but bind it to 127.0.0.1" ;;
+    esac
+  done
+}
+
 lib_doctor_run() {
   DOC_RESULTS=(); DOC_FAIL=0; DOC_WARN=0; DOC_OK=0
   lib_system_analyze --no-net
@@ -444,6 +497,7 @@ lib_doctor_run() {
   _doc_check_ssl_infra
   _doc_check_cron
   _doc_check_domains
+  _doc_check_apps
   _doc_check_log_leaks
 }
 

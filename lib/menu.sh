@@ -43,6 +43,9 @@ COMMANDS
       --proxy 127.0.0.1:3000  --static  --wordpress  --cloudflare  --no-db
       --wildcard  --staging  --hsts-preload
       --wp-title "Title" --wp-admin admin --wp-email a@b.c --wp-locale en_US
+      --node [--port N] [--start "npm start" | --script dist/main.js]
+                                Node.js site: PM2 runs the app as the site's user and
+                                OpenLiteSpeed proxies to it (a free port from 3000 up)
                                 Every site gets its own database and MariaDB user
                                 unless --no-db is given.
   db <domain>                   Create (or show) the MariaDB database for a site
@@ -52,6 +55,14 @@ COMMANDS
                                 Publish an app under a path of an existing site, in any
                                 mode: proxy add example.com /api/ 127.0.0.1:3001
   proxy remove <domain> <path>  Stop proxying that path
+  app list                      Node.js applications: status, CPU, memory, restarts (--json)
+  app status|start|stop|restart <domain>
+  app logs <domain> [--out|--error] [-n LINES]
+  app deploy <domain>           Install dependencies, build and restart the application
+  app set <domain> [--port N] [--start CMD | --script FILE] [--memory 512M|none]
+  app env <domain> list [--show] | set NAME | unset NAME... | import-db
+                                Values come from stdin or a hidden prompt, never from
+                                the command line; import-db adds DB_* and DATABASE_URL
   remove <domain> [opts]        Remove a site  (--keep-db --keep-files --keep-ssl; alias: delete)
   list                          Table of sites (--json)
   status                        Services, versions, resources, sites (--json)
@@ -129,12 +140,18 @@ _menu_run() {
 }
 
 # Ask for a domain, offering the registered ones by number. Prints the choice.
-_menu_pick_domain() {
+# "apps" offers only the sites that run a Node.js application.
+_menu_pick_domain() {   # [apps]
   local -a doms=()
-  local d="" i=1 choice=""
-  while read -r d; do [[ -n "$d" ]] && doms+=("$d"); done < <(lib_domains_list)
+  local d="" i=1 choice="" only="${1:-}"
+  while read -r d; do
+    [[ -n "$d" ]] || continue
+    if [[ "$only" == "apps" ]] && ! lib_app_state_load "$d"; then continue; fi
+    doms+=("$d")
+  done < <(lib_domains_list)
   if ((${#doms[@]} == 0)); then
-    printf '%sNo sites have been added yet.%s\n' "$C_YEL" "$C_RST" >&2
+    if [[ "$only" == "apps" ]]; then printf '%sNo Node.js applications yet: add a site and choose "Node.js app".%s\n' "$C_YEL" "$C_RST" >&2
+    else printf '%sNo sites have been added yet.%s\n' "$C_YEL" "$C_RST" >&2; fi
     return 1
   fi
   printf '\n%sWhich site?%s\n' "$C_BLD" "$C_RST" >&2
@@ -217,8 +234,8 @@ lib_menu_main() {
     _menu_item  2 "Add a site"
     _menu_item  3 "Site credentials"
     _menu_item  4 "Site logs"
-    _menu_item  5 "List databases"
-    _menu_item  6 "Create database"
+    _menu_item  5 "Databases"
+    _menu_item  6 "Node.js apps (PM2) and path proxies"
     _menu_item  7 "Remove a site"
     _menu_group "SERVER"
     _menu_item  8 "Status"
@@ -243,8 +260,8 @@ lib_menu_main() {
       2) _menu_add_site ;;
       3) domain="$(_menu_pick_domain)" && _menu_run credentials "$domain" || _menu_pause ;;
       4) domain="$(_menu_pick_domain)" && _menu_run logs "$domain" || _menu_pause ;;
-      5) _menu_run db list ;;
-      6) domain="$(_menu_pick_domain)" && _menu_run db "$domain" || _menu_pause ;;
+      5) _menu_databases ;;
+      6) _menu_apps ;;
       7) _menu_remove_site ;;
       8) _menu_run status ;;
       9) _menu_run doctor ;;
@@ -265,7 +282,7 @@ lib_menu_main() {
 }
 
 _menu_add_site() {
-  local domain="" kind="" email="" www="" ssl="" proxy=""
+  local domain="" kind="" email="" www="" ssl="" proxy="" port="" start=""
   local -a args=()
   _menu_ask domain "Domain (without www, e.g. example.com)"
   [[ -n "$domain" ]] || return 0
@@ -277,12 +294,18 @@ _menu_add_site() {
 
   printf '\n%sWhat kind of site?%s\n' "$C_BLD" "$C_RST"
   printf '  1) PHP site (default)\n  2) WordPress, installed and configured\n'
-  printf '  3) Static files only\n  4) Reverse proxy to a local app (Node, Python, ...)\n'
+  printf '  3) Static files only\n  4) Node.js app, run by PM2\n'
+  printf '  5) Reverse proxy to an app you run yourself (host:port)\n'
   _menu_ask kind "Choice" "1"
   case "$kind" in
     2) args+=(--wordpress) ;;
     3) args+=(--static) ;;
-    4) _menu_ask proxy "Application address" "127.0.0.1:3000"; args+=(--proxy "$proxy") ;;
+    4) _menu_ask port "Port the app listens on (it gets it as PORT)" "$(lib_app_port_pick 2>/dev/null || true)"
+       _menu_ask start "Start command (runs without a shell)" "npm start"
+       args+=(--node)
+       if [[ -n "$port" ]]; then args+=(--port "$port"); fi
+       if [[ -n "$start" && "$start" != "npm start" ]]; then args+=(--start "$start"); fi ;;
+    5) _menu_ask proxy "Application address" "127.0.0.1:3000"; args+=(--proxy "$proxy") ;;
     *) ;;
   esac
 
@@ -296,6 +319,152 @@ _menu_add_site() {
   [[ -n "$email" ]] && args+=(--email "$email")
 
   _menu_run add "${args[@]}"
+}
+
+# Like _menu_run, but the child's standard input is the given value instead of the terminal.
+# Used for secrets: the value is piped in and never appears on a command line.
+_menu_run_input() {   # value args...
+  local value="$1" rc=0
+  shift
+  printf '\n%s%s$ %s %s%s\n\n' "$C_BLD" "$C_CYN" "$MENU_CMD" "$*" "$C_RST"
+  trap ':' INT
+  printf '%s' "$value" | "$SCRIPT_PATH" "$@" || rc=$?
+  trap - INT
+  if (( rc != 0 )); then printf '\n%sThat command exited with status %s.%s\n' "$C_YEL" "$rc" "$C_RST"; fi
+  _menu_pause
+}
+
+_menu_databases() {
+  local choice="" domain=""
+  while true; do
+    printf '\n %sDATABASES%s\n' "$C_BLD" "$C_RST"
+    _menu_rule
+    _menu_item 1 "List databases (sizes, no passwords)"
+    _menu_item 2 "Create or show the database of a site"
+    _menu_item 0 "Back"
+    printf '\n%sChoice: %s' "$C_BLD" "$C_RST"
+    read -r choice </dev/tty || return 0
+    case "$choice" in
+      1) _menu_run db list ;;
+      2) domain="$(_menu_pick_domain)" && _menu_run db "$domain" || _menu_pause ;;
+      0|q|Q|"") return 0 ;;
+      *) printf '%sPick a number from the list.%s\n' "$C_YEL" "$C_RST" ;;
+    esac
+  done
+}
+
+_menu_apps() {
+  local choice="" domain=""
+  while true; do
+    printf '\n %sNODE.JS APPS (PM2)%s   every site runs its own PM2 as its own user\n' "$C_BLD" "$C_RST"
+    _menu_rule
+    _menu_item  1 "List applications"
+    _menu_item  2 "Add a site (choose \"Node.js app\")"
+    _menu_item  3 "Deploy: install dependencies, build, restart"
+    _menu_item  4 "Start"
+    _menu_item  5 "Stop"
+    _menu_item  6 "Restart"
+    _menu_item  7 "Follow the logs"
+    _menu_item  8 "Status of one application"
+    _menu_item  9 "Environment variables"
+    _menu_item 10 "Port, start command, memory limit"
+    _menu_item 11 "Path proxies (example.com/api -> an app)"
+    _menu_item  0 "Back"
+    printf '\n%sChoice: %s' "$C_BLD" "$C_RST"
+    read -r choice </dev/tty || return 0
+    case "$choice" in
+      1) _menu_run app list ;;
+      2) _menu_add_site ;;
+      3) domain="$(_menu_pick_domain apps)" && _menu_run app deploy "$domain" || _menu_pause ;;
+      4) domain="$(_menu_pick_domain apps)" && _menu_run app start "$domain" || _menu_pause ;;
+      5) domain="$(_menu_pick_domain apps)" && _menu_run app stop "$domain" || _menu_pause ;;
+      6) domain="$(_menu_pick_domain apps)" && _menu_run app restart "$domain" || _menu_pause ;;
+      7) domain="$(_menu_pick_domain apps)" && _menu_run app logs "$domain" || _menu_pause ;;
+      8) domain="$(_menu_pick_domain apps)" && _menu_run app status "$domain" || _menu_pause ;;
+      9) domain="$(_menu_pick_domain apps)" && _menu_app_env "$domain" || _menu_pause ;;
+      10) domain="$(_menu_pick_domain apps)" && _menu_app_set "$domain" || _menu_pause ;;
+      11) _menu_proxies ;;
+      0|q|Q|"") return 0 ;;
+      *) printf '%sPick a number from the list.%s\n' "$C_YEL" "$C_RST" ;;
+    esac
+  done
+}
+
+_menu_app_env() {   # domain
+  local domain="$1" choice="" name="" value=""
+  while true; do
+    printf '\n %sENVIRONMENT OF %s%s   stored root-only, never logged\n' "$C_BLD" "$domain" "$C_RST"
+    _menu_rule
+    _menu_item 1 "List the names"
+    _menu_item 2 "Set a variable (the value is typed hidden)"
+    _menu_item 3 "Remove a variable"
+    _menu_item 4 "Add this site's database login (DB_*, DATABASE_URL)"
+    _menu_item 0 "Back"
+    printf '\n%sChoice: %s' "$C_BLD" "$C_RST"
+    read -r choice </dev/tty || return 0
+    case "$choice" in
+      1) _menu_run app env "$domain" list ;;
+      2) _menu_ask name "Name (A-Z, 0-9 and _)"
+         if [[ -n "$name" ]]; then
+           printf '%sValue (hidden): %s' "$C_BLD" "$C_RST"
+           IFS= read -r -s value </dev/tty || value=""
+           printf '\n'
+           _menu_run_input "$value" app env "$domain" set "$name"
+           value=""
+         fi ;;
+      3) _menu_ask name "Name to remove"
+         if [[ -n "$name" ]]; then _menu_run app env "$domain" unset "$name"; fi ;;
+      4) _menu_run app env "$domain" import-db ;;
+      0|q|Q|"") return 0 ;;
+      *) printf '%sPick a number from the list.%s\n' "$C_YEL" "$C_RST" ;;
+    esac
+  done
+}
+
+_menu_app_set() {   # domain
+  local domain="$1" port="" start="" mem="" current=""
+  local -a args=()
+  lib_app_state_load "$domain" || return 0
+  current="${APP_SCRIPT:-$APP_START}"
+  printf '\n%sPress Enter to keep a value.%s\n' "$C_DIM" "$C_RST"
+  _menu_ask port "Port" "$APP_PORT"
+  _menu_ask start "Start command, or a file such as dist/main.js" "$current"
+  _menu_ask mem "Memory limit (e.g. 512M, or none)" "${APP_MEMORY:-none}"
+  if [[ -n "$port" && "$port" != "$APP_PORT" ]]; then args+=(--port "$port"); fi
+  if [[ -n "$start" && "$start" != "$current" ]]; then
+    if [[ "$start" =~ ^[^[:space:]]+\.(c|m)?js$ ]]; then args+=(--script "$start"); else args+=(--start "$start"); fi
+  fi
+  if [[ -n "$mem" && "$mem" != "${APP_MEMORY:-none}" ]]; then args+=(--memory "$mem"); fi
+  if ((${#args[@]} == 0)); then printf '%sNothing changed.%s\n' "$C_DIM" "$C_RST"; _menu_pause; return 0; fi
+  _menu_run app set "$domain" "${args[@]}"
+}
+
+_menu_proxies() {
+  local choice="" domain="" path="" target=""
+  while true; do
+    printf '\n %sPATH PROXIES%s   example.com/api/... -> an application, the rest of the site stays\n' "$C_BLD" "$C_RST"
+    _menu_rule
+    _menu_item 1 "List path proxies"
+    _menu_item 2 "Add a path proxy"
+    _menu_item 3 "Remove a path proxy"
+    _menu_item 0 "Back"
+    printf '\n%sChoice: %s' "$C_BLD" "$C_RST"
+    read -r choice </dev/tty || return 0
+    case "$choice" in
+      1) _menu_run proxy list ;;
+      2) if domain="$(_menu_pick_domain)"; then
+           _menu_ask path "Path" "/api/"
+           _menu_ask target "Application address" "127.0.0.1:$(lib_app_port_pick 2>/dev/null || printf '3001')"
+           _menu_run proxy add "$domain" "$path" "$target"
+         else _menu_pause; fi ;;
+      3) if domain="$(_menu_pick_domain)"; then
+           _menu_ask path "Path to remove (e.g. /api/)"
+           if [[ -n "$path" ]]; then _menu_run proxy remove "$domain" "$path"; else _menu_pause; fi
+         else _menu_pause; fi ;;
+      0|q|Q|"") return 0 ;;
+      *) printf '%sPick a number from the list.%s\n' "$C_YEL" "$C_RST" ;;
+    esac
+  done
 }
 
 _menu_remove_site() {

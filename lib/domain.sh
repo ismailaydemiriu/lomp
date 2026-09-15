@@ -116,6 +116,19 @@ lib_domain_state_save() {
   chmod 0600 "$tmp" && mv -f "$tmp" "$f"
 }
 
+# Keep a copy of domain.json and put it back if the run dies before lib_rollback_clear, so a
+# command that records a change and then cannot apply it does not leave the state ahead of
+# the configuration. Starts a fresh rollback stack.
+lib_domain_state_guard() {   # domain
+  local f="" bak=""
+  (( OPT_DRY_RUN )) && return 0
+  f="$(lib_domain_json "$1")"
+  bak="$(lib_mktemp)"
+  cp -f "$f" "$bak"
+  lib_rollback_clear
+  lib_rollback_push "cp -f '${bak}' '${f}'"
+}
+
 # =============================================================================
 #  add
 # =============================================================================
@@ -145,8 +158,9 @@ EOF
 }
 
 lib_domain_parse_add_args() {
-  local a=""
+  local a="" static_set=0
   lib_domain_state_reset
+  APP_OPT_NODE=0 APP_OPT_PORT="" APP_OPT_START="" APP_OPT_SCRIPT=""
   D_DOMAIN="${1,,}"; shift
   D_EMAIL="$DEFAULT_EMAIL"
   D_PHP="$PHP_VERSION"
@@ -162,7 +176,11 @@ lib_domain_parse_add_args() {
       --memory)       D_MEMORY="${1:-}"; shift ;;
       --upload)       D_UPLOAD="${1:-}"; shift ;;
       --proxy)        D_MODE="proxy"; D_PROXY="${1:-}"; shift ;;
-      --static-paths) D_STATIC_PATHS="${1:-}"; shift ;;
+      --node)         D_MODE="proxy"; APP_OPT_NODE=1 ;;
+      --port)         APP_OPT_PORT="${1:-}"; shift ;;
+      --start)        APP_OPT_START="${1:-}"; shift ;;
+      --script)       APP_OPT_SCRIPT="${1:-}"; shift ;;
+      --static-paths) D_STATIC_PATHS="${1:-}"; static_set=1; shift ;;
       --ws-path)      D_WS_PATH="${1:-}"; shift ;;
       --static)       D_MODE="static" ;;
       --wordpress)    D_MODE="wordpress"; DOM_OPT_WITH_DB=1 ;;
@@ -182,8 +200,22 @@ lib_domain_parse_add_args() {
   done
   lib_domain_valid "$D_DOMAIN" || lib_die "Invalid domain name '${D_DOMAIN}'" "not a valid FQDN (use the bare domain, without http:// or paths)" "setup.sh add example.com"
   [[ "$D_DOMAIN" == www.* ]] && lib_die "Use the apex domain and --www instead of www.${D_DOMAIN#www.}" "" "setup.sh add ${D_DOMAIN#www.} --www"
+  if (( APP_OPT_NODE )); then
+    [[ -z "$D_PROXY" ]] || lib_die "--node and --proxy cannot be combined" "a Node.js site proxies to its own application" "drop --proxy; choose the port with --port"
+    [[ -z "$APP_OPT_START" || -z "$APP_OPT_SCRIPT" ]] || lib_die "--start and --script cannot be combined" "" "use one of them"
+    [[ -z "$APP_OPT_START" ]] || lib_app_start_valid "$APP_OPT_START" || lib_die "Invalid --start '${APP_OPT_START}'" \
+      "the command runs without a shell: words only, no quotes, pipes or &&" "put it into a package.json script and use --start \"npm run <name>\""
+    [[ -z "$APP_OPT_SCRIPT" ]] || lib_app_script_valid "$APP_OPT_SCRIPT" || lib_die "Invalid --script '${APP_OPT_SCRIPT}'" "a file inside the app directory, such as dist/main.js" "--script dist/main.js"
+    [[ -z "$APP_OPT_PORT" || "$APP_OPT_PORT" =~ ^[0-9]{4,5}$ ]] || lib_die "Invalid --port '${APP_OPT_PORT}'" "a number between 1024 and 65535" "--port 3000"
+    # a Node.js application serves its own assets: paths served from disk would shadow them
+    if (( ! static_set )); then D_STATIC_PATHS=""; fi
+  elif [[ -n "${APP_OPT_PORT}${APP_OPT_START}${APP_OPT_SCRIPT}" ]]; then
+    lib_die "--port, --start and --script belong to --node" "" "setup.sh add ${D_DOMAIN} --node --port 3000"
+  fi
   if [[ "$D_MODE" == "proxy" ]]; then
-    [[ "$D_PROXY" =~ ^[A-Za-z0-9.-]+:[0-9]{2,5}$ ]] || lib_die "Invalid --proxy target '${D_PROXY}'" "expected host:port" "--proxy 127.0.0.1:3000"
+    if (( ! APP_OPT_NODE )); then
+      [[ "$D_PROXY" =~ ^[A-Za-z0-9.-]+:[0-9]{2,5}$ ]] || lib_die "Invalid --proxy target '${D_PROXY}'" "expected host:port" "--proxy 127.0.0.1:3000"
+    fi
     if [[ -n "$D_WS_PATH" ]]; then lib_note "--ws-path is no longer needed: a proxy site passes WebSocket upgrades on every path"; fi
   fi
   if [[ "$D_MODE" == "php" || "$D_MODE" == "wordpress" ]]; then
@@ -209,12 +241,13 @@ lib_domain_add_main() {
   lib_require_tools
   lib_require_installed
   lib_domain_parse_add_args "$@"
-  local domain="$D_DOMAIN" total=6 http_expect="200|301|302" rc=""
+  local domain="$D_DOMAIN" total=6 http_expect="200|301|302" rc="" why=""
   lib_domain_registered "$domain" && lib_die "Site ${domain} already exists" "registered in $(lib_domain_state_dir "$domain")" "use 'setup.sh remove ${domain}' first, or 'renew-ssl' / 'db' to change it"
   lib_ols_is_installed || lib_die "OpenLiteSpeed is not installed" "run install first" "sudo ./setup.sh install"
   (( D_SSL_WANTED )) && total=$((total + 1))
   (( DOM_OPT_WITH_DB )) && total=$((total + 1))
   [[ "$D_MODE" == "wordpress" ]] && total=$((total + 1))
+  (( APP_OPT_NODE )) && total=$((total + 1))
   lib_steps_begin "$total"
   lib_rollback_clear
   lib_system_profile
@@ -228,6 +261,18 @@ lib_domain_add_main() {
   if (( D_CLOUDFLARE )) && [[ "$(lib_manifest_get '.cloudflare.enabled')" != "true" ]]; then lib_cf_enable; fi
   [[ "$(lib_manifest_get '.cloudflare.enabled')" == "true" ]] && D_CLOUDFLARE=1
   if [[ "$D_MODE" == "wordpress" ]] && ! lib_db_installed; then lib_die "WordPress needs MariaDB" "MariaDB is not installed" "run: setup.sh install"; fi
+  if (( APP_OPT_NODE )); then
+    # before anything is created, so a missing runtime or a taken port stops the run here
+    lib_app_node_ensure
+    if [[ -z "$APP_OPT_PORT" ]]; then
+      APP_OPT_PORT="$(lib_app_port_pick)" || lib_die "No free port between ${APP_PORT_MIN} and ${APP_PORT_MAX}" "" "choose one with --port"
+    fi
+    why="$(lib_app_port_conflict "$APP_OPT_PORT" || true)"
+    [[ -z "$why" ]] || lib_die "Port ${APP_OPT_PORT} cannot be used for ${domain}" "$why" "choose another one with --port, or leave --port out to get a free one"
+    APP_OPT_PORT="$((10#$APP_OPT_PORT))"
+    D_PROXY="127.0.0.1:${APP_OPT_PORT}"
+    lib_ok "Node.js $(node -v 2>/dev/null || printf '(not installed yet)') with PM2; the application will listen on ${D_PROXY}"
+  fi
   (( OPT_DRY_RUN )) || lib_rollback_push "rm -rf '$(lib_domain_state_dir "$domain")'"
   lib_domain_state_save
   lib_ok "Preflight OK (user ${D_USER}, home ${D_HOME})"
@@ -282,9 +327,18 @@ lib_domain_add_main() {
   lib_domain_fail2ban_regen
   lib_ok "Housekeeping done"
 
-  # ---- 9 summary -----------------------------------------------------------
-  lib_step "Done"
+  # From here on nothing undoes the site: the vhost, certificate and database are in place,
+  # and creating them again on a retry would only burn Let's Encrypt rate limits.
   lib_rollback_clear
+
+  # ---- 9 Node.js application -------------------------------------------------
+  if (( APP_OPT_NODE )); then
+    lib_step "Node.js application (PM2)"
+    lib_app_provision_new
+  fi
+
+  # ---- 10 summary ----------------------------------------------------------
+  lib_step "Done"
   lib_manifest_set '.updated_at' "$(lib_iso_now)"
   lib_domain_summary
 }
@@ -448,8 +502,15 @@ lib_domain_php_probe() {
 #  logrotate / fail2ban regeneration (state -> config)
 # =============================================================================
 lib_domain_logrotate_regen() {
-  local d="" paths=()
+  local d="" line="" u="" g="" h="" paths=() apps=()
   while read -r d; do [[ -n "$d" ]] && paths+=("$(lib_domain_home "$d")/logs/*.log"); done < <(lib_domains_list)
+  # Node.js sites: PM2 writes into the site user's own ~/.pm2, so logrotate works there as that
+  # user (as root it would follow whatever links the user put in place of the logs)
+  while read -r d; do
+    [[ -n "$d" ]] || continue
+    line="$(jq -r 'select(has("app")) | "\(.user) \(.group) \(.home)"' "$(lib_domain_json "$d")" 2>/dev/null || true)"
+    if [[ -n "$line" ]]; then apps+=("$line"); fi
+  done < <(lib_domains_list)
   {
     printf '# Managed by lompstack - site logs (OpenLiteSpeed rolling is disabled for sites; logrotate owns rotation)\n'
     if ((${#paths[@]} > 0)); then
@@ -468,6 +529,11 @@ lib_domain_logrotate_regen() {
 }
 EOF
     fi
+    for line in "${apps[@]}"; do
+      read -r u g h <<<"$line"
+      printf '\n%s/.pm2/logs/*.log %s/.pm2/pm2.log\n' "$h" "$h"
+      printf '{\n  daily\n  missingok\n  rotate 14\n  compress\n  delaycompress\n  notifempty\n  copytruncate\n  dateext\n  su %s %s\n}\n' "$u" "$g"
+    done
   } | lib_write_file "$LOGROTATE_SITES_FILE" 0644 root:root
   return 0
 }
@@ -603,6 +669,12 @@ lib_domain_summary() {
   printf '\n%s%sSite %s is ready%s\n' "$C_BLD" "$C_GRN" "$D_DOMAIN" "$C_RST"
   lib_print_kv "URL"         "$( (( D_SSL )) && printf 'https' || printf 'http')://${D_DOMAIN}/$( (( D_WWW )) && printf '  (+ www)')"
   lib_print_kv "Mode"        "${D_MODE}${D_PROXY:+ -> $D_PROXY}"
+  if lib_app_state_load "$D_DOMAIN"; then
+    lib_print_kv "Application" "${D_HOME}/app, run by PM2 ($(lib_app_unit_name "$D_IDENT")): ${APP_RESULT:-prepared}"
+    if [[ "$APP_RESULT" != "running" ]]; then
+      lib_print_kv "Next"      "put the code into ${D_HOME}/app (chown -R ${D_USER}:${D_GROUP}), then: setup.sh app deploy ${D_DOMAIN}"
+    fi
+  fi
   lib_print_kv "Document root" "${D_HOME}/public_html"
   lib_print_kv "System user" "${D_USER} (upload with: chown -R ${D_USER}:${D_GROUP})"
   [[ -n "$D_PHP" ]] && lib_print_kv "PHP" "${D_PHP} (memory ${D_MEMORY}, upload ${D_UPLOAD}, workers ${D_PHP_CHILDREN})"
@@ -659,6 +731,9 @@ lib_domain_credentials_show() {
   lib_print_kv "System user"   "${D_USER}:${D_GROUP}"
   [[ -n "$D_PHP" ]] && lib_print_kv "PHP" "${D_PHP} (memory ${D_MEMORY}, upload ${D_UPLOAD}, workers ${D_PHP_CHILDREN})"
   [[ -n "$D_PROXY" ]] && lib_print_kv "Proxy target" "$D_PROXY"
+  if lib_app_state_load "$domain"; then
+    lib_print_kv "Application" "${D_HOME}/app on 127.0.0.1:${APP_PORT}, $(lib_app_unit_name "$D_IDENT"), wanted state: $( (( APP_ENABLED )) && printf 'running' || printf 'stopped') (setup.sh app status ${domain})"
+  fi
   while read -r pp pt; do
     if [[ -n "$pp" ]]; then lib_print_kv "Path proxy" "${pp} -> ${pt}"; fi
   done <<<"$D_PATH_PROXIES"
@@ -749,8 +824,15 @@ lib_domain_remove_main() {
   printf '\n%sThis will remove %s%s\n' "$C_BLD" "$domain" "$C_RST"
   lib_note "vhost + listener maps (archived), $( (( keep_files )) && printf 'files KEPT' || printf "files ${D_HOME} DELETED"), $( (( keep_db )) && printf 'database KEPT' || printf 'database DROPPED'), $( (( keep_ssl )) && printf 'certificate KEPT' || printf 'certificate deleted')"
   lib_note "a safety backup (files + database) is written to ${BACKUP_ROOT}/${domain}/ first"
+  if lib_app_state_load "$domain"; then
+    local other=""
+    other="$(_app_port_claimed_by "$APP_PORT" "$domain" || true)"
+    if [[ -n "$other" ]]; then lib_warn "${other} also sends requests to 127.0.0.1:${APP_PORT}; they fail once this application is gone"; fi
+    lib_note "its Node.js application and $(lib_app_unit_name "$D_IDENT") are stopped and removed"
+    _app_site_lock "$domain"   # not while a deploy of it is still running
+  fi
   lib_confirm "Continue?" n || lib_die "Removal cancelled" "" "re-run with --yes to skip the question"
-  lib_steps_begin 7
+  lib_steps_begin 8
   lib_rollback_clear
 
   lib_step "Scheduled tasks"
@@ -760,6 +842,10 @@ lib_domain_remove_main() {
   lib_step "OpenLiteSpeed configuration"
   lib_ols_vhost_purge "$domain" 1
   lib_ok "vhost removed and archived under ${STATE_DIR}/archive/vhosts/"
+
+  # before the backup, and long before the files: nothing may keep running out of the home
+  lib_step "Node.js application"
+  lib_app_teardown
 
   lib_step "Safety backup"
   if [[ -d "$D_HOME" ]]; then

@@ -186,6 +186,7 @@ sudo lomp renew-ssl example.com
 sudo lomp add shop.example.com --wordpress          # WordPress with database and cache
 sudo lomp add api.example.com --proxy 127.0.0.1:3000 # Node/Python app behind OpenLiteSpeed
 sudo lomp proxy add example.com /api/ 127.0.0.1:3001 # an app under a path of an existing site
+sudo lomp add node.example.com --node                # Node.js app run by PM2 (see below)
 sudo lomp add cdn.example.com --static              # static site, no PHP
 sudo lomp db shop.example.com                       # create or show the database
 sudo lomp db list                                   # every site's database, user and size
@@ -236,6 +237,33 @@ routes under `/api`. WebSocket upgrades on that path are passed through as well.
 the site is untouched, a failed configuration test rolls the change back, and `doctor` warns
 when nothing listens on a target.
 
+### Node.js applications (PM2)
+
+A Node.js site is a reverse proxy site whose application lompstack runs for you with PM2:
+
+```bash
+sudo lomp add app.example.com --node                  # takes a free port from 3000 up
+# put the code into /home/app.example.com/app (owned by the site user), then:
+sudo lomp app deploy app.example.com                  # npm ci (or pnpm / yarn), build, start
+sudo lomp app list                                    # status, CPU, memory, uptime, restarts
+sudo lomp app logs app.example.com                    # follow the application's output
+sudo lomp app restart app.example.com
+printf '%s' 'the-secret' | sudo lomp app env app.example.com set API_KEY
+sudo lomp app env app.example.com import-db           # DB_* and DATABASE_URL of the site's database
+sudo lomp app set app.example.com --script dist/main.js --memory 512M
+```
+
+- Every Node.js site runs its own PM2 daemon as the site's Linux user, started at boot by
+  `pm2-<site>.service`. Nothing runs as root, and one site cannot touch another site's
+  processes. The price is roughly 50-80 MB of memory per Node.js site.
+- The application gets its port in `PORT` and must listen on it; 127.0.0.1 is enough.
+  `npm start` is the default. When that script is plain `node <file>`, PM2 runs node itself,
+  so a `--memory` limit watches the application rather than npm.
+- Environment values are stored root-only and handed to the application through PM2. They
+  are never written to the log, and `env set` never takes them from the command line.
+- WebSocket upgrades are passed through. Behind OpenLiteSpeed, Express needs
+  `app.set('trust proxy', 'loopback')` to see HTTPS and the client's address.
+
 ---
 
 ## WebAdmin access
@@ -282,7 +310,8 @@ you are already in.
 ├── private/                  0700  sessions, temp uploads, secrets - never served
 ├── logs/                     0750  access.log, error.log (rotated by logrotate)
 ├── backups/                  0700
-└── app/                      proxy mode only: your Node/Python application
+├── app/                      proxy mode only: your Node/Python application
+└── .pm2/                     0700  Node.js sites: PM2 state, ecosystem file, application logs
 ```
 
 PHP runs as the site's own user through a per-vhost LSAPI processor, so one compromised
@@ -443,6 +472,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
 | `lib/db.sh` | MariaDB install, hardening, tuning, per-site databases, Redis |
 | `lib/ssl.sh` | certbot, DNS checks, certificate deployment, renewal hook |
 | `lib/domain.sh` | Site lifecycle, users and directories, WordPress, logrotate and jail regeneration |
+| `lib/proxy.sh` | Path proxies: an application under a path of any site |
+| `lib/app.sh` | Node.js applications: one PM2 daemon per site as the site user, systemd units, deploy, environment |
 | `lib/cloudflare.sh` | Trusted proxy ranges, real client IP, API token, edge bans |
 | `lib/backup.sh` | Backup, restore, retention, encryption, remotes, scheduling |
 | `lib/monitor.sh` | `status`, `doctor`, health check, notifications |

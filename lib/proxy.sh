@@ -84,15 +84,7 @@ lib_proxy_state_del() {   # domain path
 
 # The state file is restored from a copy if applying the new configuration fails; the
 # OpenLiteSpeed side is rolled back by lib_ols_change_begin's own snapshot.
-_proxy_state_guard() {   # domain
-  local f="" bak=""
-  (( OPT_DRY_RUN )) && return 0
-  f="$(lib_domain_json "$1")"
-  bak="$(lib_mktemp)"
-  cp -f "$f" "$bak"
-  lib_rollback_clear
-  lib_rollback_push "cp -f '${bak}' '${f}'"
-}
+_proxy_state_guard() { lib_domain_state_guard "$@"; }
 
 lib_proxy_add() {
   local domain="${1:-}" raw="${2:-}" target="${3:-}" path="" why="" old="" scheme="http"
