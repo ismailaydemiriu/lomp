@@ -63,7 +63,7 @@ COMMANDS
                                 Pull from git (the first time: clone), install dependencies
                                 when they changed, build with a memory limit, restart
   app deploy-key <domain>       Create or print the site's read-only key for a private repo
-  app set <domain> [--port N] [--start CMD | --script FILE] [--memory 512M|none]
+  app set <domain> [--port N] [--start CMD | --script FILE] [--memory 512M|none] [--no-git]
   app env <domain> list [--show] | set NAME | unset NAME... | import-db
                                 Values come from stdin or a hidden prompt, never from
                                 the command line; import-db adds DB_* and DATABASE_URL

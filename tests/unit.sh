@@ -1415,6 +1415,8 @@ D_HOME="$SITES_ROOT/app.example.com"   # Git Bash rewrites paths passed to jq.ex
 # no site users here: run "as the site user" in a subshell in that directory instead
 _orig_as="$(declare -f _app_as)"
 assert_has "_app_as starts from an empty environment" "env -i" "$_orig_as"
+assert_has "_app_as hands the site user no lock descriptor" "200>&- 201>&-" "$_orig_as"
+assert_has "_app_as creates nothing world-readable" "umask 027" "$_orig_as"
 _app_as() { local dir="$1"; shift; ( cd "$dir" && "$@" ); }
 
 APP_SCRIPT=""; APP_START="npm start"
@@ -1567,16 +1569,23 @@ assert_false "git: plain http is refused"          lib_app_git_url_valid http://
 assert_false "git: ext:: runs commands, refused"   lib_app_git_url_valid 'ext::sh -c touch% /tmp/x'
 assert_false "git: an option is refused"           lib_app_git_url_valid --upload-pack=touch
 assert_false "git: empty is refused"               lib_app_git_url_valid ""
+assert_false "git: a user that reads as an option" lib_app_git_url_valid 'git@-oProxyCommand:x'
+assert_false "git: an ssh:// user as an option"    lib_app_git_url_valid 'ssh://-oProxyCommand@host/x'
+assert_false "git: a path that reads as an option" lib_app_git_url_valid 'git@host:-oProxyCommand=x'
+assert_false "git: a token in the query string"    lib_app_git_url_valid 'https://gitlab.example.com/o/r.git?private_token=abc'
 assert_true  "branch: main"                        lib_app_git_branch_valid main
 assert_true  "branch: release/1.2"                 lib_app_git_branch_valid release/1.2
 assert_false "branch: an option is refused"        lib_app_git_branch_valid --orphan
 assert_false "branch: .. is refused"               lib_app_git_branch_valid a..b
+assert_false "branch: .lock is refused"            lib_app_git_branch_valid topic.lock
+assert_false "branch: a hidden component"          lib_app_git_branch_valid feature/.x
+assert_false "branch: HEAD is not a branch"        lib_app_git_branch_valid HEAD
 assert_true  "install: the first deploy installs"  _app_install_needed abc "" 0
 assert_true  "install: a changed lockfile"         _app_install_needed abc def 1
 assert_true  "install: node_modules missing"       _app_install_needed abc abc 0
 assert_false "install: nothing changed"            _app_install_needed abc abc 1
 assert_eq "git arguments cannot be read as options" "" \
-  "$(grep -nE '_app_git (clone|-C app fetch)' "$ROOT/lib/app.sh" | grep -v -- ' -- ' || true)"
+  "$(grep -nE '_app_git (clone|ls-remote|-C app fetch)' "$ROOT/lib/app.sh" | grep -v -- ' -- ' || true)"
 lib_domain_parse_add_args gitapp.example.com --node --git git@github.com:o/r.git --branch main
 assert_eq "--git is kept for the first deploy" "git@github.com:o/r.git" "$APP_OPT_GIT"
 assert_eq "--branch too" "main" "$APP_OPT_BRANCH"
@@ -1590,21 +1599,37 @@ D_DOMAIN="git.example.com"; D_IDENT="git_example_com"; D_USER="git_example_com";
 D_HOME="$SITES_ROOT/git.example.com"; D_MODE="proxy"; D_PROXY="127.0.0.1:3300"; D_STATUS="active"; D_CREATED="2025-01-01T00:00:00Z"
 lib_domain_state_save
 _dj="$(lib_domain_json git.example.com)"; _dlog="$(lib_domain_state_dir git.example.com)/deploy.log"
-_orig_fetch="$(declare -f lib_app_fetch)"; _orig_build="$(declare -f lib_app_build)"
+_orig_fetch="$(declare -f lib_app_fetch)"; _orig_build="$(declare -f lib_app_build)"; _orig_git="$(declare -f _app_git)"
 _quiet_deploy() { lib_app_deploy_run >/dev/null 2>&1; }
 lib_app_fetch() { printf 'cloning https://oauth2:leaked-token-123@example.com/x.git\n'; APP_GIT_COMMIT="abc1234"; return 0; }
-lib_app_build() { printf 'npm ci ok\n'; APP_DEPS_HASH_NEW="hash-1"; return 0; }
+lib_app_build() { printf 'npm ci ok\n'; return 0; }
 APP_GIT_URL="git@github.com:o/r.git"; APP_GIT_BRANCH="main"; APP_DEPS_HASH=""
 assert_true  "a deploy that works succeeds"      _quiet_deploy
 assert_eq    "the commit is recorded"            "abc1234" "$(jq -r '.app.last_deploy.commit' "$_dj")"
 assert_eq    "the deploy is recorded as ok"      "true"    "$(jq -r '.app.last_deploy.ok' "$_dj")"
-assert_eq    "the dependency hash is remembered" "hash-1"  "$(jq -r '.app.deps_hash' "$_dj")"
 assert_has   "the deploy output is kept"         "npm ci ok" "$(cat "$_dlog")"
 assert_lacks "with secrets masked"               "leaked-token-123" "$(cat "$_dlog")"
-lib_app_build() { printf 'npm ERR! boom\n'; APP_DEPS_HASH_NEW="hash-2"; APP_BUILD_ERROR="npm ci failed"; return 1; }
-assert_false "a failed build fails the deploy"   _quiet_deploy
-assert_eq    "the failure is recorded"           "false"   "$(jq -r '.app.last_deploy.ok' "$_dj")"
-assert_eq    "and the last good hash is kept"    "hash-1"  "$(jq -r '.app.deps_hash' "$_dj")"
+_app_deps_record "hash-1" >/dev/null 2>&1
+assert_eq    "an install records its dependency hash" "hash-1" "$(jq -r '.app.deps_hash' "$_dj")"
+_app_deps_record "" >/dev/null 2>&1
+assert_eq    "an install under way clears it"         "null"   "$(jq -r '.app.deps_hash' "$_dj")"
+# a build that fails on fetched code puts the previous commit back and builds that again
+_git_calls=""; _builds=0
+_app_git() { _git_calls+="$* | "; if [[ "$*" == *"rev-parse --verify -q HEAD"* ]]; then printf 'newcommitsha\n'; fi; return 0; }
+lib_app_fetch() { APP_GIT_PREV="oldcommitsha"; APP_GIT_COMMIT="newcomm"; return 0; }
+lib_app_build() {
+  _builds=$((_builds + 1))
+  if (( _builds == 1 )); then printf 'npm ERR! boom\n'; APP_BUILD_ERROR="npm run build failed"; return 1; fi
+  printf 'rebuilt the old commit\n'; return 0
+}
+assert_false "a failed build fails the deploy"          _quiet_deploy
+assert_has   "the previous commit is checked out again" "-C app checkout -q -f -B main oldcommitsha" "$_git_calls"
+assert_eq    "and built again"                          "2" "$_builds"
+assert_has   "the error says the app was put back"      "put back on oldcomm" "$APP_BUILD_ERROR"
+assert_eq    "the failure is recorded"                  "false"   "$(jq -r '.app.last_deploy.ok' "$_dj")"
+assert_eq    "with the commit that failed"              "newcomm" "$(jq -r '.app.last_deploy.commit' "$_dj")"
+assert_has   "the rebuild is in the deploy log"         "rebuilt the old commit" "$(cat "$_dlog")"
+eval "$_orig_git"
 lib_app_fetch() { APP_BUILD_ERROR="clone failed"; return 1; }
 lib_app_build() { printf 'should not run\n'; return 0; }
 assert_false "a failed fetch fails the deploy"   _quiet_deploy
@@ -1614,6 +1639,42 @@ lib_app_build() { printf 'built without git\n'; return 0; }
 assert_true  "without a repository only the build runs" _quiet_deploy
 assert_has   "and its output is kept"            "built without git" "$(cat "$_dlog")"
 eval "$_orig_fetch"; eval "$_orig_build"
+
+# the install: which command, NODE_ENV kept out of it, and the dependency hash around it
+_orig_as2="$(declare -f _app_as)"; _orig_limits="$(declare -f _app_build_limits)"
+_as_cmds=""; _install_rc=0
+_app_as() {
+  local dir="$1"; shift
+  if [[ "$1" == "timeout" && "$2" == "-k" ]]; then _as_cmds+="${*: -1} | "; return "$_install_rc"; fi
+  ( cd "$dir" && "$@" )
+}
+_app_build_limits() { APP_AS_WRAP=(); }
+mkdir -p "$D_HOME/app"
+printf '{"name":"x","version":"1.0.0"}' >"$D_HOME/app/package.json"
+APP_DEPS_HASH=""
+assert_true  "build: a project without a lockfile"        lib_app_build
+assert_has   "installs without creating a lockfile"       "npm install --include=dev --no-package-lock" "$_as_cmds"
+assert_has   "with NODE_ENV out of the way"               "unset NODE_ENV" "$_as_cmds"
+assert_eq    "and records the hash once it is installed"  "$APP_DEPS_HASH_NEW" "$(jq -r '.app.deps_hash' "$_dj")"
+: >"$D_HOME/app/package-lock.json"; _as_cmds=""
+assert_true  "build: a project with a lockfile"           lib_app_build
+assert_has   "installs exactly that lockfile"             "npm ci --include=dev" "$_as_cmds"
+_install_rc=1; printf '{"name":"x","version":"1.0.1"}' >"$D_HOME/app/package.json"
+assert_false "build: a failing install fails"             lib_app_build
+assert_eq    "and leaves no dependency hash behind"       "null" "$(jq -r '.app.deps_hash' "$_dj")"
+_install_rc=0
+eval "$_orig_as2"; eval "$_orig_limits"
+
+# a step's output goes to the deploy log; a process it leaves behind cannot hold things up
+_lf="$TMP/logged.out"; : >"$_lf"
+_app_logged "$_lf" bash -c 'echo step-output; exit 3' >/dev/null 2>&1 && _lrc=0 || _lrc=$?
+assert_eq  "_app_logged returns the status of the step" "3" "$_lrc"
+assert_has "and keeps its output"                       "step-output" "$(cat "$_lf")"
+_t0=$SECONDS
+_app_logged "$_lf" bash -c 'sleep 30 & echo left-behind' >/dev/null 2>&1 || true
+assert_true "a process left behind does not hold the deploy up" test $((SECONDS - _t0)) -lt 15
+# tee lives as long as such a process does: it must not keep the site or the global lock
+assert_has "the deploy log's tee holds no lock descriptor" "200>&- 201>&-" "$(declare -f _app_logged)"
 rm -rf "$(lib_domain_state_dir git.example.com)"
 lib_domain_state_reset
 

@@ -28,7 +28,7 @@ APP_GIT_URL="" APP_GIT_BRANCH="" APP_DEPS_HASH=""
 APP_OPT_NODE=0 APP_OPT_PORT="" APP_OPT_START="" APP_OPT_SCRIPT="" APP_OPT_GIT="" APP_OPT_BRANCH=""
 # outcome of lib_app_apply (running | waiting | stopped | failed) and a sentence for humans
 APP_RESULT="" APP_RESULT_MSG="" APP_BUILD_ERROR="" APP_FILE_CHANGED=0
-APP_DEPS_HASH_NEW="" APP_GIT_COMMIT=""
+APP_DEPS_HASH_NEW="" APP_GIT_COMMIT="" APP_GIT_PREV=""
 # commands put in front of the switch to the site user (resource limits of a build)
 APP_AS_WRAP=()
 
@@ -41,7 +41,7 @@ Usage: setup.sh app list [--json]
        setup.sh app deploy <domain> [--git URL [--branch B]]
                                         pull (git), install dependencies, build, restart
        setup.sh app deploy-key <domain> a key for a private repository (prints the public key)
-       setup.sh app set <domain> [--port N] [--start "npm start" | --script dist/main.js] [--memory 512M|none]
+       setup.sh app set <domain> [--port N] [--start "npm start" | --script dist/main.js] [--memory 512M|none] [--no-git]
        setup.sh app env <domain> list [--show] | set NAME | unset NAME... | import-db
   Create a Node.js site with: setup.sh add app.example.com --node [--port N] [--start CMD] [--git URL]
   The application must listen on the port in $PORT. "env set" reads the value from standard
@@ -73,10 +73,12 @@ lib_app_main() {
 # =============================================================================
 #  Acting as the site user
 # =============================================================================
+# umask 027, and none of lompstack's lock descriptors (200 global, 201 site): a process that a
+# build or an install script leaves running must not keep every later command locked out.
 _app_as() {   # dir cmd...   (the site in D_*)
   local dir="$1"; shift
-  "${APP_AS_WRAP[@]}" runuser -u "$D_USER" -- env -i -C "$dir" HOME="$D_HOME" PM2_HOME="${D_HOME}/.pm2" \
-    PATH="$APP_PATH_ENV" LANG="C.UTF-8" "$@"
+  ( umask 027 && exec "${APP_AS_WRAP[@]}" runuser -u "$D_USER" -- env -i -C "$dir" HOME="$D_HOME" PM2_HOME="${D_HOME}/.pm2" \
+    PATH="$APP_PATH_ENV" LANG="C.UTF-8" "$@" 200>&- 201>&- )
 }
 
 # stdin -> file, written by the site user (0600, temporary name then rename).
@@ -189,18 +191,23 @@ lib_app_script_valid() {   # path inside app/
 # URL with a user or password in it (it would live in .git/config, backups and the process
 # list - a deploy key does the same job), git's command-running transports (ext::, fd::) and
 # anything that could be read as an option.
+# Users and hosts start with a letter or digit, so no part can pass for an ssh option; "?" and
+# "#" are refused because a query string is where tokens hide.
 lib_app_git_url_valid() {   # url
   local u="$1"
-  [[ -n "$u" && "$u" != -* && "$u" != *[[:space:]]* ]] || return 1
-  if [[ "$u" =~ ^https://[^/@]+/[^[:space:]]+$ ]]; then return 0; fi
-  if [[ "$u" =~ ^ssh://([A-Za-z0-9._-]+@)?[A-Za-z0-9.-]+(:[0-9]+)?/[^[:space:]]+$ ]]; then return 0; fi
-  if [[ "$u" =~ ^[A-Za-z0-9._-]+@[A-Za-z0-9.-]+:[^/:][^[:space:]]*$ ]]; then return 0; fi
+  [[ -n "$u" && "$u" != -* && "$u" != *[[:space:]]* && "$u" != *[?#]* ]] || return 1
+  if [[ "$u" =~ ^https://[A-Za-z0-9][A-Za-z0-9.-]*(:[0-9]+)?/[^[:space:]]+$ ]]; then return 0; fi
+  if [[ "$u" =~ ^ssh://([A-Za-z0-9][A-Za-z0-9._-]*@)?[A-Za-z0-9][A-Za-z0-9.-]*(:[0-9]+)?/[^[:space:]]+$ ]]; then return 0; fi
+  if [[ "$u" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*@[A-Za-z0-9][A-Za-z0-9.-]*:[A-Za-z0-9_~][^[:space:]]*$ ]]; then return 0; fi
   if [[ "$u" =~ ^file:///[^[:space:]]+$ ]]; then return 0; fi
   return 1
 }
 
+# git's ref-name rules that a branch typed by a person can break
 lib_app_git_branch_valid() {   # branch
-  [[ "$1" =~ ^[A-Za-z0-9._/-]+$ && "$1" != -* && "$1" != *..* && "$1" != */ ]]
+  local b="$1"
+  [[ "$b" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*(/[A-Za-z0-9_][A-Za-z0-9._-]*)*$ ]] || return 1
+  [[ "$b" != *..* && "$b" != *.lock && "$b" != *.lock/* && "$b" != *. && "$b" != HEAD ]]
 }
 
 # =============================================================================
@@ -487,42 +494,56 @@ _app_report() {   # [soft]
 # git as the site user: its deploy key when it has one, accept-new for a first connection to
 # a host, and never an interactive prompt (a missing credential fails instead of hanging).
 _app_git() {   # args...
-  local ssh="ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
+  local ssh="ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=4"
   if _app_user_file .ssh/id_ed25519; then ssh+=" -i ${D_HOME}/.ssh/id_ed25519 -o IdentitiesOnly=yes"; fi
-  _app_as "$D_HOME" env GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="$ssh" git "$@"
+  # a stalled https transfer (under 1 KB/s for a minute) fails instead of hanging the deploy
+  _app_as "$D_HOME" env GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="$ssh" GIT_HTTP_LOW_SPEED_LIMIT=1000 GIT_HTTP_LOW_SPEED_TIME=60 git "$@"
 }
 
-# Bring app/ to the tip of the repository branch, as the site user. The first time it clones
-# into the empty app directory; later it fetches and resets the tracked files to the branch.
-# Files git does not track (uploads, a local .env, build output) are left alone: no "git clean".
+# The branch the remote HEAD points at ("main", usually), asked from the repository itself.
+_app_git_default_branch() {
+  local b=""
+  b="$(_app_git ls-remote --symref -- "$APP_GIT_URL" HEAD 2>/dev/null \
+    | awk '$1 == "ref:" && $2 ~ /^refs\/heads\// { sub(/^refs\/heads\//, "", $2); print $2; exit }' || true)"
+  if lib_app_git_branch_valid "$b"; then printf '%s' "$b"; fi
+}
+
+# Bring app/ to the tip of the repository branch, as the site user: the first time by cloning
+# into the empty app directory, later by fetching. The branch is fetched as refs/heads/<branch>
+# (a tag with the same name must not win) and checked out by force, so tracked files follow
+# it; files git does not track (uploads, a local .env, build output) stay - no "git clean".
+# APP_GIT_PREV keeps the commit the tree was on, to roll back to.
 lib_app_fetch() {   # -> status; APP_BUILD_ERROR says why
   local branch="$APP_GIT_BRANCH" rc=0 entries=""
-  APP_BUILD_ERROR=""; APP_GIT_COMMIT=""
+  APP_BUILD_ERROR=""; APP_GIT_COMMIT=""; APP_GIT_PREV=""
   if ! lib_have git; then lib_apt_install git || { APP_BUILD_ERROR="git is not installed and could not be installed"; return 1; }; fi
   if (( OPT_DRY_RUN )); then lib_info "[dry-run] would fetch ${APP_GIT_URL}${branch:+ (${branch})} into ${D_HOME}/app as ${D_USER}"; return 0; fi
   if _app_user_file app/.git/HEAD; then
-    _app_git -C app config remote.origin.url "$APP_GIT_URL" || true
-    if [[ -z "$branch" ]]; then branch="$(_app_git -C app rev-parse --abbrev-ref HEAD 2>/dev/null || true)"; fi
-    lib_info "Fetching ${branch} from ${APP_GIT_URL}"
-    _app_git -C app fetch --prune origin -- "$branch" || rc=$?
-    if (( rc != 0 )); then APP_BUILD_ERROR="git fetch of ${branch} from ${APP_GIT_URL} failed (status ${rc})"; return 1; fi
-    _app_git -C app reset --hard FETCH_HEAD || rc=$?
-    if (( rc != 0 )); then APP_BUILD_ERROR="git could not check out the fetched ${branch} (status ${rc})"; return 1; fi
+    APP_GIT_PREV="$(_app_git -C app rev-parse --verify -q HEAD 2>/dev/null || true)"
+    if ! _app_git -C app config remote.origin.url "$APP_GIT_URL"; then
+      APP_BUILD_ERROR="could not point ${D_HOME}/app at ${APP_GIT_URL} (git config failed)"; return 1
+    fi
   else
     entries="$(_app_as "$D_HOME" sh -c 'ls -A app 2>/dev/null | head -n 1' 2>/dev/null || true)"
     if [[ -n "$entries" ]]; then
       APP_BUILD_ERROR="${D_HOME}/app already holds files but is not a git checkout; move them away before the first deploy from ${APP_GIT_URL}"
       return 1
     fi
-    lib_info "Cloning ${APP_GIT_URL}${branch:+ (${branch})}"
-    if [[ -n "$branch" ]]; then _app_git clone --branch "$branch" -- "$APP_GIT_URL" app || rc=$?
-    else _app_git clone -- "$APP_GIT_URL" app || rc=$?; fi
+    lib_info "Cloning ${APP_GIT_URL}"
+    _app_git clone --no-checkout -- "$APP_GIT_URL" app || rc=$?
     if (( rc != 0 )); then
       APP_BUILD_ERROR="git clone of ${APP_GIT_URL} failed (status ${rc}); a private repository needs the site's deploy key: setup.sh app deploy-key ${D_DOMAIN}"
       return 1
     fi
-    if [[ -z "$APP_GIT_BRANCH" ]]; then APP_GIT_BRANCH="$(_app_git -C app rev-parse --abbrev-ref HEAD 2>/dev/null || true)"; fi
   fi
+  if [[ -z "$branch" ]]; then branch="$(_app_git_default_branch)"; fi
+  if [[ -z "$branch" ]]; then APP_BUILD_ERROR="could not tell the default branch of ${APP_GIT_URL}; name it with --branch"; return 1; fi
+  lib_info "Fetching ${branch} from ${APP_GIT_URL}"
+  _app_git -C app fetch --prune origin -- "refs/heads/${branch}" || rc=$?
+  if (( rc != 0 )); then APP_BUILD_ERROR="git fetch of branch ${branch} from ${APP_GIT_URL} failed (status ${rc})"; return 1; fi
+  _app_git -C app checkout -q -f -B "$branch" FETCH_HEAD || rc=$?
+  if (( rc != 0 )); then APP_BUILD_ERROR="git could not check out the fetched ${branch} (status ${rc})"; return 1; fi
+  APP_GIT_BRANCH="$branch"
   APP_GIT_COMMIT="$(_app_git -C app rev-parse --short HEAD 2>/dev/null || true)"
   return 0
 }
@@ -548,10 +569,20 @@ _app_build_limits() {
   fi
 }
 
-# Install the dependencies and build, as the site user, with the application's environment
-# loaded from its env file, so no value ever appears on a command line.
+# The hash of what node_modules was installed from; cleared ("") while an install is under
+# way, so a failed install or build never leaves a hash that no longer matches node_modules.
+_app_deps_record() {   # hash
+  APP_DEPS_HASH="$1"
+  lib_json_set "$(lib_domain_json "$D_DOMAIN")" 'if $h == "" then del(.app.deps_hash) else .app.deps_hash = $h end' --arg h "$1"
+}
+
+# Install the dependencies, then build, as the site user with the application's environment
+# loaded from its env file (so no value appears on a command line). NODE_ENV is left out of
+# the install: under "production" pnpm and yarn skip the devDependencies a build needs. Each
+# step is capped at an hour.
 lib_app_build() {   # -> status; APP_BUILD_ERROR says why
-  local dir="${D_HOME}/app" files="" install="" run="npm run" script="" rc=0 installed=0
+  local dir="${D_HOME}/app" files="" install="" run="npm run" rc=0 installed=0 hash=""
+  local load='set -a; if [ -f "$HOME/.pm2/lomp.env" ]; then . "$HOME/.pm2/lomp.env"; fi; set +a'
   APP_BUILD_ERROR=""; APP_DEPS_HASH_NEW=""
   # which of these exist, asked as the site user
   files=" $(_app_as "$D_HOME" sh -c 'cd app 2>/dev/null || exit 0
@@ -559,41 +590,62 @@ lib_app_build() {   # -> status; APP_BUILD_ERROR says why
       if [ -f "$f" ] && [ ! -L "$f" ]; then printf "%s " "$f"; fi
     done
     if [ -d node_modules ]; then printf "node_modules "; fi' 2>/dev/null || true) "
-  if [[ "$files" != *" package.json "* ]]; then APP_BUILD_ERROR="there is no package.json in ${dir}"; return 1; fi
+  if [[ "$files" != *" package.json "* ]]; then
+    if (( OPT_DRY_RUN )); then lib_info "[dry-run] would install the dependencies and build once ${dir}/package.json is there"; return 0; fi
+    APP_BUILD_ERROR="there is no package.json in ${dir}"; return 1
+  fi
   if [[ "$files" == *" node_modules "* ]]; then installed=1; fi
   if [[ "$files" == *" pnpm-lock.yaml "* ]]; then install="corepack pnpm install --frozen-lockfile"; run="corepack pnpm run"
   elif [[ "$files" == *" yarn.lock "* ]]; then install="corepack yarn install"; run="corepack yarn run"
   elif [[ "$files" == *" package-lock.json "* || "$files" == *" npm-shrinkwrap.json "* ]]; then install="npm ci --include=dev"
-  else install="npm install --include=dev"; fi
+  # no lockfile of its own, so it gets none: an untracked one would make the next deploy an
+  # "npm ci" against a lockfile that no longer matches package.json
+  else install="npm install --include=dev --no-package-lock"; fi
   if [[ "$install" == corepack* ]] && ! lib_have corepack; then
     APP_BUILD_ERROR="the project uses ${install#corepack }, which needs corepack (npm install -g corepack)"
     return 1
   fi
-  APP_DEPS_HASH_NEW="$(_app_as "$D_HOME" sh -c 'cd app && cat package.json package-lock.json npm-shrinkwrap.json yarn.lock pnpm-lock.yaml 2>/dev/null | sha256sum' 2>/dev/null | cut -c1-64 || true)"
-  if _app_install_needed "$APP_DEPS_HASH_NEW" "$APP_DEPS_HASH" "$installed"; then
-    script="$install"
+  # node's version is part of it: native modules built for another Node.js do not load
+  hash="$(_app_as "$D_HOME" sh -c 'cd app && { node -v; cat package.json package-lock.json npm-shrinkwrap.json yarn.lock pnpm-lock.yaml 2>/dev/null; } | sha256sum' 2>/dev/null | cut -c1-64 || true)"
+  APP_DEPS_HASH_NEW="$hash"
+  if ! _app_install_needed "$hash" "$APP_DEPS_HASH" "$installed"; then
+    lib_info "Dependencies unchanged since the last install; not reinstalling them"
+  elif (( OPT_DRY_RUN )); then
+    lib_info "[dry-run] would run as ${D_USER} in ${dir}: ${install}"
   else
-    lib_info "Dependencies unchanged since the last deploy; not reinstalling them"
+    lib_info "As ${D_USER} in ${dir}: ${install}"
+    _app_deps_record ""
+    _app_build_limits
+    _app_as "$dir" timeout -k 60 3600 bash -c "${load}; unset NODE_ENV; ${install}" || rc=$?
+    APP_AS_WRAP=()
+    if (( rc != 0 )); then APP_BUILD_ERROR="'${install}' failed with status ${rc}"; return 1; fi
+    _app_deps_record "$hash"
   fi
-  if [[ -n "$(_app_package_script build)" ]]; then script+="${script:+ && }${run} build"; fi
-  if [[ -z "$script" ]]; then return 0; fi
-  if (( OPT_DRY_RUN )); then lib_info "[dry-run] would run as ${D_USER} in ${dir}: ${script}"; return 0; fi
-  lib_info "As ${D_USER} in ${dir}: ${script}"
+  if [[ -z "$(_app_package_script build)" ]]; then return 0; fi
+  if (( OPT_DRY_RUN )); then lib_info "[dry-run] would run as ${D_USER} in ${dir}: ${run} build"; return 0; fi
+  lib_info "As ${D_USER} in ${dir}: ${run} build"
   _app_build_limits
-  _app_as "$dir" bash -c 'set -a; if [ -f "$HOME/.pm2/lomp.env" ]; then . "$HOME/.pm2/lomp.env"; fi; set +a
-export NODE_ENV="${NODE_ENV:-production}"
-'"$script" || rc=$?
+  _app_as "$dir" timeout -k 60 3600 bash -c "${load}"'; export NODE_ENV="${NODE_ENV:-production}"; '"${run} build" || rc=$?
   APP_AS_WRAP=()
-  if (( rc != 0 )); then APP_BUILD_ERROR="'${script}' failed with status ${rc}"; return 1; fi
+  if (( rc != 0 )); then APP_BUILD_ERROR="'${run} build' failed with status ${rc}"; return 1; fi
   return 0
 }
 
-# Run a step in this shell while its output also goes to a file.
+# Run a step in this shell while its output also goes to a file. The step reads nothing from
+# the terminal. tee is waited for by its own pid ($! changes under any later process
+# substitution), and only briefly: a process the step left running may still hold the pipe,
+# and keep tee alive with it - which is why tee gets no lock descriptor either.
 _app_logged() {   # file cmd...
-  local file="$1" rc=0
+  local file="$1" rc=0 fd="" pid="" i=0
   shift
-  "$@" > >(tee -a "$file") 2>&1 || rc=$?
-  wait "$!" 2>/dev/null || true
+  exec {fd}> >(exec tee -a "$file" 200>&- 201>&-)
+  pid=$!
+  "$@" >&"$fd" 2>&1 </dev/null || rc=$?
+  exec {fd}>&-
+  for (( i = 0; i < 50; i++ )); do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+  done
   return "$rc"
 }
 
@@ -603,20 +655,44 @@ _app_deploy_record() {   # output file, ok(0|1)
   (( OPT_DRY_RUN )) && return 0
   log="$(lib_domain_state_dir "$D_DOMAIN")/deploy.log"
   (umask 077; lib_mask_secrets <"$1" >"$log") || true
-  lib_json_set "$(lib_domain_json "$D_DOMAIN")" \
-    '.app.last_deploy = {at: $at, commit: $c, ok: ($ok == "1")} | if $ok == "1" and $h != "" then .app.deps_hash = $h else . end' \
-    --arg at "$(lib_iso_now)" --arg c "$APP_GIT_COMMIT" --arg ok "$2" --arg h "$APP_DEPS_HASH_NEW"
-  if [[ "$2" == "1" && -n "$APP_DEPS_HASH_NEW" ]]; then APP_DEPS_HASH="$APP_DEPS_HASH_NEW"; fi
+  lib_json_set "$(lib_domain_json "$D_DOMAIN")" '.app.last_deploy = {at: $at, commit: $c, ok: ($ok == "1")}' \
+    --arg at "$(lib_iso_now)" --arg c "$APP_GIT_COMMIT" --arg ok "$2"
   return 0
+}
+
+# After a build failed on freshly fetched code: the previous commit goes back and is built
+# again, so a crash restart or a reboot does not start code that was never built.
+_app_rollback() {   # the commit in APP_GIT_PREV
+  local short="${APP_GIT_PREV:0:7}"
+  lib_warn "The build failed; putting ${short} back and building it again"
+  if ! _app_git -C app checkout -q -f -B "$APP_GIT_BRANCH" "$APP_GIT_PREV"; then
+    lib_warn "could not check out ${short} again; ${D_HOME}/app stays on the commit that failed"
+    return 1
+  fi
+  if lib_app_build; then lib_ok "Back on ${short}"; return 0; fi
+  lib_warn "building ${short} failed as well: ${APP_BUILD_ERROR}"
+  return 1
 }
 
 # Fetch (when the application comes from git) and build. -> status; APP_BUILD_ERROR says why.
 lib_app_deploy_run() {
-  local out=""
+  local out="" err="" failed="" head=""
   out="$(lib_mktemp)"
-  APP_GIT_COMMIT=""
+  APP_GIT_COMMIT=""; APP_GIT_PREV=""
   if [[ -n "$APP_GIT_URL" ]] && ! _app_logged "$out" lib_app_fetch; then _app_deploy_record "$out" 0; return 1; fi
-  if ! _app_logged "$out" lib_app_build; then _app_deploy_record "$out" 0; return 1; fi
+  if ! _app_logged "$out" lib_app_build; then
+    err="$APP_BUILD_ERROR"; failed="$APP_GIT_COMMIT"
+    if [[ -n "$APP_GIT_PREV" ]] && (( ! OPT_DRY_RUN )); then
+      head="$(_app_git -C app rev-parse --verify -q HEAD 2>/dev/null || true)"
+      if [[ "$head" != "$APP_GIT_PREV" ]]; then
+        if _app_logged "$out" _app_rollback; then err+="; the application was put back on ${APP_GIT_PREV:0:7}"
+        else err+="; putting ${APP_GIT_PREV:0:7} back failed too, see the deploy log"; fi
+      fi
+    fi
+    APP_BUILD_ERROR="$err"; APP_GIT_COMMIT="$failed"
+    _app_deploy_record "$out" 0
+    return 1
+  fi
   _app_deploy_record "$out" 1
   return 0
 }
@@ -818,10 +894,13 @@ lib_app_deploy() {   # domain [--git URL] [--branch B]
   [[ -z "$branch" ]] || lib_app_git_branch_valid "$branch" || lib_die "Invalid branch '${branch}'" "" "--branch main"
   _app_load_site "$domain"
   _app_site_lock "$D_DOMAIN"
-  if [[ -n "$url" ]]; then APP_GIT_URL="$url"; fi
+  if [[ -n "$url" && "$url" != "$APP_GIT_URL" ]]; then
+    APP_GIT_URL="$url"
+    APP_GIT_BRANCH=""   # another repository: its own default branch, unless --branch names one
+  fi
   if [[ -n "$branch" ]]; then APP_GIT_BRANCH="$branch"; fi
   if [[ -n "$branch" && -z "$APP_GIT_URL" ]]; then lib_die "--branch needs a repository" "" "setup.sh app deploy ${D_DOMAIN} --git <url> --branch ${branch}"; fi
-  if [[ -n "$url$branch" ]]; then lib_app_state_write "$D_DOMAIN"; fi
+  # a new repository or branch is recorded only once a deploy from it has worked
   lib_app_deploy_run || lib_die "Deploy of ${D_DOMAIN} failed" "$APP_BUILD_ERROR" \
     "fix it, then run: setup.sh app deploy ${D_DOMAIN}   (output: $(lib_domain_state_dir "$D_DOMAIN")/deploy.log)"
   APP_ENABLED=1
@@ -840,7 +919,9 @@ lib_app_deploy_key() {   # domain
       || lib_die "ssh-keygen failed for ${D_USER}" "" "apt-get install openssh-client"
     lib_ok "Deploy key created for ${D_DOMAIN}"
   fi
-  pub="$(_app_as "$D_HOME" cat .ssh/id_ed25519.pub 2>/dev/null || true)"
+  # the site user controls this file: bounded, and only a public key line is ever printed
+  pub="$(_app_as "$D_HOME" timeout 5 head -c 4096 -- .ssh/id_ed25519.pub 2>/dev/null \
+    | grep -m 1 -E '^ssh-ed25519 [A-Za-z0-9+/=]+( [A-Za-z0-9@._-]*)?$' || true)"
   [[ -n "$pub" ]] || lib_die "The public deploy key of ${D_DOMAIN} cannot be read" "" "ls -l ${D_HOME}/.ssh"
   printf '\n%sPublic deploy key of %s%s\n\n%s\n\n' "$C_BLD" "$D_DOMAIN" "$C_RST" "$pub"
   lib_note "Add it as a read-only deploy key of the repository (GitHub: Settings > Deploy keys;"
@@ -872,8 +953,8 @@ lib_app_logs() {   # domain [--out|--error] [-n LINES]
   _app_as "$D_HOME" tail -n "$lines" -F "${files[@]}" || true
 }
 
-lib_app_set() {   # domain [--port N] [--start CMD | --script FILE] [--memory 512M|none]
-  local domain="${1:-}" a="" port="" start="" script="" mem="" why="" port_changed=0
+lib_app_set() {   # domain [--port N] [--start CMD | --script FILE] [--memory 512M|none] [--no-git]
+  local domain="${1:-}" a="" port="" start="" script="" mem="" why="" port_changed=0 nogit=0
   if (($# > 0)); then shift; fi
   while (($# > 0)); do
     a="$1"; shift
@@ -882,10 +963,11 @@ lib_app_set() {   # domain [--port N] [--start CMD | --script FILE] [--memory 51
       --start)  start="${1:-}"; shift ;;
       --script) script="${1:-}"; shift ;;
       --memory) mem="${1:-}"; shift ;;
-      *) lib_die "Unknown option for app set: ${a}" "" "setup.sh app set <domain> [--port N] [--start CMD | --script FILE] [--memory 512M|none]" ;;
+      --no-git) nogit=1 ;;
+      *) lib_die "Unknown option for app set: ${a}" "" "setup.sh app set <domain> [--port N] [--start CMD | --script FILE] [--memory 512M|none] [--no-git]" ;;
     esac
   done
-  [[ -n "${port}${start}${script}${mem}" ]] || lib_die "Nothing to change" "" "setup.sh app set ${domain:-<domain>} --port 3001"
+  [[ -n "${port}${start}${script}${mem}" ]] || (( nogit )) || lib_die "Nothing to change" "" "setup.sh app set ${domain:-<domain>} --port 3001"
   [[ -z "$start" || -z "$script" ]] || lib_die "--start and --script cannot be combined" "" "use one of them"
   [[ -z "$start" ]] || lib_app_start_valid "$start" || lib_die "Invalid --start '${start}'" \
     "the command runs without a shell: words only, no quotes, pipes or &&" "put it into a package.json script and use --start \"npm run <name>\""
@@ -893,6 +975,7 @@ lib_app_set() {   # domain [--port N] [--start CMD | --script FILE] [--memory 51
   [[ -z "$mem" || "$mem" == "none" || "$mem" =~ ^[0-9]+[MG]$ ]] || lib_die "Invalid --memory '${mem}'" "use e.g. 512M, 1G or none" "--memory 512M"
   _app_load_site "$domain" optional
   if (( ! APP_PRESENT )); then
+    (( ! nogit )) || lib_die "${D_DOMAIN} runs no Node.js application" "" "setup.sh app list"
     [[ "$D_MODE" == "proxy" ]] || lib_die "${D_DOMAIN} is a ${D_MODE} site" "a PM2 application needs a Node.js (proxy) site" \
       "create one with: setup.sh add app.example.com --node, or publish an app under a path: setup.sh proxy add ${D_DOMAIN} /api/ 127.0.0.1:3001"
     if [[ -z "$port" ]]; then
@@ -919,7 +1002,13 @@ lib_app_set() {   # domain [--port N] [--start CMD | --script FILE] [--memory 51
     lib_domain_state_save
     lib_domain_apply_config "application port ${APP_PORT} for ${D_DOMAIN}"
   fi
+  if (( nogit )) && [[ -n "$APP_GIT_URL" ]]; then
+    lib_json_set "$(lib_domain_json "$D_DOMAIN")" '.app |= del(.git)'
+    lib_ok "${D_DOMAIN} no longer deploys from ${APP_GIT_URL}; the checkout in ${D_HOME}/app stays as it is"
+    APP_GIT_URL=""; APP_GIT_BRANCH=""
+  fi
   lib_rollback_clear
+  if [[ -z "${port}${start}${script}${mem}" ]]; then return 0; fi
   lib_app_apply restart
   _app_report
 }

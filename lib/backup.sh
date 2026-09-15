@@ -324,6 +324,8 @@ lib_restore_main() {
     lib_domain_apply_config "restore vhost ${domain}"
   fi
   lib_domain_state_load "$domain"
+  # not while a deploy of this application works in the tree the restore writes into
+  if lib_app_state_load "$domain"; then _app_site_lock "$domain"; fi
 
   lib_note "files: $( (( no_files )) && printf 'skipped' || printf "restored into ${D_HOME} (existing files are overwritten)")"
   lib_note "database: $( (( no_db )) && printf 'skipped' || printf 'restored (tables are replaced)')"
