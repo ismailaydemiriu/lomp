@@ -132,6 +132,22 @@ lib_rollback_run() {
 }
 
 # lib_die "what failed" ["probable cause"] ["suggested fix"]
+# How to invoke this tool in a message: the short alias once it is linked, otherwise the
+# checkout being run. "install" links it in its very first step so this is almost always
+# the short name, even when the run dies early.
+lib_self_cmd() {
+  if   [[ -n "${BIN_SHORT:-}" && -x "$BIN_SHORT" ]]; then basename "$BIN_SHORT"
+  elif [[ -n "${BIN_LINK:-}"  && -x "$BIN_LINK"  ]]; then basename "$BIN_LINK"
+  else printf '%s' "${SCRIPT_PATH:-./setup.sh}"; fi
+}
+
+# Point at "doctor" after a failure - but only once a numbered step has begun. A rejected
+# command-line flag is not something doctor can diagnose, and suggesting it there is noise.
+lib_suggest_doctor() {
+  (( ${LIB_STEP_CURRENT:-0} > 0 )) || return 0
+  printf '  %sHealth check  :%s sudo %s doctor\n' "$C_YEL" "$C_RST" "$(lib_self_cmd)"
+}
+
 lib_die() {
   local what="$1" cause="${2:-}" fix="${3:-}"
   local lineno=""
@@ -142,6 +158,7 @@ lib_die() {
     [[ -n "$cause" ]] && printf '  %sProbable cause:%s %s\n' "$C_YEL" "$C_RST" "$cause"
     [[ -n "$fix" ]]   && printf '  %sSuggested fix :%s %s\n' "$C_YEL" "$C_RST" "$fix"
     printf '  %sLog           :%s %s (around line %s)\n' "$C_YEL" "$C_RST" "$LOG_FILE" "$lineno"
+    lib_suggest_doctor
   } >&2
   LIB_ERR_HANDLING=1
   lib_rollback_run
@@ -167,6 +184,7 @@ lib_on_error() {
       printf '  %sLast log lines:%s\n' "$C_YEL" "$C_RST"
       tail -n 6 "$LOG_FILE" 2>/dev/null | sed 's/^/    | /'
     fi
+    lib_suggest_doctor
   } >&2
   lib_rollback_run
   exit "$code"

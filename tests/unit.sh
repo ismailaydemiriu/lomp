@@ -1050,6 +1050,30 @@ if (( CAN_CHMOD )); then assert_eq "jail holding a token is 0600" "600" "$(stat 
 rm -rf "$STATE_DIR/domains"
 mv "$STATE_DIR/domains.bak" "$STATE_DIR/domains" 2>/dev/null || mkdir -p "$STATE_DIR/domains"
 
+# =============================================================================
+section "failure messages point at doctor"
+_bs_save="$BIN_SHORT"; _bl_save="$BIN_LINK"
+LIB_STEP_CURRENT=0
+assert_eq "silent before any step has begun" "" "$(lib_suggest_doctor)"
+LIB_STEP_CURRENT=3
+assert_has "suggested once a step is running" "doctor" "$(lib_suggest_doctor)"
+BIN_SHORT="$TMP/absent-short"; BIN_LINK="$TMP/absent-long"
+assert_eq "falls back to the checkout when nothing is linked" "$SCRIPT_PATH" "$(lib_self_cmd)"
+if (( CAN_CHMOD )); then
+  : >"$TMP/lompbin"; chmod 0755 "$TMP/lompbin"
+  BIN_SHORT="$TMP/lompbin"
+  assert_eq "prefers the short alias once linked" "lompbin" "$(lib_self_cmd)"
+fi
+# end to end: the hint has to survive the real failure path, not just the helper
+LIB_STEP_CURRENT=2
+out="$( ( lib_die "boom" "a cause" "a fix" ) 2>&1 || true )"
+assert_has "lib_die carries the hint" "doctor" "$out"
+assert_has "and still says what failed" "boom" "$out"
+LIB_STEP_CURRENT=0
+out="$( ( lib_die "bad flag" "" "" ) 2>&1 || true )"
+assert_lacks "argument errors stay free of it" "doctor" "$out"
+BIN_SHORT="$_bs_save"; BIN_LINK="$_bl_save"
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 if (( FAIL > 0 )); then exit 1; fi
 exit 0

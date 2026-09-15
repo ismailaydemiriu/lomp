@@ -122,8 +122,14 @@ lib_install_main() {
   local rerun=0
   lib_installed && rerun=1
   (( rerun )) && lib_info "Server was provisioned on $(lib_manifest_get '.installed_at') - verifying and repairing the configuration (idempotent re-run)"
-  local total=20
+  local total=21
   lib_steps_begin "$total"
+
+  # First, deliberately: every later step can fail, and when one does the operator needs a
+  # working "lomp doctor" to find out why. This used to be step 18, so a run that died at
+  # step 11 left no command installed at all - "lomp" was simply not found.
+  lib_step "Command installation (lomp)"
+  lib_install_self
 
   lib_step "System analysis"
   lib_system_analyze
@@ -199,8 +205,7 @@ lib_install_main() {
   lib_domain_logrotate_regen
   lib_domain_fail2ban_regen
 
-  lib_step "Scheduled tasks and self-installation"
-  lib_install_self
+  lib_step "Scheduled tasks"
   lib_install_cron
 
   lib_step "Manifest"

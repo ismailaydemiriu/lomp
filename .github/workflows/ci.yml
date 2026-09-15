@@ -89,5 +89,13 @@ jobs:
           test ! -e /root/.server-setup || { echo "dry-run created state dir"; exit 1; }
           test ! -e /usr/local/lsws     || { echo "dry-run installed OLS"; exit 1; }
           test ! -e /etc/cron.d/server-setup || { echo "dry-run wrote cron"; exit 1; }
-          grep -q '20/20' dryrun.out || { echo "dry-run did not reach the last step"; exit 1; }
+          # "the last step ran" without hardcoding how many there are: find a [N/N] marker.
+          # The old "grep 20/20" silently kept passing when a step was added and the
+          # counter went to 21, because [20/21] still contained no 20/20 - it only failed
+          # once the totals moved, which is exactly when a human stops trusting it.
+          awk 'match($0, /\[[0-9]+\/[0-9]+\]/) {
+                 s = substr($0, RSTART + 1, RLENGTH - 2); split(s, a, "/")
+                 if (a[1] == a[2]) found = 1
+               } END { exit !found }' dryrun.out \
+            || { echo "dry-run did not reach the last step"; exit 1; }
           ! grep -qE '\[fail\]|unbound variable|FAILED:|Probable cause' dryrun.out

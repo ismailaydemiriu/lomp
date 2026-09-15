@@ -124,7 +124,14 @@ step "T02  install --dry-run must not touch the system"
 pre_state_exists=0; [[ -e "$STATE_DIR" ]] && pre_state_exists=1
 rc="$(run_setup dryrun install --dry-run --non-interactive --no-color --email ci@example.com)"
 check_eq "dry-run exits 0" 0 "$rc"
-check_has "dry-run reached the final step" "20/20" "$(cat "${OUT_DIR}/dryrun.out")"
+# "the last step ran" without hardcoding how many there are: look for a [N/N] marker.
+# A literal "20/20" kept passing after a step was added - [20/21] contains no 20/20, so the
+# check only started failing once the totals moved, long after it stopped meaning anything.
+check_has "dry-run reached the final step" "yes" \
+  "$(awk 'match($0, /\[[0-9]+\/[0-9]+\]/) {
+            s = substr($0, RSTART + 1, RLENGTH - 2); split(s, a, "/")
+            if (a[1] == a[2]) f = 1
+          } END { print (f ? "yes" : "no") }' "${OUT_DIR}/dryrun.out")"
 if (( pre_state_exists )); then
   skip "state dir already existed before the test; cannot assert dry-run created nothing"
 else

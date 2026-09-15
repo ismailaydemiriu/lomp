@@ -93,7 +93,9 @@ sudo ./setup.sh install --email you@example.com --backup-schedule "daily 03:00"
 ```
 
 Add `--non-interactive` to run it unattended, for example from cloud-init. The run takes a
-few minutes and prints a `[n/20]` progress line for every stage.
+few minutes and prints a numbered `[step/total]` progress line for every stage. The very
+first step installs the `lomp` command itself, so if a later step fails you can still run
+`sudo lomp doctor` to find out why.
 
 By default the WebAdmin panel is **not** exposed to the internet at all: the listener binds
 to localhost and no firewall port is opened. You reach it through an SSH tunnel, which needs
