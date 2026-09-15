@@ -22,6 +22,7 @@ OLS_SNAPSHOT=""         # conf/ snapshot taken by lib_ols_change_begin
 OLS_PENDING_RELOAD=0    # set when something changed and OLS must be reloaded
 OLS_CONF_CHANGED=0
 OLS_TEST_OUTPUT=""
+OLS_RESTORE_MSG=""      # what the rollback actually managed to do, for the failure message
 
 # =============================================================================
 #  Repository & installation
@@ -75,16 +76,41 @@ lib_ols_acme_root_ensure() {
 # =============================================================================
 #  Low-level config parsing (awk, heredoc aware, case-insensitive block types)
 # =============================================================================
+# Values reach these awk programs as "-v name=value", and POSIX awk applies BACKSLASH
+# ESCAPE PROCESSING to a -v assignment: the two characters \n arrive as a real newline, and
+# gawk and mawk disagree about \<unknown> and a trailing backslash. Because the config
+# format is line oriented, an injected newline writes a new top-level directive - that is
+# how "install --email 'x@y.z\nuser root'" rewrote the server's uid. Doubling every
+# backslash makes awk's unescaping a no-op, so the value arrives exactly as written.
+_ols_awk_arg() { printf '%s' "${1//\\/\\\\}"; }
+
+# A newline cannot be represented in a line-oriented config, so refuse rather than write a
+# file that means something other than what the caller asked for.
+_ols_reject_multiline() {   # what value
+  case "${2:-}" in
+    *$'\n'*|*$'\r'*)
+      lib_die "Invalid value for ${1}" \
+        "the OpenLiteSpeed configuration format is line oriented, so a value cannot contain a line break" \
+        "remove the line break and re-run" ;;
+  esac
+  return 0
+}
+
+# OpenLiteSpeed's own parser drops every line whose first non-blank character is '#'
+# before it looks at structure, so these programs must too. Without that, a commented-out
+# block ("#expires  {" ... "#}") skews the depth counter for the rest of the file and every
+# later block lookup silently returns nothing.
 # print "start end" of the first top-level block:  _ols_span file type [name]
 _ols_span() {
   local file="$1" type="${2,,}" name="${3:-}"
   [[ -f "$file" ]] || return 0
-  awk -v t="$type" -v n="$name" '
+  awk -v t="$(_ols_awk_arg "$type")" -v n="$(_ols_awk_arg "$name")" '
     function trim(s){ sub(/^[[:space:]]+/,"",s); sub(/[[:space:]]+$/,"",s); return s }
     BEGIN{ depth=0; here=""; inblk=0; start=0 }
     {
       l=$0
       if (here != "") { if (trim(l)==here) here=""; next }
+      if (l ~ /^[[:space:]]*#/) next
       if (match(l, /<<<[A-Za-z0-9_]+[[:space:]]*$/)) { here=trim(substr(l,RSTART+3)) }
       if (l ~ /\{[[:space:]]*$/) {
         if (depth==0 && !inblk) {
@@ -103,16 +129,21 @@ _ols_span() {
     }' "$file"
 }
 
-# key inside a block (depth 1):  _ols_block_key file type name key get|set|del [value]
+# key inside a block (depth 1):  _ols_block_key file type name key get|set|del [value] [prefix]
+# "prefix" marks a key OpenLiteSpeed allows to repeat (env, add, allow, ...): only the
+# occurrence whose value starts with it is replaced, and the siblings are left alone.
 _ols_block_key() {
-  local file="$1" type="${2,,}" name="$3" key="$4" op="$5" value="${6:-}"
-  awk -v t="$type" -v n="$name" -v k="$key" -v op="$op" -v v="$value" '
+  local file="$1" type="${2,,}" name="$3" key="$4" op="$5" value="${6:-}" prefix="${7:-}"
+  [[ "$op" == "get" ]] || _ols_reject_multiline "${type} ${name} ${key}" "$value"
+  awk -v t="$(_ols_awk_arg "$type")" -v n="$(_ols_awk_arg "$name")" -v k="$(_ols_awk_arg "$key")" \
+      -v op="$op" -v v="$(_ols_awk_arg "$value")" -v mp="$(_ols_awk_arg "$prefix")" '
     function trim(s){ sub(/^[[:space:]]+/,"",s); sub(/[[:space:]]+$/,"",s); return s }
     function fmt(key,val){ return sprintf("  %-24s%s", key, val) }
     BEGIN{ depth=0; here=""; inblk=0; done=0; lk=tolower(k); bdepth=0 }
     {
       l=$0
       if (here != "") { if (op!="get") print l; if (trim(l)==here) here=""; next }
+      if (l ~ /^[[:space:]]*#/) { if (op!="get") print l; next }
       ishere=0
       if (match(l, /<<<[A-Za-z0-9_]+[[:space:]]*$/)) { here=trim(substr(l,RSTART+3)); ishere=1 }
       if (l ~ /\{[[:space:]]*$/) {
@@ -138,9 +169,12 @@ _ols_block_key() {
       if (inblk && depth==bdepth+1 && !ishere) {
         tl=trim(l); split(tl, w, /[[:space:]]+/)
         if (tolower(w[1])==lk) {
-          if (op=="get") { val=tl; sub(/^[^[:space:]]+[[:space:]]*/,"",val); print val; exit }
-          if (op=="set") { if (!done) { print fmt(k, v); done=1 }; next }
-          if (op=="del") { next }
+          val=tl; sub(/^[^[:space:]]+[[:space:]]*/,"",val)
+          if (mp=="" || substr(val,1,length(mp))==mp) {
+            if (op=="get") { print val; exit }
+            if (op=="set") { if (!done) { print fmt(k, v); done=1 }; next }
+            if (op=="del") { next }
+          }
         }
       }
       if (op!="get") print l
@@ -150,13 +184,15 @@ _ols_block_key() {
 # listener map lines:  _ols_map file listener vhost get|set|del [domains]
 _ols_map() {
   local file="$1" listener="$2" vhost="$3" op="$4" domains="${5:-}"
-  awk -v n="$listener" -v vh="$vhost" -v op="$op" -v d="$domains" '
+  [[ "$op" == "get" ]] || _ols_reject_multiline "map ${vhost}" "$domains"
+  awk -v n="$(_ols_awk_arg "$listener")" -v vh="$(_ols_awk_arg "$vhost")" -v op="$op" -v d="$(_ols_awk_arg "$domains")" '
     function trim(s){ sub(/^[[:space:]]+/,"",s); sub(/[[:space:]]+$/,"",s); return s }
     function fmt(val){ return sprintf("  %-24s%s", "map", val) }
     BEGIN{ depth=0; here=""; inblk=0; done=0; bdepth=0 }
     {
       l=$0
       if (here != "") { if (op!="get") print l; if (trim(l)==here) here=""; next }
+      if (l ~ /^[[:space:]]*#/) { if (op!="get") print l; next }
       if (match(l, /<<<[A-Za-z0-9_]+[[:space:]]*$/)) { here=trim(substr(l,RSTART+3)) }
       if (l ~ /\{[[:space:]]*$/) {
         if (depth==0 && !inblk) {
@@ -192,13 +228,15 @@ _ols_map() {
 # top-level (depth 0) key:  _ols_top_key file key get|set|del [value]
 _ols_top_key() {
   local file="$1" key="$2" op="$3" value="${4:-}"
-  awk -v k="$key" -v op="$op" -v v="$value" '
+  [[ "$op" == "get" ]] || _ols_reject_multiline "$key" "$value"
+  awk -v k="$(_ols_awk_arg "$key")" -v op="$op" -v v="$(_ols_awk_arg "$value")" '
     function trim(s){ sub(/^[[:space:]]+/,"",s); sub(/[[:space:]]+$/,"",s); return s }
     function fmt(key,val){ return sprintf("%-26s%s", key, val) }
     BEGIN{ depth=0; here=""; done=0; lk=tolower(k); n=0; firstblk=0 }
     {
       l=$0; n++; lines[n]=l; keep[n]=1
       if (here != "") { if (trim(l)==here) here=""; next }
+      if (l ~ /^[[:space:]]*#/) next
       if (match(l, /<<<[A-Za-z0-9_]+[[:space:]]*$/)) { here=trim(substr(l,RSTART+3)); next }
       if (l ~ /\{[[:space:]]*$/) { if (depth==0 && !firstblk) firstblk=n; depth++; next }
       if (l ~ /^[[:space:]]*\}[[:space:]]*$/) { depth--; next }
@@ -225,12 +263,13 @@ _ols_top_key() {
 _ols_block_names() {
   local file="$1" type="${2,,}"
   [[ -f "$file" ]] || return 0
-  awk -v t="$type" '
+  awk -v t="$(_ols_awk_arg "$type")" '
     function trim(s){ sub(/^[[:space:]]+/,"",s); sub(/[[:space:]]+$/,"",s); return s }
     BEGIN{ depth=0; here="" }
     {
       l=$0
       if (here != "") { if (trim(l)==here) here=""; next }
+      if (l ~ /^[[:space:]]*#/) next
       if (match(l, /<<<[A-Za-z0-9_]+[[:space:]]*$/)) { here=trim(substr(l,RSTART+3)) }
       if (l ~ /\{[[:space:]]*$/) {
         if (depth==0) {
@@ -244,19 +283,31 @@ _ols_block_names() {
     }' "$file"
 }
 
-# brace balance check (heredoc aware): returns 0 when balanced
+# Structure check (heredoc and comment aware): returns 0 when the file parses.
+# On failure it PRINTS the reason, because "unbalanced braces" was wrong every time the
+# braces were in fact balanced and the parser had merely lost track of them - which sent
+# the operator hunting a missing brace that did not exist.
 _ols_braces_balanced() {
   awk '
     function trim(s){ sub(/^[[:space:]]+/,"",s); sub(/[[:space:]]+$/,"",s); return s }
-    BEGIN{ depth=0; here=""; bad=0 }
+    BEGIN{ depth=0; here=""; bad=0; badline=0 }
     {
       l=$0
       if (here != "") { if (trim(l)==here) here=""; next }
+      if (l ~ /^[[:space:]]*#/) next
       if (match(l, /<<<[A-Za-z0-9_]+[[:space:]]*$/)) { here=trim(substr(l,RSTART+3)); next }
-      if (l ~ /\{[[:space:]]*$/) depth++
-      else if (l ~ /^[[:space:]]*\}[[:space:]]*$/) { depth--; if (depth<0) bad=1 }
+      if (l ~ /\{[[:space:]]*$/) { depth++; openat[depth]=NR; next }
+      if (l ~ /^[[:space:]]*\}[[:space:]]*$/) { if (depth==0) { bad=1; badline=NR; exit } depth--; next }
+      # only a line that STARTS with "}" - a value may legitimately contain one (%{HTTP_HOST})
+      if (l ~ /^[[:space:]]*\}/) { bad=2; badline=NR; exit }
     }
-    END{ exit (bad || depth!=0) ? 1 : 0 }' "$1"
+    END{
+      if (bad==1) { printf "line %d: a closing brace with no block open\n", badline; exit 1 }
+      if (bad==2) { printf "line %d: a closing brace must be alone on its line; OpenLiteSpeed rejects trailing text after \"}\"\n", badline; exit 1 }
+      if (here != "") { printf "a heredoc is never terminated by \"%s\"\n", here; exit 1 }
+      if (depth != 0) { printf "line %d: this block is never closed\n", openat[depth]; exit 1 }
+      exit 0
+    }' "$1"
 }
 
 # remove a block (and collapse blank lines)
@@ -279,7 +330,7 @@ _ols_block_put_stream() {      # file type name contentfile -> stdout
     return 0
   fi
   s="${span%% *}"; e="${span##* }"
-  awk -v s="$s" -v e="$e" -v cf="$content" '
+  awk -v s="$s" -v e="$e" -v cf="$(_ols_awk_arg "$content")" '
     NR==s { while ((getline line < cf) > 0) print line; close(cf); next }
     NR>s && NR<=e { next }
     { print }' "$file"
@@ -289,8 +340,23 @@ _ols_block_put_stream() {      # file type name contentfile -> stdout
 #  Transaction API on httpd_config.conf
 # =============================================================================
 lib_ols_tx_begin() {
+  local why=""
   OLS_TX_FILE="$(lib_mktemp)"
-  if [[ -f "$LSWS_CONF" ]]; then cp "$LSWS_CONF" "$OLS_TX_FILE"; else : >"$OLS_TX_FILE"; fi
+  if [[ -f "$LSWS_CONF" ]]; then
+    # Refuse up front on a file this parser cannot read. Every mutation below assumes it can
+    # find the existing blocks; when it silently cannot, each caller takes its "block does
+    # not exist" branch and APPENDS a duplicate instead, and the first sign of trouble is a
+    # configuration the server rejects several steps later. Stop here, before anything has
+    # been written, and say which line is the problem.
+    if ! why="$(_ols_braces_balanced "$LSWS_CONF")"; then
+      lib_die "Cannot parse ${LSWS_CONF}" \
+        "${why:-the block structure does not parse}" \
+        "fix that line - a closing brace must be alone on its line - and re-run"
+    fi
+    cp "$LSWS_CONF" "$OLS_TX_FILE"
+  else
+    : >"$OLS_TX_FILE"
+  fi
 }
 _ols_tx_apply() {   # stdin -> tx file
   local tmp=""; tmp="$(mktemp "${TMPDIR:-/tmp}/server-setup.XXXXXX")"
@@ -300,6 +366,9 @@ lib_ols_tx_top_set()      { _ols_top_key "$OLS_TX_FILE" "$1" set "$2" | _ols_tx_
 lib_ols_tx_top_get()      { _ols_top_key "$OLS_TX_FILE" "$1" get; }
 lib_ols_tx_top_del()      { _ols_top_key "$OLS_TX_FILE" "$1" del | _ols_tx_apply; }
 lib_ols_tx_block_set()    { _ols_block_key "$OLS_TX_FILE" "$1" "$2" "$3" set "$4" | _ols_tx_apply; }   # type name key value
+# For keys OpenLiteSpeed lets repeat (env, add, allow): replace only the occurrence whose
+# value starts with <prefix> and leave its siblings in place.
+lib_ols_tx_block_set_multi() { _ols_block_key "$OLS_TX_FILE" "$1" "$2" "$3" set "$4" "$5" | _ols_tx_apply; }   # type name key value prefix
 lib_ols_tx_block_get()    { _ols_block_key "$OLS_TX_FILE" "$1" "$2" "$3" get; }
 lib_ols_tx_block_del()    { _ols_block_key "$OLS_TX_FILE" "$1" "$2" "$3" del | _ols_tx_apply; }
 lib_ols_tx_block_exists() { [[ -n "$(_ols_span "$OLS_TX_FILE" "$1" "${2:-}")" ]]; }
@@ -309,7 +378,18 @@ lib_ols_tx_block_put() {    # type name  (block content on stdin)
   _ols_block_put_stream "$OLS_TX_FILE" "$1" "$2" "$c" | _ols_tx_apply
   rm -f "$c"
 }
-lib_ols_tx_map_set()      { _ols_map "$OLS_TX_FILE" "$1" "$2" set "$3" | _ols_tx_apply; }   # listener vhost domains
+# _ols_map can only add a map line INSIDE a listener block. When no block carries that
+# name it emits its input unchanged and exits 0, so the site ends up registered but bound
+# to no listener - OpenLiteSpeed then serves it from the _default catch-all (403) and
+# nothing in the change-set gate notices, because a vhost with no map is valid config.
+# Verify the line actually landed.
+lib_ols_tx_map_set() {    # listener vhost domains
+  _ols_map "$OLS_TX_FILE" "$1" "$2" set "$3" | _ols_tx_apply
+  [[ "$(lib_ols_tx_map_get "$1" "$2")" == "$3" ]] || lib_die \
+    "Could not map ${2} onto the '${1}' listener" \
+    "httpd_config.conf has no 'listener ${1}' block - it was renamed or removed outside this tool" \
+    "run 'lompstack optimize' to recreate the HTTP/HTTPS listeners, then retry"
+}
 lib_ols_tx_map_get()      { _ols_map "$OLS_TX_FILE" "$1" "$2" get; }
 lib_ols_tx_map_del()      { _ols_map "$OLS_TX_FILE" "$1" "$2" del | _ols_tx_apply; }
 lib_ols_tx_diff()         { [[ -f "$LSWS_CONF" ]] && diff -u "$LSWS_CONF" "$OLS_TX_FILE" || true; }
@@ -334,15 +414,28 @@ lib_ols_conf_vhosts()       { _ols_block_names "$LSWS_CONF" virtualhost; }
 # =============================================================================
 #  Snapshots, config test, reload
 # =============================================================================
+# Prints the snapshot path. Returns NON-ZERO when it could not take one - returning 0 with
+# an empty path made a failed snapshot indistinguishable from a good one, and the change
+# set then ran with no rollback point while still telling the operator it had one.
+# admin/conf is included: the WebAdmin change set edits admin_config.conf and nothing else,
+# so a snapshot of conf/ alone gave that change set a rollback that could not undo anything.
 lib_ols_snapshot_take() {
-  local dest="" ts=""
+  local dest="" ts="" m=""
+  local -a members=()
   ts="$(lib_ts)"
   dest="${STATE_DIR}/archive/ols-conf-${ts}.tar.gz"
   mkdir -p "${STATE_DIR}/archive" && chmod 0700 "${STATE_DIR}/archive"
-  if ! tar -czf "$dest" -C "$LSWS_HOME" conf 2>/dev/null; then
-    lib_warn "could not snapshot ${LSWS_HOME}/conf"
-    printf ''
-    return 0
+  for m in conf admin/conf; do
+    if [[ -d "${LSWS_HOME}/${m}" ]]; then members+=("$m"); fi
+  done
+  if ((${#members[@]} == 0)); then
+    lib_warn "nothing to snapshot under ${LSWS_HOME}"
+    return 1
+  fi
+  if ! tar -czf "$dest" -C "$LSWS_HOME" "${members[@]}" 2>/dev/null; then
+    rm -f "$dest"
+    lib_warn "could not snapshot ${LSWS_HOME} (disk full under ${STATE_DIR}?)"
+    return 1
   fi
   # keep the last 10 snapshots
   find "${STATE_DIR}/archive" -maxdepth 1 -name 'ols-conf-*.tar.gz' -printf '%T@ %p\n' 2>/dev/null \
@@ -350,37 +443,80 @@ lib_ols_snapshot_take() {
   printf '%s' "$dest"
 }
 
+# Replace <live> with <new>. "mv a b" moves a INSIDE b when b already exists, so the old
+# recovery path nested the saved tree inside a half-copied new one (cross-device mv is
+# copy-then-unlink and leaves a partial directory behind on ENOSPC), leaving a third state
+# that was neither the old nor the new configuration. Clear the destination every time.
+_ols_swap_dir() {   # live new
+  local live="$1" new="$2" saved="${1}.failed"
+  rm -rf -- "$saved"
+  if [[ -d "$live" ]] && ! mv -- "$live" "$saved"; then return 1; fi
+  rm -rf -- "$live"
+  mkdir -p -- "$(dirname -- "$live")"
+  if ! mv -- "$new" "$live"; then
+    rm -rf -- "$live"
+    if [[ -d "$saved" ]]; then mv -- "$saved" "$live" || true; fi
+    return 1
+  fi
+  rm -rf -- "$saved"
+  return 0
+}
+
 lib_ols_snapshot_restore() {
-  local snap="$1" tmp=""
+  local snap="$1" tmp="" m="" rc=0 n=0
   if [[ -z "$snap" || ! -f "$snap" ]]; then lib_warn "no OpenLiteSpeed snapshot available to restore"; return 1; fi
   tmp="$(lib_mktemp -d)"
   if ! tar -xzf "$snap" -C "$tmp"; then lib_warn "snapshot ${snap} is unreadable"; return 1; fi
-  rm -rf "${LSWS_HOME}/conf.failed"
-  if ! mv "${LSWS_HOME}/conf" "${LSWS_HOME}/conf.failed"; then return 1; fi
-  if ! mv "${tmp}/conf" "${LSWS_HOME}/conf"; then
-    mv "${LSWS_HOME}/conf.failed" "${LSWS_HOME}/conf" || true
-    return 1
-  fi
-  rm -rf "${LSWS_HOME}/conf.failed"
+  for m in conf admin/conf; do
+    [[ -d "${tmp}/${m}" ]] || continue
+    n=$((n + 1))
+    if ! _ols_swap_dir "${LSWS_HOME}/${m}" "${tmp}/${m}"; then
+      lib_warn "could not restore ${LSWS_HOME}/${m} from ${snap}"
+      rc=1
+    fi
+  done
+  if (( n == 0 )); then lib_warn "snapshot ${snap} contains no configuration directory"; return 1; fi
+  (( rc == 0 )) || return 1
   lib_warn "OpenLiteSpeed configuration restored from ${snap}"
   lib_log_write ROLLBACK "OLS conf restored from ${snap}"
   return 0
 }
 
 # Structural checks + "openlitespeed -t". Output/diagnostics in OLS_TEST_OUTPUT.
+# OpenLiteSpeed expands these itself, and both the stock vhost and every vhost the WebAdmin
+# creates use them. Treating the value as a literal path made lib_ols_config_test declare
+# a perfectly valid server broken, which then blocked every change set on that machine.
+_ols_expand_macros() {   # value vhostname
+  local v="$1" n="$2"
+  v="${v//\$\{SERVER_ROOT\}/$LSWS_HOME}"
+  v="${v//\$SERVER_ROOT/$LSWS_HOME}"
+  v="${v//\$\{VH_NAME\}/$n}"
+  v="${v//\$VH_NAME/$n}"
+  printf '%s' "$v"
+}
+
 lib_ols_config_test() {
-  local f="" rc=0 out="" name="" cfg=""
+  local f="" rc=0 out="" name="" cfg="" why=""
   OLS_TEST_OUTPUT=""
   [[ -f "$LSWS_CONF" ]] || { OLS_TEST_OUTPUT="missing ${LSWS_CONF}"; return 1; }
-  for f in "$LSWS_CONF" "$LSWS_VHOSTS_DIR"/*/vhconf.conf; do
+  # admin_config.conf is checked too: "panel open/close" edits that file and nothing else
+  for f in "$LSWS_CONF" "$LSWS_ADMIN_CONF" "$LSWS_VHOSTS_DIR"/*/vhconf.conf; do
     [[ -f "$f" ]] || continue
-    if ! _ols_braces_balanced "$f"; then OLS_TEST_OUTPUT="unbalanced braces in ${f}"; lib_log_write ERROR "$OLS_TEST_OUTPUT"; return 1; fi
+    if ! why="$(_ols_braces_balanced "$f")"; then
+      OLS_TEST_OUTPUT="${f}: ${why:-the block structure does not parse}"
+      lib_log_write ERROR "$OLS_TEST_OUTPUT"; return 1
+    fi
   done
   while read -r name; do
     [[ -n "$name" ]] || continue
     cfg="$(_ols_block_key "$LSWS_CONF" virtualhost "$name" configFile get)"
+    [[ -n "$cfg" ]] || continue
+    cfg="$(_ols_expand_macros "$cfg" "$name")"
+    # a macro we do not know is left to "openlitespeed -t", which knows all of them;
+    # this check must never be stricter than OpenLiteSpeed itself
+    [[ "$cfg" == *'$'* ]] && continue
     [[ "$cfg" == /* ]] || cfg="${LSWS_HOME}/${cfg}"
-    if [[ -n "$cfg" && ! -f "$cfg" ]]; then OLS_TEST_OUTPUT="virtualhost ${name}: configFile ${cfg} does not exist"; lib_log_write ERROR "$OLS_TEST_OUTPUT"; return 1; fi
+    if [[ ! -f "$cfg" ]]; then OLS_TEST_OUTPUT="virtualhost ${name}: configFile ${cfg} does not exist"; lib_log_write ERROR "$OLS_TEST_OUTPUT"; return 1; fi
   done < <(lib_ols_conf_vhosts)
   if [[ -x "$LSWS_BIN" ]]; then
     out="$(timeout 90 "$LSWS_BIN" -t 2>&1)" || rc=$?
@@ -471,39 +607,74 @@ lib_ols_change_begin() {
   OLS_SNAPSHOT=""
   (( OPT_DRY_RUN )) && return 0
   lib_ols_is_installed || return 0
-  OLS_SNAPSHOT="$(lib_ols_snapshot_take)"
+  if ! OLS_SNAPSHOT="$(lib_ols_snapshot_take)" || [[ -z "$OLS_SNAPSHOT" ]]; then
+    OLS_SNAPSHOT=""
+    lib_die "Could not snapshot the OpenLiteSpeed configuration" \
+      "without it a rejected change could not be undone; the usual cause is no free space on the filesystem holding ${STATE_DIR}" \
+      "check 'df -h ${STATE_DIR}', free some space and re-run"
+  fi
+  # Registered on the rollback stack so the ERR trap restores it as well. lib_ols_change_abort
+  # has no call site, so any failure between begin and commit - lib_ols_vhconf_write has
+  # already replaced the live vhconf.conf by then - used to exit with an untested config in
+  # place and the snapshot sitting unused in STATE_DIR.
+  lib_rollback_push "lib_ols_snapshot_restore '${OLS_SNAPSHOT}'"
+}
+
+# The change set finished (or its failure was handled here): stop the ERR trap from
+# restoring a snapshot we no longer want restored.
+_ols_change_release() {
+  if [[ -n "$OLS_SNAPSHOT" ]]; then lib_rollback_drop "lib_ols_snapshot_restore '${OLS_SNAPSHOT}'"; fi
+  OLS_SNAPSHOT=""
+  return 0
+}
+
+# Restore, then report what ACTUALLY happened. The old code discarded the restore's exit
+# status with "|| true" and then told the operator unconditionally that the previous
+# configuration had been restored - including when no snapshot existed at all.
+_ols_restore_or_report() {
+  local snap="$OLS_SNAPSHOT"
+  _ols_change_release
+  if [[ -z "$snap" ]]; then
+    OLS_RESTORE_MSG="no snapshot was available, so nothing could be rolled back and the rejected configuration is still on disk"
+  elif lib_ols_snapshot_restore "$snap"; then
+    OLS_RESTORE_MSG="the previous configuration was restored from ${snap}"
+  else
+    OLS_RESTORE_MSG="the previous configuration could NOT be restored from ${snap}; the rejected configuration is still on disk"
+  fi
+  return 0
 }
 
 lib_ols_change_commit() {   # [description]
   local desc="${1:-OpenLiteSpeed configuration}"
   if (( OPT_DRY_RUN )); then lib_info "[dry-run] would test the configuration and gracefully reload OpenLiteSpeed (${desc})"; return 0; fi
-  if (( ! OLS_PENDING_RELOAD )); then lib_debug "no OpenLiteSpeed changes to apply (${desc})"; OLS_SNAPSHOT=""; return 0; fi
+  if (( ! OLS_PENDING_RELOAD )); then lib_debug "no OpenLiteSpeed changes to apply (${desc})"; _ols_change_release; return 0; fi
   lib_info "Testing OpenLiteSpeed configuration..."
   if ! lib_ols_config_test; then
     lib_error "Configuration test failed: ${OLS_TEST_OUTPUT}"
-    lib_ols_snapshot_restore "$OLS_SNAPSHOT" || true
+    _ols_restore_or_report
     lib_die "OpenLiteSpeed configuration test failed (${desc})" \
-      "the generated configuration was rejected by openlitespeed -t; previous configuration restored" \
+      "the generated configuration was rejected; ${OLS_RESTORE_MSG}" \
       "inspect ${LOG_FILE} and ${LSWS_HOME}/logs/error.log, then re-run"
   fi
   if ! lib_ols_reload || ! lib_ols_wait_ready 40; then
     lib_error "OpenLiteSpeed did not come back after the reload"
-    lib_ols_snapshot_restore "$OLS_SNAPSHOT" || true
+    _ols_restore_or_report
     lib_ols_reload || true
     lib_ols_wait_ready 40 || lib_ols_restart || true
     lib_die "OpenLiteSpeed failed to reload (${desc})" \
-      "service did not become healthy with the new configuration; previous configuration restored" \
+      "the service did not become healthy with the new configuration; ${OLS_RESTORE_MSG}" \
       "systemctl status lsws; tail -n 50 ${LSWS_HOME}/logs/error.log"
   fi
   OLS_PENDING_RELOAD=0
-  OLS_SNAPSHOT=""
+  _ols_change_release
   lib_ok "OpenLiteSpeed reloaded (${desc})"
 }
 
 lib_ols_change_abort() {
   lib_ols_tx_abort
   if [[ -n "$OLS_SNAPSHOT" && -f "$OLS_SNAPSHOT" ]]; then lib_ols_snapshot_restore "$OLS_SNAPSHOT" || true; fi
-  OLS_SNAPSHOT=""; OLS_PENDING_RELOAD=0
+  _ols_change_release
+  OLS_PENDING_RELOAD=0
   return 0
 }
 
@@ -999,7 +1170,9 @@ EOF
   php_bin="${LSWS_HOME}/lsphp${PHP_VERSION//./}/bin/lsphp"
   if lib_ols_tx_block_exists extprocessor lsphp && [[ -x "$php_bin" ]]; then
     lib_ols_tx_block_set extprocessor lsphp path "$php_bin"
-    lib_ols_tx_block_set extprocessor lsphp env "PHP_LSAPI_CHILDREN=${CALC_PHP_CHILDREN_TOTAL}"
+    # "env" is one of the keys OpenLiteSpeed lets repeat. Matching on the variable name
+    # keeps the operator's other env lines (LSAPI_AVOID_FORK and friends) in place.
+    lib_ols_tx_block_set_multi extprocessor lsphp env "PHP_LSAPI_CHILDREN=${CALC_PHP_CHILDREN_TOTAL}" "PHP_LSAPI_CHILDREN="
   fi
   if ! lib_ols_tx_block_exists scripthandler ""; then
     lib_ols_tx_block_put scripthandler "" <<<$'scripthandler  {\n  add                     lsapi:lsphp php\n}'

@@ -43,6 +43,11 @@ lib_install_parse_args() {
     esac
   done
   lib_php_valid_version "$PHP_VERSION" || lib_die "Invalid --php '${PHP_VERSION}'" "expected e.g. 8.3" "--php 8.3"
+  if [[ -n "$DEFAULT_EMAIL" ]]; then
+    lib_email_valid "$DEFAULT_EMAIL" || lib_die "Invalid --email '${DEFAULT_EMAIL}'" \
+      "the address goes into httpd_config.conf and into mail headers, so it may not contain spaces, quotes, backslashes or line breaks" \
+      "--email you@example.com"
+  fi
   [[ "$ADMIN_PORT" =~ ^[0-9]{2,5}$ ]] && (( ADMIN_PORT >= 1024 && ADMIN_PORT <= 65535 )) \
     || lib_die "Invalid --admin-port '${ADMIN_PORT}'" "expected a port between 1024 and 65535" "--admin-port 7574"
   # lib_ssh_ports is called directly: SYS_SSH_PORTS is still the module default "22" here,
@@ -674,6 +679,11 @@ lib_panel_open() {
   else
     [[ "$ip" =~ ^[0-9a-fA-F.:/]+$ ]] || lib_die "Invalid --ip '${ip}'" "" "--ip 1.2.3.4 or --ip 1.2.3.0/24"
   fi
+  # before _panel_apply_bind, not after: lib_ols_listener_address reads SYS_IPV6, which is
+  # still its module default 0 until lib_system_analyze runs. Binding "*" (IPv4 only) while
+  # the UFW rule was opened for the operator's IPv6 address produced a panel reported as
+  # open that nothing could reach.
+  lib_system_analyze
   _panel_apply_bind "$(lib_ols_listener_address)"
   lib_ufw_delete_port_rules "$ADMIN_PORT"
   if [[ "$ip" == "any" ]]; then lib_ufw_rule allow "${ADMIN_PORT}/tcp"
@@ -732,6 +742,7 @@ lib_panel_main() {
   fi
   lib_require_tools
   lib_require_installed
+  lib_params_load
   case "$action" in
     open)
       # bare "panel" opens it; without an SSH session there is no address to open for,

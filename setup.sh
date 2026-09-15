@@ -157,6 +157,9 @@ main() {
   lib_check_os
   lib_log_file_init
   lib_tmp_root_init      # must run here, not inside $(lib_mktemp): that is a subshell
+  # every command except "install" works from the settings chosen at install time;
+  # "install" merges its own flags with the manifest in lib_install_parse_args
+  if [[ "$cmd" != "install" ]]; then lib_params_load; fi
 
   # read-only commands (and "notify --send", used by hooks/PAM) do not take the lock
   case "$cmd" in

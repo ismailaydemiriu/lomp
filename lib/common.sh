@@ -102,6 +102,17 @@ lib_log_line_no() {
 # =============================================================================
 lib_rollback_clear() { LIB_ROLLBACK_STACK=(); }
 lib_rollback_push()  { LIB_ROLLBACK_STACK+=("$*"); lib_debug "rollback step registered: $*"; }
+# Remove a step by its exact text, for when it has been handled or no longer applies.
+# By value rather than by position: other steps may have been pushed in between.
+lib_rollback_drop() {
+  local want="$*" s=""
+  local -a keep=()
+  for s in ${LIB_ROLLBACK_STACK[@]+"${LIB_ROLLBACK_STACK[@]}"}; do
+    if [[ "$s" != "$want" ]]; then keep+=("$s"); fi
+  done
+  LIB_ROLLBACK_STACK=(${keep[@]+"${keep[@]}"})
+  return 0
+}
 lib_rollback_run() {
   local n=${#LIB_ROLLBACK_STACK[@]} i="" cmd=""
   (( n > 0 )) || return 0
@@ -662,6 +673,27 @@ lib_manifest_set_json() {     # lib_manifest_set_json '.path.key' '<json literal
 
 lib_installed() { [[ -s "$STATE_DIR/manifest.json" ]] && [[ -n "$(lib_manifest_get '.installed_at')" ]]; }
 
+# Restore the settings the operator chose at install time. setup.sh only carries the
+# built-in defaults, so without this every later command works from them: "panel open"
+# rewrote the WebAdmin listener to the compiled-in 7080 even on a server installed with
+# --admin-port, and left a stale UFW rule for the port it abandoned.
+# "install" is excluded: it merges flags with the manifest itself.
+lib_params_load() {
+  local v=""
+  { [[ -s "$STATE_DIR/manifest.json" ]] && lib_have jq; } || return 0
+  v="$(lib_manifest_get '.params.admin_port')"
+  if [[ "$v" =~ ^[0-9]+$ ]]; then ADMIN_PORT="$v"; fi
+  v="$(lib_manifest_get '.params.admin_access')"
+  if [[ -n "$v" ]]; then ADMIN_ACCESS="$v"; fi
+  v="$(lib_manifest_get '.params.admin_ip')"
+  if [[ -n "$v" ]]; then ADMIN_ALLOWED_IP="$v"; fi
+  v="$(lib_manifest_get '.params.php')"
+  if [[ -n "$v" ]]; then PHP_VERSION="$v"; fi
+  v="$(lib_manifest_get '.params.email')"
+  if [[ -n "$v" && -z "$DEFAULT_EMAIL" ]]; then DEFAULT_EMAIL="$v"; fi
+  return 0
+}
+
 lib_require_installed() {
   lib_installed || lib_die "Server is not provisioned yet" "manifest missing (${STATE_DIR}/manifest.json)" "Run: sudo ./setup.sh install"
 }
@@ -792,6 +824,15 @@ PYEOF
 # sudo resets the environment by default, so SSH_CONNECTION is gone under "sudo lompstack".
 # Three sources are tried in order: our own environment, the environment of an ancestor
 # process (the login shell still has it), and finally the utmp entry for our terminal.
+# Deliberately not an RFC 5322 parser. Its job is to keep line breaks, quotes, backslashes
+# and shell metacharacters out of a value that is written into configuration files and mail
+# headers: "--email 'x@y.z\nuser root'" reached httpd_config.conf as two directives.
+lib_email_valid() {
+  local e="${1:-}"
+  [[ -n "$e" ]] || return 1
+  [[ "$e" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}$ ]]
+}
+
 lib_admin_ip_valid() { [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ || "$1" == *:*:* ]]; }
 
 # Extract the remote address from "who -m" output given on stdin. A local console has no

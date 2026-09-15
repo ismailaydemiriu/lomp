@@ -63,7 +63,12 @@ lib_domain_state_load() {
   D_BACKUP_LAST="$(lib_json_get "$f" '.backup.last')"
   [[ -z "$D_MODE" ]] && D_MODE="php"
   [[ -z "$D_HOME" ]] && D_HOME="$(lib_domain_home "$domain")"
-  [[ -z "$D_STATIC_PATHS" ]] && D_STATIC_PATHS="/static/,/assets/,/uploads/"
+  # "none" is how "--static-paths ''" survives a round trip. An empty string here cannot be
+  # told apart from "key absent", so the default came back on every reload and re-added
+  # three contexts pointing at directories that add time never created - after which
+  # openlitespeed -t rejected the vhost and renew-ssl failed for that site forever.
+  if [[ "$D_STATIC_PATHS" == "none" ]]; then D_STATIC_PATHS=""
+  elif [[ -z "$D_STATIC_PATHS" ]]; then D_STATIC_PATHS="/static/,/assets/,/uploads/"; fi
   return 0
 }
 
@@ -71,7 +76,7 @@ lib_domain_state_json() {
   jq -n \
     --arg domain "$D_DOMAIN" --arg ident "$D_IDENT" --arg user "$D_USER" --arg group "$D_GROUP" --arg home "$D_HOME" \
     --arg mode "$D_MODE" --arg php "$D_PHP" --arg children "$D_PHP_CHILDREN" --arg mem "$D_MEMORY" --arg up "$D_UPLOAD" \
-    --arg proxy "$D_PROXY" --arg spaths "$D_STATIC_PATHS" --arg ws "$D_WS_PATH" \
+    --arg proxy "$D_PROXY" --arg spaths "${D_STATIC_PATHS:-none}" --arg ws "$D_WS_PATH" \
     --argjson www "$(_d_json_bool "$D_WWW")" --argjson wwwp "$(_d_json_bool "$D_WWW_PRIMARY")" \
     --argjson ssl "$(_d_json_bool "$D_SSL")" --argjson sslw "$(_d_json_bool "$D_SSL_WANTED")" \
     --argjson wild "$(_d_json_bool "$D_SSL_WILDCARD")" --argjson hsts "$(_d_json_bool "$D_HSTS_PRELOAD")" \
@@ -397,6 +402,13 @@ lib_domain_expected_codes() {   # [lenient]
 lib_domain_apply_config() {   # [description]
   local desc="${1:-vhost ${D_DOMAIN}}" script=1
   [[ "$D_MODE" == "php" || "$D_MODE" == "wordpress" ]] || script=0
+  # Every other lib_ols_tx_begin call site checks this. Without it, "renew-ssl" and
+  # "restore" on a host that has lost httpd_config.conf start a transaction from an empty
+  # file and COMMIT a stub config to the canonical path - which the gate then passes,
+  # because openlitespeed -t is skipped when the binary is missing too.
+  lib_ols_is_installed || lib_die "OpenLiteSpeed is not installed on this server" \
+    "${LSWS_CONF} is missing, so there is no configuration to add ${D_DOMAIN} to" \
+    "run 'lompstack install' first, then retry"
   lib_system_profile
   lib_ols_change_begin
   lib_ols_vhconf_write "$D_DOMAIN"

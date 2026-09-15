@@ -246,7 +246,163 @@ assert_true "heredoc braces balanced" _ols_braces_balanced "$TMP/vh.conf"
 assert_eq "span skips heredoc" "2 9" "$(_ols_span "$TMP/vh.conf" rewrite "")"
 assert_eq "context key after heredoc" "1" "$(_ols_block_key "$TMP/vh.conf" context / allowBrowse get)"
 printf 'a {\n  b {\n}\n' >"$TMP/bad.conf"
-assert_false "unbalanced detected" _ols_braces_balanced "$TMP/bad.conf"
+_bal() { _ols_braces_balanced "$1" >/dev/null 2>&1; }   # the reason goes to stdout now
+assert_false "unbalanced detected" _bal "$TMP/bad.conf"
+
+# =============================================================================
+section "OpenLiteSpeed surgery: audit regressions"
+rc_nonzero() { [[ "$(run_isolated "$@")" != "0" ]]; }
+_why() { _ols_braces_balanced "$1" 2>/dev/null | grep -oE 'line [0-9]+' | head -1 || true; }
+_quiet() { "$@" >/dev/null 2>&1; }
+cp "$LSWS_CONF" "$TMP/conf.before-audit"   # this section rewrites it; later sections need it back
+
+# -- a value must not be able to become a second directive -------------------
+# "awk -v v=..." applies backslash escape processing, so the two characters \n arrived as a
+# real newline and "install --email 'x@y.z\nuser root'" rewrote the server's uid.
+cat >"$LSWS_CONF" <<'EOF'
+serverName
+user                      nobody
+adminEmails               root@localhost
+
+tuning  {
+  maxConnections          10000
+}
+EOF
+lib_ols_tx_begin
+lib_ols_tx_top_set adminEmails 'ops@example.com\nuser root\ngroup root'
+assert_eq "backslash-n is stored literally" 'ops@example.com\nuser root\ngroup root' "$(lib_ols_tx_top_get adminEmails)"
+assert_eq "no directive injected"  "0"      "$(grep -c '^user root' "$OLS_TX_FILE" || true)"
+assert_eq "user directive untouched" "nobody" "$(lib_ols_tx_top_get user)"
+lib_ols_tx_block_set tuning "" maxConnections 'a\tb'
+assert_eq "tab escape stored literally" 'a\tb' "$(lib_ols_tx_block_get tuning "" maxConnections)"
+assert_true "a real newline in a value is refused" rc_nonzero lib_ols_tx_top_set adminEmails "$(printf 'a@b.c\nuser root')"
+assert_false "email validation rejects the injection" lib_email_valid 'ops@example.com\nuser root'
+assert_false "email validation rejects a space"       lib_email_valid 'a b@example.com'
+assert_true  "email validation accepts a normal one"  lib_email_valid 'ops@example.com'
+assert_true  "email validation accepts a subdomain"   lib_email_valid 'ops@mail.example.co.uk'
+
+# -- keys OpenLiteSpeed lets repeat ------------------------------------------
+cat >"$LSWS_CONF" <<'EOF'
+extProcessor lsphp{
+  type                    lsapi
+  env                     LSAPI_AVOID_FORK=200M
+  env                     PHP_LSAPI_CHILDREN=10
+  path                    fcgi-bin/lsphp
+}
+EOF
+lib_ols_tx_begin
+lib_ols_tx_block_set_multi extprocessor lsphp env "PHP_LSAPI_CHILDREN=48" "PHP_LSAPI_CHILDREN="
+assert_eq "the operator's env line survives" "1" "$(grep -c 'LSAPI_AVOID_FORK=200M' "$OLS_TX_FILE")"
+assert_eq "our env line is updated"          "1" "$(grep -c 'PHP_LSAPI_CHILDREN=48' "$OLS_TX_FILE")"
+assert_eq "no stale value left"              "0" "$(grep -c 'PHP_LSAPI_CHILDREN=10' "$OLS_TX_FILE" || true)"
+lib_ols_tx_block_set extprocessor lsphp type lsapi
+assert_eq "a single-valued key still collapses duplicates" "1" "$(grep -c '^  type' "$OLS_TX_FILE")"
+
+# -- a map that cannot land must not be silent -------------------------------
+# _ols_map only emits inside a listener block; with none matching it echoed its input and
+# exited 0, leaving the site registered but bound to nothing (served 403 by the catch-all).
+printf 'serverName\nlistener Renamed {\n  address                 *:80\n}\n' >"$LSWS_CONF"
+lib_ols_tx_begin
+assert_true "a map onto a missing listener is fatal" rc_nonzero lib_ols_tx_map_set HTTP example.com "example.com"
+
+# -- structure diagnostics name the line -------------------------------------
+printf 'tuning  {\n  maxConnections 1\n}   # bumped for the campaign\n' >"$TMP/c1.conf"
+assert_false "trailing text after } is rejected" _bal "$TMP/c1.conf"
+assert_eq "and the line is named" "line 3" "$(_why "$TMP/c1.conf")"
+assert_eq "an unclosed block names where it opened" "line 1" "$(_why "$TMP/bad.conf")"
+printf 'rewrite {\n  rules  <<<END_r\nRewriteRule ^(.*)$ https://%%{HTTP_HOST}$1 [R=301,L]\n  END_r\n}\n' >"$TMP/c2.conf"
+assert_true "a value containing } is not mistaken for a close" _bal "$TMP/c2.conf"
+
+# -- a commented-out block must not skew the depth counter -------------------
+# OpenLiteSpeed drops every '#' line before it looks at structure; this parser did not, so
+# commenting a block out made every later block lookup silently return nothing.
+cat >"$TMP/c3.conf" <<'EOF'
+serverName
+#expires  {
+#  enableExpires           1
+#}
+tuning  {
+  maxConnections          10000
+}
+listener HTTP {
+  address                 *:80
+}
+EOF
+assert_true "a commented-out block parses"  _bal "$TMP/c3.conf"
+assert_eq "later blocks are still found"    "5 7"   "$(_ols_span "$TMP/c3.conf" tuning "")"
+assert_eq "later block names are still found" "HTTP" "$(_ols_block_names "$TMP/c3.conf" listener)"
+assert_eq "later keys are still readable"   "10000" "$(_ols_block_key "$TMP/c3.conf" tuning "" maxConnections get)"
+
+# -- refuse before the surgery, not after ------------------------------------
+cp "$TMP/c1.conf" "$LSWS_CONF"
+assert_true "tx_begin refuses an unparseable file" rc_nonzero lib_ols_tx_begin
+cp "$TMP/c3.conf" "$LSWS_CONF"
+assert_false "tx_begin accepts a parseable one" rc_nonzero lib_ols_tx_begin
+
+# -- the rollback point must be real -----------------------------------------
+mkdir -p "$LSWS_HOME/admin/conf"
+printf 'listener adminListener {\n  address                 127.0.0.1:7080\n}\n' >"$LSWS_ADMIN_CONF"
+snap="$(lib_ols_snapshot_take)"
+assert_true "snapshot written" test -f "$snap"
+assert_eq "admin_config.conf is in the snapshot" "1" "$(tar -tzf "$snap" | grep -c 'admin/conf/admin_config.conf')"
+assert_false "restoring an empty path reports success" _quiet lib_ols_snapshot_restore ""
+# a change set with no rollback point must stop, not proceed and then claim it rolled back
+lib_ols_snapshot_take() { return 1; }
+lib_ols_is_installed() { return 0; }
+assert_true "change_begin refuses without a snapshot" rc_nonzero lib_ols_change_begin
+unset -f lib_ols_snapshot_take lib_ols_is_installed
+
+# -- a restore must never nest the saved tree inside the new one -------------
+mkdir -p "$TMP/live/sub"; : >"$TMP/live/keep"
+mkdir -p "$TMP/newconf"; : >"$TMP/newconf/fresh"
+_ols_swap_dir "$TMP/live" "$TMP/newconf"
+assert_true  "live tree replaced"   test -f "$TMP/live/fresh"
+assert_false "old tree not kept"    test -f "$TMP/live/keep"
+assert_false "no .failed debris"    test -e "$TMP/live.failed"
+assert_false "nothing nested"       test -e "$TMP/live/live.failed"
+
+# -- config test must not be stricter than OpenLiteSpeed ---------------------
+assert_eq "SERVER_ROOT expanded" "${LSWS_HOME}/conf/vhosts/Shop/vhconf.conf" \
+  "$(_ols_expand_macros '$SERVER_ROOT/conf/vhosts/$VH_NAME/vhconf.conf' Shop)"
+assert_eq "braced form expanded too" "${LSWS_HOME}/conf/vhosts/Shop/vhconf.conf" \
+  "$(_ols_expand_macros '${SERVER_ROOT}/conf/vhosts/${VH_NAME}/vhconf.conf' Shop)"
+printf 'virtualHost Shop{\n  configFile              $SERVER_ROOT/conf/vhosts/$VH_NAME/vhconf.conf\n}\n' >"$LSWS_CONF"
+mkdir -p "${LSWS_VHOSTS_DIR}/Shop"; printf 'docRoot $VH_ROOT/public_html/\n' >"${LSWS_VHOSTS_DIR}/Shop/vhconf.conf"
+assert_true "a macro configFile passes the test" lib_ols_config_test
+rm -f "${LSWS_VHOSTS_DIR}/Shop/vhconf.conf"
+assert_false "a missing macro configFile still fails" lib_ols_config_test
+rm -rf "${LSWS_VHOSTS_DIR}/Shop"
+
+# -- an explicitly empty --static-paths must round-trip ----------------------
+lib_domain_state_reset
+D_DOMAIN="app.example.com"; D_MODE="proxy"; D_PROXY="127.0.0.1:3000"; D_STATIC_PATHS=""
+mkdir -p "$STATE_DIR/domains/app.example.com"
+lib_domain_state_json >"$STATE_DIR/domains/app.example.com/domain.json"
+assert_eq "empty static paths are persisted as 'none'" "none" \
+  "$(lib_json_get "$STATE_DIR/domains/app.example.com/domain.json" '.proxy.static_paths')"
+lib_domain_state_load app.example.com
+assert_eq "and load back as empty, not as the default" "" "$D_STATIC_PATHS"
+D_STATIC_PATHS="/static/,/assets/"
+# MSYS_NO_PATHCONV: under Git Bash, jq is a native Windows binary and MSYS rewrites any
+# argument that looks like a POSIX path, so "/static/" would arrive as "C:/Program Files/...".
+MSYS_NO_PATHCONV=1 lib_domain_state_json >"$STATE_DIR/domains/app.example.com/domain.json"
+lib_domain_state_load app.example.com
+assert_eq "a real list still round-trips" "/static/,/assets/" "$D_STATIC_PATHS"
+rm -rf "$STATE_DIR/domains/app.example.com"
+lib_domain_state_reset
+
+# -- settings chosen at install time are restored for later commands ---------
+# without this "panel" rebound the WebAdmin listener to the built-in 7080
+lib_manifest_set '.params.admin_port' '7574'
+lib_manifest_set '.params.admin_access' 'ip'
+ADMIN_PORT="7080"; ADMIN_ACCESS="tunnel"
+lib_params_load
+assert_eq "admin port restored from the manifest" "7574" "$ADMIN_PORT"
+assert_eq "admin access restored too" "ip" "$ADMIN_ACCESS"
+ADMIN_PORT="7080"; ADMIN_ACCESS="tunnel"
+lib_manifest_set '.params.admin_port' ''
+lib_manifest_set '.params.admin_access' ''
+cp "$TMP/conf.before-audit" "$LSWS_CONF"
 
 # =============================================================================
 section "profile calculation"
