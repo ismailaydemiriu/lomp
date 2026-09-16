@@ -223,6 +223,23 @@ Global flags work everywhere: `--yes`, `--dry-run`, `--quiet`, `--verbose`, `--n
 | `--wildcard` | Also request `*.<domain>` over DNS-01 (needs a stored Cloudflare API token) |
 | `--staging` | Use the Let's Encrypt staging CA while you are testing |
 
+### .htaccess
+
+PHP and WordPress sites read `.htaccess`, within two limits that come from OpenLiteSpeed:
+
+- Only rewrite rules count (`RewriteEngine`, `RewriteBase`, `RewriteCond`, `RewriteRule`).
+  `Header`, `php_value`, `Deny from all`, `Require`, `Options`, `AuthType` and the like are
+  ignored. lompstack sets the security headers, the PHP limits and the file protection in the
+  virtual host instead, and WordPress sites refuse to run any PHP file under
+  `wp-content/uploads`.
+- A `.htaccess` is read when OpenLiteSpeed loads, not when it changes. A cron job checks every
+  minute and reloads OpenLiteSpeed once a `.htaccess` has changed - a WordPress permalink
+  setting, a plugin, a hand edit - so a change takes effect within about a minute. A reload
+  restarts the server, which pauses every site for a moment; `doctor` lists a change that is
+  still waiting.
+
+Static and Node.js sites do not read `.htaccess` at all.
+
 ### Path proxies
 
 Publish an application under a path of any site, next to WordPress, PHP or static files:

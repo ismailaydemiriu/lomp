@@ -371,6 +371,15 @@ _doc_check_ssl_infra() {
 
 _doc_check_cron() {
   lib_cron_has healthcheck && _doc_add OK "healthcheck cron" "daily" || _doc_add WARN "healthcheck cron" "not scheduled (re-run install)"
+  local pending=""
+  if [[ -n "$(lib_ols_htaccess_docroots)" ]]; then
+    if lib_cron_has htaccess; then _doc_add OK "htaccess cron" "a changed .htaccess takes effect within a minute"
+    else _doc_add WARN "htaccess cron" "not scheduled: a changed .htaccess stays inactive until OpenLiteSpeed restarts (re-run install)"; fi
+    pending="$(lib_ols_htaccess_pending)"
+    if [[ -n "$pending" ]]; then
+      _doc_add WARN "htaccess" "${pending} changed after OpenLiteSpeed started and is not in effect yet (setup.sh htaccess-check)"
+    fi
+  fi
   local sched=""; sched="$(lib_manifest_get '.backup.schedule')"
   if [[ -n "$sched" ]]; then
     lib_cron_has backup && _doc_add OK "backup cron" "$sched" || _doc_add WARN "backup cron" "schedule '${sched}' configured but no cron entry"

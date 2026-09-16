@@ -262,9 +262,15 @@ lib_lock() {
   mkdir -p "$(dirname "$LOCK_FILE")" 2>/dev/null || true
   exec 200>"$LOCK_FILE"
   if ! flock -n 200; then
-    lib_die "Another setup.sh instance is already running" \
-      "lock ${LOCK_FILE} is held by another process" \
-      "Wait for it to finish (ps aux | grep setup.sh)"
+    # most often the minute-by-minute .htaccess check reloading OpenLiteSpeed, which takes
+    # seconds: wait for it instead of failing at once
+    (( OPT_QUIET )) || printf '%sAnother lompstack command is running; waiting for it (up to %s s)...%s\n' \
+      "$C_DIM" "${LIB_LOCK_WAIT:-90}" "$C_RST" >&2
+    if ! flock -w "${LIB_LOCK_WAIT:-90}" 200; then
+      lib_die "Another setup.sh instance is already running" \
+        "lock ${LOCK_FILE} is held by another process" \
+        "Wait for it to finish (ps aux | grep setup.sh)"
+    fi
   fi
   LIB_LOCK_HELD=1
   export SERVER_SETUP_LOCKED=1

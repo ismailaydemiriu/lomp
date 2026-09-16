@@ -328,6 +328,11 @@ lib_domain_add_main() {
   if [[ "$D_MODE" == "wordpress" ]]; then
     lib_step "WordPress installation"
     lib_domain_wp_install
+    # WordPress wrote its .htaccess (permalinks, LiteSpeed Cache) after OpenLiteSpeed loaded the
+    # configuration, and OpenLiteSpeed reads it only while loading: without this, every
+    # permalink answers 404 until the next restart
+    lib_ols_htaccess_reload "WordPress wrote ${D_HOME}/public_html/.htaccess" \
+      || lib_warn "OpenLiteSpeed did not reload; permalinks work after: systemctl restart ${OLS_SERVICE}"
   fi
 
   # ---- 8 housekeeping ------------------------------------------------------
@@ -336,6 +341,7 @@ lib_domain_add_main() {
   lib_domain_state_save
   lib_domain_logrotate_regen
   lib_domain_fail2ban_regen
+  if [[ "$D_MODE" == "php" || "$D_MODE" == "wordpress" ]]; then lib_ols_htaccess_watch_ensure; fi
   lib_ok "Housekeeping done"
 
   # From here on nothing undoes the site: the vhost, certificate and database are in place,
@@ -616,7 +622,7 @@ EOF
 
 _wp() {   # run wp-cli as the site user
   runuser -u "$D_USER" -- env HOME="$D_HOME" WP_CLI_PHP="$(lib_php_cli "$D_PHP")" WP_CLI_CACHE_DIR="${D_HOME}/private/.wp-cli/cache" \
-    "$WPCLI_BIN" --path="${D_HOME}/public_html" "$@"
+    WP_CLI_CONFIG_PATH="${D_HOME}/private/.wp-cli/config.yml" "$WPCLI_BIN" --path="${D_HOME}/public_html" "$@"
 }
 
 lib_domain_wp_install() {
@@ -631,6 +637,11 @@ lib_domain_wp_install() {
   admin="${DOM_OPT_WP_ADMIN:-admin}"
   email="${DOM_OPT_WP_EMAIL:-${D_EMAIL:-admin@${D_DOMAIN}}}"
   if (( OPT_DRY_RUN )); then lib_info "[dry-run] would download and install WordPress (${DOM_OPT_WP_LOCALE}) at ${url}"; return 0; fi
+  # From the command line WordPress cannot tell that LiteSpeed takes rewrite rules, so
+  # "wp rewrite --hard" wrote none into .htaccess and every permalink answered 404. wp-cli is
+  # told in its own configuration, kept out of the document root; written by the site user.
+  runuser -u "$D_USER" -- sh -c 'umask 077 && mkdir -p "$1" && printf "apache_modules:\n  - mod_rewrite\n" >"$1/config.yml"' _ "${D_HOME}/private/.wp-cli" \
+    || lib_warn "could not write ${D_HOME}/private/.wp-cli/config.yml; save Settings > Permalinks once in WordPress"
   if [[ -f "${docroot}/wp-config.php" ]]; then
     lib_warn "WordPress already present in ${docroot}; skipping download/install"
   else
@@ -644,6 +655,9 @@ define('FS_METHOD', 'direct');" || lib_die "wp config create failed" "database c
     lib_run_secret "wp core install (${url})" _wp core install --url="$url" --title="$title" --admin_user="$admin" --admin_password="$pass" \
       --admin_email="$email" --skip-email || lib_die "WordPress installation failed" "wp core install error" "see the log; database reachable?"
     lib_run _wp rewrite structure '/%postname%/' --hard || lib_warn "could not set permalink structure"
+    if ! runuser -u "$D_USER" -- timeout 5 grep -qs '^# BEGIN WordPress' "${docroot}/.htaccess"; then
+      lib_warn "WordPress wrote no rewrite rules into ${docroot}/.htaccess; permalinks answer 404 until Settings > Permalinks is saved once"
+    fi
     lib_run _wp plugin install litespeed-cache --activate || lib_warn "LiteSpeed Cache plugin could not be installed (no network?)"
     lib_run _wp option update timezone_string "$TIMEZONE" || true
     {

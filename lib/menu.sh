@@ -87,6 +87,8 @@ COMMANDS
   self-update [--from DIR]      Pull the latest lompstack and refresh the installed
                                 copy. Changes nothing on the server itself.
   update-cf-ips                 Refresh Cloudflare IP ranges
+  htaccess-check                Reload OpenLiteSpeed when a site's .htaccess has changed
+                                (cron runs it every minute; OpenLiteSpeed reads it only on load)
   notify [opts]                 --email a@b.c [--smtp-host H --smtp-port P
                                 --smtp-user U --smtp-pass P --smtp-from F]
                                 --telegram-token T --telegram-chat ID

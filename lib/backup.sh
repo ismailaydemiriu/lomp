@@ -375,6 +375,8 @@ lib_restore_main() {
     lib_json_set "$(lib_domain_json "$domain")" '.status = "active" | .restored_at = $ts | .restored_from = $f' --arg ts "$(lib_iso_now)" --arg f "$file"
     lib_domain_logrotate_regen
     lib_domain_fail2ban_regen
+    # the restored .htaccess is newer than the running OpenLiteSpeed: the check reloads it
+    if [[ "$D_MODE" == "php" || "$D_MODE" == "wordpress" ]]; then lib_ols_htaccess_watch_ensure; fi
   fi
   lib_rollback_clear
   # a Node.js site: its dependencies are not in the archive; reinstall them and start it again

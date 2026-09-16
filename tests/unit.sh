@@ -590,6 +590,9 @@ out="$(lib_ols_render_vhconf)"; printf '%s\n' "$out" >"$TMP/wp.vhconf"
 assert_true "wp vhconf balanced" _ols_braces_balanced "$TMP/wp.vhconf"
 assert_has "wp cache module" "module cache {" "$out"
 assert_has "wp htaccess" "autoLoadHtaccess        1" "$out"
+# OpenLiteSpeed ignores the "Deny from all" security plugins put into wp-content/uploads
+assert_has "wp: no PHP runs from the uploads" 'RewriteRule (?i)^/?wp-content/uploads/.*\.(php[0-9]?|phtml|phar)$ - [F,L]' "$out"
+assert_lacks "php sites get no WordPress paths" "wp-content/uploads" "$(cat "$TMP/php.vhconf")"
 lib_ols_render_default_vhconf >"$TMP/default.vhconf"
 assert_true "default vhconf balanced" _ols_braces_balanced "$TMP/default.vhconf"
 lib_ols_render_vhost_block example.com 1 >"$TMP/vhblock.conf"
@@ -1911,6 +1914,89 @@ assert_lacks "no pm2 call that would spawn a root daemon" "pm2 -v" "$_node_fn"
 assert_lacks "no root pm2-logrotate module" "pm2-logrotate" "$_node_fn"
 assert_has   "pm2 pinned to one major" 'pm2@${PM2_MAJOR}' "$_node_fn"
 assert_has   "the major is recorded" ".params.node_major" "$_node_fn"
+
+# =============================================================================
+section ".htaccess is read once: the check that reloads OpenLiteSpeed"
+# OpenLiteSpeed reads a document root's .htaccess while loading and never again, so a new or
+# changed one only works after a reload. WordPress wrote its own after the last reload of
+# "add", which left every permalink at 404.
+lib_domain_state_reset
+D_DOMAIN="wp.example.com"; D_IDENT="wp_example_com"; D_USER="wp_example_com"; D_GROUP="wp_example_com"
+D_HOME="$SITES_ROOT/wp.example.com"; D_MODE="wordpress"; D_PHP="8.3"; D_STATUS="active"; D_CREATED="2025-01-01T00:00:00Z"
+lib_domain_state_save
+_ht_wp="$SITES_ROOT/wp.example.com/public_html"
+lib_domain_state_reset
+D_DOMAIN="plain.example.com"; D_IDENT="plain_example_com"; D_USER="plain_example_com"; D_GROUP="plain_example_com"
+D_HOME="$SITES_ROOT/plain.example.com"; D_MODE="static"; D_STATUS="active"; D_CREATED="2025-01-01T00:00:00Z"
+lib_domain_state_save
+_ht_st="$SITES_ROOT/plain.example.com/public_html"
+mkdir -p "$_ht_wp/wp-content/uploads" "$_ht_st"
+_ht_roots="$(lib_ols_htaccess_docroots)"
+assert_has   "a WordPress site's .htaccess is watched" "$_ht_wp" "$_ht_roots"
+assert_lacks "a static site's is not (OpenLiteSpeed never reads it)" "$_ht_st" "$_ht_roots"
+
+_orig_olsrun="$(declare -f lib_ols_running)"; _orig_htreload="$(declare -f lib_ols_htaccess_reload)"
+eval 'lib_ols_running() { return "${_ht_running_rc:-0}"; }'
+eval 'systemctl() { if [[ "$*" == *ActiveEnterTimestamp* ]]; then printf "%s\n" "$_ht_started"; fi; return 0; }'
+_ht_started="@$(( $(date +%s) - 600 ))"
+: >"$_ht_wp/.htaccess"; touch -d '-20 minutes' "$_ht_wp/.htaccess"
+: >"$_ht_st/.htaccess"
+assert_eq "an .htaccess older than the running server is in effect" "" "$(lib_ols_htaccess_pending)"
+: >"$_ht_wp/wp-content/uploads/.htaccess"
+assert_eq "one written after the server started waits for a reload" "$_ht_wp/wp-content/uploads/.htaccess" "$(lib_ols_htaccess_pending)"
+_ht_started=""
+assert_eq "without a start time (not run by systemd) nothing is said" "" "$(lib_ols_htaccess_pending)"
+_ht_started="@$(( $(date +%s) - 600 ))"; _ht_running_rc=1
+assert_eq "a stopped server has nothing waiting" "" "$(lib_ols_htaccess_pending)"
+_ht_running_rc=0
+
+_ht_log="$TMP/ht.reloads"; : >"$_ht_log"
+eval 'lib_ols_htaccess_reload() { printf "%s\n" "$1" >>"$_ht_log"; return 0; }'
+eval 'flock() { return "${_ht_flock_rc:-0}"; }'
+_ht_count() { wc -l <"$_ht_log" | tr -d ' '; }
+( lib_ols_htaccess_check_main ) >/dev/null 2>&1
+assert_eq  "the check reloads once for a waiting .htaccess" "1" "$(_ht_count)"
+assert_has "and names it" "wp-content/uploads/.htaccess" "$(cat "$_ht_log")"
+_ht_started="@$(( $(date +%s) - 30 ))"
+( lib_ols_htaccess_check_main ) >/dev/null 2>&1
+assert_eq  "but not within a minute of the last start" "1" "$(_ht_count)"
+_ht_started="@$(( $(date +%s) - 600 ))"; _ht_flock_rc=1
+( lib_ols_htaccess_check_main ) >/dev/null 2>&1
+assert_eq  "nor while another command holds the lock" "1" "$(_ht_count)"
+_ht_flock_rc=0; touch -d '-20 minutes' "$_ht_wp/wp-content/uploads/.htaccess"
+( lib_ols_htaccess_check_main ) >/dev/null 2>&1
+assert_eq  "and not at all when nothing changed" "1" "$(_ht_count)"
+assert_eq  "the check exits 0 with errexit armed" 0 "$(run_isolated lib_ols_htaccess_check_main)"
+
+assert_has "add --wordpress reloads once WordPress wrote its .htaccess" 'lib_ols_htaccess_reload' "$(declare -f lib_domain_add_main)"
+assert_has "install schedules the check" 'lib_ols_htaccess_watch_ensure' "$(declare -f lib_install_cron)"
+lib_ols_htaccess_watch_ensure
+assert_has "the check runs every minute, as root" "* * * * * root ${BIN_LINK} htaccess-check --quiet # server-setup:htaccess" "$(cat "$CRON_FILE")"
+assert_has "setup.sh: the check waits for no lock" 'htaccess-check) ;;' "$(cat "$ROOT/setup.sh")"
+assert_has "setup.sh: it adds no header line to the log" '"$cmd" != "htaccess-check"' "$(cat "$ROOT/setup.sh")"
+eval "$_orig_olsrun"; eval "$_orig_htreload"
+unset -f systemctl flock _ht_count
+rm -rf "$(lib_domain_state_dir wp.example.com)" "$(lib_domain_state_dir plain.example.com)"
+lib_domain_state_reset
+# From the command line WordPress cannot see that LiteSpeed takes rewrite rules: without its
+# own configuration saying so, "wp rewrite --hard" wrote nothing into .htaccess
+assert_has "wp-cli runs with its own configuration" 'WP_CLI_CONFIG_PATH=' "$(declare -f _wp)"
+assert_has "which tells it rewrite rules work here" 'mod_rewrite' "$(declare -f lib_domain_wp_install)"
+assert_has "and the install checks WordPress wrote them" 'BEGIN WordPress' "$(declare -f lib_domain_wp_install)"
+# the check holds the lock for the seconds a reload takes: other commands wait for it
+assert_has "a busy lock is waited for" 'flock -w' "$(declare -f lib_lock)"
+if command -v flock >/dev/null 2>&1; then
+  ( exec 9>"$LOCK_FILE"; flock 9; sleep 2 ) &
+  _lk_pid=$!
+  sleep 0.5
+  assert_eq "a command waits for a lock that is released soon" 0 "$(SERVER_SETUP_LOCKED=0 LIB_LOCK_WAIT=10 run_isolated lib_lock)"
+  wait "$_lk_pid" 2>/dev/null || true
+  ( exec 9>"$LOCK_FILE"; flock 9; sleep 4 ) &
+  _lk_pid=$!
+  sleep 0.5
+  assert_eq "and gives up after its limit" 1 "$(SERVER_SETUP_LOCKED=0 LIB_LOCK_WAIT=1 run_isolated lib_lock)"
+  wait "$_lk_pid" 2>/dev/null || true
+fi
 
 # =============================================================================
 section "no command replaces itself and skips the EXIT cleanup"

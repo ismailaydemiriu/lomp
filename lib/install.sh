@@ -491,11 +491,12 @@ EOF
 
 lib_install_cron() {
   lib_cron_set healthcheck "15 6 * * * root ${BIN_LINK} healthcheck"
+  lib_ols_htaccess_watch_ensure
   if [[ -n "$INS_BACKUP_SCHEDULE" ]]; then
     lib_backup_schedule "$INS_BACKUP_SCHEDULE" "$(lib_manifest_get '.backup.schedule_flags')"
   fi
   lib_cf_enabled && lib_cf_schedule
-  lib_ok "Scheduled tasks in ${CRON_FILE} (healthcheck daily 06:15$( lib_cf_enabled && printf ', cloudflare ips weekly')$( [[ -n "$INS_BACKUP_SCHEDULE" ]] && printf ', backups %s' "$INS_BACKUP_SCHEDULE"))"
+  lib_ok "Scheduled tasks in ${CRON_FILE} (healthcheck daily 06:15, .htaccess changes every minute$( lib_cf_enabled && printf ', cloudflare ips weekly')$( [[ -n "$INS_BACKUP_SCHEDULE" ]] && printf ', backups %s' "$INS_BACKUP_SCHEDULE"))"
 }
 
 # Copy this checkout to INSTALL_DIR and link the command. The source directory is

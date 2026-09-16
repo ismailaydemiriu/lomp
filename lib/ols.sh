@@ -603,6 +603,75 @@ lib_ols_recent_errors() {   # [lines]
 
 lib_ols_restart() { lib_systemctl restart "$OLS_SERVICE"; }
 
+# =============================================================================
+#  .htaccess: read once
+# =============================================================================
+# OpenLiteSpeed reads a document root's .htaccess while the configuration loads - and only if
+# the file exists at that moment - and a subdirectory's on the first request into it. It never
+# looks at one again (httpvhost.cpp: bestMatch, httpcontext.cpp: configRewriteRule). A new or
+# changed .htaccess - WordPress permalinks, a plugin's rules, a hand edit - therefore works only
+# after a reload. PHP and WordPress sites are the ones that load them (autoLoadHtaccess).
+lib_ols_htaccess_docroots() {   # -> one document root per line
+  local d="" mode=""
+  while read -r d; do
+    [[ -n "$d" ]] || continue
+    mode="$(lib_json_get "$(lib_domain_json "$d")" '.mode')"
+    if [[ "$mode" == "php" || "$mode" == "wordpress" ]]; then printf '%s/public_html\n' "$(lib_domain_home "$d")"; fi
+  done < <(lib_domains_list)
+  return 0
+}
+
+# The first .htaccess that changed after OpenLiteSpeed last started, or nothing. The trees
+# belong to the site users: find neither follows links nor reads files, and stops after 30 s.
+lib_ols_htaccess_pending() {
+  local started="" since="" root=""
+  local -a roots=()
+  lib_ols_running || return 0
+  started="$(systemctl show -p ActiveEnterTimestamp --value "$OLS_SERVICE" 2>/dev/null || true)"
+  [[ -n "$started" ]] || return 0
+  since="$(date -d "$started" +%s 2>/dev/null || true)"
+  [[ "$since" =~ ^[0-9]+$ ]] || return 0
+  while IFS= read -r root; do
+    if [[ -d "$root" ]]; then roots+=("$root"); fi
+  done < <(lib_ols_htaccess_docroots)
+  ((${#roots[@]} > 0)) || return 0
+  timeout 30 find "${roots[@]}" -maxdepth 4 -name .htaccess -type f -newermt "@${since}" -print -quit 2>/dev/null \
+    | head -n 1 | tr -c '[:print:]\n' '?' || true
+}
+
+lib_ols_htaccess_reload() {   # reason
+  if (( OPT_DRY_RUN )); then lib_info "[dry-run] would reload OpenLiteSpeed so that it reads the new .htaccess (${1})"; return 0; fi
+  lib_info "Reloading OpenLiteSpeed so that it reads the new .htaccess (${1})"
+  lib_ols_reload && lib_ols_wait_ready 40
+}
+
+# The cron line PHP and WordPress sites need: a changed .htaccess takes effect within a minute.
+lib_ols_htaccess_watch_ensure() {
+  lib_cron_set htaccess "* * * * * root ${BIN_LINK} htaccess-check --quiet"
+}
+
+# "htaccess-check" (cron, every minute): one reload once a .htaccess changed after
+# OpenLiteSpeed started; silent when nothing did. While another lompstack command holds the
+# lock it does nothing, so a reload never lands in the middle of a configuration change, and a
+# server that (re)started less than a minute ago is left alone: a plugin that keeps rewriting
+# its .htaccess costs at most one reload a minute.
+lib_ols_htaccess_check_main() {
+  local changed="" started="" since=0
+  exec 200>"$LOCK_FILE"
+  flock -n 200 || return 0
+  changed="$(lib_ols_htaccess_pending)"
+  [[ -n "$changed" ]] || return 0
+  started="$(systemctl show -p ActiveEnterTimestamp --value "$OLS_SERVICE" 2>/dev/null || true)"
+  since="$(date -d "$started" +%s 2>/dev/null || printf '0')"
+  if (( $(date +%s) - since < 60 )); then return 0; fi
+  lib_log_write INFO "htaccess-check: ${changed} changed after OpenLiteSpeed started; reloading it"
+  if ! lib_ols_htaccess_reload "$changed"; then
+    lib_error "OpenLiteSpeed did not come back after the reload for ${changed}"
+    return 1
+  fi
+  lib_ok "OpenLiteSpeed reloaded: ${changed} had changed"
+}
+
 # The server answers but systemd does not own it any more (see above, or somebody ran
 # lswsctrl by hand). Put the two back in sync.
 lib_ols_service_desynced() {
@@ -991,6 +1060,11 @@ EOF
   rules+=$'RewriteRule ^/?\\.(?!well-known/) - [F,L]\n'
   rules+=$'RewriteRule (?i)\\.(sql|bak|env|log|swp|orig|old|inc|sh)$ - [F,L]\n'
   rules+=$'RewriteRule ^/?(wp-config\\.php|composer\\.(json|lock)|package(-lock)?\\.json|yarn\\.lock)$ - [F,L]\n'
+  if [[ "$D_MODE" == "wordpress" ]]; then
+    # uploads are user files, never code. Security plugins keep PHP from running there with a
+    # "Deny from all" in wp-content/uploads/.htaccess, which OpenLiteSpeed ignores.
+    rules+=$'RewriteRule (?i)^/?wp-content/uploads/.*\\.(php[0-9]?|phtml|phar)$ - [F,L]\n'
+  fi
   if (( D_WWW )); then
     if (( D_WWW_PRIMARY )); then
       rules+="RewriteCond %{HTTP_HOST} ^${esc}\$ [NC]"$'\n'

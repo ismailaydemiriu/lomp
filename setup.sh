@@ -171,6 +171,8 @@ main() {
   # read-only commands (and "notify --send", used by hooks/PAM) do not take the lock
   case "$cmd" in
     list|status|doctor|credentials|logs|menu) ;;
+    # cron runs it every minute: it takes the lock itself, without waiting for it
+    htaccess-check) ;;
     panel) if [[ "${rest[0]:-open}" != "status" ]]; then lib_lock; fi ;;
     notify) [[ " ${rest[*]:-} " == *" --send "* ]] || lib_lock ;;
     proxy)  if [[ "${rest[0]:-list}" != "list" && "${rest[0]:-list}" != "help" ]]; then lib_lock; fi ;;
@@ -184,7 +186,10 @@ main() {
     *) lib_lock ;;
   esac
 
-  lib_log_write INFO "=== setup.sh ${SCRIPT_VERSION} command='${cmd}' args='${rest[*]:-}' dry-run=${OPT_DRY_RUN} ==="
+  # (not for the check cron runs every minute: it writes to the log only when it acts)
+  if [[ "$cmd" != "htaccess-check" ]]; then
+    lib_log_write INFO "=== setup.sh ${SCRIPT_VERSION} command='${cmd}' args='${rest[*]:-}' dry-run=${OPT_DRY_RUN} ==="
+  fi
 
   # commands that report problems through their exit status use "|| exit" so the
   # ERR trap (meant for unexpected failures) stays quiet
@@ -211,6 +216,7 @@ main() {
     self-update)    lib_selfupdate_main "${rest[@]}" ;;
     logs)           lib_domain_logs_main "${rest[@]}" ;;
     healthcheck)    lib_healthcheck_main "${rest[@]}" ;;   # internal (cron)
+    htaccess-check) lib_ols_htaccess_check_main || exit 1 ;;   # internal (cron)
     *)
       lib_error "Unknown command: ${cmd}"
       printf '\n'
