@@ -177,9 +177,12 @@ main() {
     notify) [[ " ${rest[*]:-} " == *" --send "* ]] || lib_lock ;;
     proxy)  if [[ "${rest[0]:-list}" != "list" && "${rest[0]:-list}" != "help" ]]; then lib_lock; fi ;;
     # reading the mail stack's state changes nothing; everything else writes a table or
-    # restarts a service. "box list" and "alias list" only read, "dns" only prints.
+    # restarts a service. "box list" and "alias list" only read, and "dns" only prints
+    # unless --apply, which writes into Cloudflare and into the domain's own state.
+    firewall) case "${rest[0]:-status}" in status|--status|"") ;; *) lib_lock ;; esac ;;
     mail)   case "${rest[0]:-status}" in
-              status|test|queue|dns|help|-h|--help) ;;
+              dns) if [[ " ${rest[*]:-} " == *" --apply "* ]]; then lib_lock; fi ;;
+              status|test|queue|help|-h|--help) ;;
               box|alias) if [[ "${rest[1]:-list}" != "list" ]]; then lib_lock; fi ;;
               *) lib_lock ;;
             esac ;;
@@ -207,6 +210,7 @@ main() {
     proxy)          lib_proxy_main "${rest[@]}" ;;
     app)            lib_app_main "${rest[@]}" ;;
     mail)           lib_mail_main "${rest[@]}" ;;
+    firewall)       lib_cf_firewall_main "${rest[@]}" ;;
     remove|delete)  lib_domain_remove_main "${rest[@]}" ;;
     list)           lib_domain_list_main "${rest[@]}" ;;
     status)         lib_status_main "${rest[@]}" ;;

@@ -39,12 +39,14 @@ lib_iso_now() { date -u '+%Y-%m-%dT%H:%M:%SZ'; }
 #   --some-token VALUE                      every secret flag is SPACE separated
 #   requirepass VALUE                       space separated config syntax (redis, msmtp)
 # The flag rule matches any long option whose name contains pass/token/secret/key, so a
-# new secret flag is covered without touching this function. lib_secret_leak_pattern
-# below is the read-side mirror of the same three shapes - keep them in step.
+# new secret flag is covered without touching this function. What follows the keyword may
+# not contain a hyphen, so "--key-type ecdsa" stays readable while "--cf-api-token X" and
+# "--api-key X" are still masked. lib_secret_leak_pattern below is the read-side mirror of
+# the same three shapes - keep them in step.
 lib_mask_secrets() {
   sed -E \
     -e 's/((password|passwd|passwort|pass|pwd|secret|token|api[_-]?key|requirepass|auth_pass|smtp_pass|cftoken|des_key|dns_cloudflare_api_token|MYSQL_PWD|REDISCLI_AUTH)["'"'"']?[[:space:]]*[=:][[:space:]]*["'"'"']?)[^[:space:]"'"'"',}]+/\1********/Ig' \
-    -e 's/(--[a-z0-9-]*(password|passwd|pass|secret|token|api[_-]?key|key)[a-z0-9-]*[=[:space:]]["'"'"']?)[^[:space:]"'"'"',}]+/\1********/Ig' \
+    -e 's/(--[a-z0-9-]*(password|passwd|pass|secret|token|api[_-]?key|key)[a-z0-9]*[=[:space:]]["'"'"']?)[^[:space:]"'"'"',}]+/\1********/Ig' \
     -e 's/^([[:space:]]*(requirepass|password|auth_pass|smtp_pass|cftoken)[[:space:]]+["'"'"']?)[^[:space:]"'"'"',}]+/\1********/Ig' \
     -e 's/(IDENTIFIED[[:space:]]+BY[[:space:]]+["'"'"'])[^"'"'"']*/\1********/Ig' \
     -e 's/(pass:)[^[:space:]]+/\1********/g' \
@@ -64,7 +66,7 @@ lib_mask_secrets() {
 # The pattern "doctor" greps the log with. It must cover exactly the shapes
 # lib_mask_secrets masks, or the check reports a clean log while a token sits in it.
 lib_secret_leak_pattern() {
-  printf '%s' '(password|passwd|pass|pwd|secret|token|api[_-]?key|requirepass|auth_pass|des_key)["'"'"']?[[:space:]]*[=:][[:space:]]*["'"'"']?[A-Za-z0-9+/=._~-]{8,}|--[a-z0-9-]*(password|pass|secret|token|api[_-]?key|key)[a-z0-9-]*[=[:space:]]+[A-Za-z0-9+/=._~:-]{8,}|^[[:space:]]*(requirepass|password|auth_pass)[[:space:]]+[A-Za-z0-9+/=._~-]{8,}|[a-z][a-z0-9+.-]*://[^/@[:space:]:]*:[^*/@[:space:]][^/@[:space:]]{3,}@|https?://[A-Za-z0-9_-]{20,}@|\{(BLF-CRYPT|SHA512-CRYPT|SHA256-CRYPT|CRYPT)\}[^[:space:]*:]{4,}|\$(2[aby]|5|6)\$[^[:space:]"'"'"',}*]{10,}|-----BEGIN [A-Z ]*PRIVATE KEY-----'
+  printf '%s' '(password|passwd|pass|pwd|secret|token|api[_-]?key|requirepass|auth_pass|des_key)["'"'"']?[[:space:]]*[=:][[:space:]]*["'"'"']?[A-Za-z0-9+/=._~-]{8,}|--[a-z0-9-]*(password|pass|secret|token|api[_-]?key|key)[a-z0-9]*[=[:space:]]+[A-Za-z0-9+/=._~:-]{8,}|^[[:space:]]*(requirepass|password|auth_pass)[[:space:]]+[A-Za-z0-9+/=._~-]{8,}|[a-z][a-z0-9+.-]*://[^/@[:space:]:]*:[^*/@[:space:]][^/@[:space:]]{3,}@|https?://[A-Za-z0-9_-]{20,}@|\{(BLF-CRYPT|SHA512-CRYPT|SHA256-CRYPT|CRYPT)\}[^[:space:]*:]{4,}|\$(2[aby]|5|6)\$[^[:space:]"'"'"',}*]{10,}|-----BEGIN [A-Z ]*PRIVATE KEY-----'
 }
 
 # Append a line to the log file (masked). Never fails.

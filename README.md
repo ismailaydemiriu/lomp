@@ -505,8 +505,36 @@ disk — enabling it again restores the mailboxes with the passwords they had. R
 removes its mailboxes, its mail, its key and its certificate, whether or not mail was switched
 off first; the safety backup does not include mail, and `remove` says so before it asks.
 
-The webmail, and writing these DNS records through the Cloudflare API instead of by hand, come
-in the next releases.
+With a Cloudflare API token stored, lomp can write those records itself:
+
+```bash
+sudo lomp mail dns example.com --apply                  # writes them into Cloudflare
+sudo lomp mail dns example.com --apply --replace-mx     # and takes over another provider's MX
+sudo lomp mail disable example.com --dns-cleanup        # removes only what lomp wrote
+```
+
+It never touches a record it did not write. A domain that already has an MX pointing at another
+provider, or an SPF record of its own, is reported and left alone — two SPF records fail for
+every receiver, and moving somebody's mail is not a thing a provisioning script should do by
+itself. `lomp mail enable` does the same automatically when a token is there.
+
+The webmail comes in the next release.
+
+### Closing the origin
+
+With the sites behind Cloudflare, anyone who learns the server's address can still reach it
+directly and walk around the edge:
+
+```bash
+sudo lomp firewall --web-cloudflare-only   # 80 and 443 answer Cloudflare's ranges only
+sudo lomp firewall status
+sudo lomp firewall --web-open              # undo it
+```
+
+Every site then has to be proxied (orange cloud) or it stops answering. SSH, the mail ports and
+the WebAdmin port are untouched. Because port 80 no longer answers Let's Encrypt, certificates
+switch to DNS-01, which is why this needs the API token; the weekly IP refresh keeps the rules
+in step with Cloudflare's ranges.
 
 ---
 

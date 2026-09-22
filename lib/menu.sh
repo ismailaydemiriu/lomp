@@ -88,6 +88,10 @@ COMMANDS
                                 the command line; "kick" ends the open sessions of a mailbox
   mail alias add|del|list <alias@domain> [target,...]
   mail dns <domain> [--check] [--json]   What to put in DNS, and whether it is there
+  mail dns <domain> --apply [--replace-mx]
+                                Write those records into Cloudflare with the stored token.
+                                A foreign MX or a second SPF record is reported, never
+                                overwritten; only records lompstack wrote are ever removed
   mail status|test|queue        The mail stack: what runs, reverse DNS, outgoing port 25
   mail cert [domain]            Ask again for a certificate that did not come
   mail regenerate               Rewrite every mail configuration file and restart the stack
@@ -108,6 +112,11 @@ COMMANDS
   self-update [--from DIR]      Pull the latest lompstack and refresh the installed
                                 copy. Changes nothing on the server itself.
   update-cf-ips                 Refresh Cloudflare IP ranges
+  firewall [status]             Whether the web ports answer everyone or Cloudflare only
+  firewall --web-cloudflare-only   Close 80/443 to everything but Cloudflare's ranges, so
+                                nobody can walk around the edge by using the server's address.
+                                Needs a Cloudflare token: certificates then come over DNS-01
+  firewall --web-open           Open them again
   htaccess-check                Reload OpenLiteSpeed when a site's .htaccess has changed
                                 (cron runs it every minute; OpenLiteSpeed reads it only on load)
   notify [opts]                 --email a@b.c [--smtp-host H --smtp-port P

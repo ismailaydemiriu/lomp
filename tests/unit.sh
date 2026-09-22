@@ -121,6 +121,7 @@ assert_eq "mask --api-key"        "--api-key ********"               "$(m '--api
 assert_eq "mask redis requirepass line" "requirepass ********"       "$(m 'requirepass S3cr3tRedisPass')"
 assert_eq "mask msmtp password line"    "password ********"          "$(m 'password S3cr3tSmtpPass')"
 assert_eq "mask json token"       '"token":"********"'               "$(m '"token":"abcd1234efgh"')"
+assert_eq "no mask --key-type"    "--key-type ecdsa -d mail.x.com"   "$(m '--key-type ecdsa -d mail.x.com')"
 assert_eq "no mask --admin-ip"    "--admin-ip 203.0.113.5"           "$(m '--admin-ip 203.0.113.5')"
 assert_eq "no mask --backup-keep" "--backup-keep 7"                  "$(m '--backup-keep 7')"
 assert_eq "no mask --admin-port"  "--admin-port 7080"                "$(m '--admin-port 7080')"
@@ -2376,6 +2377,238 @@ rm -f "$MAIL_RELAY_INFO"
 
 MAIL_PASSWD_FILE="$TMP/passwd"; MAIL_ALIAS_DIR="$TMP/aliases"; MAIL_DKIM_DIR="$TMP/dkim-unused"
 rm -rf "$_m_state/alpha.example" "$_m_state/beta.example" "$_m_state/plain.example"
+
+# =============================================================================
+section "writing the records into Cloudflare"
+# Every API call goes through _cf_api, so the whole of this can be exercised without an
+# account: the stub answers like Cloudflare and records what it was asked to do.
+CF_CALLS="$TMP/cf-calls.txt"
+CF_ZONE_CACHE=()
+: >"$CF_CALLS"
+_cf_api_real="$(declare -f _cf_api)"   # put back afterwards: later sections use the real one
+_cf_zone_json='{"success":true,"result":[{"id":"zone123"}]}'
+eval '_cf_api() {
+  printf "%s %s\n" "$1" "$2" >>"$CF_CALLS"
+  case "$1 $2" in
+    "GET /zones?name=alpha.example"*)      printf "%s" "$_cf_zone_json" ;;
+    "GET /zones?name="*)                   printf "%s" "{\"success\":true,\"result\":[]}" ;;
+    "GET /zones/zone123/dns_records?type=A&name=mail.alpha.example"*) printf "%s" "$_cf_a_json" ;;
+    "GET /zones/zone123/dns_records?type=MX"*)  printf "%s" "$_cf_mx_json" ;;
+    "GET /zones/zone123/dns_records?type=TXT&name=alpha.example"*) printf "%s" "$_cf_spf_json" ;;
+    "GET /zones/zone123/dns_records?type=TXT"*) printf "%s" "{\"success\":true,\"result\":[]}" ;;
+    "POST "*|"PUT "*|"DELETE "*)           printf "%s" "{\"success\":true,\"result\":{\"id\":\"rec1\"}}" ;;
+    *) printf "%s" "{\"success\":true,\"result\":[]}" ;;
+  esac
+}'
+_cf_a_json='{"success":true,"result":[]}'
+_cf_mx_json='{"success":true,"result":[]}'
+_cf_spf_json='{"success":true,"result":[]}'
+
+# the zone of a name is found by walking up its labels
+assert_eq "the zone of a mail name" "zone123" "$(lib_cf_zone_id mail.alpha.example)"
+assert_has "which is asked for by name" "GET /zones?name=mail.alpha.example" "$(cat "$CF_CALLS")"
+assert_has "and then for the domain above it" "GET /zones?name=alpha.example" "$(cat "$CF_CALLS")"
+CF_ZONE_CACHE=()
+assert_eq "a name in no zone this token can see is refused" 1 "$(run_isolated lib_cf_zone_id mail.nowhere.example)"
+
+# A record: created when missing, left alone when already right, refused when it points
+# somewhere else and lompstack did not write it
+: >"$CF_CALLS"
+MAIL_DNS_APPLIED=0; MAIL_DNS_CONFLICTS=0
+_mail_dns_apply_one zone123 A mail.alpha.example 203.0.113.9 >/dev/null
+assert_has "a missing record is created" "POST /zones/zone123/dns_records" "$(cat "$CF_CALLS")"
+assert_eq  "and counted"  1 "$MAIL_DNS_APPLIED"
+_cf_a_json='{"success":true,"result":[{"id":"r1","content":"203.0.113.9","proxied":false,"comment":"lompstack:mail"}]}'
+: >"$CF_CALLS"; MAIL_DNS_APPLIED=0
+_mail_dns_apply_one zone123 A mail.alpha.example 203.0.113.9 >/dev/null
+assert_lacks "a record that already says it is left alone" "POST" "$(cat "$CF_CALLS")"
+assert_eq    "and nothing is counted as written" 0 "$MAIL_DNS_APPLIED"
+_cf_a_json='{"success":true,"result":[{"id":"r1","content":"198.51.100.7","proxied":true,"comment":""}]}'
+MAIL_DNS_CONFLICTS=0
+_mail_dns_apply_one zone123 A mail.alpha.example 203.0.113.9 >/dev/null || true
+assert_eq "somebody else's record is never overwritten" 1 "$MAIL_DNS_CONFLICTS"
+
+# MX: another provider's mail server is a decision, not a leftover
+_cf_mx_json='{"success":true,"result":[{"id":"m1","content":"aspmx.l.google.com","priority":1,"comment":""}]}'
+MAIL_DNS_CONFLICTS=0; : >"$CF_CALLS"
+_mail_dns_apply_one zone123 MX alpha.example "10 mail.alpha.example." >/dev/null || true
+assert_eq    "a foreign MX stops the write" 1 "$MAIL_DNS_CONFLICTS"
+assert_lacks "and nothing is deleted"       "DELETE" "$(cat "$CF_CALLS")"
+: >"$CF_CALLS"; MAIL_DNS_CONFLICTS=0
+_mail_dns_apply_one zone123 MX alpha.example "10 mail.alpha.example." --replace-mx >/dev/null
+assert_has "--replace-mx takes it over"     "DELETE /zones/zone123/dns_records/m1" "$(cat "$CF_CALLS")"
+assert_has "and writes ours"                "POST /zones/zone123/dns_records" "$(cat "$CF_CALLS")"
+
+# a foreign MX next to ours still takes the domain's mail: the lowest preference wins
+_cf_mx_json='{"success":true,"result":[{"id":"m1","content":"aspmx.l.google.com","priority":1,"comment":""},{"id":"m2","content":"mail.alpha.example","priority":10,"comment":"lompstack:mail"}]}'
+MAIL_DNS_CONFLICTS=0; : >"$CF_CALLS"
+_mail_dns_apply_one zone123 MX alpha.example "10 mail.alpha.example." >/dev/null || true
+assert_eq "a foreign MX counts even when ours is there too" 1 "$MAIL_DNS_CONFLICTS"
+# and taking it over writes ours BEFORE deleting theirs: the other way round, a refused
+# write would leave the domain with no MX at all
+: >"$CF_CALLS"; MAIL_DNS_CONFLICTS=0
+_mail_dns_apply_one zone123 MX alpha.example "20 mail.alpha.example." --replace-mx >/dev/null
+assert_eq "the write comes before the delete" "PUT
+DELETE" "$(awk '/^(PUT|POST|DELETE)/{print $1}' "$CF_CALLS")"
+_cf_mx_json='{"success":true,"result":[]}'
+
+# two SPF records are the same as none, so an existing one is never overwritten
+_cf_spf_json='{"success":true,"result":[{"id":"s1","content":"v=spf1 include:_spf.google.com ~all","comment":""}]}'
+MAIL_DNS_CONFLICTS=0; : >"$CF_CALLS"
+_mail_dns_apply_one zone123 TXT alpha.example "v=spf1 ip4:203.0.113.9 ~all" >/dev/null || true
+assert_eq    "an existing SPF record is reported, not replaced" 1 "$MAIL_DNS_CONFLICTS"
+assert_lacks "and nothing is written"       "POST" "$(cat "$CF_CALLS")"
+_cf_spf_json='{"success":true,"result":[]}'
+
+# DMARC and DKIM live at a name of their own, so anything already there was put there by
+# somebody. A second record does not override it - two DMARC records mean no policy at all.
+_cf_dmarc_json='{"success":true,"result":[{"id":"d1","content":"v=DMARC1; p=quarantine; rua=mailto:me@alpha.example","comment":""}]}'
+eval '_cf_api() {
+  printf "%s %s\n" "$1" "$2" >>"$CF_CALLS"
+  case "$1 $2" in
+    "GET /zones/zone123/dns_records?type=TXT&name=_dmarc"*) printf "%s" "$_cf_dmarc_json" ;;
+    "GET /zones/zone123/dns_records?type=TXT&name=sel._domainkey"*) printf "%s" "$_cf_dkim_json" ;;
+    "GET "*)  printf "%s" "{\"success\":true,\"result\":[]}" ;;
+    *)        printf "%s" "{\"success\":true,\"result\":{\"id\":\"rec1\"}}" ;;
+  esac
+}'
+_cf_dkim_json='{"success":true,"result":[]}'
+MAIL_DNS_CONFLICTS=0; : >"$CF_CALLS"
+_mail_dns_apply_one zone123 TXT _dmarc.alpha.example "v=DMARC1; p=none; rua=mailto:x@alpha.example" >/dev/null || true
+assert_eq    "a DMARC record somebody wrote is not doubled" 1 "$MAIL_DNS_CONFLICTS"
+assert_lacks "and nothing is written"                       "POST" "$(cat "$CF_CALLS")"
+
+# Cloudflare gives a TXT value over 255 bytes back as several strings. Comparing that with
+# what we mean to write would rewrite the DKIM key on every single run.
+assert_eq "a chunked TXT value reads as one string" "v=DKIM1; k=rsa; p=AAAABBBB" "$(_mail_txt_norm '"v=DKIM1; k=rsa; p=AAAA" "BBBB"')"
+_cf_dkim_json='{"success":true,"result":[{"id":"k1","content":"\"v=DKIM1; k=rsa; p=AAAA\" \"BBBB\"","comment":"lompstack:mail"}]}'
+MAIL_DNS_APPLIED=0; : >"$CF_CALLS"
+_mail_dns_apply_one zone123 TXT sel._domainkey.alpha.example "v=DKIM1; k=rsa; p=AAAABBBB" >/dev/null
+assert_eq    "so the DKIM record is written once, not on every run" 0 "$MAIL_DNS_APPLIED"
+assert_lacks "and no second call is made"   "PUT" "$(cat "$CF_CALLS")"
+
+# a failed API call is not an empty zone: answering "there is nothing here" is what makes a
+# caller add a second SPF or a second MX record
+eval '_cf_api() { printf "%s %s\n" "$1" "$2" >>"$CF_CALLS"; printf "%s" "{\"success\":false,\"errors\":[{\"message\":\"rate limited\"}]}"; }'
+MAIL_DNS_CONFLICTS=0; : >"$CF_CALLS"
+assert_eq    "a refused read fails"  1 "$(run_isolated lib_cf_records zone123 TXT alpha.example)"
+_mail_dns_apply_one zone123 TXT alpha.example "v=spf1 ip4:203.0.113.9 ~all" >/dev/null || true
+assert_eq    "and nothing is written on top of it" 1 "$MAIL_DNS_CONFLICTS"
+assert_lacks "no record is created blind"          "POST" "$(cat "$CF_CALLS")"
+
+# a second A record at the same name sends half of every mail connection to the wrong host
+eval '_cf_api() {
+  printf "%s %s\n" "$1" "$2" >>"$CF_CALLS"
+  case "$1 $2" in
+    "GET /zones?name=alpha.example"*)         printf "%s" "$_cf_zone_json" ;;
+    "GET /zones/zone123/dns_records?type=A"*) printf "%s" "$_cf_a_json" ;;
+    "GET "*) printf "%s" "{\"success\":true,\"result\":[]}" ;;
+    *)       printf "%s" "{\"success\":true,\"result\":{\"id\":\"rec1\"}}" ;;
+  esac
+}'
+_cf_a_json='{"success":true,"result":[{"id":"r1","content":"203.0.113.9","proxied":false,"comment":"lompstack:mail"},{"id":"r2","content":"198.51.100.7","proxied":false,"comment":""}]}'
+MAIL_DNS_CONFLICTS=0; : >"$CF_CALLS"
+_mail_dns_apply_one zone123 A mail.alpha.example 203.0.113.9 >/dev/null || true
+assert_eq    "a second A record is a conflict, whoever wrote the first" 1 "$MAIL_DNS_CONFLICTS"
+assert_lacks "and nothing is overwritten" "PUT" "$(cat "$CF_CALLS")"
+# one the operator made by hand that already says the right thing is simply left alone
+_cf_a_json='{"success":true,"result":[{"id":"r2","content":"203.0.113.9","proxied":false,"comment":""}]}'
+MAIL_DNS_CONFLICTS=0; MAIL_DNS_APPLIED=0; : >"$CF_CALLS"
+_mail_dns_apply_one zone123 A mail.alpha.example 203.0.113.9 >/dev/null
+assert_eq "a hand-made record that is already right is accepted" 0 "$((MAIL_DNS_CONFLICTS + MAIL_DNS_APPLIED))"
+_cf_a_json='{"success":true,"result":[]}'
+
+# a value the table could not fill in is a placeholder for the reader, never a live record
+_dns_records_real="$(declare -f _mail_dns_records)"
+eval '_mail_dns_records() { printf "A\tmail.%s\t<the IPv4 address of this server>\tnote\n" "$1"; }'
+: >"$CF_CALLS"; MAIL_DNS_SKIPPED=0
+printf 'dns_cloudflare_api_token = Xv8sQ2pLm9TzR4kWn1bYc7dEf0g\n' >"$CF_INI"
+CF_ZONE_CACHE=()
+lib_mail_dns_apply alpha.example >/dev/null 2>&1 || true
+assert_eq    "a placeholder is skipped" 1 "$MAIL_DNS_SKIPPED"
+assert_lacks "and never published"      "POST" "$(cat "$CF_CALLS")"
+eval "$_dns_records_real"
+
+# a dry run sends nothing at all
+: >"$CF_CALLS"
+printf 'dns_cloudflare_api_token = Xv8sQ2pLm9TzR4kWn1bYc7dEf0g\n' >"$CF_INI"
+OPT_DRY_RUN=1
+lib_mail_dns_apply alpha.example >/dev/null 2>&1 || true
+OPT_DRY_RUN=0
+assert_eq "a dry run sends no request" "" "$(cat "$CF_CALLS")"
+
+# cleanup removes what lompstack wrote and nothing else
+eval '_cf_api() {
+  printf "%s %s\n" "$1" "$2" >>"$CF_CALLS"
+  case "$1 $2" in
+    "GET /zones?name=alpha.example"*) printf "%s" "{\"success\":true,\"result\":[{\"id\":\"zone123\"}]}" ;;
+    "GET /zones/"*)  printf "%s" "{\"success\":true,\"result\":[{\"id\":\"mine\",\"comment\":\"lompstack:mail\"},{\"id\":\"theirs\",\"comment\":\"\"}]}" ;;
+    *) printf "%s" "{\"success\":true,\"result\":{\"id\":\"mine\"}}" ;;
+  esac
+}'
+CF_ZONE_CACHE=(); : >"$CF_CALLS"
+lib_mail_dns_cleanup alpha.example >/dev/null 2>&1
+assert_has   "the records lompstack wrote are deleted" "DELETE /zones/zone123/dns_records/mine" "$(cat "$CF_CALLS")"
+assert_lacks "a record somebody else added stays"      "dns_records/theirs" "$(cat "$CF_CALLS")"
+eval "$_cf_api_real"                   # the real one again, for the sections below
+CF_INI="$TMP/cloudflare-absent.ini"
+
+# =============================================================================
+section "the origin lock"
+# 80 and 443 closed to everything but Cloudflare, and the two things that must follow from it
+_ol="$(declare -f lib_cf_origin_lock)"
+assert_has "the lock needs a token first"       "lib_cf_token" "$_ol"
+assert_has "because HTTP-01 stops working"      "DNS-01" "$_ol"
+assert_has "it asks before closing the ports"   "lib_confirm" "$_ol"
+assert_has "the open rules go first"            "lib_ufw_delete_port_rules 80" "$_ol"
+assert_has "and every rule carries lompstack's name" 'comment "$CF_UFW_COMMENT"' "$_ol"
+assert_has "certbot switches to DNS-01 while it is on" "lib_cf_origin_locked" "$(declare -f lib_ssl_obtain)"
+assert_has "but only with a token to switch to"        "lib_cf_origin_locked && lib_ssl_cf_token_available" "$(declare -f lib_ssl_obtain)"
+assert_has "and the weekly range refresh renews the rules" "lib_cf_origin_relock" "$(declare -f lib_cf_update_ips)"
+# renewing must never unlock first: that would open the origin to everyone for the length
+# of the rebuild, and an abort in between would leave it that way
+assert_lacks "which never opens the ports in between" "lib_cf_origin_unlock" "$(declare -f lib_cf_update_ips)"
+assert_has   "the lock's own refresh cannot re-lock behind the question" "CF_LOCK_RENEWING" "$_ol"
+# a re-run of install would otherwise put "Anywhere" back next to the Cloudflare rules
+assert_has "installing again leaves a locked origin locked" "lib_cf_origin_locked" "$(declare -f lib_install_ufw)"
+# HTTP/3: OpenLiteSpeed answers QUIC on 443/udp, which the port deleter (TCP by name) misses
+assert_has "the lock closes 443/udp as well" "delete allow 443/udp" "$_ol"
+_ou="$(declare -f lib_cf_origin_unlock)"
+assert_has "unlocking puts the open rules back" "lib_ufw_rule allow 80/tcp" "$_ou"
+
+# the rules are matched back to the ranges they name, so a renewal can remove only the stale
+# ones instead of deleting them all and hoping the rebuild works
+eval 'ufw() { case "$*" in *numbered*) printf "%s" "$_ufw_out" ;; *) printf "%s" "$_ufw_plain" ;; esac; }'
+_ufw_out='Status: active
+
+     To                         Action      From
+     --                         ------      ----
+[ 1] 22/tcp                     ALLOW IN    Anywhere
+[ 2] 80,443/tcp                 ALLOW IN    173.245.48.0/20            # lompstack cloudflare origin
+[ 3] 443/udp                    ALLOW IN    173.245.48.0/20            # lompstack cloudflare origin
+[ 4] 80/tcp                     ALLOW IN    198.51.100.10              # office staging
+[10] 80,443/tcp                 ALLOW IN    2400:cb00::/32             # lompstack cloudflare origin
+'
+assert_eq "the lock rules are read highest number first" "10 2400:cb00::/32
+3 173.245.48.0/20
+2 173.245.48.0/20" "$(_cf_ufw_lock_rule_ranges)"
+_ufw_plain='Status: active
+
+To                         Action      From
+--                         ------      ----
+22/tcp                     ALLOW       Anywhere
+80/tcp                     ALLOW       Anywhere
+80,443/tcp                 ALLOW       173.245.48.0/20            # lompstack cloudflare origin
+80/tcp                     ALLOW       198.51.100.10              # office staging
+443/tcp (v6)               ALLOW       Anywhere (v6)
+'
+assert_eq "and a rule of the operator's on 80 is seen before it is deleted" \
+  "80/tcp                     ALLOW       198.51.100.10              # office staging" "$(_cf_ufw_foreign_web_rules)"
+unset -f ufw
+# grep -c prints 0 AND fails when it counts nothing, so a fallback would print it twice
+printf '# only a comment\n' >"$TMP/cf-ips-empty.conf"
+assert_eq "an empty range list counts as one 0" "0" "$(CF_IPS_FILE="$TMP/cf-ips-empty.conf" _cf_ips_count)"
+assert_eq "and a missing file too"              "0" "$(CF_IPS_FILE="$TMP/cf-ips-none.conf" _cf_ips_count)"
 
 # =============================================================================
 section "a secret never reaches a command line"

@@ -293,9 +293,15 @@ lib_install_ufw() {
   lib_ufw_rule default deny incoming
   lib_ufw_rule default allow outgoing
   for p in $SYS_SSH_PORTS $SSH_PORT; do lib_ufw_rule allow "${p}/tcp"; done
-  lib_ufw_rule allow 80/tcp
-  lib_ufw_rule allow 443/tcp
-  lib_ufw_rule allow 443/udp
+  # a locked origin stays locked: an "Anywhere" rule next to the Cloudflare ones would put the
+  # web ports back on the open internet, while the state file still claimed they were closed
+  if lib_cf_origin_locked; then
+    lib_info "The origin is locked to Cloudflare; the rules for 80 and 443 are left as they are"
+  else
+    lib_ufw_rule allow 80/tcp
+    lib_ufw_rule allow 443/tcp
+    lib_ufw_rule allow 443/udp
+  fi
   case "$ADMIN_ACCESS" in
     ip)
       lib_ufw_delete_port_rules "$ADMIN_PORT"

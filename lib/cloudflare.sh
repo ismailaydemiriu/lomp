@@ -32,6 +32,286 @@ _cf_api() {   # METHOD PATH [body-file]   -> response body on stdout
 }
 
 # =============================================================================
+#  Origin lock: the web ports answer Cloudflare and nobody else
+# =============================================================================
+# With the sites behind Cloudflare, anyone who learns the server's address can still reach the
+# origin directly and walk around the edge - its WAF, its rate limits, its bot rules. Locking
+# 80 and 443 to Cloudflare's own ranges closes that door. It also closes HTTP-01, so this is
+# only offered where a token is stored and certificates can be issued over DNS-01 instead.
+CF_UFW_COMMENT="lompstack cloudflare origin"
+
+lib_cf_origin_locked() { [[ "$(lib_manifest_get '.cloudflare.origin_lock')" == "true" ]]; }
+
+# How many ranges are in the list. grep -c prints 0 AND exits 1 when it counts nothing, so a
+# "|| printf 0" fallback would print the number twice.
+_cf_ips_count() {
+  local n=""
+  n="$(grep -vc '^#' "$CF_IPS_FILE" 2>/dev/null || true)"
+  printf '%s' "${n:-0}"
+}
+
+# The ranges themselves, one per line.
+_cf_ips_list() { grep -v '^#' "$CF_IPS_FILE" 2>/dev/null || true; }
+
+# UFW rule numbers of the lock, highest first (deleting by number renumbers everything below).
+_cf_ufw_lock_rules() {
+  lib_have ufw || return 0
+  ufw status numbered 2>/dev/null \
+    | grep -F "$CF_UFW_COMMENT" \
+    | sed -E 's/^\[[[:space:]]*([0-9]+)\].*/\1/' \
+    | sort -rn || true
+}
+
+# The same rules with the range each one names: "<number> <cidr>", highest number first.
+_cf_ufw_lock_rule_ranges() {
+  lib_have ufw || return 0
+  ufw status numbered 2>/dev/null \
+    | grep -F "$CF_UFW_COMMENT" \
+    | sed -E 's/^\[[[:space:]]*([0-9]+)\][^#]*[[:space:]]([0-9a-fA-F.:]+\/[0-9]+)[[:space:]]+#.*/\1 \2/' \
+    | grep -E '^[0-9]+ ' \
+    | sort -rn || true
+}
+
+# Rules on 80 or 443 that are not the plain "open to everyone" ones and not the lock's own.
+# They belong to the operator, and the lock is about to delete them.
+_cf_ufw_foreign_web_rules() {
+  lib_have ufw || return 0
+  ufw status 2>/dev/null \
+    | grep -E '^(80|443|80,443)/(tcp|udp)' \
+    | grep -vF "$CF_UFW_COMMENT" \
+    | grep -viE '[[:space:]]Anywhere[[:space:]]*(\(v6\))?[[:space:]]*$' || true
+}
+
+lib_cf_origin_unlock() {
+  local n="" count=0 left=""
+  lib_have ufw || return 0
+  if (( OPT_DRY_RUN )); then lib_info "[dry-run] would open 80 and 443 to everyone again"; return 0; fi
+  # the open rules go in first: between deleting the lock and opening the ports the sites
+  # would be unreachable, and a failure in between would leave them that way
+  lib_ufw_rule allow 80/tcp
+  lib_ufw_rule allow 443/tcp
+  lib_ufw_rule allow 443/udp
+  while read -r n; do
+    [[ -n "$n" ]] || continue
+    lib_run ufw --force delete "$n" || lib_warn "could not delete UFW rule ${n}"
+    count=$((count + 1))
+  done < <(_cf_ufw_lock_rules)
+  lib_manifest_set '.cloudflare.origin_lock' 'false'
+  left="$(_cf_ufw_lock_rules | wc -l | tr -d ' ')"
+  (( left == 0 )) || lib_warn "${left} Cloudflare rule(s) could not be deleted; they allow, so the ports are open, but 'ufw status numbered' will show them"
+  lib_ok "The web ports are open to everyone again (${count} Cloudflare rule(s) removed)"
+  lib_note "Certificates can use HTTP-01 again; nothing else changes"
+  return 0
+}
+
+# Certificates that still renew over HTTP-01. With the origin locked, Let's Encrypt reaches
+# port 80 only through Cloudflare, so a name that is not proxied - every mail name is not,
+# deliberately - stops renewing. Named here because certbot will not say so until it fails.
+_cf_webroot_lineages() {
+  local f=""
+  for f in /etc/letsencrypt/renewal/*.conf; do
+    [[ -e "$f" ]] || continue
+    grep -qE '^[[:space:]]*authenticator[[:space:]]*=[[:space:]]*webroot' "$f" 2>/dev/null || continue
+    f="${f##*/}"
+    printf '%s\n' "${f%.conf}"
+  done
+}
+
+lib_cf_origin_lock() {
+  local r="" n=0 foreign="" stale=""
+  lib_have ufw || lib_die "UFW is not installed" "" "the origin lock is built on it"
+  [[ -n "$(lib_cf_token)" ]] || lib_die "The origin lock needs a Cloudflare API token first" \
+    "with 80 closed to everyone but Cloudflare, Let's Encrypt cannot answer an HTTP-01 challenge; certificates have to come over DNS-01" \
+    "printf '%s' \"\$TOKEN\" | lomp install --cf-api-token -"
+  CF_LOCK_RENEWING=1 lib_cf_ips_ensure      # the refresh must not re-lock behind the question below
+  lib_warn "After this, only Cloudflare can reach ports 80 and 443 on this server."
+  lib_note "Every site must be proxied (orange cloud) or it stops answering. SSH, mail and the"
+  lib_note "WebAdmin port are not touched. Undo it with: lomp firewall --web-open"
+  foreign="$(_cf_ufw_foreign_web_rules)"
+  if [[ -n "$foreign" ]]; then
+    lib_warn "These firewall rules of yours on 80/443 are removed by the lock and not restored:"
+    printf '%s\n' "$foreign" | sed 's/^/        /'
+  fi
+  stale="$(_cf_webroot_lineages)"
+  if [[ -n "$stale" ]]; then
+    lib_warn "These certificates still renew over HTTP-01, which the lock closes:"
+    printf '%s' "$stale" | tr '\n' ' ' | sed 's/^/        /;s/$/\n/'
+    lib_note "        re-issue each one afterwards: lomp renew-ssl <domain> --force, or lomp mail cert"
+  fi
+  lib_confirm "Lock the web ports to Cloudflare?" n || lib_die "Nothing was changed" "" ""
+  if (( OPT_DRY_RUN )); then
+    lib_info "[dry-run] would allow 80/443 from $(_cf_ips_count) Cloudflare ranges and remove the open rules"
+    return 0
+  fi
+  # The ranges are read and allowed BEFORE the open rules are deleted. The other way round,
+  # an empty list or a UFW that rejects every rule would leave 80 and 443 answering nobody -
+  # every site on the machine offline, and no way in over HTTP to see why.
+  local -a ranges=()
+  while read -r r; do
+    [[ -n "$r" && "$r" != \#* ]] || continue
+    ranges+=("$r")
+  done < <(_cf_ips_list)
+  (( ${#ranges[@]} > 0 )) || lib_die "No Cloudflare ranges to allow" "the list in ${CF_IPS_FILE} is empty" "lomp update-cf-ips"
+  for r in "${ranges[@]}"; do
+    if lib_ufw_rule allow from "$r" to any port 80,443 proto tcp comment "$CF_UFW_COMMENT"; then
+      n=$((n + 1))
+    else
+      lib_warn "could not allow ${r}"
+    fi
+    lib_ufw_rule allow from "$r" to any port 443 proto udp comment "$CF_UFW_COMMENT" || true
+  done
+  (( n > 0 )) || lib_die "Not one Cloudflare range could be allowed" \
+    "UFW refused every rule, so the ports were left open" "ufw status, then try again"
+  # a partly applied lock is not a lock: the edge addresses that were refused reach nothing
+  (( n == ${#ranges[@]} )) || lib_warn "only ${n} of ${#ranges[@]} ranges could be allowed - the rest of Cloudflare's edge now gets no answer (IPv6 disabled in /etc/default/ufw?)"
+  # only now: a range rule and an "anywhere" rule together are still open to everyone
+  lib_ufw_delete_port_rules 80
+  lib_ufw_delete_port_rules 443
+  # and HTTP/3: OpenLiteSpeed answers QUIC on 443/udp, which lib_ufw_delete_port_rules (TCP
+  # by name) leaves alone. Deleting it by rule spec takes the "Anywhere" rule and not the
+  # per-range ones just added.
+  lib_run ufw --force delete allow 443/udp || true
+  lib_manifest_set '.cloudflare.origin_lock' 'true'
+  lib_ok "Ports 80 and 443 now answer ${n} Cloudflare range(s) only"
+  lib_note "Certificates from here on are issued over DNS-01; the weekly IP refresh keeps these rules in step"
+  return 0
+}
+
+# Bring the rules in step with a changed range list. The ports are never opened in between:
+# what is new is allowed first, and only the lock's own rules whose range is gone are removed.
+lib_cf_origin_relock() {
+  local r="" num="" cidr="" added=0 removed=0 list=""
+  lib_have ufw || return 0
+  list="$(_cf_ips_list)"
+  [[ -n "$list" ]] || { CF_LAST_ERROR="the Cloudflare range list is empty"; return 1; }
+  while read -r r; do
+    [[ -n "$r" ]] || continue
+    lib_ufw_rule allow from "$r" to any port 80,443 proto tcp comment "$CF_UFW_COMMENT" || { lib_warn "could not allow ${r}"; continue; }
+    lib_ufw_rule allow from "$r" to any port 443 proto udp comment "$CF_UFW_COMMENT" || true
+    added=$((added + 1))
+  done <<<"$list"
+  (( added > 0 )) || { CF_LAST_ERROR="not one range could be allowed"; return 1; }
+  while read -r num cidr; do
+    [[ -n "$num" && -n "$cidr" ]] || continue
+    grep -qxF "$cidr" <<<"$list" && continue
+    lib_run ufw --force delete "$num" || lib_warn "could not delete UFW rule ${num}"
+    removed=$((removed + 1))
+  done < <(_cf_ufw_lock_rule_ranges)
+  lib_log_write INFO "origin lock renewed: ${added} range(s) allowed, ${removed} stale rule(s) removed"
+  return 0
+}
+
+lib_cf_firewall_main() {
+  local a="${1:-status}"
+  case "$a" in
+    --web-cloudflare-only|lock)  lib_cf_origin_lock ;;
+    --web-open|open)             lib_cf_origin_unlock ;;
+    status|--status|"")
+      if lib_cf_origin_locked; then
+        lib_print_kv "Web ports" "Cloudflare only ($(_cf_ufw_lock_rules | wc -l | tr -d ' ') rules)"
+      else
+        lib_print_kv "Web ports" "open to everyone (lomp firewall --web-cloudflare-only closes them to all but Cloudflare)"
+      fi
+      lib_print_kv "Cloudflare ranges" "$(_cf_ips_count) (refreshed $(lib_manifest_get '.cloudflare.ips_checked'))"
+      ;;
+    *) lib_die "Unknown firewall command: ${a}" "" "lomp firewall --web-cloudflare-only | --web-open | status" ;;
+  esac
+  return 0
+}
+
+# =============================================================================
+#  DNS records through the API
+# =============================================================================
+# Everything below is written so that a dry run sends nothing at all, and so that lompstack
+# only ever removes what it created: every record it writes carries a comment naming it.
+CF_RECORD_TAG="${CF_RECORD_TAG:-lompstack:mail}"
+CF_LAST_ERROR=""
+declare -gA CF_ZONE_CACHE=()
+
+# The zone a name belongs to. "mail.shop.example.com" may live in a zone called
+# shop.example.com or example.com, so the labels are walked from the longest suffix down and
+# the first zone this token can see wins.
+lib_cf_zone_id() {   # name -> zone id on stdout
+  local name="${1,,}" try="" out="" id=""
+  CF_LAST_ERROR=""
+  [[ -n "${CF_ZONE_CACHE[$name]:-}" ]] && { printf '%s' "${CF_ZONE_CACHE[$name]}"; return 0; }
+  try="$name"
+  while [[ "$try" == *.*.* || "$try" == *.* ]]; do
+    out="$(_cf_api GET "/zones?name=${try}&status=active&per_page=1" || true)"
+    id="$(jq -r '.result[0].id // empty' <<<"${out:-}" 2>/dev/null || true)"
+    if [[ -n "$id" ]]; then
+      CF_ZONE_CACHE["$name"]="$id"
+      printf '%s' "$id"
+      return 0
+    fi
+    [[ "$try" == *.*.* ]] || break
+    try="${try#*.}"
+  done
+  CF_LAST_ERROR="no Cloudflare zone for ${name} that this token can see"
+  return 1
+}
+
+# What the API said went wrong. An empty join is still an empty string, and jq's // only
+# catches null and false, so the fallback has to be chosen here and not in the filter.
+_cf_error() {   # response-body [fallback]
+  local msg=""
+  msg="$(jq -r '[.errors[]?.message] | join("; ")' <<<"${1:-}" 2>/dev/null || true)"
+  [[ -n "$msg" ]] || msg="${2:-the Cloudflare API did not answer}"
+  printf '%s' "$msg"
+}
+
+# Every record of one type and name, as a JSON array.
+# A failed call is NOT an empty answer: it returns non-zero. "There is nothing at this name"
+# is exactly the reply that makes a caller add a second SPF or a second MX record, so one
+# dropped request must never be able to say it.
+lib_cf_records() {   # zone type name
+  local z="$1" t="$2" n="$3" out="" res=""
+  CF_LAST_ERROR=""
+  out="$(_cf_api GET "/zones/${z}/dns_records?type=${t}&name=${n}&per_page=100" || true)"
+  res="$(jq -c 'select(.success == true) | .result | select(type == "array")' <<<"${out:-}" 2>/dev/null || true)"
+  if [[ -z "$res" ]]; then
+    CF_LAST_ERROR="$(_cf_error "$out" "the record list could not be read")"
+    return 1
+  fi
+  printf '%s' "$res"
+  return 0
+}
+
+# Create or change one record. The body goes through a file so that nothing of it - and no
+# token - is ever visible in the process list.
+lib_cf_record_write() {   # zone [id] type name content [prio] [proxied]
+  local z="$1" id="$2" t="$3" n="$4" c="$5" prio="${6:-}" proxied="${7:-false}" body="" out="" ok=""
+  body="$(lib_mktemp)"
+  if [[ "$t" == "MX" ]]; then
+    jq -n --arg t "$t" --arg n "$n" --arg c "$c" --argjson p "${prio:-10}" --arg cm "$CF_RECORD_TAG" \
+      '{type:$t, name:$n, content:$c, priority:$p, ttl:300, comment:$cm}' >"$body"
+  elif [[ "$t" == "A" || "$t" == "AAAA" ]]; then
+    jq -n --arg t "$t" --arg n "$n" --arg c "$c" --argjson px "$proxied" --arg cm "$CF_RECORD_TAG" \
+      '{type:$t, name:$n, content:$c, ttl:300, proxied:$px, comment:$cm}' >"$body"
+  else
+    jq -n --arg t "$t" --arg n "$n" --arg c "$c" --arg cm "$CF_RECORD_TAG" \
+      '{type:$t, name:$n, content:$c, ttl:300, comment:$cm}' >"$body"
+  fi
+  if [[ -n "$id" ]]; then out="$(_cf_api PUT "/zones/${z}/dns_records/${id}" "$body" || true)"
+  else out="$(_cf_api POST "/zones/${z}/dns_records" "$body" || true)"; fi
+  rm -f "$body"
+  ok="$(jq -r '.success // false' <<<"${out:-}" 2>/dev/null || printf 'false')"
+  if [[ "$ok" != "true" ]]; then
+    CF_LAST_ERROR="$(_cf_error "$out" "the API refused the record")"
+    return 1
+  fi
+  return 0
+}
+
+lib_cf_record_delete() {   # zone id
+  local out="" ok=""
+  out="$(_cf_api DELETE "/zones/${1}/dns_records/${2}" || true)"
+  ok="$(jq -r 'if .result.id then "true" else (.success // false | tostring) end' <<<"${out:-}" 2>/dev/null || printf 'false')"
+  [[ "$ok" == "true" ]] || { CF_LAST_ERROR="$(_cf_error "$out" "the API refused to delete ${2}")"; return 1; }
+  return 0
+}
+
+# =============================================================================
 #  IP ranges
 # =============================================================================
 # Download both lists into a temp file (validated). Prints the path; returns 1 on failure.
@@ -69,6 +349,15 @@ lib_cf_update_ips() {
   fi
   rm -f "$tmp"
   lib_manifest_set '.cloudflare.ips_checked' "$(lib_iso_now)"
+  # ...unless this very refresh was started by the lock itself, which would then apply
+  # before the operator has answered its own question
+  if (( changed )) && [[ -z "${CF_LOCK_RENEWING:-}" ]] && lib_cf_origin_locked; then
+    # the ranges moved, so the firewall rules that name them have to move too. Never by
+    # unlocking first: that would open the origin to everyone for the length of the rebuild.
+    lib_info "Cloudflare ranges changed; renewing the origin lock rules"
+    ( CF_LOCK_RENEWING=1; lib_cf_origin_relock ) \
+      || lib_warn "the origin lock could not be renewed: ${CF_LAST_ERROR:-see the log} (lomp firewall status)"
+  fi
   if (( changed )) && lib_cf_enabled && lib_ols_is_installed; then
     lib_ols_change_begin
     lib_ols_tx_begin
@@ -238,7 +527,7 @@ lib_cf_update_main() {
 lib_cf_status_line() {
   if lib_cf_enabled; then
     printf 'enabled (ranges: %s, updated: %s, token: %s)' \
-      "$( [[ -s "$CF_IPS_FILE" ]] && grep -cv '^#' "$CF_IPS_FILE" || printf 0)" \
+      "$(_cf_ips_count)" \
       "$(lib_manifest_get '.cloudflare.ips_updated' | cut -c1-10)" \
       "$( lib_ssl_cf_token_available && printf 'stored' || printf 'none')"
   else

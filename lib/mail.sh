@@ -1275,7 +1275,7 @@ lib_mail_install() {   # [hostname]
   fi
   lib_mail_cert_ensure "$host"
   lib_ok "Mail stack ready as ${host}"
-  lib_note "No domain sends or receives mail yet; that comes with the next release (lomp mail enable example.com)"
+  lib_note "No domain sends or receives mail yet: give one its own mail with 'lomp mail enable example.com'"
   (( OPT_DRY_RUN )) || lib_mail_test_report brief
   return 0
 }
@@ -1833,12 +1833,18 @@ lib_mail_enable_main() {   # domain [--mailbox NAME] [--quota Q]
     lib_warn "There is no mailbox yet, so every message to @${d} is refused"
     lib_note "Make one: lomp mail box add info@${d}"
   fi
-  lib_mail_dns_print "$d"
+  # with a token stored, the records go in by themselves - that is what the token is for -
+  # and anything lompstack refuses to touch is printed for the operator
+  if [[ -n "$(lib_cf_token)" ]]; then
+    lib_mail_dns_apply "$d" || lib_mail_dns_print "$d"
+  else
+    lib_mail_dns_print "$d"
+  fi
   return 0
 }
 
-lib_mail_disable_main() {   # domain [--keep-data]
-  local d="" keep=1 a=""
+lib_mail_disable_main() {   # domain [--keep-data|--delete-data] [--dns-cleanup]
+  local d="" keep=1 cleanup=0 a=""
   d="${1:-}"; shift || true
   [[ -n "$d" ]] || lib_die "Which domain?" "" "lomp mail disable example.com"
   d="${d,,}"
@@ -1847,6 +1853,7 @@ lib_mail_disable_main() {   # domain [--keep-data]
     case "$a" in
       --keep-data) keep=1 ;;
       --delete-data) keep=0 ;;
+      --dns-cleanup) cleanup=1 ;;
       --yes) OPT_YES=1 ;;
       *) lib_die "Unknown option for 'mail disable': ${a}" "" "lomp mail help" ;;
     esac
@@ -1865,6 +1872,9 @@ lib_mail_disable_main() {   # domain [--keep-data]
   # is rewritten, and Postfix would try to deliver it to the internet instead
   _mail_warn_queued "$d"
   lib_cron_remove "mail-cert:${d}"
+  # only the records lompstack wrote, and only when asked: somebody else may be pointing that
+  # name somewhere on purpose
+  (( cleanup )) && lib_mail_dns_cleanup "$d"
   if (( keep )); then
     # the mailbox lines are put aside, not left in place: Dovecot's user store has no
     # per-domain switch, so a line that stays is a login that still works. They come back
@@ -2388,6 +2398,207 @@ lib_mail_dns_check() {   # domain -> 0 when everything is in place
   return "$bad"
 }
 
+
+# =============================================================================
+#  Writing the records for the operator
+# =============================================================================
+# With a Cloudflare token stored, lomp can put the records there itself. Two rules decide
+# everything below: it never touches a record it did not write, and it never guesses. A mail
+# server that somebody else's MX already serves, or a domain that already has an SPF record,
+# is reported and left alone - merging two SPF records or silently moving mail away from a
+# provider is not a thing a provisioning script should do behind an operator's back.
+MAIL_DNS_APPLIED=0
+MAIL_DNS_CONFLICTS=0
+MAIL_DNS_SKIPPED=0
+
+_mail_dns_report() {   # status name detail
+  case "$1" in
+    applied)   printf '  %s%-9s%s %-38s %s\n' "$C_GRN" "written" "$C_RST" "$2" "$3" ;;
+    same)      printf '  %s%-9s%s %-38s %s\n' "$C_DIM" "already" "$C_RST" "$2" "$3" ;;
+    conflict)  printf '  %s%-9s%s %-38s %s\n' "$C_RED" "conflict" "$C_RST" "$2" "$3" ;;
+    *)         printf '  %s%-9s%s %-38s %s\n' "$C_YEL" "skipped" "$C_RST" "$2" "$3" ;;
+  esac
+}
+
+_mail_dns_conflict() {   # name detail   - report it and count it
+  _mail_dns_report conflict "$1" "$2"
+  MAIL_DNS_CONFLICTS=$((MAIL_DNS_CONFLICTS + 1))
+  return 1
+}
+
+# A TXT value longer than 255 bytes is stored as several strings and comes back as
+# "chunk" "chunk" - the DKIM record always does. Comparing that with what we mean to write
+# would rewrite the key on every single run.
+_mail_txt_norm() {
+  local s="${1//\" \"/}"
+  s="${s#\"}"; s="${s%\"}"
+  printf '%s' "$s"
+}
+
+# One record. Returns 0 when the zone now says what it should.
+_mail_dns_apply_one() {   # zone type name content [--replace-mx]
+  local z="$1" t="$2" n="$3" c="$4" replace="${5:-}"
+  local existing="" mine="" others="" id="" cur="" prio=10 n_other=0 old=""
+  if ! existing="$(lib_cf_records "$z" "$t" "$n")"; then
+    _mail_dns_conflict "$n" "Cloudflare could not be read: ${CF_LAST_ERROR}"
+    return 1
+  fi
+  # what lompstack itself wrote, and what somebody else put at the same name
+  mine="$(jq -c --arg tag "$CF_RECORD_TAG" '[.[] | select((.comment // "") == $tag)][0] // empty' <<<"$existing" 2>/dev/null || true)"
+  others="$(jq -c --arg tag "$CF_RECORD_TAG" '[.[] | select((.comment // "") != $tag)]' <<<"$existing" 2>/dev/null || printf '[]')"
+  n_other="$(jq 'length' <<<"$others" 2>/dev/null || printf '0')"
+  id="$(jq -r '.id // empty' <<<"${mine:-{\}}" 2>/dev/null || true)"
+
+  case "$t" in
+    MX)
+      prio="${c%% *}"; c="${c#* }"; c="${c%.}"
+      # Somebody else's mail server is in the zone: that is a decision, not a leftover. It
+      # counts even when lompstack's own MX is there as well - the lowest preference wins, so
+      # a foreign MX next to ours still takes every message the domain receives.
+      if (( n_other > 0 )) && [[ "$replace" != "--replace-mx" ]]; then
+        _mail_dns_conflict "$n" "another MX is set: $(jq -r '[.[] | "\(.priority) \(.content)"] | join(", ")' <<<"$others"); use --replace-mx to take it over"
+        return 1
+      fi
+      cur="$(jq -r '"\(.priority) \(.content)"' <<<"${mine:-{\}}" 2>/dev/null || true)"
+      if [[ "$cur" != "${prio} ${c}" && "$cur" != "${prio} ${c}." ]]; then
+        lib_cf_record_write "$z" "$id" MX "$n" "$c" "$prio" || { _mail_dns_conflict "$n" "$CF_LAST_ERROR"; return 1; }
+        _mail_dns_report applied "$n" "MX ${prio} ${c}"
+        MAIL_DNS_APPLIED=$((MAIL_DNS_APPLIED + 1))
+      elif (( n_other == 0 )); then
+        _mail_dns_report same "$n" "MX ${prio} ${c}"
+        return 0
+      fi
+      # ours is in the zone: only now do the others go. The other way round, a refused write
+      # would leave the domain with no MX at all and every message to it bounced.
+      if (( n_other > 0 )); then
+        while read -r old; do
+          [[ -n "$old" ]] || continue
+          lib_cf_record_delete "$z" "$old" || lib_warn "could not remove the old MX ${old}: ${CF_LAST_ERROR}"
+        done < <(jq -r '.[].id' <<<"$others" || true)
+        _mail_dns_report applied "$n" "${n_other} MX record(s) of another provider removed"
+      fi
+      ;;
+    TXT)
+      if [[ "$c" == v=spf1* ]]; then
+        # two SPF records are the same as none, so an existing one is never overwritten
+        local other=""
+        other="$(jq -r '[.[] | select(.content | startswith("v=spf1"))][0].content // empty' <<<"$others" 2>/dev/null || true)"
+        if [[ -n "$other" ]]; then
+          _mail_dns_conflict "$n" "this domain already has an SPF record: ${other}"
+          lib_note "        merge it by hand; two SPF records fail for every receiver"
+          return 1
+        fi
+      elif (( n_other > 0 )) && [[ -z "$mine" ]]; then
+        # DMARC and DKIM live at a name of their own, so anything already there was put there
+        # by somebody. A second record does not override it: two DMARC records mean the domain
+        # has no policy at all, and a second key at one selector breaks the signature.
+        _mail_dns_conflict "$n" "a record is already here: $(jq -r '.[0].content' <<<"$others" | cut -c1-40)"
+        return 1
+      fi
+      cur="$(jq -r '.content // empty' <<<"${mine:-{\}}" 2>/dev/null || true)"
+      if [[ "$(_mail_txt_norm "$cur")" == "$(_mail_txt_norm "$c")" ]]; then _mail_dns_report same "$n" "unchanged"; return 0; fi
+      lib_cf_record_write "$z" "$id" TXT "$n" "$c" || { _mail_dns_conflict "$n" "$CF_LAST_ERROR"; return 1; }
+      _mail_dns_report applied "$n" "$(printf '%.48s' "$c")..."
+      MAIL_DNS_APPLIED=$((MAIL_DNS_APPLIED + 1))
+      ;;
+    A)
+      if (( n_other > 0 )); then
+        # A record somebody else made at this name. One that already says the right thing is
+        # left exactly as it is; anything else is theirs to decide, not ours to overwrite -
+        # and a second address here sends half of all mail connections to the wrong host.
+        if [[ -z "$mine" && "$n_other" == "1" \
+              && "$(jq -r '.[0].content' <<<"$others")" == "$c" \
+              && "$(jq -r '.[0].proxied // false' <<<"$others")" == "false" ]]; then
+          _mail_dns_report same "$n" "$c"
+          return 0
+        fi
+        _mail_dns_conflict "$n" "another A record is here: $(jq -r '[.[] | .content] | join(", ")' <<<"$others"); this name must point at this server and stay unproxied"
+        return 1
+      fi
+      cur="$(jq -r '.content // empty' <<<"${mine:-{\}}" 2>/dev/null || true)"
+      if [[ "$cur" == "$c" && "$(jq -r '.proxied // false' <<<"${mine:-{\}}" 2>/dev/null || printf 'true')" == "false" ]]; then
+        _mail_dns_report same "$n" "$c"
+        return 0
+      fi
+      # a proxied mail name answers with Cloudflare's address and no client can reach it
+      lib_cf_record_write "$z" "$id" A "$n" "$c" "" false \
+        || { _mail_dns_conflict "$n" "$CF_LAST_ERROR"; return 1; }
+      _mail_dns_report applied "$n" "${c} (not proxied)"
+      MAIL_DNS_APPLIED=$((MAIL_DNS_APPLIED + 1))
+      ;;
+  esac
+  return 0
+}
+
+lib_mail_dns_apply() {   # domain [--replace-mx]
+  local d="$1" replace="${2:-}" t="" n="" v="" note="" zone="" first=""
+  [[ -n "$(lib_cf_token)" ]] || lib_die "No Cloudflare API token is stored" \
+    "the records can only be written with one; they are printed instead" \
+    "printf '%s' \"\$TOKEN\" | lomp install --cf-api-token -"
+  MAIL_DNS_APPLIED=0
+  MAIL_DNS_CONFLICTS=0
+  MAIL_DNS_SKIPPED=0
+  if (( OPT_DRY_RUN )); then
+    lib_info "[dry-run] would write these records into Cloudflare (no request is sent):"
+    lib_mail_dns_print "$d"
+    return 0
+  fi
+  first="mail.${d}"
+  # not lib_die: this is the last step of "mail enable", and a domain whose DNS lives
+  # somewhere else must still be told what to put there
+  if ! zone="$(lib_cf_zone_id "$first")"; then
+    lib_warn "Cloudflare has no zone for ${d} that this token can see"
+    lib_note "${CF_LAST_ERROR}; the records have to go in by hand"
+    return 1
+  fi
+  lib_heading "Writing the DNS records of ${d}"
+  while IFS=$'\t' read -r t n v note; do
+    [[ -n "$t" ]] || continue
+    [[ "$t" == "SRV" ]] && continue                     # optional; nothing breaks without them
+    # a value the table could not fill in ("<no DKIM key yet>", "<the IPv4 address of this
+    # server>") is a placeholder for the reader. Published, it would be a live record saying
+    # something that is not an address at all.
+    if [[ "$v" == *"<"* ]]; then
+      _mail_dns_report skipped "$n" "$v"
+      MAIL_DNS_SKIPPED=$((MAIL_DNS_SKIPPED + 1))
+      continue
+    fi
+    _mail_dns_apply_one "$zone" "$t" "$n" "$v" "$replace" || true
+  done < <(_mail_dns_records "$d")
+  lib_json_set "$(lib_domain_json "$d")" '.mail.dns_applied_at = $ts' --arg ts "$(lib_iso_now)" 2>/dev/null || true
+  printf '\n'
+  if (( MAIL_DNS_CONFLICTS > 0 || MAIL_DNS_SKIPPED > 0 )); then
+    lib_warn "${MAIL_DNS_APPLIED} record(s) written, $((MAIL_DNS_CONFLICTS + MAIL_DNS_SKIPPED)) left for you: lomp mail dns ${d} shows what they should say"
+    return 1
+  fi
+  lib_ok "${MAIL_DNS_APPLIED} record(s) written; the rest was already right"
+  lib_note "Reverse DNS is still your provider's to set: lomp mail test"
+  return 0
+}
+
+# Take away only what lompstack wrote. A record somebody added by hand stays, whatever it says.
+lib_mail_dns_cleanup() {   # domain
+  local d="$1" zone="" t="" n="" v="" note="" gone=0 id="" have=""
+  [[ -n "$(lib_cf_token)" ]] || return 0
+  if (( OPT_DRY_RUN )); then lib_info "[dry-run] would remove the DNS records lompstack wrote for ${d}"; return 0; fi
+  zone="$(lib_cf_zone_id "mail.${d}")" || return 0
+  while IFS=$'\t' read -r t n v note; do
+    [[ -n "$t" ]] || continue
+    [[ "$t" == "SRV" ]] && continue
+    # a failed read is not an empty zone: saying nothing here would quietly leave records behind
+    if ! have="$(lib_cf_records "$zone" "$t" "$n")"; then
+      lib_warn "could not read ${t} ${n} from Cloudflare: ${CF_LAST_ERROR}; it may still be there"
+      continue
+    fi
+    while read -r id; do
+      [[ -n "$id" ]] || continue
+      if lib_cf_record_delete "$zone" "$id"; then gone=$((gone + 1)); else lib_warn "could not remove ${t} ${n}: ${CF_LAST_ERROR}"; fi
+    done < <(jq -r --arg tag "$CF_RECORD_TAG" '.[] | select((.comment // "") == $tag) | .id' <<<"$have" || true)
+  done < <(_mail_dns_records "$d")
+  (( gone > 0 )) && lib_ok "${gone} DNS record(s) that lompstack had written were removed"
+  return 0
+}
+
 # postmaster, abuse and dmarc have to arrive somewhere: the first mailbox of the domain gets
 # them unless the operator has already said otherwise.
 lib_mail_domain_aliases_seed() {   # domain mailbox-address
@@ -2433,7 +2644,7 @@ Usage: lomp mail <command>
 
   enable <domain> [--mailbox info] [--quota 2G]
                          give a site its own mail: DKIM key, certificate, DNS to add
-  disable <domain> [--delete-data]
+  disable <domain> [--delete-data] [--dns-cleanup]
                          stop taking mail for it: no delivery and no login, but every message
                          stays on disk and enabling it again restores the mailboxes
 
@@ -2446,6 +2657,7 @@ Usage: lomp mail <command>
   alias del <alias@domain> | alias list [domain]
 
   dns <domain> [--json] [--check]       what to put in DNS, and whether it is there yet
+  dns <domain> --apply [--replace-mx]   write it into Cloudflare with the stored token
   cert [domain]                         ask again for a certificate that did not come
 
   status                 what the mail stack is doing, and whether it can send
@@ -2485,7 +2697,7 @@ _mail_alias_cmd() {
 }
 
 _mail_dns_cmd() {
-  local d="${1:-}" a="" check=0
+  local d="${1:-}" a="" check=0 apply=0 replace=""
   shift || true
   [[ -n "$d" ]] || lib_die "Which domain?" "" "lomp mail dns example.com"
   d="${d,,}"
@@ -2494,11 +2706,18 @@ _mail_dns_cmd() {
     a="$1"; shift
     case "$a" in
       --check) check=1 ;;
+      --apply) apply=1 ;;
+      --replace-mx) replace="--replace-mx"; apply=1 ;;
       --json)  OPT_JSON=1 ;;
       *) lib_die "Unknown option for 'mail dns': ${a}" "" "lomp mail dns example.com --check" ;;
     esac
   done
   if (( OPT_JSON )); then lib_mail_dns_json "$d"; return 0; fi
+  if (( apply )); then
+    lib_mail_domain_enabled "$d" || lib_die "Mail is not on for ${d}" "" "lomp mail enable ${d}"
+    lib_mail_dns_apply "$d" "$replace" || exit 1
+    return 0
+  fi
   if (( check )); then lib_mail_dns_check "$d" || exit 1; return 0; fi
   lib_mail_dns_print "$d"
 }

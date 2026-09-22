@@ -187,7 +187,13 @@ lib_ssl_obtain() {
   (( force )) && args+=(--force-renewal)
   if [[ -n "$email" ]]; then args+=(--email "$email"); else args+=(--register-unsafely-without-email); fi
   if [[ "$method" == "auto" ]]; then
-    if (( wildcard )) || { [[ "${D_CLOUDFLARE:-0}" == "1" ]] && lib_ssl_cf_token_available; }; then method="dns"; else method="webroot"; fi
+    # With the origin locked to Cloudflare, port 80 answers only through the edge, so DNS-01
+    # is the way a certificate still comes for a name that is not proxied. Only with a token,
+    # though: without one there is nothing to switch to, and HTTP-01 through an orange cloud
+    # still works - the challenge is fetched by a Cloudflare address, which the lock allows.
+    if (( wildcard )) \
+       || { lib_cf_origin_locked && lib_ssl_cf_token_available; } \
+       || { [[ "${D_CLOUDFLARE:-0}" == "1" ]] && lib_ssl_cf_token_available; }; then method="dns"; else method="webroot"; fi
   fi
   if [[ "$method" == "dns" ]]; then
     lib_ssl_cf_token_available || lib_die "DNS-01 requires a Cloudflare API token" "${CF_INI} is missing" "run: setup.sh install --cf-api-token <token>  (or use --cloudflare without --wildcard)"
