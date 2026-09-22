@@ -95,7 +95,7 @@ _ss_load_module() {
   # shellcheck source=/dev/null
   source "$file"
 }
-for _m in common system ols php db ssl domain proxy app cloudflare backup monitor install menu; do
+for _m in common system ols php db ssl domain proxy app mail cloudflare backup monitor install menu; do
   _ss_load_module "$_m"
 done
 unset _m

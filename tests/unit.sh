@@ -23,7 +23,7 @@ INSTALL_DIR="$TMP/install"; BIN_LINK="$TMP/lompstack"; BIN_SHORT="$TMP/lomp"; LO
 OPT_YES=1 OPT_DRY_RUN=0 OPT_QUIET=1 OPT_VERBOSE=0 OPT_NO_COLOR=1 OPT_JSON=0 OPT_NON_INTERACTIVE=1
 SCRIPT_PATH="$ROOT/setup.sh"; SCRIPT_DIR="$ROOT"
 export TMPDIR="$TMP"
-for m in common system ols php db ssl domain proxy app cloudflare backup monitor install menu; do
+for m in common system ols php db ssl domain proxy app mail cloudflare backup monitor install menu; do
   # shellcheck source=/dev/null
   source "$ROOT/lib/$m.sh"
 done
@@ -150,6 +150,20 @@ assert_false "doctor ignores a host:port url"        leak_hit "http://127.0.0.1:
 for _s in 'https://oauth2:glpat-Ab12Cd34Ef56@gitlab.com/g/r.git' 'https://ghp_1234567890abcdefghijKLMNOP@github.com/o/r.git' 'mysql://app:S3cr3tPw@127.0.0.1:3306/app'; do
   assert_false "masked form of ${_s%%@*}@... is clean" leak_hit "$(m "$_s")"
 done
+# a mail server hands the log two more shapes: password hashes and private keys. A hash is not
+# a password, but it is worth an offline attack, and neither belongs in a world-readable log.
+assert_eq "mask a dovecot hash"  "info@example.com:{BLF-CRYPT}********" "$(m 'info@example.com:{BLF-CRYPT}$2y$10$abcdefghijklmnopqrstuv')"
+assert_eq "mask a bare bcrypt hash" 'hash $2y$********'                 "$(m 'hash $2y$10$Abcdefghijklmnopqrstuv')"
+assert_eq "mask a sha512-crypt hash" 'hash $6$********'                 "$(m 'hash $6$rounds=5000$saltsalt$Abcdefghij')"
+assert_eq "mask roundcube des_key" "des_key = ********"                 "$(m 'des_key = rcmail24ByteDESkeyStr')"
+_pem=$'-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQ\n-----END PRIVATE KEY-----'
+# the markers go too: the leak scan looks for them, and a masked line must not trip it
+assert_eq "mask a whole private key" $'********\n********\n********' "$(m "$_pem")"
+assert_true  "doctor sees a leaked hash"        leak_hit 'info@example.com:{BLF-CRYPT}$2y$10$abcdefghijklmnopqrstuv'
+assert_true  "doctor sees a leaked private key" leak_hit "$_pem"
+assert_false "doctor ignores the masked hash"   leak_hit "$(m 'info@example.com:{BLF-CRYPT}$2y$10$abcdefghijklmnopqrstuv')"
+assert_false "doctor ignores the masked key"    leak_hit "$(m "$_pem")"
+assert_false "doctor ignores an ordinary path"  leak_hit '/var/vmail/example.com/info/Maildir'
 
 # =============================================================================
 section "OpenLiteSpeed config editing (awk)"
@@ -1109,7 +1123,7 @@ section "fail2ban jail regeneration (regression: empty Cloudflare action)"
 mkdir -p "$FAIL2BAN_FILTER_DIR"
 mv "$STATE_DIR/domains" "$STATE_DIR/domains.bak" 2>/dev/null || true
 mkdir -p "$STATE_DIR/domains"
-CF_F2B_ACTION="$TMP/cf-action.conf"; CF_INI="$TMP/cloudflare-absent.ini"
+CF_F2B_ACTION="$TMP/cf-action.conf"; CF_F2B_AUTH="$TMP/cf-auth.header"; CF_INI="$TMP/cloudflare-absent.ini"
 lib_pkg_installed() { [[ "$1" == "fail2ban" ]]; }
 lib_service_active() { return 1; }
 # run with errexit explicitly re-armed: this is what the installer does, and what broke
@@ -1146,13 +1160,16 @@ assert_has "first site logpath" "logpath = ${SITES_ROOT}/alpha.example/logs/acce
 assert_has "second site is an indented continuation" $'\n          '"${SITES_ROOT}/beta.example/logs/access.log" "$out"
 assert_eq "cloudflare action reaches both jails" 2 "$(grep -c 'server-setup-cloudflare' <<<"$out")"
 assert_eq "both jails still inherit action_" 2 "$(grep -c '^action = %(action_)s$' <<<"$out")"
-assert_has "token passed to the action" 'cftoken="Xv8sQ2pLm9TzR4kWn1bYc7dEf0g"' "$out"
 assert_has "account passed to the action" 'cfaccount="acc0123456789"' "$out"
+# the token used to be an action argument here, which put it on the command line of every ban
+assert_lacks "the token itself never reaches the jail file" 'Xv8sQ2pLm9TzR4kWn1bYc7dEf0g' "$out"
 # the action block belongs to the jail above it; one stray newline moves it into the next
 assert_eq "action stays inside the wp-login jail" "logpath action action_cf [server-setup-web-probe]" \
   "$(awk '/^logpath/{print "logpath"} /^action = /{print "action"} /server-setup-cloudflare/{print "action_cf"} /^\[server-setup-web-probe\]/{print; exit}' <<<"$out" | tr '\n' ' ' | sed 's/ $//')"
 assert_eq "second regen with sites is also clean" 0 "$(run_isolated lib_domain_fail2ban_regen)"
-if (( CAN_CHMOD )); then assert_eq "jail holding a token is 0600" "600" "$(stat -c %a "$FAIL2BAN_WEB_JAIL_FILE")"; fi
+if (( CAN_CHMOD )); then assert_eq "the jail file stays 0600" "600" "$(stat -c %a "$FAIL2BAN_WEB_JAIL_FILE")"; fi
+# regen is where a server that stored its token before this file existed gets it
+assert_true "regen wrote the header file the action reads" test -s "$CF_F2B_AUTH"
 rm -rf "$STATE_DIR/domains"
 mv "$STATE_DIR/domains.bak" "$STATE_DIR/domains" 2>/dev/null || mkdir -p "$STATE_DIR/domains"
 
@@ -1997,6 +2014,118 @@ if command -v flock >/dev/null 2>&1; then
   assert_eq "and gives up after its limit" 1 "$(SERVER_SETUP_LOCKED=0 LIB_LOCK_WAIT=1 run_isolated lib_lock)"
   wait "$_lk_pid" 2>/dev/null || true
 fi
+
+# =============================================================================
+section "a secret never reaches a command line"
+# /proc/<pid>/cmdline is world-readable, so every site user of this server can read the
+# arguments of any command while it runs. Tokens therefore go to curl in a configuration on
+# standard input, and these tests assert on what curl actually received.
+_curl_argv="$TMP/curl.argv"; _curl_stdin="$TMP/curl.stdin"
+: >"$_curl_argv"; : >"$_curl_stdin"
+eval 'curl() { printf "%s\n" "$*" >>"$_curl_argv"; cat >"$_curl_stdin"; printf "%s" "${CURL_REPLY:-}"; }'
+_cf_tok="Xv8sQ2pLm9TzR4kWn1bYc7dEf0g"
+CURL_REPLY='{"result":{"status":"active"}}' CF_API_TOKEN_OVERRIDE="$_cf_tok" _cf_api GET /user/tokens/verify >/dev/null
+assert_lacks "the Cloudflare token stays out of curl's arguments" "$_cf_tok" "$(cat "$_curl_argv")"
+assert_has   "curl reads it from the configuration on stdin"      "$_cf_tok" "$(cat "$_curl_stdin")"
+assert_has   "which carries the method" 'request = "GET"'                        "$(cat "$_curl_stdin")"
+assert_has   "and the full URL"         "url = \"${CF_API}/user/tokens/verify\"" "$(cat "$_curl_stdin")"
+assert_eq    "no token means no request" 1 "$(CF_API_TOKEN_OVERRIDE= CF_INI="$TMP/no-such.ini" run_isolated _cf_api GET /accounts)"
+
+: >"$_curl_argv"; : >"$_curl_stdin"
+_tg_tok="123456:ABCdefGhiJklMnoPqr"
+NOTIFY_CONF="$TMP/notify.conf"
+printf 'TELEGRAM_TOKEN=%s\nTELEGRAM_CHAT=-1001234567\n' "$_tg_tok" >"$NOTIFY_CONF"
+lib_notify_send "disk almost full" "body" >/dev/null 2>&1 || true
+assert_lacks "the Telegram token stays out of curl's arguments" "$_tg_tok" "$(cat "$_curl_argv")"
+assert_has   "the URL holding it comes in on stdin" "api.telegram.org/bot${_tg_tok}/sendMessage" "$(cat "$_curl_stdin")"
+assert_has   "while the chat id may stay an argument" "chat_id=-1001234567" "$(cat "$_curl_argv")"
+unset -f curl
+
+CF_INI="$TMP/cf-live.ini"; CF_F2B_ACTION="$TMP/cf-action-live.conf"; CF_F2B_AUTH="$TMP/cf-auth-live.header"
+printf 'dns_cloudflare_api_token = %s\n' "$_cf_tok" >"$CF_INI"
+lib_manifest_set '.cloudflare.account_id' 'acc0123456789'
+lib_cf_fail2ban_action_write
+_act="$(cat "$CF_F2B_ACTION")"
+assert_lacks "a ban carries no token on its command line" "$_cf_tok" "$_act"
+assert_has   "curl takes the header from a file"          '-H @<cfauth>' "$_act"
+assert_has   "the file the action names is the one lomp wrote" "cfauth = ${CF_F2B_AUTH}" "$_act"
+assert_eq    "which holds the header"  "Authorization: Bearer ${_cf_tok}" "$(cat "$CF_F2B_AUTH")"
+if (( CAN_CHMOD )); then assert_eq "and only root may read it" "600" "$(stat -c %a "$CF_F2B_AUTH")"; fi
+assert_lacks "the jail lines carry no token either" "$_cf_tok" "$(lib_cf_fail2ban_action_lines)"
+
+_sec="$TMP/secret-write.conf"
+_q="$OPT_QUIET"; OPT_QUIET=0; OPT_DRY_RUN=1
+_out="$(printf 'dns_cloudflare_api_token = %s\n' "$_cf_tok" | lib_write_file "$_sec" 0600 "" secret 2>&1)"
+_out2="$(printf 'ServerName x\n' | lib_write_file "$TMP/plain-write.conf" 0644 2>&1)"
+OPT_DRY_RUN=0; OPT_QUIET="$_q"
+assert_lacks "a dry run never prints a secret's contents" "$_cf_tok" "$_out"
+assert_has   "it says how much it would write instead" "contents not shown" "$_out"
+assert_has   "an ordinary file is still shown in full" "would create" "$_out2"
+assert_false "and the dry run wrote nothing" test -e "$_sec"
+printf 'dns_cloudflare_api_token = %s\n' "$_cf_tok" | lib_write_file "$_sec" 0600 "" secret
+if (( CAN_CHMOD )); then assert_eq "the file itself is written 0600" "600" "$(stat -c %a "$_sec")"; fi
+
+# =============================================================================
+section "certificates for names that belong to no site"
+_cert_args() {   # cert-name name...   -> the certbot command line it would run
+  eval 'lib_run() { printf "%s\n" "$*"; }
+        lib_pkg_installed() { [[ "$1" == "python3-certbot-dns-cloudflare" ]]; }'
+  OPT_DRY_RUN=1
+  lib_ssl_obtain_names "$@" 2>/dev/null
+}
+CF_INI="$TMP/cf-absent-for-certs.ini"; rm -f "$CF_INI"
+_cb="$(_cert_args _mailhost mail.example.com)"
+assert_has "one lineage for the mail host"    "--cert-name _mailhost" "$_cb"
+assert_has "carrying the name asked for"      "-d mail.example.com" "$_cb"
+assert_has "webroot while no token is stored" "--webroot" "$_cb"
+CF_INI="$TMP/cf-present-for-certs.ini"; printf 'dns_cloudflare_api_token = %s\n' "$_cf_tok" >"$CF_INI"
+_cb="$(_cert_args _mail_example_com mail.example.com webmail.example.com)"
+assert_has "DNS-01 once a token is stored"  "--dns-cloudflare" "$_cb"
+assert_has "both names on one certificate"  "-d mail.example.com -d webmail.example.com" "$_cb"
+assert_lacks "and the token is not an argument" "$_cf_tok" "$_cb"
+assert_eq "a certificate with no names is refused" 1 "$(run_isolated lib_ssl_obtain_names _mailhost)"
+
+lib_ssl_hook_render >"$TMP/hook-mail.sh"
+assert_true "the deploy hook still parses" bash -n "$TMP/hook-mail.sh"
+_hk="$(cat "$TMP/hook-mail.sh")"
+assert_has "it has its own branch for the mail lineages" "_mailhost|_mail_*)" "$_hk"
+assert_has "which reloads Postfix"                       "postfix reload" "$_hk"
+assert_has "and Dovecot"                                 "systemctl reload dovecot" "$_hk"
+# lsws' own graceful restart replaces the process behind systemd's back; the next restart fails
+assert_has   "a site's certificate restarts OpenLiteSpeed" 'systemctl restart "$OLS_SERVICE"' "$_hk"
+assert_lacks "and nothing reloads lsws through systemd"    "systemctl reload lsws" "$_hk"
+
+# =============================================================================
+section "mail names, and the RAM the mail stack takes"
+assert_true  "a plain local part"       lib_mail_local_valid "info"
+assert_true  "dots, dashes and digits"  lib_mail_local_valid "first.last-1"
+assert_false "no leading dot"           lib_mail_local_valid ".info"
+assert_false "no double dot"            lib_mail_local_valid "a..b"
+assert_false "no slash"                 lib_mail_local_valid "a/b"
+assert_false "no path traversal"        lib_mail_local_valid "../../etc/passwd"
+assert_false "not empty"                lib_mail_local_valid ""
+assert_true  "a full address, any case" lib_mail_address_valid "Info@Example.COM"
+assert_false "one @ and no more"        lib_mail_address_valid "a@b@example.com"
+assert_false "a domain is required"     lib_mail_address_valid "info@"
+assert_true  "a quota with a unit"      lib_mail_quota_valid "1G"
+assert_true  "0 means no limit"         lib_mail_quota_valid "0"
+assert_false "nothing free-form"        lib_mail_quota_valid "1TB"
+# the leading underscore is what keeps a mail lineage out of reach of any site
+assert_eq    "the mail lineage of a site"     "_mail_example_com" "$(lib_mail_cert_name example.com)"
+assert_false "no site can be called that" lib_domain_valid "_mail_example_com"
+
+SYS_ANALYZED=1; SYS_RAM_MB=4096; SYS_RAM_AVAIL_MB=3000; SYS_CPU_CORES=2; SYS_DISK_TYPE=ssd; SYS_SWAP_MB=0
+DB_BUFFER_PERCENT=""; REDIS_MAX_PERCENT=""
+lib_system_profile
+assert_eq "nothing is reserved while mail is not installed" 0 "$CALC_MAIL_MB"
+_php_no_mail="$CALC_PHP_CHILDREN_TOTAL"
+lib_manifest_set '.components.mail.postfix' '3.8.6'
+lib_system_profile
+assert_eq "512 MB at 4 GB once the stack is there" 512 "$CALC_MAIL_MB"
+assert_true "which leaves fewer PHP workers" bash -c "(( $CALC_PHP_CHILDREN_TOTAL < $_php_no_mail ))"
+lib_json_set "$STATE_DIR/manifest.json" 'del(.components.mail)'
+lib_system_profile
+assert_eq "and the reservation goes with the stack" 0 "$CALC_MAIL_MB"
 
 # =============================================================================
 section "no command replaces itself and skips the EXIT cleanup"

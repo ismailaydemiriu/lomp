@@ -43,7 +43,7 @@ lib_iso_now() { date -u '+%Y-%m-%dT%H:%M:%SZ'; }
 # below is the read-side mirror of the same three shapes - keep them in step.
 lib_mask_secrets() {
   sed -E \
-    -e 's/((password|passwd|passwort|pass|pwd|secret|token|api[_-]?key|requirepass|auth_pass|smtp_pass|cftoken|dns_cloudflare_api_token|MYSQL_PWD|REDISCLI_AUTH)["'"'"']?[[:space:]]*[=:][[:space:]]*["'"'"']?)[^[:space:]"'"'"',}]+/\1********/Ig' \
+    -e 's/((password|passwd|passwort|pass|pwd|secret|token|api[_-]?key|requirepass|auth_pass|smtp_pass|cftoken|des_key|dns_cloudflare_api_token|MYSQL_PWD|REDISCLI_AUTH)["'"'"']?[[:space:]]*[=:][[:space:]]*["'"'"']?)[^[:space:]"'"'"',}]+/\1********/Ig' \
     -e 's/(--[a-z0-9-]*(password|passwd|pass|secret|token|api[_-]?key|key)[a-z0-9-]*[=[:space:]]["'"'"']?)[^[:space:]"'"'"',}]+/\1********/Ig' \
     -e 's/^([[:space:]]*(requirepass|password|auth_pass|smtp_pass|cftoken)[[:space:]]+["'"'"']?)[^[:space:]"'"'"',}]+/\1********/Ig' \
     -e 's/(IDENTIFIED[[:space:]]+BY[[:space:]]+["'"'"'])[^"'"'"']*/\1********/Ig' \
@@ -51,7 +51,10 @@ lib_mask_secrets() {
     -e 's/(Bearer[[:space:]]+)[A-Za-z0-9._~+\/=-]+/\1********/g' \
     -e 's#(https://api\.telegram\.org/bot)[^/[:space:]]+#\1********#g' \
     -e 's#([a-z][a-z0-9+.-]*://[^/@[:space:]:]*:)[^/@[:space:]]+@#\1********@#Ig' \
-    -e 's#(https?://)[A-Za-z0-9_-]{20,}@#\1********@#Ig'
+    -e 's#(https?://)[A-Za-z0-9_-]{20,}@#\1********@#Ig' \
+    -e 's/(\{(BLF-CRYPT|SHA512-CRYPT|SHA256-CRYPT|CRYPT|PLAIN)\})[^[:space:]:]+/\1********/Ig' \
+    -e 's/\$(2[aby]|5|6)\$[^[:space:]"'"'"',}]+/$\1$********/g' \
+    -e '/-----BEGIN [A-Z ]*PRIVATE KEY-----/,/-----END [A-Z ]*PRIVATE KEY-----/s/.*/********/'
 }
 # The last two rules cover credentials inside a URL: "scheme://user:secret@host" (git remotes,
 # DATABASE_URL-style connection strings) and a token used as the user name of an https remote
@@ -61,7 +64,7 @@ lib_mask_secrets() {
 # The pattern "doctor" greps the log with. It must cover exactly the shapes
 # lib_mask_secrets masks, or the check reports a clean log while a token sits in it.
 lib_secret_leak_pattern() {
-  printf '%s' '(password|passwd|pass|pwd|secret|token|api[_-]?key|requirepass|auth_pass)["'"'"']?[[:space:]]*[=:][[:space:]]*["'"'"']?[A-Za-z0-9+/=._~-]{8,}|--[a-z0-9-]*(password|pass|secret|token|api[_-]?key|key)[a-z0-9-]*[=[:space:]]+[A-Za-z0-9+/=._~:-]{8,}|^[[:space:]]*(requirepass|password|auth_pass)[[:space:]]+[A-Za-z0-9+/=._~-]{8,}|[a-z][a-z0-9+.-]*://[^/@[:space:]:]*:[^*/@[:space:]][^/@[:space:]]{3,}@|https?://[A-Za-z0-9_-]{20,}@'
+  printf '%s' '(password|passwd|pass|pwd|secret|token|api[_-]?key|requirepass|auth_pass|des_key)["'"'"']?[[:space:]]*[=:][[:space:]]*["'"'"']?[A-Za-z0-9+/=._~-]{8,}|--[a-z0-9-]*(password|pass|secret|token|api[_-]?key|key)[a-z0-9-]*[=[:space:]]+[A-Za-z0-9+/=._~:-]{8,}|^[[:space:]]*(requirepass|password|auth_pass)[[:space:]]+[A-Za-z0-9+/=._~-]{8,}|[a-z][a-z0-9+.-]*://[^/@[:space:]:]*:[^*/@[:space:]][^/@[:space:]]{3,}@|https?://[A-Za-z0-9_-]{20,}@|\{(BLF-CRYPT|SHA512-CRYPT|SHA256-CRYPT|CRYPT)\}[^[:space:]*:]{4,}|\$(2[aby]|5|6)\$[^[:space:]"'"'"',}*]{10,}|-----BEGIN [A-Z ]*PRIVATE KEY-----'
 }
 
 # Append a line to the log file (masked). Never fails.
@@ -391,12 +394,14 @@ lib_backup_config() {
   printf '%s' "$dest"
 }
 
-# lib_write_file <path> [mode] [owner:group]   (content on stdin)
+# lib_write_file <path> [mode] [owner:group] [secret]   (content on stdin)
 # Atomic, idempotent (no-op when identical), backs up the previous version,
 # dry-run shows a diff. Sets LIB_FILE_CHANGED=1 when the file was (or would be) modified.
+# A fourth argument marks the content as secret: the dry run then prints no contents and no
+# diff, and the archived copy of the previous version is closed to everyone but root.
 lib_write_file() {
-  local path="$1" mode="${2:-}" owner="${3:-}"
-  local content="" tmp=""
+  local path="$1" mode="${2:-}" owner="${3:-}" secret="${4:-}"
+  local content="" tmp="" bak=""
   LIB_FILE_CHANGED=0
   content="$(lib_mktemp)"
   cat >"$content"
@@ -411,7 +416,9 @@ lib_write_file() {
   fi
   LIB_FILE_CHANGED=1
   if (( OPT_DRY_RUN )); then
-    if [[ -f "$path" ]]; then
+    if [[ -n "$secret" ]]; then
+      (( OPT_QUIET )) || printf '%s[dry ]%s  would write %s (%s bytes, contents not shown)\n' "$C_MAG" "$C_RST" "$path" "$(wc -c <"$content" | tr -d ' ')"
+    elif [[ -f "$path" ]]; then
       (( OPT_QUIET )) || printf '%s[dry ]%s  would modify %s\n' "$C_MAG" "$C_RST" "$path"
       (( OPT_QUIET )) || diff -u "$path" "$content" 2>/dev/null | head -n 60 | sed 's/^/        /' || true
     else
@@ -420,7 +427,10 @@ lib_write_file() {
     rm -f "$content"
     return 0
   fi
-  [[ -f "$path" ]] && lib_backup_config "$path" >/dev/null
+  if [[ -f "$path" ]]; then
+    bak="$(lib_backup_config "$path")"
+    if [[ -n "$secret" && -n "$bak" ]]; then chmod 0600 "$bak" 2>/dev/null || true; fi
+  fi
   mkdir -p "$(dirname "$path")"
   tmp="${path}.tmp.$$"
   cp "$content" "$tmp"

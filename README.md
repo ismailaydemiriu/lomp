@@ -410,12 +410,17 @@ With an API token you also get DNS-01 certificates (including wildcards) for pro
 domains, and Fail2ban bans are mirrored to the Cloudflare edge:
 
 ```bash
-sudo lomp install --cf-api-token YOUR_TOKEN
+printf '%s' "$CF_TOKEN" | sudo lomp install --cf-api-token -
 ```
 
+`-` reads the token from standard input. Passing it as `--cf-api-token YOUR_TOKEN` also
+works, but then it sits in the process list while the command runs, where every user of the
+server can read it.
+
 The token needs `Zone → DNS → Edit` and `Account → Firewall Access Rules → Edit`, and is
-stored with mode 0600. Set your Cloudflare SSL mode to **Full (strict)** once certificates
-are issued.
+stored with mode 0600. It never reaches a command line afterwards either: API calls get it
+through curl's configuration on stdin, and Fail2ban's ban action reads it from a 0600 header
+file. Set your Cloudflare SSL mode to **Full (strict)** once certificates are issued.
 
 There is no bundled WAF or ModSecurity: that job belongs to the edge.
 

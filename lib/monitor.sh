@@ -56,8 +56,12 @@ lib_notify_send() {
     fi
   fi
   if [[ -n "$NT_TELEGRAM_TOKEN" && -n "$NT_TELEGRAM_CHAT" ]]; then
-    curl -fsS --max-time 15 -o /dev/null -X POST "https://api.telegram.org/bot${NT_TELEGRAM_TOKEN}/sendMessage" \
-      --data-urlencode "chat_id=${NT_TELEGRAM_CHAT}" --data-urlencode "text=[${host}] ${subject}"$'\n\n'"${body:0:3500}" >/dev/null 2>&1 \
+    # the bot token is part of the URL, so the URL goes to curl in a configuration on standard
+    # input: on a command line it would sit in /proc/<pid>/cmdline, readable by every user here
+    printf 'url = "https://api.telegram.org/bot%s/sendMessage"\n' "$NT_TELEGRAM_TOKEN" \
+      | curl -fsS --max-time 15 -o /dev/null -K - \
+          --data-urlencode "chat_id=${NT_TELEGRAM_CHAT}" \
+          --data-urlencode "text=[${host}] ${subject}"$'\n\n'"${body:0:3500}" >/dev/null 2>&1 \
       || lib_log_write WARN "telegram notification failed"
   fi
   if [[ -n "$NT_WEBHOOK_URL" ]]; then
@@ -85,7 +89,13 @@ _nt_set() {   # key value  (rewrite notify.conf atomically, 0600)
 lib_notify_msmtp_write() {
   local starttls="on"
   [[ "$NT_SMTP_PORT" == "465" ]] && starttls="off"
-  lib_apt_install msmtp msmtp-mta || lib_warn "msmtp could not be installed"
+  # msmtp-mta provides /usr/sbin/sendmail, and so does Postfix: two packages cannot own that
+  # path. Where this server runs its own mail, notifications use msmtp directly instead.
+  if lib_pkg_installed postfix; then
+    lib_apt_install msmtp || lib_warn "msmtp could not be installed"
+  else
+    lib_apt_install msmtp msmtp-mta || lib_warn "msmtp could not be installed"
+  fi
   {
     printf '# Managed by lompstack\ndefaults\nauth on\ntls %s\ntls_starttls %s\ntls_trust_file /etc/ssl/certs/ca-certificates.crt\nlogfile /var/log/msmtp.log\n\n' "$NT_SMTP_TLS" "$starttls"
     printf 'account default\nhost %s\nport %s\nfrom %s\nuser %s\npassword %s\n' "$NT_SMTP_HOST" "${NT_SMTP_PORT:-587}" "${NT_SMTP_FROM:-$NT_EMAIL}" "$NT_SMTP_USER" "$NT_SMTP_PASS"

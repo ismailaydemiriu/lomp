@@ -578,6 +578,9 @@ lib_domain_fail2ban_regen() {
   while read -r d; do [[ -n "$d" ]] && logs+=("$(lib_domain_home "$d")/logs/access.log"); done < <(lib_domains_list)
   ((${#logs[@]} == 0)) && { enabled=false; logs=("/dev/null"); }
   lib_domain_fail2ban_filters_write
+  # rewrites the action and its 0600 header file; both are idempotent, and this is where a
+  # server that stored its token before the header file existed picks it up
+  if [[ -n "$(lib_cf_token)" ]]; then lib_cf_fail2ban_action_write; fi
   local cf_action=""; cf_action="$(lib_cf_fail2ban_action_lines)"
   # NOTE: every branch below must end on a successful command. A trailing
   # "[[ ... ]] && printf ..." makes the whole group exit 1 when the test is false,

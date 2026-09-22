@@ -31,7 +31,12 @@ lib_install_parse_args() {
       --with-python)     INS_WITH_PYTHON=1 ;;
       --with-netdata)    INS_WITH_NETDATA=1 ;;
       --cloudflare)      INS_CLOUDFLARE=1 ;;
-      --cf-api-token)    INS_CF_TOKEN="${1:-}"; shift ;;
+      --cf-api-token)    INS_CF_TOKEN="${1:-}"; shift
+                         # "-" reads the token from standard input. A token given on the
+                         # command line is readable by every user on this server for as long
+                         # as the command runs (/proc/<pid>/cmdline), so prefer the pipe:
+                         #   printf '%s' "$TOKEN" | lomp install --cf-api-token -
+                         if [[ "$INS_CF_TOKEN" == "-" ]]; then IFS= read -r INS_CF_TOKEN || true; fi ;;
       --mariadb)         INS_MARIADB="${1:-}"; shift ;;
       --redis-persist)   INS_REDIS_PERSIST=1 ;;
       --backup-schedule) INS_BACKUP_SCHEDULE="${1:-}"; shift ;;

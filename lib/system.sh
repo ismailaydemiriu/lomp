@@ -18,7 +18,7 @@ CALC_PHP_MEMORY_MB=0 CALC_PHP_UPLOAD_MB=0 CALC_PHP_POST_MB=0 CALC_PHP_MAX_EXEC=0
 CALC_OPCACHE_MB=0 CALC_OPCACHE_FILES=0 CALC_OPCACHE_STRINGS_MB=0
 CALC_PHP_CHILDREN_TOTAL=0 CALC_PHP_CHILDREN_SITE=0
 CALC_OLS_WORKERS=0 CALC_OLS_MAX_CONN=0 CALC_OLS_INMEM_MB=0 CALC_OLS_MMAP_MB=0
-CALC_SWAP_MB=0
+CALC_SWAP_MB=0 CALC_MAIL_MB=0
 
 _sys_clamp() { local v="$1" lo="$2" hi="$3"; (( v < lo )) && v="$lo"; (( v > hi )) && v="$hi"; printf '%d' "$v"; }
 
@@ -165,10 +165,20 @@ lib_system_profile() {
   CALC_PHP_MAX_EXEC=120
   CALC_PHP_MAX_INPUT_VARS=5000
 
-  # PHP worker budget: RAM minus OS, DB, Redis and OLS shares; ~48 MB per worker
+  # ---- Mail -------------------------------------------------------------------
+  # Postfix, Dovecot, Rspamd with its own Redis and Unbound together. Reserved only where the
+  # mail stack is actually installed, so a server without mail keeps the same profile it had.
+  CALC_MAIL_MB=0
+  if lib_mail_installed; then
+    if   (( r <= 2048 )); then CALC_MAIL_MB=384
+    elif (( r <= 4096 )); then CALC_MAIL_MB=512
+    else                       CALC_MAIL_MB=768; fi
+  fi
+
+  # PHP worker budget: RAM minus OS, DB, Redis, OLS and mail shares; ~48 MB per worker
   local os_reserve=$(( r / 10 )); (( os_reserve < 256 )) && os_reserve=256
   local ols_share=$(( c * 30 + 64 ))
-  local budget=$(( r - os_reserve - CALC_DB_BUFFER_MB - CALC_REDIS_MB - ols_share ))
+  local budget=$(( r - os_reserve - CALC_DB_BUFFER_MB - CALC_REDIS_MB - ols_share - CALC_MAIL_MB ))
   (( budget < 192 )) && budget=192
   CALC_PHP_CHILDREN_TOTAL="$(_sys_clamp $(( budget * 7 / 10 / 48 )) 4 $(( c * 12 )))"
   CALC_PHP_CHILDREN_SITE="$(_sys_clamp $(( CALC_PHP_CHILDREN_TOTAL / 2 )) 2 $(( c * 4 )))"

@@ -34,45 +34,81 @@ lib_ssl_install() {
 lib_ssl_hook_render() {
   cat <<EOF
 #!/usr/bin/env bash
-# Managed by lompstack - certbot deploy hook: copy renewed certificates into the
-# OpenLiteSpeed deploy directory, test the configuration and reload gracefully.
+# Managed by lompstack - certbot deploy hook: copy a renewed certificate into the deploy
+# directory and put it into effect. Two independent branches: a site's certificate goes to
+# OpenLiteSpeed, the mail lineages (_mailhost, _mail_<site>) go to Postfix and Dovecot.
 set -u
 STATE_DIR="${STATE_DIR}"
 DEPLOY_DIR="${SSL_DEPLOY_DIR}"
 LOG="${LOG_FILE}"
 LSWS_BIN="${LSWS_HOME}/bin/openlitespeed"
+OLS_SERVICE="${OLS_SERVICE}"
+MAIL_SNI="${MAIL_POSTFIX_DIR}/sni"
 BIN="${BIN_LINK}"
-log() { printf '%s [HOOK] %s\\n' "\$(date '+%Y-%m-%d %H:%M:%S')" "\$*" >>"\$LOG" 2>/dev/null; }
+log()  { printf '%s [HOOK] %s\\n' "\$(date '+%Y-%m-%d %H:%M:%S')" "\$*" >>"\$LOG" 2>/dev/null; }
+fail() {
+  log "ERROR: \$*"
+  if [[ -x "\$BIN" ]]; then "\$BIN" notify --send "SSL deploy failed on \$(hostname)" "\$* Check \$LOG." --quiet >/dev/null 2>&1; fi
+  return 0
+}
 
 [[ -n "\${RENEWED_LINEAGE:-}" ]] || exit 0
 name="\$(basename "\$RENEWED_LINEAGE")"
-changed=0
-if [[ -d "\$STATE_DIR/domains/\$name" ]]; then
-  mkdir -p "\$DEPLOY_DIR/\$name" && chmod 0700 "\$DEPLOY_DIR/\$name"
-  if cp -L "\$RENEWED_LINEAGE/fullchain.pem" "\$DEPLOY_DIR/\$name/fullchain.pem.new" \\
-     && cp -L "\$RENEWED_LINEAGE/privkey.pem" "\$DEPLOY_DIR/\$name/privkey.pem.new"; then
-    chmod 0600 "\$DEPLOY_DIR/\$name/"*.new
-    mv -f "\$DEPLOY_DIR/\$name/fullchain.pem.new" "\$DEPLOY_DIR/\$name/fullchain.pem"
-    mv -f "\$DEPLOY_DIR/\$name/privkey.pem.new" "\$DEPLOY_DIR/\$name/privkey.pem"
-    exp="\$(openssl x509 -enddate -noout -in "\$DEPLOY_DIR/\$name/fullchain.pem" 2>/dev/null | cut -d= -f2)"
-    printf 'CERT_NAME=%s\\nEXPIRES=%s\\nDEPLOYED=%s\\nDOMAINS=%s\\n' "\$name" "\$exp" "\$(date -u +%Y-%m-%dT%H:%M:%SZ)" "\${RENEWED_DOMAINS:-}" >"\$STATE_DIR/domains/\$name/ssl.info"
-    chmod 0600 "\$STATE_DIR/domains/\$name/ssl.info"
-    changed=1
-    log "deployed renewed certificate for \$name (\${RENEWED_DOMAINS:-})"
-  else
-    log "ERROR: could not copy renewed certificate for \$name"
-  fi
-else
-  log "renewed lineage \$name is not a managed site; nothing deployed"
-fi
-(( changed )) || exit 0
-if "\$LSWS_BIN" -t >/dev/null 2>&1 && systemctl reload lsws >/dev/null 2>&1; then
-  log "OpenLiteSpeed reloaded after renewal of \$name"
-  exit 0
-fi
-log "ERROR: OpenLiteSpeed config test/reload failed after renewal of \$name"
-[[ -x "\$BIN" ]] && "\$BIN" notify --send "SSL deploy failed on \$(hostname)" "Certificate \$name renewed but OpenLiteSpeed could not be reloaded. Check \$LOG." --quiet >/dev/null 2>&1
-exit 1
+rc=0
+
+deploy() {   # copy the renewed pair into the deploy directory, 0600 root
+  mkdir -p "\$DEPLOY_DIR/\$name" && chmod 0700 "\$DEPLOY_DIR/\$name" || return 1
+  cp -L "\$RENEWED_LINEAGE/fullchain.pem" "\$DEPLOY_DIR/\$name/fullchain.pem.new" \\
+    && cp -L "\$RENEWED_LINEAGE/privkey.pem" "\$DEPLOY_DIR/\$name/privkey.pem.new" || return 1
+  chmod 0600 "\$DEPLOY_DIR/\$name/"*.new
+  mv -f "\$DEPLOY_DIR/\$name/fullchain.pem.new" "\$DEPLOY_DIR/\$name/fullchain.pem"
+  mv -f "\$DEPLOY_DIR/\$name/privkey.pem.new" "\$DEPLOY_DIR/\$name/privkey.pem"
+}
+
+case "\$name" in
+  _mailhost|_mail_*)
+    if deploy; then
+      log "deployed renewed mail certificate \$name (\${RENEWED_DOMAINS:-})"
+      if command -v postfix >/dev/null 2>&1; then
+        if [[ -f "\$MAIL_SNI" ]]; then postmap -F "hash:\$MAIL_SNI" >/dev/null 2>&1 || fail "postmap failed for \$MAIL_SNI"; fi
+        if postfix check >/dev/null 2>&1 && postfix reload >/dev/null 2>&1; then
+          log "Postfix reloaded after renewal of \$name"
+        else
+          fail "Postfix could not be reloaded after renewal of \$name."; rc=1
+        fi
+      fi
+      if command -v doveconf >/dev/null 2>&1; then
+        if doveconf -n >/dev/null 2>&1 && systemctl reload dovecot >/dev/null 2>&1; then
+          log "Dovecot reloaded after renewal of \$name"
+        else
+          fail "Dovecot could not be reloaded after renewal of \$name."; rc=1
+        fi
+      fi
+    else
+      fail "Could not copy the renewed certificate for \$name."; rc=1
+    fi
+    ;;
+  *)
+    if [[ ! -d "\$STATE_DIR/domains/\$name" ]]; then
+      log "renewed lineage \$name is not managed by lompstack; nothing deployed"
+    elif deploy; then
+      exp="\$(openssl x509 -enddate -noout -in "\$DEPLOY_DIR/\$name/fullchain.pem" 2>/dev/null | cut -d= -f2)"
+      printf 'CERT_NAME=%s\\nEXPIRES=%s\\nDEPLOYED=%s\\nDOMAINS=%s\\n' "\$name" "\$exp" "\$(date -u +%Y-%m-%dT%H:%M:%SZ)" "\${RENEWED_DOMAINS:-}" >"\$STATE_DIR/domains/\$name/ssl.info"
+      chmod 0600 "\$STATE_DIR/domains/\$name/ssl.info"
+      log "deployed renewed certificate for \$name (\${RENEWED_DOMAINS:-})"
+      # a stop and start, not a reload: lsws' own graceful restart replaces the process behind
+      # systemd's back, and systemd then refuses the next restart
+      if "\$LSWS_BIN" -t >/dev/null 2>&1 && systemctl restart "\$OLS_SERVICE" >/dev/null 2>&1; then
+        log "OpenLiteSpeed restarted after renewal of \$name"
+      else
+        fail "Certificate \$name renewed but OpenLiteSpeed could not be restarted."; rc=1
+      fi
+    else
+      fail "Could not copy the renewed certificate for \$name."; rc=1
+    fi
+    ;;
+esac
+exit \$rc
 EOF
 }
 
@@ -169,10 +205,39 @@ lib_ssl_obtain() {
   lib_ssl_deploy "$domain"
 }
 
-# Copy live certificate into the OLS deploy directory + update state.
-lib_ssl_deploy() {
-  local domain="$1" src="${LE_LIVE}/${1}" dst="${SSL_DEPLOY_DIR}/${1}" exp=""
-  (( OPT_DRY_RUN )) && { lib_info "[dry-run] would deploy ${src} -> ${dst}"; return 0; }
+# A certificate for names that do not belong to a site: the mail host, a domain's mail and
+# webmail names. The lineage name is given by the caller and starts with an underscore, which
+# lib_domain_valid refuses, so it can never collide with a site's own lineage.
+lib_ssl_obtain_names() {   # cert-name name [name...]
+  local cert="$1"; shift
+  local email="${DEFAULT_EMAIL:-}" method="webroot" n=""
+  local -a args=(certonly --non-interactive --agree-tos --keep-until-expiring --cert-name "$cert" --key-type ecdsa)
+  (( $# > 0 )) || { SSL_LAST_ERROR="no names given for certificate ${cert}"; return 1; }
+  for n in "$@"; do args+=(-d "$n"); done
+  if [[ -n "$email" ]]; then args+=(--email "$email"); else args+=(--register-unsafely-without-email); fi
+  if lib_ssl_cf_token_available; then
+    if lib_pkg_installed python3-certbot-dns-cloudflare || lib_apt_install python3-certbot-dns-cloudflare; then method="dns"; fi
+  fi
+  if [[ "$method" == "dns" ]]; then
+    args+=(--dns-cloudflare --dns-cloudflare-credentials "$CF_INI" --dns-cloudflare-propagation-seconds 30)
+  else
+    args+=(--webroot -w "$ACME_ROOT")
+  fi
+  lib_info "Requesting certificate ${cert} for ${*} via ${method}"
+  if ! lib_run certbot "${args[@]}"; then
+    SSL_LAST_ERROR="certbot failed for ${cert} (see ${LOG_FILE} and /var/log/letsencrypt/letsencrypt.log)"
+    return 1
+  fi
+  (( OPT_DRY_RUN )) && return 0
+  lib_ssl_deploy_files "$cert" || return 1
+  lib_log_write INFO "certificate ${cert} deployed (${*})"
+  lib_ok "Certificate ${cert} deployed (${*})"
+}
+
+# Copy a live lineage into the deploy directory (0600 root). No site state is touched, so it
+# serves both a site's certificate and the mail lineages.
+lib_ssl_deploy_files() {   # cert-name
+  local name="$1" src="${LE_LIVE}/${1}" dst="${SSL_DEPLOY_DIR}/${1}"
   [[ -s "${src}/fullchain.pem" && -s "${src}/privkey.pem" ]] || { SSL_LAST_ERROR="no certificate in ${src}"; return 1; }
   lib_mkdir "$SSL_DEPLOY_DIR" 0700 root:root
   lib_mkdir "$dst" 0700 root:root
@@ -180,6 +245,13 @@ lib_ssl_deploy() {
   chmod 0600 "${dst}"/*.new
   mv -f "${dst}/fullchain.pem.new" "${dst}/fullchain.pem"
   mv -f "${dst}/privkey.pem.new" "${dst}/privkey.pem"
+}
+
+# Copy live certificate into the OLS deploy directory + update state.
+lib_ssl_deploy() {
+  local domain="$1" dst="${SSL_DEPLOY_DIR}/${1}" exp=""
+  (( OPT_DRY_RUN )) && { lib_info "[dry-run] would deploy ${LE_LIVE}/${domain} -> ${dst}"; return 0; }
+  lib_ssl_deploy_files "$domain" || return 1
   exp="$(openssl x509 -enddate -noout -in "${dst}/fullchain.pem" 2>/dev/null | cut -d= -f2)"
   if [[ -d "$(lib_domain_state_dir "$domain")" ]]; then
     printf 'CERT_NAME=%s\nEXPIRES=%s\nDEPLOYED=%s\nISSUER=%s\n' "$domain" "$exp" "$(lib_iso_now)" "$(lib_ssl_issuer "$domain")" \

@@ -7,10 +7,29 @@ CF_IPV4_URL="https://www.cloudflare.com/ips-v4"
 CF_IPV6_URL="https://www.cloudflare.com/ips-v6"
 CF_API="https://api.cloudflare.com/client/v4"
 CF_F2B_ACTION="/etc/fail2ban/action.d/server-setup-cloudflare.conf"
+CF_F2B_AUTH="/etc/fail2ban/lomp-cf-auth.header"
 
 lib_cf_enabled() { [[ "$(lib_manifest_get '.cloudflare.enabled')" == "true" ]]; }
 lib_cf_token()   { [[ -s "$CF_INI" ]] && awk -F'=' '/^dns_cloudflare_api_token/{gsub(/[[:space:]]/,"",$2); print $2; exit}' "$CF_INI" || true; }
 lib_cf_account_id() { lib_manifest_get '.cloudflare.account_id'; }
+
+# Every Cloudflare API call goes through here. The token reaches curl in a configuration read
+# from standard input, never as an argument: /proc/<pid>/cmdline is world-readable, so a token
+# on a command line is a token every site user of this server can read.
+# CF_API_TOKEN_OVERRIDE covers the calls made before the token has been stored.
+_cf_api() {   # METHOD PATH [body-file]   -> response body on stdout
+  local method="$1" path="$2" body="${3:-}" token=""
+  token="${CF_API_TOKEN_OVERRIDE:-$(lib_cf_token)}"
+  [[ -n "$token" ]] || return 1
+  {
+    printf 'silent\nshow-error\nmax-time = 20\n'
+    printf 'request = "%s"\n' "$method"
+    printf 'url = "%s%s"\n' "$CF_API" "$path"
+    printf 'header = "Authorization: Bearer %s"\n' "$token"
+    printf 'header = "Content-Type: application/json"\n'
+    if [[ -n "$body" ]]; then printf 'data-binary = "@%s"\n' "$body"; fi
+  } | curl -K - 2>/dev/null
+}
 
 # =============================================================================
 #  IP ranges
@@ -133,14 +152,16 @@ lib_cf_store_token() {   # token
   local token="$1" verify="" acct=""
   [[ "$token" =~ ^[A-Za-z0-9_-]{20,}$ ]] || lib_die "Cloudflare API token looks invalid" "unexpected characters/length" "create a token at https://dash.cloudflare.com/profile/api-tokens"
   if (( ! OPT_DRY_RUN )); then
-    verify="$(curl -fsS --max-time 15 -H "Authorization: Bearer ${token}" "${CF_API}/user/tokens/verify" 2>/dev/null | jq -r '.result.status // "invalid"' 2>/dev/null || printf 'error')"
+    verify="$(CF_API_TOKEN_OVERRIDE="$token" _cf_api GET /user/tokens/verify | jq -r '.result.status // "invalid"' 2>/dev/null || printf 'error')"
     if [[ "$verify" != "active" ]]; then
       lib_die "Cloudflare API token verification failed (${verify})" "token inactive/invalid or API unreachable" "check the token and its permissions (Zone:DNS:Edit, Account:Firewall Access Rules:Edit)"
     fi
     mkdir -p "$STATE_DIR" && chmod 0700 "$STATE_DIR"
-    printf '# Cloudflare API token (certbot dns-cloudflare / fail2ban) - stored %s\ndns_cloudflare_api_token = %s\n' "$(lib_iso_now)" "$token" >"$CF_INI"
+    # umask, not a chmod afterwards: the token must never exist in a world-readable file, not
+    # even for the instant between the two
+    (umask 077; printf '# Cloudflare API token (certbot dns-cloudflare / fail2ban) - stored %s\ndns_cloudflare_api_token = %s\n' "$(lib_iso_now)" "$token" >"$CF_INI")
     chmod 0600 "$CF_INI"
-    acct="$(curl -fsS --max-time 15 -H "Authorization: Bearer ${token}" "${CF_API}/accounts?per_page=1" 2>/dev/null | jq -r '.result[0].id // empty' 2>/dev/null || true)"
+    acct="$(CF_API_TOKEN_OVERRIDE="$token" _cf_api GET '/accounts?per_page=1' | jq -r '.result[0].id // empty' 2>/dev/null || true)"
     if [[ -n "$acct" ]]; then
       lib_manifest_set '.cloudflare.account_id' "$acct"
     else
@@ -155,42 +176,54 @@ lib_cf_store_token() {   # token
   lib_ok "Cloudflare API token stored (${CF_INI}, 0600)"
 }
 
+# The Authorization header for the fail2ban action, in a file only root can read. A ban would
+# otherwise run "curl -H 'Authorization: Bearer <token>'", and that command line is readable by
+# every user on the server for as long as the ban takes.
+lib_cf_f2b_auth_write() {
+  local token=""
+  token="$(lib_cf_token)"
+  [[ -n "$token" ]] || return 0
+  lib_mkdir "$(dirname "$CF_F2B_AUTH")" 0755 root:root
+  printf 'Authorization: Bearer %s\n' "$token" | lib_write_file "$CF_F2B_AUTH" 0600 root:root secret
+  return 0
+}
+
 # fail2ban action: account-level IP Access Rules through the API token.
 lib_cf_fail2ban_action_write() {
   lib_pkg_installed fail2ban || return 0
-  cat <<'EOF' | lib_write_file "$CF_F2B_ACTION" 0644 root:root
+  lib_cf_f2b_auth_write
+  {
+    cat <<'EOF'
 # Managed by lompstack - ban/unban at the Cloudflare edge (account-level IP Access Rules)
 # Requires an API token with "Account - Firewall Access Rules: Edit".
+# The token is read from the header file below, never passed as an argument: a command line is
+# world-readable through /proc while it runs.
 [Definition]
 actionstart =
 actionstop =
 actioncheck =
 actionban = curl -s -o /dev/null -X POST "<_cf_api_url>" \
-              -H "Authorization: Bearer <cftoken>" -H "Content-Type: application/json" \
+              -H @<cfauth> -H "Content-Type: application/json" \
               --data '{"mode":"block","configuration":{"target":"<cftarget>","value":"<ip>"},"notes":"<notes>"}'
 actionunban = id=$(curl -s -X GET "<_cf_api_url>?configuration.target=<cftarget>&configuration.value=<ip>&notes=<notes>&per_page=1" \
-                -H "Authorization: Bearer <cftoken>" -H "Content-Type: application/json" | jq -r '.result[0].id // empty'); \
-              if [ -n "$id" ]; then curl -s -o /dev/null -X DELETE "<_cf_api_url>/$id" -H "Authorization: Bearer <cftoken>"; fi
+                -H @<cfauth> -H "Content-Type: application/json" | jq -r '.result[0].id // empty'); \
+              if [ -n "$id" ]; then curl -s -o /dev/null -X DELETE "<_cf_api_url>/$id" -H @<cfauth>; fi
 
 [Init]
-cftoken =
-cfaccount =
-cftarget = ip
-notes = Fail2Ban-server-setup
-_cf_api_url = https://api.cloudflare.com/client/v4/accounts/<cfaccount>/firewall/access_rules/rules
-
-[Init?family=inet6]
-cftarget = ip6
 EOF
+    printf 'cfauth = %s\ncfaccount =\ncftarget = ip\nnotes = Fail2Ban-server-setup\n' "$CF_F2B_AUTH"
+    printf '_cf_api_url = %s/accounts/<cfaccount>/firewall/access_rules/rules\n\n[Init?family=inet6]\ncftarget = ip6\n' "$CF_API"
+  } | lib_write_file "$CF_F2B_ACTION" 0644 root:root
   return 0
 }
 
-# Extra "action" lines for web jails when bans must also reach Cloudflare.
+# Extra "action" lines for web jails when bans must also reach Cloudflare. Only the account id
+# goes into the jail file; the token stays in the 0600 header file.
 lib_cf_fail2ban_action_lines() {
   local token="" acct=""
   token="$(lib_cf_token)"; acct="$(lib_cf_account_id)"
   [[ -n "$token" && -n "$acct" && -f "$CF_F2B_ACTION" ]] || return 0
-  printf 'action = %%(action_)s\n         server-setup-cloudflare[cftoken="%s", cfaccount="%s"]\n' "$token" "$acct"
+  printf 'action = %%(action_)s\n         server-setup-cloudflare[cfaccount="%s"]\n' "$acct"
 }
 
 # =============================================================================

@@ -31,7 +31,8 @@ COMMANDS
       --with-python             python3-venv + pip (venv-per-app policy)
       --with-netdata            Netdata bound to localhost (+ admin IP)
       --cloudflare              Trust Cloudflare proxies (real client IP)
-      --cf-api-token TOKEN      Store Cloudflare API token (DNS-01 / fail2ban)
+      --cf-api-token TOKEN      Store Cloudflare API token (DNS-01 / fail2ban); "-" reads it
+                                from stdin so it stays out of the process list
       --mariadb 11.4            Install MariaDB from the official repository
       --redis-persist           Enable Redis persistence (default: cache only)
       --backup-schedule "daily 03:00"
