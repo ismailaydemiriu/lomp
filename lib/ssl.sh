@@ -238,6 +238,7 @@ lib_ssl_obtain_names() {   # cert-name name [name...]
 # serves both a site's certificate and the mail lineages.
 lib_ssl_deploy_files() {   # cert-name
   local name="$1" src="${LE_LIVE}/${1}" dst="${SSL_DEPLOY_DIR}/${1}"
+  (( OPT_DRY_RUN )) && { lib_info "[dry-run] would deploy ${src} -> ${dst}"; return 0; }
   [[ -s "${src}/fullchain.pem" && -s "${src}/privkey.pem" ]] || { SSL_LAST_ERROR="no certificate in ${src}"; return 1; }
   lib_mkdir "$SSL_DEPLOY_DIR" 0700 root:root
   lib_mkdir "$dst" 0700 root:root

@@ -1019,7 +1019,20 @@ section "shell pitfalls (static)"
 # server, so every scalar local must be initialised at declaration.
 bare_locals="$(for f in "$ROOT/setup.sh" "$ROOT"/lib/*.sh "$ROOT"/tests/*.sh; do
   awk -v F="$f" '
-    BEGIN { q = sprintf("%c", 39) }                     # a literal single quote
+    BEGIN { q = sprintf("%c", 39); hd = "" }            # a literal single quote
+    # A here-document body is data, not code: Postfix master.cf has a service called "local",
+    # and a renderer that prints it must not read as a bare "local" declaration.
+    {
+      if (hd != "") { if ($0 ~ "^[[:space:]]*" hd "[[:space:]]*$") hd = ""; next }
+      probe = $0
+      gsub(/<<</, "@@@", probe)                         # a here-string is not a here-document
+      if (match(probe, /<<-?[[:space:]]*[A-Za-z_"]+/) || match(probe, "<<-?[[:space:]]*" q "[A-Za-z_]+" q)) {
+        d = substr(probe, RSTART, RLENGTH)
+        sub(/^<<-?[[:space:]]*/, "", d)
+        gsub("[\"" q "]", "", d)
+        if (d != "") { hd = d; next }
+      }
+    }
     /^[[:space:]]*local[[:space:]]+-/ { next }          # typed declarations are left alone
     /^[[:space:]]*local[[:space:]]/ {
       line=$0
@@ -2014,6 +2027,190 @@ if command -v flock >/dev/null 2>&1; then
   assert_eq "and gives up after its limit" 1 "$(SERVER_SETUP_LOCKED=0 LIB_LOCK_WAIT=1 run_isolated lib_lock)"
   wait "$_lk_pid" 2>/dev/null || true
 fi
+
+# =============================================================================
+section "the mail server's own configuration"
+# These assertions are the mail server's security policy in the only form that matters: the
+# lines Postfix and Dovecot actually read. A renderer is pure, so a test can read every one of
+# them without a package installed.
+_pf="$(lib_mail_render_postfix_main mail.example.com hash ipv4)"
+assert_has "the server knows the name it sends as" "myhostname = mail.example.com" "$_pf"
+# mail the system sends to root must land here, not be posted back to this server as a relay
+assert_has "this machine is a destination for its own mail" 'mydestination = $myhostname, localhost.$mydomain, localhost' "$_pf"
+assert_has "relaying needs a login, even from this machine" "smtpd_relay_restrictions = permit_sasl_authenticated, reject_unauth_destination" "$_pf"
+# a site broken into reaches 127.0.0.1:25 as easily as anything else
+assert_lacks "being on the server is not a reason to relay" "smtpd_relay_restrictions = permit_mynetworks" "$_pf"
+assert_has "a recipient nobody here has is refused" "reject_unlisted_recipient" "$_pf"
+assert_has "no authentication before TLS" "smtpd_tls_auth_only = yes" "$_pf"
+assert_has "and none at all on port 25" "smtpd_sasl_auth_enable = no" "$_pf"
+assert_has "a sender must be one the login owns" "smtpd_sender_login_maps = hash:/etc/postfix/lomp/senders" "$_pf"
+# the rule lives on the submission ports: Postfix skips it where SASL is off, and says so
+# in the log on every single connection
+assert_lacks "no sender rule where it would only be noise" "smtpd_sender_restrictions" "$_pf"
+# being on the machine must not skip the sender rule or the quota check either
+assert_lacks "loopback gets no free pass on recipients" $'smtpd_recipient_restrictions =\n    permit_mynetworks' "$_pf"
+assert_has "the filter is reached through a socket, not a port" "smtpd_milters = unix:/run/rspamd/milter.sock" "$_pf"
+assert_has "only root may hand mail to sendmail" "authorized_submit_users = root" "$_pf"
+assert_has "delivery belongs to Dovecot" "virtual_transport = lmtp:unix:private/dovecot-lmtp" "$_pf"
+assert_has "a full mailbox is refused at the door" "check_policy_service unix:private/quota-status" "$_pf"
+assert_has "the mail host's own certificate is served" "smtpd_tls_chain_files = ${SSL_DEPLOY_DIR}/_mailhost/privkey.pem" "$_pf"
+assert_lacks "nothing is relayed away while no relay is set" "relayhost" "$_pf"
+assert_has "the table type follows what Postfix has" "virtual_mailbox_maps = lmdb:" "$(lib_mail_render_postfix_main mail.example.com lmdb ipv4)"
+_pfr="$(lib_mail_render_postfix_main mail.example.com hash ipv4 smtp.example.net 2587)"
+assert_has "a relay is used where one is set" "relayhost = [smtp.example.net]:2587" "$_pfr"
+assert_has "with credentials from a map, not from here" "smtp_sasl_password_maps = hash:/etc/postfix/lomp/sasl_passwd" "$_pfr"
+assert_has "and never in the clear" "smtp_tls_security_level = encrypt" "$_pfr"
+
+_mc="$(lib_mail_render_postfix_master)"
+assert_eq "every submission port checks sender against login" 2 "$(grep -c 'reject_authenticated_sender_login_mismatch' <<<"$_mc")"
+assert_eq "and every one of them demands a password" 2 "$(grep -c 'smtpd_sasl_auth_enable=yes' <<<"$_mc")"
+assert_eq "an unsigned message never leaves the building" 2 "$(grep -c 'milter_default_action=tempfail' <<<"$_mc")"
+# what port 25 does is decided in its own block, which ends where the next service begins
+_smtp25="$(awk '/^smtp +inet/{f=1;next} /^[a-z0-9.:]+ +(inet|unix)/{f=0} f' <<<"$_mc")"
+assert_lacks "port 25 offers no authentication at all" "smtpd_sasl_auth_enable=yes" "$_smtp25"
+assert_has "and takes mail in even when the filter is down" "milter_default_action=accept" "$_smtp25"
+# the webmail's own submission port arrives with the webmail, together with the rule about
+# who may open it; until then there is no port on this machine that takes a password in clear
+assert_lacks "no cleartext submission port yet" "10587" "$_mc"
+
+_dc="$(lib_mail_render_dovecot_local mail.example.com)"
+assert_eq "the Dovecot configuration closes every brace it opens" 0 \
+  "$(awk '{o+=gsub(/\{/,"{"); c+=gsub(/\}/,"}")} END{print o-c}' <<<"$_dc")"
+assert_has "no mailbox is opened without TLS" "ssl = required" "$_dc"
+# Dovecot treats a loopback connection as already secure, so a plain 143 would be a password
+# oracle for every user of the machine; it arrives with the webmail that needs it
+assert_has "plain IMAP is switched off" $'inet_listener imap {\n    port = 0' "$_dc"
+assert_has "IMAPS is the way in" $'inet_listener imaps {\n    port = 993' "$_dc"
+assert_lacks "and ManageSieve has no listener yet" "port = 4190" "$_dc"
+assert_has "Postfix authenticates through Dovecot" "/var/spool/postfix/private/auth" "$_dc"
+assert_has "and delivers through it" "/var/spool/postfix/private/dovecot-lmtp" "$_dc"
+assert_has "every mailbox is one directory" "mail_location = maildir:/var/vmail/%Ld/%Ln/Maildir" "$_dc"
+# Dovecot expands % in a plugin value, so a literal percent has to be written twice
+assert_has "the quota grace survives that expansion" "quota_grace = 10%%" "$_dc"
+assert_has "and the count backend gets its index" "mailbox_list_index = yes" "$_dc"
+assert_has "spam lands in Junk, never in the bin" "sieve_before = /etc/dovecot/sieve/spam-to-junk.sieve" "$_dc"
+assert_lacks "and a Linux account is not a mailbox" "auth-system" "$_dc"
+# that one only says local.conf does not ask for it; this one runs the code that takes the
+# packaged include away, which is what actually keeps a site user out of IMAP
+MAIL_DOVECOT_10AUTH="$TMP/10-auth.conf"
+printf 'auth_mechanisms = plain\n!include auth-system.conf.ext\n#!include auth-passwdfile.conf.ext\n' >"$MAIL_DOVECOT_10AUTH"
+MAIL_CHANGED=0
+lib_mail_pam_disable >/dev/null 2>&1
+assert_has   "the packaged system-user include is commented out" '#!include auth-system.conf.ext' "$(cat "$MAIL_DOVECOT_10AUTH")"
+assert_eq    "no line of it is left active" 0 "$(grep -c '^[[:space:]]*!include auth-system' "$MAIL_DOVECOT_10AUTH" || true)"
+assert_eq    "and that counts as a change, so Dovecot is restarted" 1 "$MAIL_CHANGED"
+MAIL_CHANGED=0
+lib_mail_pam_disable >/dev/null 2>&1
+assert_eq    "running it again changes nothing" 0 "$MAIL_CHANGED"
+_da="$(lib_mail_render_dovecot_auth)"
+assert_has "the user store is a file of hashes" "scheme=BLF-CRYPT" "$_da"
+assert_has "owned by one user that owns no site" "uid=vmail gid=vmail" "$_da"
+assert_lacks "and there is no PAM anywhere near it" "pam" "$_da"
+
+_dk="$(lib_mail_render_rspamd_dkim dkim_signing)"
+assert_has "only an authenticated sender is signed for" "sign_authenticated = true" "$_dk"
+assert_has "being local is not a reason to sign" "sign_local = false" "$_dk"
+assert_has "and the From: domain must own the key" "allow_hdrfrom_mismatch = false" "$_dk"
+_rc="$(lib_mail_render_rspamd_worker_controller 'Sup3rS3cretControllerPw')"
+assert_has "the Rspamd interface has no port" 'bind_socket = "/run/rspamd/controller.sock' "$_rc"
+assert_has "it still asks for a password over that socket" 'enable_password = "Sup3rS3cretControllerPw"' "$_rc"
+assert_lacks "and trusts no address without one" "secure_ip = [\"127.0.0.1\"]" "$_rc"
+assert_lacks "and without one, sets none" 'enable_password = "' "$(lib_mail_render_rspamd_worker_controller '')"
+_rp="$(lib_mail_render_rspamd_worker_proxy)"
+# whoever speaks the milter protocol says who authenticated, and that is what DKIM signs on
+assert_has "the milter is a socket only Postfix can open" 'bind_socket = "/run/rspamd/milter.sock mode=0660 owner=_rspamd group=lompmilter"' "$_rp"
+assert_lacks "not a port any local user can reach" "127.0.0.1:11332" "$_rp"
+assert_has "the unused worker is switched off, not merely set to zero" "enabled = false" "$(lib_mail_render_rspamd_worker_normal)"
+_rl="$(lib_mail_render_rspamd_ratelimit)"
+# the bucket is keyed on the account, which is what a compromised site would be sending with
+assert_has "an account may send 100 messages an hour" 'rate = "100 / 1h"' "$_rl"
+_rr="$(lib_mail_render_rspamd_redis)"
+assert_has "Rspamd talks to its own Redis over a socket" "/run/lomp-redis-rspamd/redis.sock" "$_rr"
+_ru="$(lib_mail_render_redis_unit)"
+assert_has "which runs as the filter's own user" "User=_rspamd" "$_ru"
+# what the filter learned about this server's mail is nobody else's business
+assert_has "its dataset on disk is closed to everyone else" "StateDirectoryMode=0700" "$_ru"
+assert_has "including the files it writes there" "UMask=0077" "$_ru"
+assert_has "and it starts before the filter that needs it" "Before=rspamd.service" "$_ru"
+_rk="$(lib_mail_render_redis_conf)"
+assert_has "and answers on no TCP port" "port 0" "$_rk"
+assert_has "with a socket nobody else can open" "unixsocketperm 700" "$_rk"
+
+_j="$(lib_mail_render_jails)"
+assert_has "fail2ban reads Postfix where Ubuntu logs it" "journalmatch = _SYSTEMD_UNIT=postfix@-.service" "$_j"
+assert_has "and Dovecot the same way" "journalmatch = _SYSTEMD_UNIT=dovecot.service" "$_j"
+# the addresses never to ban are in the [DEFAULT] section of the base jail file, which
+# fail2ban applies here too; repeating them would mean two places to keep in step
+assert_lacks "the mail jails repeat no ignore list" "ignoreip" "$_j"
+
+# the renderers are used as "renderer | lib_write_file": one that ends on a false test exits 1
+for fn in lib_mail_render_postfix_master lib_mail_render_dovecot_auth lib_mail_render_sieve_spam \
+          lib_mail_render_rspamd_worker_proxy lib_mail_render_rspamd_worker_normal \
+          lib_mail_render_rspamd_worker_controller lib_mail_render_rspamd_options \
+          lib_mail_render_rspamd_dropin \
+          lib_mail_render_rspamd_redis lib_mail_render_rspamd_actions lib_mail_render_rspamd_ratelimit \
+          lib_mail_render_redis_conf lib_mail_render_redis_unit lib_mail_render_unbound; do
+  assert_eq "${fn} exits 0" 0 "$(run_isolated "$fn")"
+done
+assert_eq "lib_mail_render_postfix_main exits 0" 0 "$(run_isolated lib_mail_render_postfix_main mail.example.com hash ipv4)"
+assert_eq "lib_mail_render_dovecot_local exits 0" 0 "$(run_isolated lib_mail_render_dovecot_local mail.example.com)"
+assert_eq "lib_mail_render_jails exits 0" 0 "$(run_isolated lib_mail_render_jails)"
+assert_eq "lib_mail_render_rspamd_classifier exits 0" 0 "$(run_isolated lib_mail_render_rspamd_classifier 0)"
+
+assert_true  "a mail host is a name under a domain" lib_mail_hostname_valid "mail.example.com"
+assert_false "a bare label is not one"              lib_mail_hostname_valid "localhost"
+assert_false "and neither is an empty string"       lib_mail_hostname_valid ""
+# a fresh VPS image calls itself something like srv1.localdomain, which looks like a name and
+# can never receive a certificate or pass a recipient's HELO check
+assert_true  "a real name can send mail"     lib_mail_name_usable "mail.example.com"
+assert_false "the image's own name cannot"   lib_mail_name_usable "srv1.localdomain"
+assert_false "nor a name reserved for tests" lib_mail_name_usable "mail.lomp.test"
+assert_false "nor one on the local network"  lib_mail_name_usable "mail.home.lan"
+# the WebAdmin may not take a port the mail server answers on
+assert_eq "the WebAdmin cannot sit on the submission port" 1 "$(run_isolated lib_install_parse_args --admin-port 587 --skip-upgrade)"
+assert_eq "nor on IMAPS" 1 "$(run_isolated lib_install_parse_args --admin-port 993 --skip-upgrade)"
+
+# A relay password is given on stdin and ends up in exactly one file, which only root reads.
+MAIL_POSTFIX_DIR="$TMP/pf"; MAIL_SASL_MAP="$TMP/pf/sasl_passwd"
+MAIL_STATE_DIR="$TMP/mailstate"; MAIL_RELAY_INFO="$TMP/mailstate/relay.info"
+mkdir -p "$MAIL_POSTFIX_DIR" "$MAIL_STATE_DIR"
+( eval 'lib_mail_postmap() { return 0; }
+        lib_mail_apply() { return 0; }
+        lib_mail_host() { printf "mail.example.com"; }
+        lib_manifest_set_json() { return 0; }'
+  printf '%s\n' 'R3layS3cretPw' | lib_mail_relay_set smtp.example.net 2587 me@example.net ) >/dev/null 2>&1
+assert_has "the credentials reach Postfix through its map" "[smtp.example.net]:2587 me@example.net:R3layS3cretPw" "$(cat "$MAIL_SASL_MAP")"
+if (( CAN_CHMOD )); then assert_eq "which only root can read" "600" "$(stat -c %a "$MAIL_SASL_MAP")"; fi
+assert_lacks "the state file holds no password" "R3layS3cretPw" "$(cat "$MAIL_RELAY_INFO")"
+assert_has "only what is not secret" "USER=me@example.net" "$(cat "$MAIL_RELAY_INFO")"
+assert_eq "a relay without a password is refused" 1 "$(printf '' | run_isolated lib_mail_relay_set smtp.example.net 587 me@example.net)"
+# a user name with a space or a colon would split the entry and SASL would fail with nothing
+# in the log to say why
+assert_eq "a relay user with a space is refused" 1 "$(printf 'x\n' | run_isolated lib_mail_relay_set smtp.example.net 587 'me@example.net extra')"
+
+# A rollback has to put the whole stack back, not the two services the apply happens to reach
+# last: the apply stops at the FIRST failure, so the ones already restarted are the ones left
+# running on files that have just been taken away from them.
+_rb="$(declare -f _mail_apply_rollback)"
+assert_has "the rollback restarts every mail service" "lib_mail_services" "$_rb"
+assert_has "after telling systemd the unit files changed" "daemon-reload" "$_rb"
+assert_has "and says which ones did not come back" "did not come back" "$_rb"
+_ap="$(declare -f lib_mail_apply)"
+assert_has "an apply that ends the run outright still restores" 'lib_rollback_push "lib_mail_restore_snapshot"' "$_ap"
+assert_has "and the step is dropped once it succeeds" 'lib_rollback_drop "lib_mail_restore_snapshot"' "$_ap"
+# the jail file is one of the managed files, so every path that writes it puts it into effect
+assert_has "a changed jail file reaches fail2ban" "fail2ban-client reload" "$_ap"
+assert_eq "and so is one with an invalid host" 1 "$(printf 'x\n' | run_isolated lib_mail_relay_set 'not a host' 587 me@example.net)"
+
+# The stack can be dead for weeks without a word unless doctor knows about it.
+_dm="$(declare -f _doc_check_mail)"
+assert_true  "doctor has a mail section"            test -n "$_dm"
+assert_has   "which runs only where mail exists"    "lib_mail_installed" "$_dm"
+assert_has   "and checks every mail service"        "lib_mail_services" "$_dm"
+assert_has   "that the Linux logins stay switched off" "auth-system" "$_dm"
+assert_has   "the filter socket nobody else may open"  "MAIL_MILTER_GROUP" "$_dm"
+assert_has   "and the certificate running out"      "lib_ssl_days_left" "$_dm"
+assert_has   "doctor runs it"                       "_doc_check_mail" "$(declare -f lib_doctor_run)"
 
 # =============================================================================
 section "a secret never reaches a command line"

@@ -85,10 +85,17 @@ jobs:
         run: |
           sudo bash setup.sh install --dry-run --non-interactive --no-color \
             --admin-ip 203.0.113.5 --email ci@example.com \
-            --backup-schedule "daily 03:00" --cloudflare 2>&1 | tee dryrun.out
+            --backup-schedule "daily 03:00" --cloudflare \
+            --with-mail --mail-hostname mail.example.com 2>&1 | tee dryrun.out
           test ! -e /root/.server-setup || { echo "dry-run created state dir"; exit 1; }
           test ! -e /usr/local/lsws     || { echo "dry-run installed OLS"; exit 1; }
           test ! -e /etc/cron.d/server-setup || { echo "dry-run wrote cron"; exit 1; }
+          # the mail stack is the newest thing a dry run can touch: it must plan it and
+          # still leave the machine alone
+          grep -q "Installing the mail stack for mail.example.com" dryrun.out \
+            || { echo "dry-run did not plan the mail stack"; exit 1; }
+          test ! -e /etc/postfix/lomp   || { echo "dry-run wrote Postfix maps"; exit 1; }
+          test ! -e /etc/apt/sources.list.d/lomp-rspamd.list || { echo "dry-run added the Rspamd repository"; exit 1; }
           # "the last step ran" without hardcoding how many there are: find a [N/N] marker.
           # The old "grep 20/20" silently kept passing when a step was added and the
           # counter went to 21, because [20/21] still contained no 20/20 - it only failed

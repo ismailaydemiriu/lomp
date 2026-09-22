@@ -30,6 +30,9 @@ COMMANDS
       --with-node [--node 24]   Node.js (NodeSource) + PM2; an installed major is kept
       --with-python             python3-venv + pip (venv-per-app policy)
       --with-netdata            Netdata bound to localhost (+ admin IP)
+      --with-mail [--mail-hostname mail.example.com]
+                                Mail server (Postfix, Dovecot, Rspamd) for the sites of
+                                this server; needs its own name, an A record and a PTR
       --cloudflare              Trust Cloudflare proxies (real client IP)
       --cf-api-token TOKEN      Store Cloudflare API token (DNS-01 / fail2ban); "-" reads it
                                 from stdin so it stays out of the process list
@@ -74,6 +77,11 @@ COMMANDS
   app env <domain> list [--show] | set NAME | unset NAME... | import-db
                                 Values come from stdin or a hidden prompt, never from
                                 the command line; import-db adds DB_* and DATABASE_URL
+  mail status|test|queue        The mail stack: what runs, reverse DNS, outgoing port 25
+  mail cert|regenerate          Ask for the mail host's certificate / rewrite every file
+  mail relay set --host H [--port 587] --user U | relay off
+                                Send outgoing mail through another server where port 25
+                                is blocked; the password is read from stdin
   remove <domain> [opts]        Remove a site  (--keep-db --keep-files --keep-ssl; alias: delete)
   list                          Table of sites (--json)
   status                        Services, versions, resources, sites (--json)
@@ -576,14 +584,16 @@ _menu_remove_site() {
   _menu_run remove "${args[@]}"
 }
 
-# Optional runtimes are never installed unless asked for, on the command line with
-# --with-node / --with-python / --with-netdata, or from here.
+# Optional components are never installed unless asked for, on the command line with
+# --with-node / --with-python / --with-netdata / --with-mail, or from here.
 _menu_runtimes() {
-  local choice="" ver="" node_v="" py_v="" nd=""
+  local choice="" ver="" node_v="" py_v="" nd="" mail_v="" mail_host=""
   while true; do
     node_v="$(lib_manifest_get '.components.node')"
     py_v="$(lib_manifest_get '.components.python')"
     nd="$(lib_manifest_get '.components.netdata')"
+    mail_v="$(lib_manifest_get '.components.mail.postfix')"
+    mail_host="$(lib_mail_host)"
     printf '\n %sOPTIONAL COMPONENTS%s   (nothing here is installed by default)\n' "$C_BLD" "$C_RST"
     _menu_rule
     printf '  %s1%s) Node.js + PM2        %s\n' "$C_CYN" "$C_RST" \
@@ -592,6 +602,8 @@ _menu_runtimes() {
       "$( [[ -n "$py_v" ]] && printf '%sinstalled %s%s' "$C_GRN" "$py_v" "$C_RST" || printf '%snot installed%s' "$C_DIM" "$C_RST")"
     printf '  %s3%s) Netdata monitoring   %s\n' "$C_CYN" "$C_RST" \
       "$( [[ "$nd" == "true" ]] && printf '%sinstalled%s' "$C_GRN" "$C_RST" || printf '%snot installed%s' "$C_DIM" "$C_RST")"
+    printf '  %s4%s) Mail server          %s\n' "$C_CYN" "$C_RST" \
+      "$( [[ -n "$mail_v" ]] && printf '%sinstalled, sends as %s%s' "$C_GRN" "$mail_host" "$C_RST" || printf '%snot installed%s' "$C_DIM" "$C_RST")"
     printf '  %s0%s) Back\n' "$C_CYN" "$C_RST"
     printf '\n%sChoice: %s' "$C_BLD" "$C_RST"
     read -r choice </dev/tty || return 0
@@ -600,6 +612,15 @@ _menu_runtimes() {
          _menu_run install --with-node --node "$ver" --skip-upgrade ;;
       2) _menu_run install --with-python --skip-upgrade ;;
       3) _menu_run install --with-netdata --skip-upgrade ;;
+      4) if [[ -n "$mail_v" ]]; then
+           _menu_run mail status
+         else
+           local mh=""
+           printf '\n  The mail server needs a name of its own (mail.example.com), an A record\n'
+           printf '  pointing here, and a PTR record your provider sets to the same name.\n'
+           _menu_ask mh "Name this server sends mail as" "$(hostname -f 2>/dev/null || true)"
+           [[ -n "$mh" ]] && _menu_run install --with-mail --mail-hostname "$mh" --skip-upgrade
+         fi ;;
       0|q|Q|"") return 0 ;;
       *) printf '%sPick a number from the list.%s\n' "$C_YEL" "$C_RST" ;;
     esac

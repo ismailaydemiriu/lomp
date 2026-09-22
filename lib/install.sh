@@ -4,6 +4,7 @@
 #                  plus "update" and "optimize".
 
 INS_WITH_NODE=0 INS_NODE_MAJOR="" INS_WITH_PYTHON=0 INS_WITH_NETDATA=0 INS_CLOUDFLARE=0 INS_CF_TOKEN=""
+INS_WITH_MAIL=0 INS_MAIL_HOSTNAME=""
 # Node.js major for a server that has never had Node (Active LTS). A server that already runs
 # Node keeps its own major unless --node asks for another: see lib_install_node_major_resolve.
 INS_NODE_DEFAULT_MAJOR=24
@@ -29,6 +30,8 @@ lib_install_parse_args() {
       --with-node)       INS_WITH_NODE=1 ;;
       --node)            INS_NODE_MAJOR="${1:-}"; INS_WITH_NODE=1; shift ;;
       --with-python)     INS_WITH_PYTHON=1 ;;
+      --with-mail)       INS_WITH_MAIL=1 ;;
+      --mail-hostname)   INS_MAIL_HOSTNAME="${1:-}"; INS_WITH_MAIL=1; shift ;;
       --with-netdata)    INS_WITH_NETDATA=1 ;;
       --cloudflare)      INS_CLOUDFLARE=1 ;;
       --cf-api-token)    INS_CF_TOKEN="${1:-}"; shift
@@ -63,10 +66,10 @@ lib_install_parse_args() {
   # because lib_system_analyze only runs after the arguments are parsed. Unquoted on
   # purpose (several ports possible); an "if" body, not a trailing "&&", so the loop
   # cannot end on a false test and return 1 under errexit.
-  for _p in 80 443 3306 6379 $(lib_ssh_ports); do
+  for _p in 80 443 3306 6379 25 465 587 993 143 4190 10587 11332 11333 11334 5335 $(lib_ssh_ports); do
     if [[ "$ADMIN_PORT" == "$_p" ]]; then
       lib_die "--admin-port ${ADMIN_PORT} is already used by another service" \
-        "the WebAdmin panel cannot share a port with the web server, database, cache or SSH" \
+        "the WebAdmin panel cannot share a port with the web server, database, cache, mail or SSH" \
         "pick a free port, e.g. --admin-port 7574"
     fi
   done
@@ -204,11 +207,22 @@ lib_install_main() {
   lib_step "Cloudflare real-IP mode"
   if (( INS_CLOUDFLARE )) || lib_cf_enabled; then lib_cf_enable; else lib_info "Cloudflare mode disabled (enable with --cloudflare)"; fi
 
-  lib_step "Optional runtimes (Node.js / Python / Netdata)"
+  lib_step "Optional runtimes (Node.js / Python / Netdata / Mail)"
   (( INS_WITH_NODE ))    && lib_install_node
   (( INS_WITH_PYTHON ))  && lib_install_python
   (( INS_WITH_NETDATA )) && lib_install_netdata
-  (( INS_WITH_NODE || INS_WITH_PYTHON || INS_WITH_NETDATA )) || lib_info "none requested (--with-node / --with-python / --with-netdata)"
+  # the mail stack is last here: it wants certbot, the firewall and fail2ban already in place
+  if (( INS_WITH_MAIL )); then
+    lib_mail_install "$INS_MAIL_HOSTNAME"
+  elif lib_mail_installed; then
+    # a re-run verifies mail like everything else, but a mail problem must not stop an install
+    # the operator started for another reason. errexit is re-armed inside: "if !" would
+    # otherwise let a failed step continue silently.
+    if ! ( set -Eeuo pipefail; lib_mail_install "" ); then
+      lib_warn "The mail stack could not be verified on this run (lomp mail status)"
+    fi
+  fi
+  (( INS_WITH_NODE || INS_WITH_PYTHON || INS_WITH_NETDATA || INS_WITH_MAIL )) || lib_info "none requested (--with-node / --with-python / --with-netdata / --with-mail)"
 
   lib_step "Log rotation"
   lib_install_logrotate
@@ -628,6 +642,9 @@ lib_install_summary() {
   lib_print_kv "Add a site"     "setup.sh add example.com [--www] [--wordpress] [--proxy 127.0.0.1:3000]"
   lib_print_kv "Health"         "setup.sh status | setup.sh doctor"
   lib_print_kv "Notifications"  "$(lib_notify_channels)  (setup.sh notify --email you@example.com ...)"
+  if lib_mail_installed; then
+    lib_print_kv "Mail"         "sends as $(lib_mail_host)  (setup.sh mail status | mail test)"
+  fi
   lib_print_kv "Log"            "$LOG_FILE"
   lib_system_reboot_required && lib_warn "A reboot is required to finish kernel/package updates (reboot at your convenience)."
   (( OPT_DRY_RUN )) && lib_warn "DRY RUN finished - no changes were made."

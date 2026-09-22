@@ -41,7 +41,7 @@ after it is applied, and rolled back if the verification fails.
 | TLS | Let's Encrypt via certbot, shared ACME webroot, TLS 1.2/1.3 only, HSTS, auto-renew with an OpenLiteSpeed deploy hook |
 | Security | UFW, Fail2ban (sshd + recidive + WordPress/scanner jails), sshd drop-in hardening, unattended security updates |
 | Operations | Backups with retention/encryption/remote upload, daily health check, e-mail / Telegram / webhook alerts, `status` and `doctor` |
-| Optional | Node.js + PM2, Python venv tooling, Netdata, Cloudflare real-client-IP mode. None of these is installed unless you ask for it, on the command line or from the menu. |
+| Optional | Node.js + PM2, Python venv tooling, Netdata, Cloudflare real-client-IP mode, a mail server (Postfix + Dovecot + Rspamd). None of these is installed unless you ask for it, on the command line or from the menu. |
 
 Everything is sized from the machine it runs on: CPU count, RAM, and whether the disk is
 NVMe, SSD or spinning rust all feed into the OpenLiteSpeed, PHP, MariaDB and Redis settings.
@@ -120,6 +120,9 @@ Useful extras:
 # These are opt-in: without the flags nothing extra is installed. They can also be
 # added later, from "Optional components" in the menu or by re-running install.
 sudo ./setup.sh install --with-node --with-python --cloudflare --php 8.3
+
+# A mail server for the sites on this machine (see "Mail" below for what it needs first)
+sudo ./setup.sh install --with-mail --mail-hostname mail.example.com
 
 # Change the SSH port safely (UFW is opened first, sshd is tested before it is restarted)
 sudo ./setup.sh install --ssh-port 2222
@@ -426,6 +429,63 @@ There is no bundled WAF or ModSecurity: that job belongs to the edge.
 
 ---
 
+## Mail
+
+A mail server for the sites on this machine: Postfix for SMTP, Dovecot for IMAP and delivery,
+Rspamd for spam filtering and DKIM. It is opt-in and changes nothing about the web stack.
+
+```bash
+sudo lomp install --with-mail --mail-hostname mail.example.com
+sudo lomp mail status        # what runs, reverse DNS, whether outgoing port 25 is open
+sudo lomp mail test
+```
+
+Three things have to be true before mail leaves this server, and only two of them are
+lompstack's to arrange:
+
+1. **A name of its own.** `mail.example.com` needs an A record pointing at this server. It is
+   the name in HELO and in the certificate, and it stays the same however many sites you add.
+2. **A PTR record.** Your provider (OVH, Hetzner, Contabo …) sets the reverse name of the
+   server's IP to exactly that name. Nothing on the server can do this for you; `lomp mail
+   test` tells you whether it is right.
+3. **Outgoing port 25.** Many providers block it on new servers. `lomp mail test` finds out,
+   and where it is blocked you can send through somebody else's server instead:
+
+```bash
+printf '%s' "$PASS" | sudo lomp mail relay set --host smtp.example.net --port 587 --user you@example.net
+sudo lomp mail relay off
+```
+
+The password is read from standard input and lands in one 0600 file that Postfix reads; it is
+never an argument and never reaches the log. Mail still carries this server's own DKIM
+signature when it goes through a relay.
+
+What the configuration insists on:
+
+- **Port 25 offers no way to log in**, and no message is relayed to a third party without an
+  authenticated sender - not even from the server itself. A site that gets broken into can
+  open `127.0.0.1:25`, so "it came from this machine" is not a reason to send anything.
+- **Sites do not use PHP `mail()`.** Only root may hand a message to `sendmail`; a site sends
+  through SMTP with the credentials of a mailbox, like any other client.
+- **A sender must own the address it claims**: submission ports check the login against the
+  address in `MAIL FROM`.
+- **A Linux account is not a mailbox.** Dovecot's system-user login is switched off; mailboxes
+  live in one file of BLF-CRYPT hashes, and mail itself under `/var/vmail`, owned by a user no
+  site belongs to.
+- **Only four ports answer**: 25, 465, 587 and 993. There is no plain-text 143 and no
+  cleartext submission port, not even on loopback — Dovecot treats a local connection as
+  already secure, which would make one a password oracle for every user of the machine. They
+  arrive with the webmail, which needs them, and with the rule about who may open them.
+- **The spam filter has no port either.** Its milter is a socket whose group holds Postfix and
+  Rspamd and nobody else; its web interface is a socket only root and Rspamd can open. Whoever
+  speaks the milter protocol decides which account a message comes from, and that is what a
+  DKIM signature is based on.
+
+Giving a domain its own mailboxes (`lomp mail enable example.com`, DKIM records, webmail)
+comes in the next release; what is here now is the server itself.
+
+---
+
 ## Backups
 
 ```bash
@@ -531,6 +591,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
 | `lib/domain.sh` | Site lifecycle, users and directories, WordPress, logrotate and jail regeneration |
 | `lib/proxy.sh` | Path proxies: an application under a path of any site |
 | `lib/app.sh` | Node.js applications: one PM2 daemon per site as the site user, systemd units, deploy, environment, workers and scheduled jobs |
+| `lib/mail.sh` | Mail: Postfix, Dovecot, Rspamd and their configuration, the mail host's certificate, relay, deliverability checks |
 | `lib/cloudflare.sh` | Trusted proxy ranges, real client IP, API token, edge bans |
 | `lib/backup.sh` | Backup, restore, retention, encryption, remotes, scheduling |
 | `lib/monitor.sh` | `status`, `doctor`, health check, notifications |

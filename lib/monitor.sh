@@ -199,6 +199,9 @@ lib_status_main() {
   lib_require_tools
   lib_system_analyze --no-net
   local -a services=(lsws mariadb redis-server fail2ban ufw certbot.timer)
+  # the mail services only appear once this server has mail; on a web-only server the list
+  # stays what it always was
+  if lib_mail_installed; then services+=(postfix dovecot rspamd); fi
   local -A sstate=()
   for svc in "${services[@]}"; do sstate["$svc"]="$(_svc_state "$svc")"; done
   local ram_used=$(( SYS_RAM_MB - SYS_RAM_AVAIL_MB ))
@@ -260,6 +263,9 @@ lib_status_main() {
   lib_print_kv "Cloudflare"    "$(lib_cf_status_line)"
   lib_print_kv "Notifications" "$(lib_notify_channels)"
   lib_print_kv "Backups"       "schedule: $(lib_manifest_get '.backup.schedule' || true), last run: ${last_backup:-never}"
+  if lib_mail_installed; then
+    lib_print_kv "Mail" "sends as $(lib_mail_host)$( [[ -n "$(lib_mail_relay_get host)" ]] && printf ' through %s' "$(lib_mail_relay_get host)")"
+  fi
   printf '  %sSites%s\n' "$C_BLD" "$C_RST"
   local n=0
   for d in $(lib_domains_list); do
@@ -536,6 +542,70 @@ _doc_check_apps() {
   done
 }
 
+# The mail stack, on a server that has one. Four things decide whether mail still works and
+# none of them announce themselves when they stop being true: a service that did not come
+# back, the Dovecot include that would let every Linux account read mail, a certificate
+# running out, and a port that should not be open.
+_doc_check_mail() {
+  local s="" days="" mode="" issuer="" p="" q=""
+  lib_mail_installed || return 0
+  while read -r s; do
+    [[ -n "$s" ]] || continue
+    lib_service_exists "$s" || { _doc_add WARN "mail: ${s}" "not installed on this server"; continue; }
+    if lib_service_active "$s"; then _doc_add OK "mail: ${s}" "running"
+    else _doc_add FAIL "mail: ${s}" "not running; mail is not being handled (journalctl -u ${s})"; fi
+    lib_service_enabled "$s" || _doc_add FAIL "mail: ${s} boot" "not enabled, it will not come back after a reboot (systemctl enable ${s})"
+  done < <(lib_mail_services)
+
+  if [[ -f "$MAIL_DOVECOT_10AUTH" ]] && grep -qE '^[[:space:]]*!include auth-system\.conf\.ext' "$MAIL_DOVECOT_10AUTH"; then
+    _doc_add FAIL "mail: system logins" "Dovecot accepts Linux accounts again (a package upgrade restored ${MAIL_DOVECOT_10AUTH}); run: setup.sh mail regenerate"
+  else
+    _doc_add OK "mail: system logins" "a Linux account is not a mailbox"
+  fi
+
+  if [[ -S "$MAIL_MILTER_SOCK" ]]; then
+    mode="$(stat -c '%G %a' "$MAIL_MILTER_SOCK" 2>/dev/null || true)"
+    if [[ "$mode" == "${MAIL_MILTER_GROUP} 660" ]]; then _doc_add OK "mail: filter socket" "${MAIL_MILTER_SOCK} (${mode})"
+    else _doc_add FAIL "mail: filter socket" "${MAIL_MILTER_SOCK} is ${mode:-unreadable}, expected ${MAIL_MILTER_GROUP} 660: another user could ask for a signature"; fi
+  elif lib_service_active rspamd; then
+    _doc_add FAIL "mail: filter socket" "${MAIL_MILTER_SOCK} is missing; Postfix cannot reach the filter"
+  fi
+
+  if [[ -f "$MAIL_PASSWD_FILE" ]]; then
+    mode="$(stat -c '%U:%G %a' "$MAIL_PASSWD_FILE" 2>/dev/null || true)"
+    [[ "$mode" == "root:dovecot 640" ]] || _doc_add FAIL "mail: user store" "${MAIL_PASSWD_FILE} is ${mode:-unreadable}, expected root:dovecot 640"
+  fi
+
+  days="$(lib_ssl_days_left "$MAIL_CERT_NAME")"
+  issuer="$(lib_ssl_issuer "$MAIL_CERT_NAME")"
+  if [[ -z "$days" ]]; then
+    _doc_add WARN "mail: certificate" "no certificate for $(lib_mail_host) yet (setup.sh mail cert)"
+  elif [[ "$issuer" == *"$(lib_mail_host)"* || -z "$issuer" ]]; then
+    _doc_add WARN "mail: certificate" "still the temporary self-signed one; clients will warn (setup.sh mail cert)"
+  elif (( days < 7 )); then
+    _doc_add FAIL "mail: certificate" "${days} day(s) left on ${MAIL_CERT_NAME}; renewal is not getting through (certbot renew --dry-run)"
+  elif (( days < 30 )); then
+    _doc_add WARN "mail: certificate" "${days} day(s) left on ${MAIL_CERT_NAME}"
+  else
+    _doc_add OK "mail: certificate" "${days} day(s) left (${issuer})"
+  fi
+
+  # nothing on this server should be taking a password in the clear
+  for p in 143 4190 10587 11332; do
+    if lib_port_listening "$p"; then
+      _doc_add FAIL "mail: port ${p}" "something is listening on ${p}; this release binds none of these"
+    fi
+  done
+
+  if lib_have postqueue; then
+    q="$(postqueue -p 2>/dev/null | awk '/^-- /{print $5}' | head -n 1 || true)"
+    if [[ "$q" =~ ^[0-9]+$ ]] && (( q > 50 )); then
+      _doc_add WARN "mail: queue" "${q} message(s) waiting to go out (setup.sh mail queue)"
+    fi
+  fi
+  return 0
+}
+
 lib_doctor_run() {
   DOC_RESULTS=(); DOC_FAIL=0; DOC_WARN=0; DOC_OK=0
   lib_system_analyze --no-net
@@ -545,6 +615,7 @@ lib_doctor_run() {
   _doc_check_cron
   _doc_check_domains
   _doc_check_apps
+  _doc_check_mail
   _doc_check_log_leaks
 }
 

@@ -985,8 +985,8 @@ lib_port_holder() {   # lib_port_holder 7080 [tcp|udp]
 
 # lib_tcp_open host port: does something accept a TCP connection there within 2 seconds?
 # Use it as a condition only ("if lib_tcp_open ..."): its status is the answer.
-lib_tcp_open() {
-  timeout 2 bash -c 'exec 3<>"/dev/tcp/$1/$2"' _ "$1" "$2" >/dev/null 2>&1
+lib_tcp_open() {   # host port [timeout-seconds]
+  timeout "${3:-2}" bash -c 'exec 3<>"/dev/tcp/$1/$2"' _ "$1" "$2" >/dev/null 2>&1
 }
 
 # Run curl and print exactly one three-digit HTTP status code ("000" when the request failed).

@@ -176,6 +176,8 @@ main() {
     panel) if [[ "${rest[0]:-open}" != "status" ]]; then lib_lock; fi ;;
     notify) [[ " ${rest[*]:-} " == *" --send "* ]] || lib_lock ;;
     proxy)  if [[ "${rest[0]:-list}" != "list" && "${rest[0]:-list}" != "help" ]]; then lib_lock; fi ;;
+    # reading the mail stack's state changes nothing; everything else restarts services
+    mail)   case "${rest[0]:-status}" in status|test|queue|help|-h|--help) ;; *) lib_lock ;; esac ;;
     # "app deploy" can build for minutes: it takes the site's own lock (lib/app.sh) instead
     app)    case "${rest[0]:-list}" in
               list|status|logs|deploy|help|-h|--help) ;;
@@ -199,6 +201,7 @@ main() {
     db)             lib_db_main "${rest[@]}" ;;
     proxy)          lib_proxy_main "${rest[@]}" ;;
     app)            lib_app_main "${rest[@]}" ;;
+    mail)           lib_mail_main "${rest[@]}" ;;
     remove|delete)  lib_domain_remove_main "${rest[@]}" ;;
     list)           lib_domain_list_main "${rest[@]}" ;;
     status)         lib_status_main "${rest[@]}" ;;
