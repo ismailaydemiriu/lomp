@@ -69,9 +69,11 @@ lib_mail_host() { lib_manifest_get '.mail.hostname'; }
 lib_mail_cert_name() { printf '_mail_%s' "$(lib_domain_ident "$1")"; }
 
 # The part of an address before the @. Checked before it reaches a map, a file name or a path.
+# No "+": Postfix delivers user+anything@domain to user@domain (recipient_delimiter), so a
+# mailbox called info+news would take mail that was meant to reach info.
 lib_mail_local_valid() {
   local l="$1"
-  [[ "$l" =~ ^[a-z0-9]([a-z0-9._+-]{0,62}[a-z0-9])?$ ]] || return 1
+  [[ "$l" =~ ^[a-z0-9]([a-z0-9._-]{0,62}[a-z0-9])?$ ]] || return 1
   [[ "$l" != *..* ]]
 }
 
@@ -815,15 +817,19 @@ lib_mail_pam_disable() {
   lib_ok "System-user authentication switched off in Dovecot"
 }
 
-lib_mail_postmap() {   # file [-F]
-  local f="$1" flag="${2:-}" t=""
+lib_mail_postmap() {   # file [-F] [force]
+  local f="$1" flag="${2:-}" force="${3:-}" t=""
   (( OPT_DRY_RUN )) && { lib_info "[dry-run] would rebuild the Postfix map ${f}"; return 0; }
   lib_have postmap || return 0
   # a table no older than its source is already up to date. Rebuilding it anyway would write
   # a different file every run - Berkeley DB pages differ even for identical content - and
   # two runs of the same install would stop looking the same.
-  if [[ -f "${f}.db" ]] && ! [[ "$f" -nt "${f}.db" ]]; then return 0; fi
-  if [[ -f "${f}.lmdb" ]] && ! [[ "$f" -nt "${f}.lmdb" ]]; then return 0; fi
+  # "force" is for the SNI table: postmap -F copies the certificates INTO it, so what it
+  # should hold changes on renewal without the file it is built from being touched.
+  if [[ -z "$force" ]]; then
+    if [[ -f "${f}.db" ]] && ! [[ "$f" -nt "${f}.db" ]]; then return 0; fi
+    if [[ -f "${f}.lmdb" ]] && ! [[ "$f" -nt "${f}.lmdb" ]]; then return 0; fi
+  fi
   t="$(lib_mail_map_type)"
   if [[ -n "$flag" ]]; then
     lib_run postmap "$flag" "${t}:${f}" || { MAIL_LAST_ERROR="postmap failed for ${f}"; return 1; }
@@ -1418,6 +1424,982 @@ lib_mail_relay_off() {
   lib_ok "Outgoing mail goes directly again"
 }
 
+
+# =============================================================================
+#  A domain of its own: mailboxes, aliases, DKIM, its certificate
+# =============================================================================
+# Everything below works the same way: the state is the mailbox file, the alias files and
+# domain.json, and every table Postfix, Dovecot and Rspamd read is RENDERED from that state,
+# whole, every time. Nothing is patched line by line. That is what keeps two entries for the
+# same address out of the tables - postmap keeps the first of a duplicate pair and only warns,
+# so an address that is both a mailbox and an alias target would silently lose half its rights.
+
+MAIL_ALIAS_DIR="${MAIL_ALIAS_DIR:-${MAIL_STATE_DIR}/aliases}"
+MAIL_DISABLED_DIR="${MAIL_DISABLED_DIR:-${MAIL_STATE_DIR}/disabled}"
+
+# Does this domain still have mail on this server, whatever domain.json says? A mailbox line
+# is a live login on its own - Dovecot's user store has no per-domain switch - so "is mail
+# enabled" is the wrong question to ask before taking things away.
+lib_mail_domain_has_traces() {   # domain
+  local d="$1"
+  [[ -n "$(lib_mail_boxes "$d")" ]] && return 0
+  [[ -s "$(lib_mail_alias_file "$d")" ]] && return 0
+  [[ -s "${MAIL_DISABLED_DIR}/${d}.passwd" ]] && return 0
+  [[ -d "${MAIL_VMAIL_HOME}/${d}" ]] && return 0
+  compgen -G "${MAIL_DKIM_DIR}/${d}.*.key" >/dev/null 2>&1 && return 0
+  return 1
+}
+
+lib_mail_domain_enabled() { [[ "$(lib_json_get "$(lib_domain_json "$1")" '.mail.enabled')" == "true" ]]; }
+
+# Every domain whose mail is on, in a stable order.
+lib_mail_domains() {
+  local d=""
+  while read -r d; do
+    [[ -n "$d" ]] || continue
+    lib_mail_domain_enabled "$d" && printf '%s\n' "$d"
+  done < <(lib_domains_list)
+  return 0
+}
+
+# The DKIM selector of a domain: whatever it was signed with, or a new dated one.
+lib_mail_selector() {
+  local d="$1" s=""
+  s="$(lib_json_get "$(lib_domain_json "$d")" '.mail.selector')"
+  printf '%s' "${s:-lomp$(date -u +%Y%m)}"
+}
+
+lib_mail_alias_file() { printf '%s/%s' "$MAIL_ALIAS_DIR" "$1"; }
+
+# Mailbox addresses of one domain (or all), read from the one file that holds them.
+lib_mail_boxes() {   # [domain]
+  local d="${1:-}"
+  [[ -s "$MAIL_PASSWD_FILE" ]] || return 0
+  # compared, not matched: a domain is not a regular expression, and awk would read the dots
+  # in it as "any character" (and warn about the @)
+  if [[ -n "$d" ]]; then
+    awk -F: -v d="$d" 'index($1, "@") > 0 && substr($1, index($1, "@") + 1) == d {print $1}' "$MAIL_PASSWD_FILE" || true
+  else
+    awk -F: 'index($1, "@") > 0 {print $1}' "$MAIL_PASSWD_FILE" || true
+  fi
+}
+
+lib_mail_box_exists() { lib_mail_boxes | grep -qxF "${1,,}"; }
+
+lib_mail_box_quota() {   # address -> the quota rule's size, or the default
+  local a="${1,,}" v=""
+  [[ -s "$MAIL_PASSWD_FILE" ]] || { printf '%s' "$MAIL_QUOTA_DEFAULT"; return 0; }
+  # not field 8: the rule itself carries a colon (storage=...), so the size sits in field 9
+  v="$(awk -F: -v u="$a" '$1 == u' "$MAIL_PASSWD_FILE" | sed -n 's/.*storage=\([^ :]*\).*/\1/p' | head -1 || true)"
+  printf '%s' "${v:-$MAIL_QUOTA_DEFAULT}"
+}
+
+# =============================================================================
+#  Passwords
+# =============================================================================
+# doveadm reads the password from standard input, twice - and when the two reads do not match
+# it does not fail: it loops, reads end-of-file twice, and hashes the EMPTY password with a
+# zero exit status. A carriage return is enough to de-synchronise it. So the password is
+# checked first, and the hash is checked afterwards against the password it should match.
+lib_mail_hash_password() {   # password -> hash on stdout
+  local pw="$1" hash="" bytes=0
+  [[ -n "$pw" ]] || { MAIL_LAST_ERROR="the password is empty"; return 1; }
+  if [[ "$pw" == *$'\n'* || "$pw" == *$'\r'* ]]; then
+    MAIL_LAST_ERROR="the password may not contain a line break"
+    return 1
+  fi
+  bytes="$(printf '%s' "$pw" | wc -c | tr -d ' ')"
+  if (( bytes < 8 )); then MAIL_LAST_ERROR="the password is shorter than 8 characters"; return 1; fi
+  if (( bytes > 72 )); then MAIL_LAST_ERROR="bcrypt ignores everything past 72 bytes; use a shorter password"; return 1; fi
+  lib_have doveadm || { MAIL_LAST_ERROR="doveadm is missing (is Dovecot installed?)"; return 1; }
+  hash="$(printf '%s\n%s\n' "$pw" "$pw" | doveadm pw -s BLF-CRYPT 2>/dev/null || true)"
+  [[ "$hash" == '{BLF-CRYPT}'* ]] || { MAIL_LAST_ERROR="doveadm could not hash the password"; return 1; }
+  # the hash of an empty password verifies against an empty password, not against this one
+  printf '%s\n' "$pw" | doveadm pw -t "$hash" >/dev/null 2>&1 \
+    || { MAIL_LAST_ERROR="the hash doveadm produced does not match the password given"; return 1; }
+  printf '%s' "$hash"
+}
+
+# Read a password from stdin when it is a pipe, or ask for it twice without echo.
+lib_mail_read_password() {   # -> password on stdout
+  local p1="" p2=""
+  if [[ ! -t 0 ]]; then
+    IFS= read -r p1 || true
+    printf '%s' "$p1"
+    return 0
+  fi
+  read -r -s -p "Password: " p1 </dev/tty >/dev/tty 2>&1 || true
+  printf '\n' >/dev/tty
+  read -r -s -p "Again: " p2 </dev/tty >/dev/tty 2>&1 || true
+  printf '\n' >/dev/tty
+  [[ "$p1" == "$p2" ]] || { MAIL_LAST_ERROR="the two passwords did not match"; return 1; }
+  printf '%s' "$p1"
+}
+
+# =============================================================================
+#  The generated tables
+# =============================================================================
+# One line per domain. The value is required and never read, so it says what it is.
+lib_mail_render_vdomains() {
+  local d=""
+  printf '# Managed by lompstack - the domains this server takes mail for\n'
+  while read -r d; do [[ -n "$d" ]] && printf '%s\tvirtual\n' "$d"; done < <(lib_mail_domains)
+  return 0
+}
+
+# Every mailbox that belongs to a domain whose mail is on. Postfix never uses the value as a
+# path here - Dovecot's LMTP decides where the mail goes - but it says what it would be.
+lib_mail_render_vmailbox() {
+  local d="" a=""
+  printf '# Managed by lompstack - every mailbox on this server\n'
+  while read -r d; do
+    [[ -n "$d" ]] || continue
+    while read -r a; do
+      [[ -n "$a" ]] || continue
+      printf '%s\t%s/%s/Maildir/\n' "$a" "$d" "${a%%@*}"
+    done < <(lib_mail_boxes "$d")
+  done < <(lib_mail_domains)
+  return 0
+}
+
+lib_mail_render_valias() {
+  local d="" f=""
+  printf '# Managed by lompstack - aliases and forwards\n'
+  while read -r d; do
+    [[ -n "$d" ]] || continue
+    f="$(lib_mail_alias_file "$d")"
+    [[ -s "$f" ]] || continue
+    grep -v '^[[:space:]]*#' "$f" | grep -v '^[[:space:]]*$' || true
+  done < <(lib_mail_domains)
+  return 0
+}
+
+# Which login may send as which address. One line per address, with every owner on it:
+# postmap keeps the FIRST of two lines with the same key and only warns, so an address that
+# is both a mailbox and an alias target would otherwise lose one of its owners.
+lib_mail_render_senders() {
+  local d="" a="" f="" alias="" targets="" t=""
+  {
+    while read -r d; do
+      [[ -n "$d" ]] || continue
+      while read -r a; do
+        [[ -n "$a" ]] && printf '%s\t%s\n' "$a" "$a"
+      done < <(lib_mail_boxes "$d")
+      f="$(lib_mail_alias_file "$d")"
+      [[ -s "$f" ]] || continue
+      # an alias may be used as a sender by each LOCAL mailbox it points at. An address
+      # somewhere else is not a login here and must not become one.
+      while IFS=$'\t' read -r alias targets; do
+        [[ -n "$alias" && "$alias" != \#* && -n "$targets" ]] || continue
+        for t in ${targets//,/ }; do
+          lib_mail_box_exists "$t" && printf '%s\t%s\n' "$alias" "$t"
+        done
+      done <"$f"
+    done < <(lib_mail_domains)
+  } | awk -F'\t' -v OFS='\t' '
+      NF == 2 && $2 != "" {
+        if (!($1 in seen)) { order[++n] = $1; seen[$1] = $2; next }
+        if (index("," seen[$1] ",", "," $2 ",") == 0) seen[$1] = seen[$1] "," $2
+      }
+      END {
+        print "# Managed by lompstack - which login may send as which address"
+        for (i = 1; i <= n; i++) print order[i], seen[order[i]]
+      }'
+  return 0
+}
+
+# The certificate each mail name gets. The private key is named FIRST - the other way round
+# postmap accepts the line and the handshake then dies with an alert instead of falling back.
+lib_mail_render_sni() {
+  local d="" ident="" dir="" host=""
+  printf '# Managed by lompstack - per-name certificates (postmap -F copies the files in)\n'
+  host="$(lib_mail_host)"
+  if [[ -n "$host" && -s "${SSL_DEPLOY_DIR}/${MAIL_CERT_NAME}/privkey.pem" ]]; then
+    printf '%s\t%s/%s/privkey.pem, %s/%s/fullchain.pem\n' "$host" "$SSL_DEPLOY_DIR" "$MAIL_CERT_NAME" "$SSL_DEPLOY_DIR" "$MAIL_CERT_NAME"
+  fi
+  while read -r d; do
+    [[ -n "$d" ]] || continue
+    ident="$(lib_mail_cert_name "$d")"
+    dir="${SSL_DEPLOY_DIR}/${ident}"
+    [[ -s "${dir}/privkey.pem" && -s "${dir}/fullchain.pem" ]] || continue
+    printf 'mail.%s\t%s/privkey.pem, %s/fullchain.pem\n' "$d" "$dir" "$dir"
+  done < <(lib_mail_domains)
+  return 0
+}
+
+# The same names on the IMAP side. A block whose files are missing is a silent failure -
+# doveconf says nothing and the name quietly falls back to the mail host's certificate - so
+# only names whose certificate is really there get a block.
+lib_mail_render_dovecot_sni() {
+  local d="" ident="" dir=""
+  printf '# Managed by lompstack - per-name certificates for IMAP\n'
+  while read -r d; do
+    [[ -n "$d" ]] || continue
+    ident="$(lib_mail_cert_name "$d")"
+    dir="${SSL_DEPLOY_DIR}/${ident}"
+    [[ -s "${dir}/privkey.pem" && -s "${dir}/fullchain.pem" ]] || continue
+    printf 'local_name "mail.%s" {\n  ssl_cert = <%s/fullchain.pem\n  ssl_key = <%s/privkey.pem\n}\n' "$d" "$dir" "$dir"
+  done < <(lib_mail_domains)
+  return 0
+}
+
+lib_mail_render_selectors() {
+  local d=""
+  printf '# Managed by lompstack - "<domain> <selector>", one line per domain with mail\n'
+  while read -r d; do
+    [[ -n "$d" ]] || continue
+    [[ -s "${MAIL_DKIM_DIR}/${d}.$(lib_mail_selector "$d").key" ]] || continue
+    printf '%s %s\n' "$d" "$(lib_mail_selector "$d")"
+  done < <(lib_mail_domains)
+  return 0
+}
+
+# =============================================================================
+#  Putting the tables into effect
+# =============================================================================
+# Written, rebuilt and - where the daemon that reads them is a long-lived one - reloaded.
+# virtual_mailbox_domains is read by trivial-rewrite, which qmgr keeps a connection to for
+# ever, so a new domain is not taken in until Postfix is told; the rest are read by smtpd and
+# cleanup, which are replaced every few connections.
+lib_mail_tables_apply() {
+  local changed=0 reload=0
+  lib_mkdir "$MAIL_POSTFIX_DIR" 0750 root:postfix
+  lib_mkdir "$MAIL_ALIAS_DIR" 0700 root:root
+
+  lib_mail_render_vdomains | lib_write_file "${MAIL_POSTFIX_DIR}/vdomains" 0640 root:postfix
+  (( LIB_FILE_CHANGED )) && { changed=1; reload=1; }
+  lib_mail_render_vmailbox | lib_write_file "${MAIL_POSTFIX_DIR}/vmailbox" 0640 root:postfix
+  (( LIB_FILE_CHANGED )) && changed=1
+  lib_mail_render_valias | lib_write_file "${MAIL_POSTFIX_DIR}/valias" 0640 root:postfix
+  (( LIB_FILE_CHANGED )) && changed=1
+  lib_mail_render_senders | lib_write_file "${MAIL_POSTFIX_DIR}/senders" 0640 root:postfix
+  (( LIB_FILE_CHANGED )) && changed=1
+  lib_mail_render_sni | lib_write_file "$MAIL_SNI_MAP" 0600 root:root secret
+  (( LIB_FILE_CHANGED )) && { changed=1; reload=1; }
+
+  local f=""
+  for f in vdomains vmailbox valias senders; do
+    lib_mail_postmap "${MAIL_POSTFIX_DIR}/${f}" || return 1
+  done
+  # always rebuilt: postmap -F copies the certificates INTO the table, so a renewal changes
+  # what the table should hold without touching the file it is built from
+  lib_mail_postmap "$MAIL_SNI_MAP" -F force || return 1
+
+  lib_mail_render_selectors | lib_write_file "${MAIL_RSPAMD_LOMP}/dkim_selectors.map" 0644 root:root
+  (( LIB_FILE_CHANGED )) && changed=1      # Rspamd watches this file; no reload needed
+
+  lib_mail_dovecot_sni_apply || return 1
+
+  if (( reload )) && (( ! OPT_DRY_RUN )) && lib_service_active postfix; then
+    lib_run postfix reload || lib_warn "postfix reload failed (see log)"
+  fi
+  (( changed )) && lib_log_write INFO "mail tables rebuilt"
+  return 0
+}
+
+# Dovecot is the one that has to be handled carefully: a syntax error here makes "systemctl
+# reload dovecot" exit non-zero, and systemd then stops the unit - the mail server goes down
+# because of a certificate block. So the file is tested before anything is reloaded, and put
+# back if the test fails.
+lib_mail_dovecot_sni_apply() {
+  local f="${MAIL_DOVECOT_DIR}/sni.conf" bak=""
+  lib_mkdir "$MAIL_DOVECOT_DIR" 0750 root:dovecot
+  if (( OPT_DRY_RUN )); then
+    lib_mail_render_dovecot_sni | lib_write_file "$f" 0640 root:dovecot
+    return 0
+  fi
+  [[ -f "$f" ]] && bak="$(lib_backup_config "$f")"
+  lib_mail_render_dovecot_sni | lib_write_file "$f" 0640 root:dovecot
+  (( LIB_FILE_CHANGED )) || return 0
+  if lib_have doveconf && ! doveconf -n >/dev/null 2>&1; then
+    if [[ -n "$bak" ]]; then cp -p "$bak" "$f"; else lib_rm "$f"; fi
+    MAIL_LAST_ERROR="Dovecot refused the per-name certificate file; it was put back"
+    return 1
+  fi
+  lib_service_active dovecot && { lib_run doveadm reload || lib_warn "dovecot reload failed (see log)"; }
+  return 0
+}
+
+# =============================================================================
+#  DKIM
+# =============================================================================
+# One key per domain, generated once. rspamadm exits 0 even when it could not write the key
+# and prints the public record anyway, so the file is what gets trusted, not the exit status.
+lib_mail_dkim_ensure() {   # domain
+  local d="$1" sel="" key="" tmp=""
+  sel="$(lib_mail_selector "$d")"
+  key="${MAIL_DKIM_DIR}/${d}.${sel}.key"
+  [[ -s "$key" ]] && return 0
+  if (( OPT_DRY_RUN )); then lib_info "[dry-run] would create a DKIM key for ${d} (selector ${sel})"; return 0; fi
+  lib_have rspamadm || { MAIL_LAST_ERROR="rspamadm is missing (is Rspamd installed?)"; return 1; }
+  lib_mkdir "$MAIL_DKIM_DIR" 0750 root:_rspamd
+  tmp="$(mktemp "${MAIL_DKIM_DIR}/.${d}.XXXXXX")" || { MAIL_LAST_ERROR="could not create a temporary file for the DKIM key"; return 1; }
+  if ! rspamadm dkim_keygen -d "$d" -s "$sel" -b 2048 -t rsa -k "$tmp" -o dnskey >/dev/null 2>&1 \
+     || [[ ! -s "$tmp" ]] || ! openssl rsa -in "$tmp" -noout -check >/dev/null 2>&1; then
+    rm -f "$tmp"
+    MAIL_LAST_ERROR="rspamadm could not generate a DKIM key for ${d}"
+    return 1
+  fi
+  chown root:_rspamd "$tmp" 2>/dev/null || true
+  chmod 0640 "$tmp"
+  mv -f "$tmp" "$key"
+  lib_ok "DKIM key for ${d} (selector ${sel})"
+  return 0
+}
+
+# The public half, read from the private key rather than generated again: generating again
+# would quietly replace a key whose public half is already published, and every message signed
+# from then on would fail DKIM with nothing on this server to show for it.
+lib_mail_dkim_public() {   # domain -> "v=DKIM1; k=rsa; p=..."
+  local d="$1" key="" p=""
+  key="${MAIL_DKIM_DIR}/${d}.$(lib_mail_selector "$d").key"
+  [[ -s "$key" ]] || return 1
+  p="$(openssl rsa -in "$key" -pubout 2>/dev/null | grep -v -- '-----' | tr -d '\n' || true)"
+  [[ -n "$p" ]] || return 1
+  printf 'v=DKIM1; k=rsa; p=%s' "$p"
+}
+
+# =============================================================================
+#  The certificate of one domain's mail name
+# =============================================================================
+lib_mail_domain_cert_ensure() {   # domain
+  local d="$1" cert="" name=""
+  cert="$(lib_mail_cert_name "$d")"
+  name="mail.${d}"
+  if lib_ssl_cert_exists "$cert"; then
+    lib_ssl_deploy_files "$cert" || lib_warn "certificate ${cert} could not be deployed: ${SSL_LAST_ERROR}"
+    lib_cron_remove "mail-cert:${d}"
+    return 0
+  fi
+  if lib_ssl_obtain_names "$cert" "$name"; then
+    lib_cron_remove "mail-cert:${d}"
+    return 0
+  fi
+  lib_warn "No certificate for ${name} yet: ${SSL_LAST_ERROR}"
+  lib_note "Clients reach it under ${MAIL_HOST_SHOWN:-$(lib_mail_host)} meanwhile, which is a name they can trust"
+  lib_note "Add an A record for ${name} pointing here, then run: lomp mail cert ${d}"
+  lib_cron_set "mail-cert:${d}" "41 */6 * * * root ${BIN_LINK} mail cert ${d} --quiet"
+  return 0
+}
+
+# =============================================================================
+#  enable / disable
+# =============================================================================
+lib_mail_enable_main() {   # domain [--mailbox NAME] [--quota Q]
+  local d="" box="" quota="$MAIL_QUOTA_DEFAULT" a="" _first_box=""
+  d="${1:-}"; shift || true
+  lib_domain_valid "${d,,}" || lib_die "Invalid domain '${d:-none}'" "" "lomp mail enable example.com"
+  d="${d,,}"
+  while (($# > 0)); do
+    a="$1"; shift
+    case "$a" in
+      --mailbox) box="${1:-}"; shift || true ;;
+      --quota)   quota="${1:-}"; shift || true ;;
+      --yes)     OPT_YES=1 ;;
+      *) lib_die "Unknown option for 'mail enable': ${a}" "" "lomp mail help" ;;
+    esac
+  done
+  # not in a dry run: the site it belongs to was only planned, never written
+  if (( ! OPT_DRY_RUN )); then
+    lib_domain_registered "$d" || lib_die "No site called ${d} on this server" \
+      "mail is enabled for a site this server already hosts" "lomp add ${d}"
+  fi
+  lib_mail_quota_valid "$quota" || lib_die "Invalid quota '${quota}'" "a size with a unit, or 0 for no limit" "--quota 2G"
+  [[ -z "$box" ]] || lib_mail_local_valid "$box" || lib_die "Invalid mailbox name '${box}'" "" "--mailbox info"
+  lib_mail_installed || lib_mail_ensure || lib_die "Mail is not installed" "${MAIL_LAST_ERROR}" "lomp install --with-mail"
+
+  lib_info "Turning on mail for ${d}"
+  lib_mail_dkim_ensure "$d" || lib_die "The DKIM key could not be created" "${MAIL_LAST_ERROR}" "lomp mail status"
+  if (( ! OPT_DRY_RUN )); then
+    lib_json_set "$(lib_domain_json "$d")" \
+      '.mail.enabled = true | .mail.host = $h | .mail.selector = $s | .mail.quota_default = $q | .mail.enabled_at = $ts' \
+      --arg h "mail.${d}" --arg s "$(lib_mail_selector "$d")" --arg q "$quota" --arg ts "$(lib_iso_now)"
+  fi
+  # mailboxes that were put aside when mail was turned off come back with their passwords
+  lib_mail_boxes_unpark "$d"
+  if [[ -n "$box" ]]; then
+    lib_mail_box_add_main "${box}@${d}" --quota "$quota"
+  else
+    # postmaster, abuse and dmarc point at the first mailbox there is; with none, they are
+    # left for the first "mail box add" to set, because an alias to nowhere bounces
+    _first_box="$(lib_mail_boxes "$d" | head -1)"
+    [[ -n "$_first_box" ]] && lib_mail_domain_aliases_seed "$d" "$_first_box"
+    lib_mail_tables_apply || lib_die "The mail tables could not be rebuilt" "${MAIL_LAST_ERROR}" "lomp mail status"
+  fi
+  lib_mail_domain_cert_ensure "$d"
+  lib_mail_tables_apply || true          # the certificate may have arrived in the meantime
+  lib_ok "Mail is on for ${d}"
+  if [[ -z "$(lib_mail_boxes "$d")" ]]; then
+    lib_warn "There is no mailbox yet, so every message to @${d} is refused"
+    lib_note "Make one: lomp mail box add info@${d}"
+  fi
+  lib_mail_dns_print "$d"
+  return 0
+}
+
+lib_mail_disable_main() {   # domain [--keep-data]
+  local d="" keep=1 a=""
+  d="${1:-}"; shift || true
+  [[ -n "$d" ]] || lib_die "Which domain?" "" "lomp mail disable example.com"
+  d="${d,,}"
+  while (($# > 0)); do
+    a="$1"; shift
+    case "$a" in
+      --keep-data) keep=1 ;;
+      --delete-data) keep=0 ;;
+      --yes) OPT_YES=1 ;;
+      *) lib_die "Unknown option for 'mail disable': ${a}" "" "lomp mail help" ;;
+    esac
+  done
+  lib_mail_domain_enabled "$d" || { lib_info "Mail is already off for ${d}"; return 0; }
+  if (( keep )); then
+    lib_info "Turning mail off for ${d}; the mailboxes and their mail stay where they are"
+  else
+    lib_confirm "Delete every mailbox of ${d} and all of its mail?" n \
+      || lib_die "Nothing was deleted" "" "run it without --delete-data to keep the mail"
+  fi
+  if (( ! OPT_DRY_RUN )); then
+    lib_json_set "$(lib_domain_json "$d")" '.mail.enabled = false | .mail.disabled_at = $ts' --arg ts "$(lib_iso_now)"
+  fi
+  # anything still queued for this domain stops being a local destination the moment the table
+  # is rewritten, and Postfix would try to deliver it to the internet instead
+  _mail_warn_queued "$d"
+  lib_cron_remove "mail-cert:${d}"
+  if (( keep )); then
+    # the mailbox lines are put aside, not left in place: Dovecot's user store has no
+    # per-domain switch, so a line that stays is a login that still works. They come back
+    # with their passwords when the domain is enabled again.
+    lib_mail_boxes_park "$d"
+  else
+    lib_mail_domain_purge "$d"
+  fi
+  lib_mail_tables_apply || lib_die "The mail tables could not be rebuilt" "${MAIL_LAST_ERROR}" "lomp mail status"
+  if (( keep )); then
+    lib_ok "Mail is off for ${d}: no login and no delivery, and every message is still on disk"
+    lib_note "\"lomp mail enable ${d}\" brings the mailboxes back with the passwords they had"
+  else
+    lib_ok "Mail is off for ${d} and its mailboxes are gone"
+  fi
+  return 0
+}
+
+# Move a domain's mailbox lines out of the live user store and into the state directory, and
+# back again. What is parked keeps its password hash and its quota.
+lib_mail_boxes_park() {   # domain
+  local d="$1" f="" n=0 a=""
+  f="${MAIL_DISABLED_DIR}/${d}.passwd"
+  [[ -s "$MAIL_PASSWD_FILE" ]] || return 0
+  n="$(lib_mail_boxes "$d" | wc -l | tr -d ' ')"
+  (( n > 0 )) || return 0
+  if (( OPT_DRY_RUN )); then lib_info "[dry-run] would put ${n} mailbox line(s) of ${d} aside"; return 0; fi
+  lib_mkdir "$MAIL_DISABLED_DIR" 0700 root:root
+  awk -F: -v d="$d" 'index($1, "@") > 0 && substr($1, index($1, "@") + 1) == d' "$MAIL_PASSWD_FILE" \
+    | lib_write_file "$f" 0600 root:root secret
+  awk -F: -v d="$d" '!(index($1, "@") > 0 && substr($1, index($1, "@") + 1) == d)' "$MAIL_PASSWD_FILE" \
+    | lib_write_file "$MAIL_PASSWD_FILE" 0640 root:dovecot secret
+  if lib_have doveadm && (( ! OPT_DRY_RUN )); then
+    sleep 1
+    # 68 is "nobody was logged in", which is the usual answer and not a failure
+    while read -r a; do
+      [[ -n "$a" ]] || continue
+      doveadm kick "$a" >/dev/null 2>&1 || true
+    done < <(awk -F: '{print $1}' "$f")
+  fi
+  return 0
+}
+
+lib_mail_boxes_unpark() {   # domain
+  local d="$1" f="" tmp=""
+  f="${MAIL_DISABLED_DIR}/${d}.passwd"
+  [[ -s "$f" ]] || return 0
+  if (( OPT_DRY_RUN )); then lib_info "[dry-run] would bring the mailboxes of ${d} back"; return 0; fi
+  tmp="$(lib_mktemp)"
+  { [[ -s "$MAIL_PASSWD_FILE" ]] && cat "$MAIL_PASSWD_FILE"; grep -v '^[[:space:]]*#' "$f"; } \
+    | awk -F: '!seen[$1]++' | sort -t: -k1,1 >"$tmp"
+  lib_write_file "$MAIL_PASSWD_FILE" 0640 root:dovecot secret <"$tmp"
+  rm -f "$tmp"
+  lib_rm "$f"
+  return 0
+}
+
+# Mail still waiting to go out to a domain that is about to stop being one of ours.
+_mail_warn_queued() {   # domain
+  local n=0
+  lib_have postqueue || return 0
+  (( OPT_DRY_RUN )) && return 0
+  n="$(postqueue -p 2>/dev/null | grep -c "@${1}$" || true)"
+  [[ "$n" =~ ^[0-9]+$ ]] || n=0
+  (( n > 0 )) && lib_warn "${n} message(s) for ${1} are still in the queue; they will be treated as mail for somewhere else now (lomp mail queue)"
+  return 0
+}
+
+# Everything that belongs to one domain's mail, for "disable --delete-data" and for "remove".
+lib_mail_domain_purge() {   # domain
+  local d="$1" a="" sel=""
+  sel="$(lib_mail_selector "$d")"
+  while read -r a; do
+    [[ -n "$a" ]] && lib_mail_box_remove "$a"
+  done < <(lib_mail_boxes "$d")
+  lib_rm "$(lib_mail_alias_file "$d")"
+  lib_rm "${MAIL_DKIM_DIR}/${d}.${sel}.key"
+  lib_rm "${MAIL_VMAIL_HOME}/${d}"
+  lib_cron_remove "mail-cert:${d}"
+  lib_ssl_delete "$(lib_mail_cert_name "$d")" 2>/dev/null || true
+  return 0
+}
+
+# =============================================================================
+#  Mailboxes
+# =============================================================================
+# The file is rewritten whole, with this address's line replaced: Dovecot keeps the FIRST of
+# two lines with the same key, so a second line for the same mailbox would be a password
+# nobody can use and a quota nobody sees.
+lib_mail_passwd_set() {   # address hash quota
+  local a="${1,,}" hash="$2" quota="$3" tmp=""
+  tmp="$(lib_mktemp)"
+  {
+    [[ -s "$MAIL_PASSWD_FILE" ]] && awk -F: -v u="$a" '$1 != u' "$MAIL_PASSWD_FILE"
+    printf '%s:%s::::::userdb_quota_rule=*:storage=%s\n' "$a" "$hash" "$quota"
+  } | sort -t: -k1,1 >"$tmp"
+  lib_write_file "$MAIL_PASSWD_FILE" 0640 root:dovecot secret <"$tmp"
+  rm -f "$tmp"
+  return 0
+}
+
+# Read a password and hash it, both in this shell so that a refusal can say why. The hash comes
+# back in MAIL_HASH; the password itself is never assigned to anything that outlives the call.
+MAIL_HASH=""
+_mail_ask_password() {   # what (for the message only)
+  local f="" rc=0
+  MAIL_HASH=""
+  f="$(lib_mktemp)"
+  if ! lib_mail_read_password >"$f"; then rm -f "$f"; return 1; fi
+  if ! lib_mail_hash_password "$(cat "$f")" >"${f}.h"; then rm -f "$f" "${f}.h"; return 1; fi
+  MAIL_HASH="$(cat "${f}.h")"
+  rm -f "$f" "${f}.h"
+  [[ -n "$MAIL_HASH" ]] || { MAIL_LAST_ERROR="the password could not be hashed"; rc=1; }
+  return "$rc"
+}
+
+lib_mail_box_add_main() {   # address [--quota Q]   (password on stdin or asked for)
+  local a="" quota="" pw="" hash="" d="" opt=""
+  a="${1:-}"; shift || true
+  a="${a,,}"
+  lib_mail_address_valid "$a" || lib_die "Invalid address '${a:-none}'" "" "lomp mail box add info@example.com"
+  d="${a#*@}"
+  while (($# > 0)); do
+    opt="$1"; shift
+    case "$opt" in
+      --quota) quota="${1:-}"; shift || true ;;
+      *) lib_die "Unknown option for 'mail box add': ${opt}" "" "lomp mail help" ;;
+    esac
+  done
+  # in a dry run the domain was only planned, so its state does not say "enabled" yet
+  if (( ! OPT_DRY_RUN )); then
+    lib_mail_domain_enabled "$d" || lib_die "Mail is not on for ${d}" "" "lomp mail enable ${d}"
+  fi
+  [[ -n "$quota" ]] || quota="$(lib_json_get "$(lib_domain_json "$d")" '.mail.quota_default')"
+  [[ -n "$quota" ]] || quota="$MAIL_QUOTA_DEFAULT"
+  lib_mail_quota_valid "$quota" || lib_die "Invalid quota '${quota}'" "a bad value makes every delivery to this mailbox fail" "--quota 2G"
+  if lib_mail_box_exists "$a"; then lib_die "${a} already exists" "" "lomp mail box passwd ${a}"; fi
+  # the mirror of the check in "alias add": one address, one meaning. Postfix resolves the
+  # alias first, so a mailbox of the same name would never see a message.
+  if [[ -s "$(lib_mail_alias_file "$d")" ]] && awk -F'	' -v k="$a" '$1 == k {found=1} END{exit !found}' "$(lib_mail_alias_file "$d")"; then
+    lib_die "${a} is already an alias" "an address is either a mailbox or an alias, never both" "lomp mail alias del ${a}"
+  fi
+
+  if (( OPT_DRY_RUN )); then lib_info "[dry-run] would create the mailbox ${a} (${quota})"; return 0; fi
+  # not "pw=$(lib_mail_read_password)": the helpers set MAIL_LAST_ERROR, and a command
+  # substitution is a subshell, so the reason for the refusal would die with it
+  _mail_ask_password "add ${a}" || lib_die "The mailbox was not created" "${MAIL_LAST_ERROR}" "printf '%s' \"\$PW\" | lomp mail box add ${a}"
+  hash="$MAIL_HASH"
+  MAIL_HASH=""
+  lib_mail_passwd_set "$a" "$hash" "$quota"
+  lib_mail_domain_aliases_seed "$d" "$a"
+  lib_mail_tables_apply || lib_die "The mail tables could not be rebuilt" "${MAIL_LAST_ERROR}" "lomp mail status"
+  lib_ok "Mailbox ${a} created (${quota})"
+  lib_note "IMAP ${MAIL_CLIENT_HOST:-$(lib_mail_host)}:993 (SSL/TLS), SMTP ${MAIL_CLIENT_HOST:-$(lib_mail_host)}:465 (SSL/TLS), user name ${a}"
+  return 0
+}
+
+lib_mail_box_passwd_main() {   # address
+  local a="${1:-}" pw="" hash=""
+  a="${a,,}"
+  lib_mail_address_valid "$a" || lib_die "Invalid address '${a:-none}'" "" "lomp mail box passwd info@example.com"
+  lib_mail_box_exists "$a" || lib_die "No such mailbox: ${a}" "" "lomp mail box list"
+  if (( OPT_DRY_RUN )); then lib_info "[dry-run] would change the password of ${a}"; return 0; fi
+  _mail_ask_password "passwd ${a}" || lib_die "The password was not changed" "${MAIL_LAST_ERROR}" "printf '%s' \"\$PW\" | lomp mail box passwd ${a}"
+  hash="$MAIL_HASH"
+  MAIL_HASH=""
+  lib_mail_passwd_set "$a" "$hash" "$(lib_mail_box_quota "$a")"
+  lib_ok "Password changed for ${a}"
+  lib_note "Open sessions stay open until they reconnect: lomp mail box kick ${a} closes them now"
+  return 0
+}
+
+lib_mail_box_quota_main() {   # address quota
+  local a="${1:-}" q="${2:-}" hash=""
+  a="${a,,}"
+  lib_mail_address_valid "$a" || lib_die "Invalid address '${a:-none}'" "" "lomp mail box quota info@example.com 2G"
+  lib_mail_quota_valid "$q" || lib_die "Invalid quota '${q:-none}'" "a bad value makes every delivery to this mailbox fail" "2G, 500M, or 0 for no limit"
+  lib_mail_box_exists "$a" || lib_die "No such mailbox: ${a}" "" "lomp mail box list"
+  if (( OPT_DRY_RUN )); then lib_info "[dry-run] would set the quota of ${a} to ${q}"; return 0; fi
+  hash="$(awk -F: -v u="$a" '$1 == u {print $2}' "$MAIL_PASSWD_FILE" | head -1 || true)"
+  [[ -n "$hash" ]] || lib_die "Could not read the stored password of ${a}" "" "lomp mail box passwd ${a}"
+  lib_mail_passwd_set "$a" "$hash" "$q"
+  lib_ok "Quota of ${a} is now ${q}"
+  return 0
+}
+
+# The line goes first: from that moment no new session can start. Only then is what is still
+# open closed, and only then does the mail go - otherwise a client with a saved password
+# reconnects in the gap and recreates the mailbox under the directory just deleted.
+lib_mail_box_remove() {   # address   (no questions; the callers ask)
+  local a="${1,,}" d="" loc=""
+  d="${a#*@}"; loc="${a%%@*}"
+  if (( OPT_DRY_RUN )); then lib_info "[dry-run] would delete the mailbox ${a} and its mail"; return 0; fi
+  if [[ -s "$MAIL_PASSWD_FILE" ]]; then
+    awk -F: -v u="$a" '$1 != u' "$MAIL_PASSWD_FILE" | lib_write_file "$MAIL_PASSWD_FILE" 0640 root:dovecot secret
+  fi
+  sleep 1                                  # Dovecot re-reads the file about once a second
+  if lib_have doveadm; then doveadm kick "$a" >/dev/null 2>&1 || true; fi   # 68 = nobody was logged in
+  lib_rm "${MAIL_VMAIL_HOME}/${d}/${loc}"
+  return 0
+}
+
+lib_mail_box_del_main() {   # address
+  local a="${1:-}"
+  a="${a,,}"
+  lib_mail_address_valid "$a" || lib_die "Invalid address '${a:-none}'" "" "lomp mail box del info@example.com"
+  lib_mail_box_exists "$a" || lib_die "No such mailbox: ${a}" "" "lomp mail box list"
+  lib_confirm "Delete ${a} and every message in it?" n || lib_die "Nothing was deleted" "" ""
+  lib_mail_box_remove "$a"
+  lib_mail_alias_forget_target "${a#*@}" "$a"
+  lib_mail_tables_apply || lib_warn "the mail tables could not be rebuilt: ${MAIL_LAST_ERROR}"
+  lib_ok "${a} is gone"
+  return 0
+}
+
+# An alias pointing at a mailbox that no longer exists is worse than no alias: Postfix accepts
+# the message and bounces it afterwards. So a deleted mailbox is taken out of every alias, and
+# an alias left with nowhere to go is removed.
+lib_mail_alias_forget_target() {   # domain address
+  local d="$1" gone="$2" f="" tmp="" changed=0
+  f="$(lib_mail_alias_file "$d")"
+  [[ -s "$f" ]] || return 0
+  if (( OPT_DRY_RUN )); then lib_info "[dry-run] would take ${gone} out of the aliases of ${d}"; return 0; fi
+  tmp="$(lib_mktemp)"
+  awk -F'	' -v gone="$gone" -v OFS='	' '
+    /^[[:space:]]*#/ { print; next }
+    NF < 2 { next }
+    {
+      n = split($2, t, ","); out = ""
+      for (i = 1; i <= n; i++) if (t[i] != gone) out = (out == "" ? t[i] : out "," t[i])
+      if (out != "") print $1, out
+    }' "$f" >"$tmp"
+  if ! cmp -s "$tmp" "$f"; then changed=1; fi
+  lib_write_file "$f" 0600 root:root <"$tmp"
+  rm -f "$tmp"
+  (( changed )) && lib_note "Aliases that pointed at ${gone} were updated"
+  return 0
+}
+
+# Close the sessions a mailbox still has open. A password change does not end them: IMAP
+# clients stay connected until they reconnect by themselves.
+lib_mail_box_kick_main() {   # address
+  local a="${1:-}"
+  a="${a,,}"
+  lib_mail_address_valid "$a" || lib_die "Invalid address '${a:-none}'" "" "lomp mail box kick info@example.com"
+  lib_have doveadm || lib_die "doveadm is missing (is Dovecot installed?)" "" "lomp install --with-mail"
+  if (( OPT_DRY_RUN )); then lib_info "[dry-run] would close the open sessions of ${a}"; return 0; fi
+  # 68 is "nobody was logged in", which is the usual answer and not a failure
+  doveadm kick "$a" >/dev/null 2>&1 || true
+  lib_ok "Any open session of ${a} is closed"
+  return 0
+}
+
+lib_mail_box_list_main() {   # [domain]
+  local d="${1:-}" a="" q="" used=""
+  if (( OPT_JSON )); then
+    {
+      while read -r a; do
+        [[ -n "$a" ]] || continue
+        printf '{"address":"%s","domain":"%s","quota":"%s"}\n' "$a" "${a#*@}" "$(lib_mail_box_quota "$a")"
+      done < <(lib_mail_boxes "$d")
+    } | jq -s '.'
+    return 0
+  fi
+  printf '  %-34s %-10s %s\n' "MAILBOX" "QUOTA" "USED"
+  while read -r a; do
+    [[ -n "$a" ]] || continue
+    q="$(lib_mail_box_quota "$a")"
+    used="-"
+    if lib_have doveadm && (( ! OPT_DRY_RUN )); then
+      used="$(doveadm -f tab quota get -u "$a" 2>/dev/null | awk -F'\t' '$2=="STORAGE"{print $3}' | head -1 || true)"
+      [[ -n "$used" ]] && used="$(( used / 1024 )) MB"
+    fi
+    printf '  %-34s %-10s %s\n' "$a" "$q" "${used:--}"
+  done < <(lib_mail_boxes "$d")
+  return 0
+}
+
+# =============================================================================
+#  Aliases
+# =============================================================================
+lib_mail_alias_set() {   # domain alias targets   (empty targets removes it)
+  local d="$1" alias="${2,,}" targets="${3:-}" f="" tmp=""
+  f="$(lib_mail_alias_file "$d")"
+  lib_mkdir "$MAIL_ALIAS_DIR" 0700 root:root
+  if (( OPT_DRY_RUN )); then
+    if [[ -n "$targets" ]]; then lib_info "[dry-run] would point ${alias} at ${targets}"
+    else lib_info "[dry-run] would remove the alias ${alias}"; fi
+    return 0
+  fi
+  tmp="$(lib_mktemp)"
+  {
+    printf '# Managed by lompstack - aliases of %s\n' "$d"
+    if [[ -s "$f" ]]; then awk -F'\t' -v a="$alias" '!/^[[:space:]]*#/ && NF >= 2 && $1 != a' "$f"; fi
+    [[ -n "$targets" ]] && printf '%s\t%s\n' "$alias" "$targets"
+  } >"$tmp"
+  lib_write_file "$f" 0600 root:root <"$tmp"
+  rm -f "$tmp"
+  return 0
+}
+
+lib_mail_alias_add_main() {   # alias target[,target...]
+  local alias="${1:-}" targets="${2:-}" d="" t=""
+  alias="${alias,,}"
+  lib_mail_address_valid "$alias" || lib_die "Invalid alias '${alias:-none}'" "" "lomp mail alias add sales@example.com info@example.com"
+  [[ -n "$targets" ]] || lib_die "Where should ${alias} go?" "" "lomp mail alias add ${alias} info@example.com"
+  d="${alias#*@}"
+  lib_mail_domain_enabled "$d" || lib_die "Mail is not on for ${d}" "" "lomp mail enable ${d}"
+  local clean=""
+  for t in ${targets//,/ }; do
+    lib_mail_address_valid "$t" || lib_die "Invalid target '${t}'" "" "an address, or several separated by commas"
+    clean="${clean:+${clean},}${t}"
+  done
+  [[ -n "$clean" ]] || lib_die "Where should ${alias} go?" "" "lomp mail alias add ${alias} info@${d}"
+  if lib_mail_box_exists "$alias"; then lib_die "${alias} is a mailbox, not an alias" "" "lomp mail box del ${alias} first"; fi
+  # what is stored is what was checked, token by token: the string the operator typed may hold
+  # a line break, and a second line in that file is an entry for a domain nobody checked
+  lib_mail_alias_set "$d" "$alias" "$clean"
+  lib_mail_tables_apply || lib_die "The mail tables could not be rebuilt" "${MAIL_LAST_ERROR}" "lomp mail status"
+  lib_ok "${alias} now goes to ${targets}"
+  return 0
+}
+
+lib_mail_alias_del_main() {   # alias
+  local alias="${1:-}" d="" f=""
+  alias="${alias,,}"
+  lib_mail_address_valid "$alias" || lib_die "Invalid alias '${alias:-none}'" "" "lomp mail alias del sales@example.com"
+  d="${alias#*@}"
+  f="$(lib_mail_alias_file "$d")"
+  if [[ ! -s "$f" ]] || ! awk -F'	' -v k="$alias" '$1 == k {found=1} END{exit !found}' "$f"; then
+    lib_die "No such alias: ${alias}" "" "lomp mail alias list ${d}"
+  fi
+  lib_mail_alias_set "$d" "$alias" ""
+  lib_mail_tables_apply || lib_warn "the mail tables could not be rebuilt: ${MAIL_LAST_ERROR}"
+  lib_ok "${alias} is gone"
+  return 0
+}
+
+lib_mail_alias_list_main() {   # [domain]
+  local d="" f=""
+  if (( OPT_JSON )); then
+    {
+      while read -r d; do
+        [[ -n "$d" ]] || continue
+        f="$(lib_mail_alias_file "$d")"
+        [[ -s "$f" ]] || continue
+        awk -F'\t' -v d="$d" '!/^[[:space:]]*#/ && NF >= 2 {printf "{\"alias\":\"%s\",\"targets\":\"%s\",\"domain\":\"%s\"}\n", $1, $2, d}' "$f"
+      done < <(if [[ -n "${1:-}" ]]; then printf '%s\n' "${1,,}"; else lib_mail_domains; fi)
+    } | jq -s '.'
+    return 0
+  fi
+  printf '  %-34s %s\n' "ALIAS" "GOES TO"
+  while read -r d; do
+    [[ -n "$d" ]] || continue
+    f="$(lib_mail_alias_file "$d")"
+    [[ -s "$f" ]] || continue
+    awk -F'\t' '!/^[[:space:]]*#/ && NF >= 2 {printf "  %-34s %s\n", $1, $2}' "$f"
+  done < <(if [[ -n "${1:-}" ]]; then printf '%s\n' "${1,,}"; else lib_mail_domains; fi)
+  return 0
+}
+
+# =============================================================================
+#  What has to be in DNS
+# =============================================================================
+# One function produces the table; printing, --json and --check all read it, so what the
+# operator is told and what lomp checks can never drift apart.
+# Fields: type <TAB> name <TAB> value <TAB> note
+_mail_dns_records() {   # domain
+  local d="$1" ip="" ipshow="" sel="" dkim="" relay=""
+  # not --no-net: with it the analysis falls back to the address of the local interface, and on
+  # a NAT'd server that is an address nobody on the internet can reach. Printed into an A
+  # record and an SPF record it would be a mail server that quietly cannot be delivered to.
+  lib_system_analyze >/dev/null 2>&1 || true
+  ip="${SYS_PUBLIC_IPV4:-}"
+  case "$ip" in
+    10.*|127.*|169.254.*|192.168.*|172.1[6-9].*|172.2[0-9].*|172.3[01].*|100.6[4-9].*|100.[7-9][0-9].*|100.1[01][0-9].*|100.12[0-7].*) ip="" ;;
+  esac
+  # spelled out here rather than inline: the word inside ${x:-word} is quote-processed even
+  # within double quotes, so one apostrophe there swallows every line up to the next one
+  ipshow="$ip"
+  [[ -n "$ipshow" ]] || ipshow="<the IPv4 address of this server>"
+  sel="$(lib_mail_selector "$d")"
+  dkim="$(lib_mail_dkim_public "$d" || printf '')"
+  printf 'A\tmail.%s\t%s\tDNS only - never proxied: a mail client has to reach this server itself\n' "$d" "$ipshow"
+  printf 'MX\t%s\t10 mail.%s.\tthe dot at the end belongs to the record\n' "$d" "$d"
+  relay="$(lib_mail_relay_get host)"
+  if [[ -n "$relay" ]]; then
+    # the mail leaves through somebody else's server, so their hosts have to be in the record
+    # as well, or everything this domain sends fails SPF at the far end
+    printf 'TXT\t%s\tv=spf1 ip4:%s include:%s ~all\tone SPF record per domain, never two; the include covers the relay this server sends through\n' "$d" "$ipshow" "${relay#*.}"
+  else
+    printf 'TXT\t%s\tv=spf1 ip4:%s ~all\tone SPF record per domain, never two\n' "$d" "$ipshow"
+  fi
+  if [[ -n "$dkim" ]]; then
+    printf 'TXT\t%s._domainkey.%s\t%s\tpaste it as one line; the provider splits it\n' "$sel" "$d" "$dkim"
+  else
+    printf 'TXT\t%s._domainkey.%s\t<no DKIM key yet>\trun: lomp mail enable %s\n' "$sel" "$d" "$d"
+  fi
+  printf 'TXT\t_dmarc.%s\tv=DMARC1; p=none; rua=mailto:dmarc@%s; adkim=r; aspf=r\tstart at p=none and read the reports before tightening it\n' "$d" "$d"
+  printf 'SRV\t_imaps._tcp.%s\t0 1 993 mail.%s.\toptional: mail clients find the settings by themselves\n' "$d" "$d"
+  printf 'SRV\t_submissions._tcp.%s\t0 1 465 mail.%s.\toptional\n' "$d" "$d"
+  printf 'SRV\t_imap._tcp.%s\t0 0 0 .\toptional: says there is no plain IMAP here\n' "$d"
+  printf 'SRV\t_pop3._tcp.%s\t0 0 0 .\toptional: says there is no POP3 here\n' "$d"
+  return 0
+}
+
+lib_mail_dns_print() {   # domain
+  local d="$1" t="" n="" v="" note=""
+  lib_heading "DNS records for ${d}"
+  lib_note "Add these at your DNS provider. At Cloudflare every one of them is grey-cloud (DNS only);"
+  lib_note "a proxied MX or mail name cannot receive mail."
+  printf '\n'
+  while IFS=$'\t' read -r t n v note; do
+    [[ -n "$t" ]] || continue
+    printf '  %-4s %-38s %s\n' "$t" "$n" "$v"
+    [[ -n "$note" ]] && printf '       %s%s%s\n' "$C_DIM" "$note" "$C_RST"
+  done < <(_mail_dns_records "$d")
+  printf '\n'
+  lib_note "And one your provider sets, not your DNS: the PTR record of $(lib_mail_host)'s address"
+  lib_note "must say $(lib_mail_host). 'lomp mail test' tells you whether it does."
+  return 0
+}
+
+lib_mail_dns_json() {   # domain
+  local d="$1"
+  _mail_dns_records "$d" | jq -R -s --arg domain "$d" '
+    {domain: $domain,
+     records: [ split("\n")[] | select(length > 0) | split("\t")
+                | {type: .[0], name: .[1], value: .[2], note: .[3]} ]}'
+}
+
+# What DNS actually says today. Asked of the zone's own name servers, because a record that
+# was added a minute ago is not in a cache yet and "not there" and "wrong" are different
+# answers to an operator.
+_mail_dns_query() {   # type name -> the value(s), one per line
+  local t="$1" n="$2" ns="" out=""
+  lib_have dig || return 1
+  ns="$(dig +short SOA "$n" 2>/dev/null | awk '{print $1; exit}' || true)"
+  [[ -n "$ns" ]] || ns="$(dig +short SOA "${n#*.}" 2>/dev/null | awk '{print $1; exit}' || true)"
+  if [[ -n "$ns" ]]; then out="$(dig +short "@${ns}" "$t" "$n" 2>/dev/null || true)"; fi
+  [[ -n "$out" ]] || out="$(dig +short "$t" "$n" 2>/dev/null || true)"
+  # a TXT record longer than 255 bytes comes back as several quoted strings
+  printf '%s' "$out" | sed 's/" *"//g; s/^"//; s/"$//' || true
+  return 0
+}
+
+# What DNS says today, judged the way a receiving server judges it: the lowest MX wins, and a
+# second SPF record is the same as none.
+_mail_dns_say() {   # colour type name detail
+  printf '  %s%-4s %-38s %s%s\n' "$1" "$2" "$3" "$4" "$C_RST"
+}
+
+lib_mail_dns_check() {   # domain -> 0 when everything is in place
+  local d="$1" t="" n="" v="" note="" got="" bad=0 want="" best="" count=0
+  lib_have dig || { lib_warn "dig is not installed; DNS cannot be checked"; return 1; }
+  lib_heading "DNS check for ${d}"
+  while IFS=$'\t' read -r t n v note; do
+    [[ -n "$t" ]] || continue
+    [[ "$t" == "SRV" ]] && continue                      # optional, not worth an alarm
+    [[ "$v" == "<no DKIM key yet>" ]] && continue
+    got="$(_mail_dns_query "$t" "$n")"
+    if [[ -z "$got" ]]; then
+      _mail_dns_say "$C_YEL" "$t" "$n" "missing"
+      bad=1
+      continue
+    fi
+    case "$t" in
+      MX)
+        # a domain moving away from another provider usually keeps its old MX at a lower
+        # number, and the lowest number is where the mail goes: "ours is in the list" is
+        # not the question
+        want="${v#* }"; want="${want%.}"
+        best="$(sort -n <<<"$got" | head -1 | awk '{print $2}' | sed 's/[.]$//')"
+        count="$(grep -c . <<<"$got" || true)"
+        if [[ "$best" == "$want" ]]; then
+          _mail_dns_say "$C_GRN" "$t" "$n" "ok"
+          (( count > 1 )) && _mail_dns_say "$C_YEL" "$t" "$n" "another mail server is also listed: $(tr '\n' ' ' <<<"$got")"
+        else
+          _mail_dns_say "$C_RED" "$t" "$n" "mail goes to ${best:-somewhere else} first"
+          bad=1
+        fi
+        ;;
+      TXT)
+        if [[ "$v" == v=spf1* ]]; then
+          # two SPF records are the same as none: a receiver that finds both fails the check
+          count="$(grep -c '^v=spf1' <<<"$got" || true)"
+          if (( count > 1 )); then
+            _mail_dns_say "$C_RED" "$t" "$n" "${count} SPF records; a domain may have only one"
+            bad=1
+          elif [[ "$got" == *"$v"* ]]; then
+            _mail_dns_say "$C_GRN" "$t" "$n" "ok"
+          else
+            _mail_dns_say "$C_YEL" "$t" "$n" "says: $(tr '\n' ' ' <<<"$got" | cut -c1-60)"
+            bad=1
+          fi
+        elif [[ "$got" == *"$v"* ]]; then
+          _mail_dns_say "$C_GRN" "$t" "$n" "ok"
+        else
+          _mail_dns_say "$C_RED" "$t" "$n" "says: $(tr '\n' ' ' <<<"$got" | cut -c1-60)"
+          bad=1
+        fi
+        ;;
+      *)
+        if [[ "$got" == *"${v%.}"* ]]; then
+          _mail_dns_say "$C_GRN" "$t" "$n" "ok"
+        else
+          _mail_dns_say "$C_RED" "$t" "$n" "says: $(tr '\n' ' ' <<<"$got")"
+          bad=1
+        fi
+        ;;
+    esac
+  done < <(_mail_dns_records "$d")
+  # a mail name behind Cloudflare's proxy answers with Cloudflare's address, and no mail
+  # client can reach it there
+  got="$(lib_resolve A "mail.${d}" | tr '\n' ' ')"
+  if [[ -n "$got" ]] && lib_cf_ips_are_cloudflare "$got"; then
+    _mail_dns_say "$C_RED" "A" "mail.${d}" "resolves to Cloudflare (${got% }): turn the proxy off for it"
+    bad=1
+  fi
+  (( bad )) && lib_note "Add what is missing, then run this again; DNS takes a few minutes to spread."
+  return "$bad"
+}
+
+# postmaster, abuse and dmarc have to arrive somewhere: the first mailbox of the domain gets
+# them unless the operator has already said otherwise.
+lib_mail_domain_aliases_seed() {   # domain mailbox-address
+  local d="$1" box="$2" f="" a=""
+  f="$(lib_mail_alias_file "$d")"
+  for a in postmaster abuse dmarc; do
+    if [[ -s "$f" ]] && awk -F'\t' -v k="${a}@${d}" '$1 == k {found=1} END{exit !found}' "$f"; then continue; fi
+    lib_mail_alias_set "$d" "${a}@${d}" "$box"
+  done
+  return 0
+}
+
 # =============================================================================
 #  Commands
 # =============================================================================
@@ -1449,18 +2431,76 @@ lib_mail_usage() {
   cat <<'EOF'
 Usage: lomp mail <command>
 
+  enable <domain> [--mailbox info] [--quota 2G]
+                         give a site its own mail: DKIM key, certificate, DNS to add
+  disable <domain> [--delete-data]
+                         stop taking mail for it: no delivery and no login, but every message
+                         stays on disk and enabling it again restores the mailboxes
+
+  box add <user@domain> [--quota 2G]    the password is read from stdin or asked for, never
+  box passwd <user@domain>              taken from the command line
+  box quota <user@domain> <2G|0>
+  box list [domain] | box del <user@domain> | box kick <user@domain>
+
+  alias add <alias@domain> <target[,target]>   an address that goes somewhere else
+  alias del <alias@domain> | alias list [domain]
+
+  dns <domain> [--json] [--check]       what to put in DNS, and whether it is there yet
+  cert [domain]                         ask again for a certificate that did not come
+
   status                 what the mail stack is doing, and whether it can send
   test                   check reverse DNS and whether outgoing port 25 is open
   queue                  show the Postfix queue
-  cert                   ask for the mail host's certificate (again)
   regenerate             rewrite every mail configuration file and restart the stack
   relay set --host H [--port 587] --user U
                          send outgoing mail through another server; the password is read
                          from standard input, never from an argument
   relay off              send outgoing mail directly again
-
-Mail for a domain arrives with the next release: "lomp mail enable example.com".
 EOF
+}
+
+_mail_box_cmd() {
+  local action="${1:-list}"
+  shift || true
+  case "$action" in
+    add)    lib_mail_box_add_main "$@" ;;
+    passwd) lib_mail_box_passwd_main "$@" ;;
+    quota)  lib_mail_box_quota_main "$@" ;;
+    del|delete|remove) lib_mail_box_del_main "$@" ;;
+    kick)   lib_mail_box_kick_main "$@" ;;
+    list)   lib_mail_box_list_main "${1:-}" ;;
+    *)      lib_die "Unknown mailbox command: ${action}" "" "lomp mail box add info@example.com" ;;
+  esac
+}
+
+_mail_alias_cmd() {
+  local action="${1:-list}"
+  shift || true
+  case "$action" in
+    add)  lib_mail_alias_add_main "$@" ;;
+    del|delete|remove) lib_mail_alias_del_main "$@" ;;
+    list) lib_mail_alias_list_main "${1:-}" ;;
+    *)    lib_die "Unknown alias command: ${action}" "" "lomp mail alias add sales@example.com info@example.com" ;;
+  esac
+}
+
+_mail_dns_cmd() {
+  local d="${1:-}" a="" check=0
+  shift || true
+  [[ -n "$d" ]] || lib_die "Which domain?" "" "lomp mail dns example.com"
+  d="${d,,}"
+  lib_domain_registered "$d" || lib_die "No site called ${d} on this server" "" "lomp list"
+  while (($# > 0)); do
+    a="$1"; shift
+    case "$a" in
+      --check) check=1 ;;
+      --json)  OPT_JSON=1 ;;
+      *) lib_die "Unknown option for 'mail dns': ${a}" "" "lomp mail dns example.com --check" ;;
+    esac
+  done
+  if (( OPT_JSON )); then lib_mail_dns_json "$d"; return 0; fi
+  if (( check )); then lib_mail_dns_check "$d" || exit 1; return 0; fi
+  lib_mail_dns_print "$d"
 }
 
 _mail_relay_cmd() {
@@ -1492,8 +2532,23 @@ lib_mail_main() {
                 lib_mail_test_report ;;
     queue)      lib_have postqueue || lib_die "Postfix is not installed" "" "lomp install --with-mail"
                 postqueue -p || lib_warn "The Postfix queue could not be read (is postfix running?)" ;;
+    enable)     lib_mail_enable_main "$@" ;;
+    disable)    lib_mail_installed || lib_die "Mail is not installed" "" "lomp install --with-mail"
+                lib_mail_disable_main "$@" ;;
+    box)        lib_mail_installed || lib_die "Mail is not installed" "" "lomp install --with-mail"
+                _mail_box_cmd "$@" ;;
+    alias)      lib_mail_installed || lib_die "Mail is not installed" "" "lomp install --with-mail"
+                _mail_alias_cmd "$@" ;;
+    dns)        lib_mail_installed || lib_die "Mail is not installed" "" "lomp install --with-mail"
+                _mail_dns_cmd "$@" ;;
     cert)       lib_mail_installed || lib_die "Mail is not installed" "" "lomp install --with-mail"
-                lib_mail_cert_ensure "$(lib_mail_host)" ;;
+                if [[ -n "${1:-}" && "${1:0:2}" != "--" ]]; then
+                  lib_mail_domain_enabled "${1,,}" || lib_die "Mail is not on for ${1}" "" "lomp mail enable ${1}"
+                  lib_mail_domain_cert_ensure "${1,,}"
+                  lib_mail_tables_apply || lib_warn "the mail tables could not be rebuilt: ${MAIL_LAST_ERROR}"
+                else
+                  lib_mail_cert_ensure "$(lib_mail_host)"
+                fi ;;
     regenerate) lib_mail_installed || lib_die "Mail is not installed" "" "lomp install --with-mail"
                 lib_mail_dirs_ensure
                 lib_mail_apply "$(lib_mail_host)" || lib_die "The mail configuration could not be applied" "${MAIL_LAST_ERROR}" "lomp mail status"

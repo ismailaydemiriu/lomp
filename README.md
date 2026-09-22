@@ -481,8 +481,32 @@ What the configuration insists on:
   speaks the milter protocol decides which account a message comes from, and that is what a
   DKIM signature is based on.
 
-Giving a domain its own mailboxes (`lomp mail enable example.com`, DKIM records, webmail)
-comes in the next release; what is here now is the server itself.
+### Giving a domain its own mail
+
+```bash
+sudo lomp mail enable example.com --mailbox info --quota 2G   # or: lomp add example.com --mail
+printf '%s' "$PASS" | sudo lomp mail box add sales@example.com
+sudo lomp mail alias add contact@example.com info@example.com
+sudo lomp mail dns example.com            # what to put in DNS
+sudo lomp mail dns example.com --check    # and whether it is there yet
+```
+
+Enabling mail for a domain creates its DKIM key, asks for a certificate for `mail.example.com`,
+points `postmaster@`, `abuse@` and `dmarc@` at the first mailbox, and prints the records to
+publish: an A record for `mail.example.com`, an MX, one SPF record, the DKIM key, and a DMARC
+record that starts at `p=none` so you can read the reports before tightening it. **All of them
+are DNS only** — a proxied MX or mail name cannot receive mail.
+
+A mailbox password is read from standard input or a hidden prompt and only its hash is stored;
+nothing on the server can print it back. Mailboxes are reached at `mail.<domain>` — IMAP on 993,
+submission on 465 or 587, user name the full address — and `lomp credentials <domain>` shows the
+settings. `lomp mail disable` stops both delivery and login for a domain while keeping every message on
+disk — enabling it again restores the mailboxes with the passwords they had. Removing the site
+removes its mailboxes, its mail, its key and its certificate, whether or not mail was switched
+off first; the safety backup does not include mail, and `remove` says so before it asks.
+
+The webmail, and writing these DNS records through the Cloudflare API instead of by hand, come
+in the next releases.
 
 ---
 

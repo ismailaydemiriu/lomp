@@ -1052,6 +1052,11 @@ assert_eq "every scalar local is initialised" "" "$bare_locals"
 # A group that ends in "[[ ... ]] && cmd" exits 1 when the test is false. Feeding such a
 # group into a pipeline makes pipefail kill the whole script. This regression guard exists
 # because exactly that bug reached a real server in lib_domain_fail2ban_regen.
+# The word inside ${x:-word} is quote-processed even inside double quotes, so an apostrophe
+# there opens a quoted region that runs to the next one - swallowing whole lines of code with
+# no syntax error. This shipped in the mail DNS table: two records silently disappeared.
+quoted_defaults="$(grep -nE '\$\{[A-Za-z_][A-Za-z0-9_]*:[-=][^}]*'"'" "$ROOT/setup.sh" "$ROOT"/lib/*.sh "$ROOT"/tests/*.sh || true)"
+assert_eq "no apostrophe inside a \${x:-default}" "" "$quoted_defaults"
 pitfalls="$(for f in "$ROOT/setup.sh" "$ROOT"/lib/*.sh "$ROOT"/tests/*.sh; do
   awk -v F="$f" '
     /^[[:space:]]*\}[[:space:]]*\|/ {
@@ -2211,6 +2216,166 @@ assert_has   "that the Linux logins stay switched off" "auth-system" "$_dm"
 assert_has   "the filter socket nobody else may open"  "MAIL_MILTER_GROUP" "$_dm"
 assert_has   "and the certificate running out"      "lib_ssl_days_left" "$_dm"
 assert_has   "doctor runs it"                       "_doc_check_mail" "$(declare -f lib_doctor_run)"
+
+# =============================================================================
+section "a domain of its own: mailboxes, aliases, DKIM"
+# Two domains with mail and one without, so every renderer has to filter.
+_m_state="$TMP/state/domains"
+mkdir -p "$_m_state/alpha.example" "$_m_state/beta.example" "$_m_state/plain.example"
+printf '{"domain":"alpha.example","mail":{"enabled":true,"selector":"lomp202609","quota_default":"2G"}}\n' >"$_m_state/alpha.example/domain.json"
+printf '{"domain":"beta.example","mail":{"enabled":true,"selector":"lomp202510"}}\n' >"$_m_state/beta.example/domain.json"
+printf '{"domain":"plain.example"}\n' >"$_m_state/plain.example/domain.json"
+MAIL_PASSWD_FILE="$TMP/mail-passwd"
+MAIL_ALIAS_DIR="$TMP/mail-aliases"; mkdir -p "$MAIL_ALIAS_DIR"
+MAIL_DKIM_DIR="$TMP/dkim"; mkdir -p "$MAIL_DKIM_DIR"
+MAIL_POSTFIX_DIR="$TMP/pf2"; MAIL_SNI_MAP="$TMP/pf2/sni"; mkdir -p "$MAIL_POSTFIX_DIR"
+printf 'key\n' >"${MAIL_DKIM_DIR}/alpha.example.lomp202609.key"
+printf 'key\n' >"${MAIL_DKIM_DIR}/beta.example.lomp202510.key"
+
+assert_eq "only the domains whose mail is on" "alpha.example beta.example" "$(lib_mail_domains | tr '\n' ' ' | sed 's/ $//')"
+assert_eq "each with the selector it was signed with" "lomp202510" "$(lib_mail_selector beta.example)"
+assert_has "and a dated one where there is none yet" "lomp" "$(lib_mail_selector plain.example)"
+
+lib_mail_passwd_set "info@alpha.example" '{BLF-CRYPT}$2y$05$abcdefghijklmnopqrstuv' "2G"
+lib_mail_passwd_set "sales@alpha.example" '{BLF-CRYPT}$2y$05$second' "500M"
+lib_mail_passwd_set "info@beta.example" '{BLF-CRYPT}$2y$05$third' "1G"
+_pw="$(cat "$MAIL_PASSWD_FILE")"
+# Dovecot keeps the FIRST line for a user and a line with too few fields authenticates but
+# has no mailbox, so the shape is the whole point
+assert_has "the line carries the hash and the quota" 'info@alpha.example:{BLF-CRYPT}$2y$05$abcdefghijklmnopqrstuv::::::userdb_quota_rule=*:storage=2G' "$_pw"
+# fewer than eight fields authenticates but has no mailbox behind it
+assert_true "with the eight fields Dovecot wants" bash -c "(( \$(awk -F: 'NR==1{print NF}' '$MAIL_PASSWD_FILE') >= 8 ))"
+lib_mail_passwd_set "info@alpha.example" '{BLF-CRYPT}$2y$05$changed' "3G"
+assert_eq  "a second password replaces the line, never adds one" 1 "$(grep -c '^info@alpha.example:' "$MAIL_PASSWD_FILE")"
+assert_has "and the new one is what is left" '$2y$05$changed' "$(cat "$MAIL_PASSWD_FILE")"
+assert_eq  "the quota comes back out" "3G" "$(lib_mail_box_quota info@alpha.example)"
+assert_eq  "mailboxes of one domain" "info@alpha.example sales@alpha.example" "$(lib_mail_boxes alpha.example | sort | tr '\n' ' ' | sed 's/ $//')"
+
+lib_mail_alias_set alpha.example "postmaster@alpha.example" "info@alpha.example"
+lib_mail_alias_set alpha.example "team@alpha.example" "info@alpha.example,sales@alpha.example"
+lib_mail_alias_set alpha.example "old@alpha.example" "somebody@outside.example"
+
+_vd="$(lib_mail_render_vdomains)"
+assert_has "a domain with mail is virtual" $'alpha.example\tvirtual' "$_vd"
+assert_lacks "a site without mail is not" "plain.example" "$_vd"
+_vm="$(lib_mail_render_vmailbox)"
+assert_has "every mailbox is listed" $'info@alpha.example\talpha.example/info/Maildir/' "$_vm"
+_va="$(lib_mail_render_valias)"
+assert_has "aliases go in as written" $'team@alpha.example\tinfo@alpha.example,sales@alpha.example' "$_va"
+
+_sn="$(lib_mail_render_senders)"
+# postmap keeps the FIRST of two lines with the same key and only warns, so an address that is
+# both a mailbox and an alias target must arrive on ONE line with both owners
+assert_eq  "one line per address, never two" 1 "$(grep -c '^info@alpha.example' <<<"$_sn")"
+assert_has "a mailbox may send as itself" $'info@alpha.example\tinfo@alpha.example' "$_sn"
+assert_has "an alias may be used by everyone it points at" $'team@alpha.example\tinfo@alpha.example,sales@alpha.example' "$_sn"
+assert_has "including postmaster" $'postmaster@alpha.example\tinfo@alpha.example' "$_sn"
+assert_lacks "an alias that only goes outside gives nobody the right to send as it" "old@alpha.example" "$_sn"
+
+# the certificate blocks only exist for names whose certificate is really on disk: a block
+# pointing at a missing file is a silent failure Dovecot never reports
+mkdir -p "${SSL_DEPLOY_DIR}/_mail_alpha_example"
+printf 'x\n' >"${SSL_DEPLOY_DIR}/_mail_alpha_example/privkey.pem"
+printf 'x\n' >"${SSL_DEPLOY_DIR}/_mail_alpha_example/fullchain.pem"
+_sni="$(lib_mail_render_sni)"
+assert_has "the private key is named first, or the handshake dies" $'mail.alpha.example\t'"${SSL_DEPLOY_DIR}/_mail_alpha_example/privkey.pem, ${SSL_DEPLOY_DIR}/_mail_alpha_example/fullchain.pem" "$_sni"
+assert_lacks "a name with no certificate yet gets no line" "mail.beta.example" "$_sni"
+_dsni="$(lib_mail_render_dovecot_sni)"
+assert_has "Dovecot gets the same name" 'local_name "mail.alpha.example" {' "$_dsni"
+assert_has "with the chain" "ssl_cert = <${SSL_DEPLOY_DIR}/_mail_alpha_example/fullchain.pem" "$_dsni"
+assert_lacks "and nothing for a name without one" "mail.beta.example" "$_dsni"
+assert_eq "the brace is the last thing on its line, or Dovecot refuses the file" 0 \
+  "$(grep -c '{.*[^[:space:]]' <<<"$_dsni" || true)"
+
+_sel="$(lib_mail_render_selectors)"
+assert_has "a domain with a key gets a selector line" "alpha.example lomp202609" "$_sel"
+rm -f "${MAIL_DKIM_DIR}/beta.example.lomp202510.key"
+assert_lacks "one without a key does not" "beta.example" "$(lib_mail_render_selectors)"
+
+# A password that cannot be hashed safely must be refused before it reaches doveadm: doveadm
+# reads the password twice from stdin and, when the two reads differ, hashes the EMPTY
+# password with a zero exit status.
+assert_eq "an empty password is refused"        1 "$(run_isolated lib_mail_hash_password "")"
+assert_eq "a short one is refused"              1 "$(run_isolated lib_mail_hash_password "abc")"
+assert_eq "one with a line break is refused"    1 "$(run_isolated lib_mail_hash_password "$(printf 'a\nb')")"
+assert_eq "one with a carriage return too"      1 "$(run_isolated lib_mail_hash_password "$(printf 'goodpassword\r')")"
+assert_eq "and one past bcrypt's 72 bytes"      1 "$(run_isolated lib_mail_hash_password "$(printf 'a%.0s' {1..80})")"
+_hp="$(declare -f lib_mail_hash_password)"
+assert_has "the password is fed to doveadm twice" '%s\n%s\n' "$_hp"
+assert_has "and the hash is checked against it afterwards" "doveadm pw -t" "$_hp"
+_br="$(declare -f lib_mail_box_remove)"
+assert_has "removing a mailbox takes the line away first" "awk -F: -v u=" "$_br"
+assert_has "then waits for Dovecot to notice" "sleep 1" "$_br"
+assert_has "then closes what is still open" "doveadm kick" "$_br"
+
+_dns="$(_mail_dns_records alpha.example)"
+assert_has "the mail name"        $'A\tmail.alpha.example' "$_dns"
+assert_has "the MX record"        $'MX\talpha.example\t10 mail.alpha.example.' "$_dns"
+assert_has "one SPF record"       "v=spf1 ip4:" "$_dns"
+assert_has "the DKIM name"        "lomp202609._domainkey.alpha.example" "$_dns"
+assert_has "a DMARC record that starts gently" "v=DMARC1; p=none;" "$_dns"
+assert_has "and says what must never be proxied" "DNS only" "$_dns"
+assert_eq  "every row has four fields" 0 "$(awk -F'\t' 'NF != 4' <<<"$_dns" | wc -l | tr -d ' ')"
+assert_true "the JSON says the same" bash -c "jq -e '.records | length >= 5' <<<'$(lib_mail_dns_json alpha.example)' >/dev/null"
+# the public half is read from the private key: generating it again would replace a key whose
+# public half is already published, and every signature after that would fail
+assert_has "the DKIM record comes from the key on disk" "openssl rsa" "$(declare -f lib_mail_dkim_public)"
+assert_has "and a key is never overwritten" '[[ -s "$key" ]] && return 0' "$(declare -f lib_mail_dkim_ensure)"
+
+# A mailbox line is a login that works from anywhere; the flag in domain.json is not what
+# keeps anyone out. So what a removal takes away follows what is on disk.
+MAIL_DISABLED_DIR="$TMP/mail-disabled"
+assert_true  "a domain with mailboxes has traces" lib_mail_domain_has_traces alpha.example
+assert_false "one that never had mail has none"   lib_mail_domain_has_traces nothing.example
+_dis="$(declare -f lib_mail_disable_main)"
+assert_has "turning mail off puts the logins beyond use" "lib_mail_boxes_park" "$_dis"
+assert_has "and takes the certificate cron with it"      'lib_cron_remove "mail-cert:' "$_dis"
+assert_has "the removal follows the traces, not the flag" "lib_mail_domain_has_traces" "$(declare -f lib_domain_remove_main)"
+# parked lines keep their hash, so enabling the domain again asks nobody for a new password
+lib_mail_boxes_park alpha.example
+assert_false "a parked mailbox is out of the live store" lib_mail_box_exists "sales@alpha.example"
+assert_true  "but it is not lost"                        test -s "${MAIL_DISABLED_DIR}/alpha.example.passwd"
+lib_mail_boxes_unpark alpha.example
+assert_true  "and comes back with the hash it had"       lib_mail_box_exists "sales@alpha.example"
+assert_eq    "and its quota"                             "500M" "$(lib_mail_box_quota sales@alpha.example)"
+
+# an address is either a mailbox or an alias: Postfix resolves the alias first, so a mailbox
+# of the same name would never see a message
+_ba="$(declare -f lib_mail_box_add_main)"
+assert_has "a mailbox may not be created over an alias" "is already an alias" "$_ba"
+_bd="$(declare -f lib_mail_box_del_main)"
+assert_has "deleting a mailbox repairs the aliases that pointed at it" "lib_mail_alias_forget_target" "$_bd"
+lib_mail_alias_set alpha.example "team@alpha.example" "info@alpha.example,sales@alpha.example"
+lib_mail_alias_forget_target alpha.example "sales@alpha.example"
+assert_has   "the target is taken out"     $'team@alpha.example\tinfo@alpha.example' "$(cat "$(lib_mail_alias_file alpha.example)")"
+lib_mail_alias_forget_target alpha.example "info@alpha.example"
+assert_lacks "and an alias with nowhere to go is removed" "team@alpha.example" "$(cat "$(lib_mail_alias_file alpha.example)")"
+
+# the local part may not carry the recipient delimiter, or user+tag would stop reaching user
+assert_false "no plus in a mailbox name"  lib_mail_local_valid "info+news"
+assert_true  "the rest still passes"      lib_mail_local_valid "first.last-2"
+# an address is compared, not matched: a dot is a dot
+lib_mail_passwd_set "johnxdoe@alpha.example" '{BLF-CRYPT}$2y$05$x' "1G"
+assert_false "a dot in an address is not a wildcard" lib_mail_box_exists "john.doe@alpha.example"
+
+# the reason a password was refused has to survive the call that refused it
+_ap="$(declare -f _mail_ask_password)"
+assert_has "the password is read in this shell, not a subshell" "lib_mail_read_password >" "$_ap"
+assert_has "and so is the hashing"                              "lib_mail_hash_password " "$_ap"
+
+# a private address in an A or SPF record is a mail server nobody can deliver to
+SYS_PUBLIC_IPV4="10.0.0.5"
+assert_lacks "a NAT address is never printed as the server's" "10.0.0.5" "$(_mail_dns_records alpha.example)"
+SYS_PUBLIC_IPV4="203.0.113.9"
+assert_has   "a real one is" "203.0.113.9" "$(_mail_dns_records alpha.example)"
+# where a relay carries the mail, its senders belong in SPF too
+MAIL_RELAY_INFO="$TMP/mail-relay.info"
+printf 'HOST=smtp.provider.example\nPORT=587\nUSER=u\n' >"$MAIL_RELAY_INFO"
+assert_has "the relay is included in SPF" "include:provider.example" "$(_mail_dns_records alpha.example)"
+rm -f "$MAIL_RELAY_INFO"
+
+MAIL_PASSWD_FILE="$TMP/passwd"; MAIL_ALIAS_DIR="$TMP/aliases"; MAIL_DKIM_DIR="$TMP/dkim-unused"
+rm -rf "$_m_state/alpha.example" "$_m_state/beta.example" "$_m_state/plain.example"
 
 # =============================================================================
 section "a secret never reaches a command line"

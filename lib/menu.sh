@@ -46,6 +46,8 @@ COMMANDS
       --memory 256M  --upload 64M  --php-children N
       --proxy 127.0.0.1:3000  --static  --wordpress  --cloudflare  --no-db
       --wildcard  --staging  --hsts-preload
+      --mail [--mailbox info] [--mail-quota 2G]
+                                Give the site its own mail while creating it
       --wp-title "Title" --wp-admin admin --wp-email a@b.c --wp-locale en_US
       --node [--port N] [--start "npm start" | --script dist/main.js] [--git URL [--branch B]]
                                 Node.js site: PM2 runs the app as the site's user and
@@ -77,8 +79,18 @@ COMMANDS
   app env <domain> list [--show] | set NAME | unset NAME... | import-db
                                 Values come from stdin or a hidden prompt, never from
                                 the command line; import-db adds DB_* and DATABASE_URL
+  mail enable <domain> [--mailbox info] [--quota 2G]
+                                Give a site its own mail: DKIM key, certificate for
+                                mail.<domain>, and the DNS records to add
+  mail disable <domain> [--delete-data]
+  mail box add|passwd|quota|list|del|kick <user@domain>
+                                Passwords come from stdin or a hidden prompt, never from
+                                the command line; "kick" ends the open sessions of a mailbox
+  mail alias add|del|list <alias@domain> [target,...]
+  mail dns <domain> [--check] [--json]   What to put in DNS, and whether it is there
   mail status|test|queue        The mail stack: what runs, reverse DNS, outgoing port 25
-  mail cert|regenerate          Ask for the mail host's certificate / rewrite every file
+  mail cert [domain]            Ask again for a certificate that did not come
+  mail regenerate               Rewrite every mail configuration file and restart the stack
   mail relay set --host H [--port 587] --user U | relay off
                                 Send outgoing mail through another server where port 25
                                 is blocked; the password is read from stdin
@@ -258,6 +270,7 @@ lib_menu_main() {
     _menu_item  5 "Databases"
     _menu_item  6 "Node.js apps (PM2) and path proxies"
     _menu_item  7 "Remove a site"
+    _menu_item 20 "Mail: domains, mailboxes, DNS"
     _menu_group "SERVER"
     _menu_item  8 "Status"
     _menu_item  9 "Health check"
@@ -270,7 +283,7 @@ lib_menu_main() {
     _menu_item 15 "Update lompstack"
     _menu_item 16 "Re-tune to hardware"
     _menu_item 17 "Notifications"
-    _menu_item 18 "Optional components (Node.js, Python, Netdata)"
+    _menu_item 18 "Optional components (Node.js, Python, Netdata, Mail)"
     _menu_item 19 "Command reference"
     _menu_item  0 "Exit"
     printf '\n%sChoice: %s' "$C_BLD" "$C_RST"
@@ -284,6 +297,7 @@ lib_menu_main() {
       5) _menu_databases ;;
       6) _menu_apps ;;
       7) _menu_remove_site ;;
+      20) _menu_mail ;;
       8) _menu_run status ;;
       9) _menu_run doctor ;;
       10) _menu_run panel ;;
@@ -338,6 +352,17 @@ _menu_add_site() {
 
   _menu_ask email "Contact e-mail" "$DEFAULT_EMAIL"
   [[ -n "$email" ]] && args+=(--email "$email")
+
+  # only where this server actually runs mail; otherwise the question is an offer it cannot keep
+  if lib_mail_installed; then
+    local mail="" mailbox=""
+    _menu_ask mail "Give this site its own mail (mailboxes at @${domain})? (y/n)" "n"
+    if [[ "${mail,,}" == y* ]]; then
+      _menu_ask mailbox "First mailbox name (before the @)" "info"
+      args+=(--mail)
+      [[ -n "$mailbox" ]] && args+=(--mailbox "$mailbox")
+    fi
+  fi
 
   _menu_run add "${args[@]}"
 }
@@ -582,6 +607,57 @@ _menu_remove_site() {
   _menu_ask keep "Keep the files? (y/n)" "n"
   [[ "${keep,,}" == y* ]] && args+=(--keep-files)
   _menu_run remove "${args[@]}"
+}
+
+_menu_mail() {
+  local choice="" domain="" box="" quota="" alias="" target=""
+  while true; do
+    if ! lib_mail_installed; then
+      printf '\n  The mail server is not installed yet. Optional components (18) installs it.\n'
+      _menu_pause
+      return 0
+    fi
+    printf '\n %sMAIL%s   (this server sends as %s)\n' "$C_BLD" "$C_RST" "$(lib_mail_host)"
+    _menu_rule
+    printf '  %s1%s) Which sites have mail, and their mailboxes\n' "$C_CYN" "$C_RST"
+    printf '  %s2%s) Turn mail on for a site\n' "$C_CYN" "$C_RST"
+    printf '  %s3%s) Add a mailbox\n' "$C_CYN" "$C_RST"
+    printf '  %s4%s) Change a mailbox password\n' "$C_CYN" "$C_RST"
+    printf '  %s5%s) Aliases and forwards\n' "$C_CYN" "$C_RST"
+    printf '  %s6%s) What to put in DNS (and whether it is there)\n' "$C_CYN" "$C_RST"
+    printf '  %s7%s) Can this server send? (reverse DNS, port 25)\n' "$C_CYN" "$C_RST"
+    printf '  %s8%s) Turn mail off for a site\n' "$C_CYN" "$C_RST"
+    printf '  %s0%s) Back\n' "$C_CYN" "$C_RST"
+    printf '\n%sChoice: %s' "$C_BLD" "$C_RST"
+    read -r choice </dev/tty || return 0
+    case "$choice" in
+      1) _menu_run mail box list ;;
+      2) domain="$(_menu_pick_domain)" || { _menu_pause; continue; }
+         _menu_ask box 'First mailbox name, or a dash for none' "info"
+         _menu_ask quota "Mailbox size" "2G"
+         if [[ -n "$box" && "$box" != "-" ]]; then _menu_run mail enable "$domain" --mailbox "$box" --quota "$quota"
+         else _menu_run mail enable "$domain"; fi ;;
+      3) domain="$(_menu_pick_domain)" || { _menu_pause; continue; }
+         _menu_ask box "Mailbox name (before the @)" "info"
+         _menu_ask quota "Mailbox size" "2G"
+         [[ -n "$box" ]] && _menu_run mail box add "${box}@${domain}" --quota "$quota" ;;
+      4) _menu_ask box "Which address?"
+         [[ -n "$box" ]] && _menu_run mail box passwd "$box" ;;
+      5) _menu_ask alias "Alias address (empty to only list them)"
+         if [[ -z "$alias" ]]; then _menu_run mail alias list
+         else
+           _menu_ask target "Where should it go? (an address, or several with commas)"
+           [[ -n "$target" ]] && _menu_run mail alias add "$alias" "$target"
+         fi ;;
+      6) domain="$(_menu_pick_domain)" || { _menu_pause; continue; }
+         _menu_run mail dns "$domain" --check ;;
+      7) _menu_run mail test ;;
+      8) domain="$(_menu_pick_domain)" || { _menu_pause; continue; }
+         _menu_run mail disable "$domain" ;;
+      0|q|Q|"") return 0 ;;
+      *) printf '%sPick a number from the list.%s\n' "$C_YEL" "$C_RST" ;;
+    esac
+  done
 }
 
 # Optional components are never installed unless asked for, on the command line with

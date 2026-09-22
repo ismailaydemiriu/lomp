@@ -12,6 +12,7 @@ D_EMAIL="" D_CREATED="" D_STATUS="" D_DB_NAME="" D_DB_USER="" D_WP=0 D_BACKUP_LA
 # ---- add-only options ---------------------------------------------------------
 # Every new site gets a database and its own MariaDB user by default; --no-db opts out.
 DOM_OPT_WP_TITLE="" DOM_OPT_WP_ADMIN="admin" DOM_OPT_WP_EMAIL="" DOM_OPT_WP_LOCALE="en_US" DOM_OPT_WITH_DB=1
+DOM_OPT_MAIL=0 DOM_OPT_MAILBOX="" DOM_OPT_MAIL_QUOTA=""
 DOMAIN_CREATED_HOME=0
 DOMAIN_CREATED_USER=0
 
@@ -191,6 +192,9 @@ lib_domain_parse_add_args() {
       --static)       D_MODE="static" ;;
       --wordpress)    D_MODE="wordpress"; DOM_OPT_WITH_DB=1 ;;
       --with-db)      DOM_OPT_WITH_DB=1 ;;
+      --mail)         DOM_OPT_MAIL=1 ;;
+      --mailbox)      DOM_OPT_MAIL=1; DOM_OPT_MAILBOX="${1:-}"; shift ;;
+      --mail-quota)   DOM_OPT_MAIL=1; DOM_OPT_MAIL_QUOTA="${1:-}"; shift ;;
       --no-db)        DOM_OPT_WITH_DB=0 ;;
       --cloudflare)   D_CLOUDFLARE=1 ;;
       --wildcard)     D_SSL_WILDCARD=1 ;;
@@ -259,6 +263,7 @@ lib_domain_add_main() {
   (( DOM_OPT_WITH_DB )) && total=$((total + 1))
   [[ "$D_MODE" == "wordpress" ]] && total=$((total + 1))
   (( APP_OPT_NODE )) && total=$((total + 1))
+  (( DOM_OPT_MAIL )) && total=$((total + 1))
   lib_steps_begin "$total"
   lib_rollback_clear
   lib_system_profile
@@ -354,7 +359,27 @@ lib_domain_add_main() {
     lib_app_provision_new
   fi
 
-  # ---- 10 summary ----------------------------------------------------------
+  # ---- 10 mail -------------------------------------------------------------
+  # after lib_rollback_clear on purpose: the site is live by now, and mail that will not come
+  # up must leave it that way. Whatever goes wrong here is a warning and a command to run.
+  if (( DOM_OPT_MAIL )); then
+    lib_step "Mail for ${domain}"
+    local -a _mail_args=("$domain" --yes)
+    # --with-mail is how a mail server gets installed, deliberately and with its own name.
+    # "add --mail" on a server that has none must not do it as a side effect of --yes.
+    if ! lib_mail_installed; then
+      lib_warn "This server does not run mail yet, so ${domain} did not get any"
+      lib_note "Install it once, with the name it will send as: lomp install --with-mail --mail-hostname mail.example.com"
+      DOM_OPT_MAIL=0
+    fi
+    [[ -n "$DOM_OPT_MAILBOX" ]] && _mail_args+=(--mailbox "$DOM_OPT_MAILBOX")
+    [[ -n "$DOM_OPT_MAIL_QUOTA" ]] && _mail_args+=(--quota "$DOM_OPT_MAIL_QUOTA")
+    if (( DOM_OPT_MAIL )) && ! ( set -Eeuo pipefail; lib_mail_enable_main "${_mail_args[@]}" ); then
+      lib_warn "The site is up, but its mail is not: run 'lomp mail enable ${domain}' once the cause is fixed"
+    fi
+  fi
+
+  # ---- 11 summary ----------------------------------------------------------
   lib_step "Done"
   lib_manifest_set '.updated_at' "$(lib_iso_now)"
   lib_domain_summary
@@ -776,6 +801,22 @@ lib_domain_credentials_show() {
     printf '\n'
   fi
   if [[ -n "$(lib_redis_password)" ]]; then lib_print_kv "Redis" "127.0.0.1:6379 (password: setup.sh credentials --all)"; fi
+  # what somebody needs to set up a mail client, and nothing they should not have: a mailbox
+  # password is not stored anywhere on this server, only its hash
+  if lib_mail_installed && lib_mail_domain_enabled "$domain"; then
+    local mhost="" box=""
+    mhost="mail.${domain}"
+    [[ -s "${SSL_DEPLOY_DIR}/$(lib_mail_cert_name "$domain")/fullchain.pem" ]] || mhost="$(lib_mail_host)"
+    printf '%sMail%s\n' "$C_BLD" "$C_RST"
+    lib_print_kv "IMAP"     "${mhost}:993, SSL/TLS"
+    lib_print_kv "SMTP"     "${mhost}:465 (SSL/TLS) or :587 (STARTTLS)"
+    box="$(lib_mail_boxes "$domain" | head -1)"
+    lib_print_kv "User name" "the full address, e.g. ${box:-info@${domain} (no mailbox yet: setup.sh mail box add info@${domain})}"
+    lib_print_kv "Password" "set when the mailbox was made; change it with: setup.sh mail box passwd <address>"
+    while read -r box; do [[ -n "$box" ]] && lib_print_kv "Mailbox" "${box} ($(lib_mail_box_quota "$box"))"; done < <(lib_mail_boxes "$domain")
+    lib_print_kv "DNS"      "setup.sh mail dns ${domain} --check"
+    printf '\n'
+  fi
 }
 
 lib_domain_list_main() {
@@ -852,6 +893,10 @@ lib_domain_remove_main() {
   printf '\n%sThis will remove %s%s\n' "$C_BLD" "$domain" "$C_RST"
   lib_note "vhost + listener maps (archived), $( (( keep_files )) && printf 'files KEPT' || printf "files ${D_HOME} DELETED"), $( (( keep_db )) && printf 'database KEPT' || printf 'database DROPPED'), $( (( keep_ssl )) && printf 'certificate KEPT' || printf 'certificate deleted')"
   lib_note "a safety backup (files + database) is written to ${BACKUP_ROOT}/${domain}/ first"
+  if lib_mail_installed && lib_mail_domain_has_traces "$domain"; then
+    lib_warn "Every mailbox of ${domain} and all of its mail is deleted too, and the safety backup does NOT include it"
+    lib_note "to keep the mail, turn it off instead and leave the site: setup.sh mail disable ${domain}"
+  fi
   if lib_app_state_load "$domain"; then
     local other=""
     other="$(_app_port_claimed_by "$APP_PORT" "$domain" || true)"
@@ -860,7 +905,7 @@ lib_domain_remove_main() {
     _app_site_lock "$domain"   # not while a deploy of it is still running
   fi
   lib_confirm "Continue?" n || lib_die "Removal cancelled" "" "re-run with --yes to skip the question"
-  lib_steps_begin 8
+  lib_steps_begin 9
   lib_rollback_clear
 
   lib_step "Scheduled tasks"
@@ -881,6 +926,22 @@ lib_domain_remove_main() {
     if lib_backup_domain "$domain" --tag pre-remove --keep 0; then lib_ok "safety backup written"; else lib_warn "safety backup FAILED (continuing because you confirmed the removal)"; fi
   else
     lib_info "home directory missing; nothing to back up"
+  fi
+
+  # after the backup, so what is deleted here was saved a moment ago
+  lib_step "Mail"
+  # traces, not the flag: a domain whose mail was turned off still has its mailbox lines, and
+  # a mailbox line is a login that works from anywhere until it is taken away
+  if lib_mail_installed && lib_mail_domain_has_traces "$domain"; then
+    lib_mail_domain_purge "$domain"
+    if (( ! OPT_DRY_RUN )); then
+      lib_json_set "$(lib_domain_json "$domain")" '.mail.enabled = false' 2>/dev/null || true
+    fi
+    lib_mail_tables_apply || lib_warn "the mail tables could not be rebuilt: ${MAIL_LAST_ERROR}"
+    lib_ok "mailboxes, mail, DKIM key and certificate removed"
+    lib_note "At your DNS provider, the records for ${domain} can go too (MX, mail.${domain}, SPF, DKIM, _dmarc)"
+  else
+    lib_info "this site had no mail"
   fi
 
   lib_step "Database"

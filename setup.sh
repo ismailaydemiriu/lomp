@@ -176,8 +176,13 @@ main() {
     panel) if [[ "${rest[0]:-open}" != "status" ]]; then lib_lock; fi ;;
     notify) [[ " ${rest[*]:-} " == *" --send "* ]] || lib_lock ;;
     proxy)  if [[ "${rest[0]:-list}" != "list" && "${rest[0]:-list}" != "help" ]]; then lib_lock; fi ;;
-    # reading the mail stack's state changes nothing; everything else restarts services
-    mail)   case "${rest[0]:-status}" in status|test|queue|help|-h|--help) ;; *) lib_lock ;; esac ;;
+    # reading the mail stack's state changes nothing; everything else writes a table or
+    # restarts a service. "box list" and "alias list" only read, "dns" only prints.
+    mail)   case "${rest[0]:-status}" in
+              status|test|queue|dns|help|-h|--help) ;;
+              box|alias) if [[ "${rest[1]:-list}" != "list" ]]; then lib_lock; fi ;;
+              *) lib_lock ;;
+            esac ;;
     # "app deploy" can build for minutes: it takes the site's own lock (lib/app.sh) instead
     app)    case "${rest[0]:-list}" in
               list|status|logs|deploy|help|-h|--help) ;;
