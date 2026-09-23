@@ -98,9 +98,15 @@ COMMANDS
   mail webmail on|off <domain>  A webmail at webmail.<domain>. Every domain that has one
                                 shares a single Roundcube and a single PHP process, so the
                                 twentieth costs a vhost and nothing else
-  webmail status                What runs, and for which domains
+  webmail status                What runs, and for which domains (people change their own
+                                password in it, under Settings)
   webmail update [version]      Take a newer Roundcube (it also happens by itself, daily)
   webmail uninstall | purge     Remove it; "purge" drops its database too
+  mail dkim status <domain>     Which key this domain signs with
+  mail dkim rotate <domain> [--abort]
+                                Make a second key and publish its record; signing moves to it
+                                by itself once DNS carries it, and the old key is kept a week
+                                so that mail already sent still verifies
   mail backup <domain> [--keep N]     The mail on its own: mailboxes, aliases, the DKIM key
   mail restore <domain> [--file A]    and the mail itself, back into the same mailboxes
                                 with the same passwords and the same key. A mailbox that is

@@ -2921,6 +2921,73 @@ assert_has "a partly filled restore says so"       "only partly back" "$_mr"
 assert_has "the manifest's domain is compared"     'jq -r' "$_mr"
 assert_has "and answering no stops it"             "belongs to" "$_mr"
 
+# =============================================================================
+# Rotating a DKIM key: two steps with DNS in between, because the key is published
+_rs="$(declare -f lib_mail_dkim_rotate_start)"
+_rf="$(declare -f lib_mail_dkim_rotate_finish)"
+assert_has "starting makes a SECOND key"          "selector_next" "$_rs"
+assert_has "and does not touch the one in use"    "still signs with" "$_rs"
+assert_has "a job watches for the record"         "lib_cron_set" "$_rs"
+assert_has "the switch compares what DNS says"    "_mail_dns_query TXT" "$_rf"
+assert_has "against the key itself"               "lib_mail_dkim_public_of" "$_rf"
+assert_has "and keeps the old one for a while"    "selector_old_until" "$_rf"
+assert_has "the retired key is removed later"     "selector_old_until" "$(declare -f lib_mail_dkim_retire_old)"
+# a selector that has been in DNS must never be handed to a second key: resolvers hold what
+# they cached until the TTL runs out
+assert_has "every selector used is remembered"   "selectors_used" "$_rs"
+assert_has "and never chosen again"              "selectors_used" "$(declare -f _mail_selector_next)"
+# two records at one selector fail for every receiver, so that is a reason to wait
+assert_has "a second record stops the switch"    "carries" "$_rf"
+assert_has "and the name has to hold a DKIM record at all" "v=DKIM1" "$_rf"
+# a domain that goes takes every key with it, not only the one it was signing with
+_pg="$(declare -f lib_mail_domain_purge)"
+assert_has "removing a domain takes every DKIM key" '${MAIL_DKIM_DIR}/${d}."*.key' "$_pg"
+assert_has "and the job that watched for a record"  'lib_cron_remove "mail-dkim:' "$_pg"
+# a selector is dated, and a second one in the same month gets a letter
+eval 'lib_mail_selector() { printf "lomp209901"; }'
+MAIL_DKIM_DIR="$TMP/dkim-next"; mkdir -p "$MAIL_DKIM_DIR"
+_sn="$(_mail_selector_next x.example)"
+assert_true "a free selector is not the one in use" bash -c "[[ '$_sn' != 'lomp209901' ]]"
+assert_true "and it is dated"                      bash -c "[[ '$_sn' =~ ^lomp[0-9]{6}[a-j]?$ ]]"
+printf 'key
+' >"${MAIL_DKIM_DIR}/x.example.${_sn}.key"   # -s: a selector is taken only when its key has content
+assert_true "a taken one is skipped too"           bash -c "[[ '$(_mail_selector_next x.example)' != '$_sn' ]]"
+unset -f lib_mail_selector
+# shellcheck source=/dev/null
+source "$ROOT/lib/mail.sh"
+
+# =============================================================================
+# Changing a mailbox password from the webmail: one helper, one sudo rule, nothing on argv
+_ph="$(lib_mail_render_pw_helper)"
+assert_has "the helper reads the address from stdin"   "IFS= read -r addr" "$_ph"
+assert_has "and both passwords too"                    "IFS= read -r new" "$_ph"
+assert_lacks "the address is not an argument"          'addr="$1"' "$_ph"
+assert_lacks "nor is a password"                      'new="$3"' "$_ph"
+# the stored hash must not become an argument of a root process: /proc/<pid>/cmdline is
+# world-readable, and the hash is the thing the file mode exists to protect
+assert_has "Dovecot is asked, with the password on stdin" "doveadm auth test" "$_ph"
+assert_lacks "the stored hash is never an argument"       'doveadm pw -t "$hash"' "$_ph"
+assert_has "every attempt is logged"                      "logger -t lomp-webmail" "$_ph"
+assert_has "and none of them is fast"                     "GAP" "$_ph"
+assert_has "a line break in the new one is refused"    "may not contain a line break" "$_ph"
+assert_has "so is one that is too short"               "too short" "$_ph"
+assert_has "and one that is too long for bcrypt"       "72 bytes at most" "$_ph"
+assert_has "the change goes through the ordinary command" "mail box passwd" "$_ph"
+
+assert_true "the helper parses"                        bash -c "printf '%s' \"\$_ph\" | bash -n"
+_ps="$(lib_mail_render_pw_sudoers)"
+assert_has "the rule names the webmail user"           "lompwebmail ALL=(root)" "$_ps"
+assert_has "and exactly one command"                   "webmail-passwd" "$_ps"
+assert_lacks "with no wildcard in it"                  "ALL$" "$_ps"
+# the driver hands all three to the helper, so the helper can insist on the current password
+_pd="$(lib_webmail_render_pw_driver)"
+assert_has "the driver sends the address"              'fwrite($handle, $username' "$_pd"
+assert_has "the current password"                      '$currpass' "$_pd"
+assert_has "and the new one"                           '$newpass' "$_pd"
+assert_has "it is written into every release"          "plugins/password/drivers" "$(declare -f lib_webmail_pw_driver_install)"
+assert_has "the webmail is told to use it"             "password_driver'] = 'lomp'" "$(lib_webmail_render_config 2>/dev/null || printf '')"
+assert_has "and to ask for the current password"       "password_confirm_current'] = true" "$(lib_webmail_render_config 2>/dev/null || printf '')"
+
 # a port that carries a password without TLS may answer this machine and nobody else
 eval 'ss() { printf "%s\n" "LISTEN 0 100 127.0.0.1:10587 0.0.0.0:*" "LISTEN 0 100 0.0.0.0:993 0.0.0.0:*" | awk "{print \$1, \$2, \$3, \$4, \$5}"; }'
 assert_false "a loopback port is not public"  lib_port_listening_public 10587

@@ -544,6 +544,32 @@ Roundcube's own login limit counts per account and ignores the address a request
 failed logins go to the journal and fail2ban bans by IP - through Cloudflare's API when the
 site is proxied, so the ban happens at the edge.
 
+### Rotating a DKIM key
+
+A signing key is published in DNS, so it cannot simply be replaced: the moment a new key signs
+a message, every receiver still holding the old record fails it. Rotation is therefore two
+steps with DNS in between, and lomp does the waiting:
+
+```bash
+sudo lomp mail dkim rotate example.com    # a second key, and the record to publish
+sudo lomp mail dkim status example.com
+```
+
+The domain goes on signing with the old key. An hourly job checks whether the new record has
+appeared and whether it really carries the new key; only then does signing move to it. The old
+key is kept a week after that, because a message sent an hour ago may still be in somebody's
+queue, and is then removed with a note that its record can go too. `--abort` calls the whole
+thing off.
+
+### Changing a password from the webmail
+
+People can change their own password in the webmail, under Settings. The webmail does not
+write the password file: it hands the address, the current password and the new one to a single
+helper through `sudo`, with a rule that allows that one command and nothing else. The helper
+checks the current password against the stored hash before it changes anything, so a webmail
+somebody has taken over still cannot change a password it does not already know, and it writes
+through the same command an operator would use.
+
 ### Backing the mail up
 
 A domain's mail is backed up with the site, into an archive of its own next to it:

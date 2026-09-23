@@ -158,6 +158,7 @@ _wm_fetch_release() {   # version -> path of the unpacked release on stdout
   # out here rather than switched off in the configuration: what is not there cannot be
   # served, and upstream's own updater keeps it deleted once it is gone.
   rm -rf "${dest}.part/installer"
+  lib_webmail_pw_driver_install "${dest}.part"
   rm -rf "$dest"
   mv "${dest}.part" "$dest"
   # Not root, and not the user that runs it. OpenLiteSpeed refuses a document root whose
@@ -318,7 +319,17 @@ ${hosts}];
 \$config['proxy_whitelist'] = [
 ${proxies}];
 
-\$config['plugins'] = ['archive', 'zipdownload', 'managesieve'];
+\$config['plugins'] = ['archive', 'zipdownload', 'managesieve', 'password'];
+
+// Changing one's own password. The plugin checks the current one against the session before
+// it calls anything, and the helper behind the driver checks it again against the stored
+// hash: the webmail never writes the password file itself.
+\$config['password_driver'] = 'lomp';
+\$config['password_lomp_cmd'] = '/usr/bin/sudo -n ${MAIL_PW_HELPER}';
+\$config['password_confirm_current'] = true;
+\$config['password_minimum_length'] = ${MAIL_PW_MIN};
+\$config['password_force_save'] = false;
+\$config['password_log'] = true;
 // Dovecot's ManageSieve, for holiday replies and filters
 \$config['managesieve_host'] = '127.0.0.1:4190';
 \$config['managesieve_script_name'] = 'roundcube';
@@ -356,6 +367,11 @@ lib_webmail_config_apply() {
   _wm_info_load || return 0
   lib_webmail_render_config | lib_write_file "$WM_CONF" 0640 "root:${WM_USER}" secret || return 1
   if (( OPT_DRY_RUN )); then return 0; fi
+  # The password UI is advertised by this very configuration, so what it needs goes in with
+  # it: the driver into the release that is running (a release installed before this version
+  # of lomp has none) and the helper with its sudo rule.
+  lib_webmail_pw_driver_install "$WM_CURRENT" || true
+  lib_mail_pw_helper_apply on || lib_warn "the password helper was not installed: ${MAIL_LAST_ERROR}"
   # The configuration is a PHP file, so OPcache holds it: with revalidate_freq at 60 the
   # running workers would answer from the old one for up to a minute - long enough for the
   # domain just switched on to fail every login. The workers are the only processes this user
@@ -761,6 +777,8 @@ lib_webmail_domain_enable() {   # domain
   lib_mail_domain_enabled "$d" || { WM_LAST_ERROR="${d} has no mail"; return 1; }
   lib_webmail_installed || lib_webmail_install
   lib_webmail_dirs_ensure      # also puts right an owner an older release of lomp set
+  # the one thing the webmail may ask root to do, and the rule that lets it
+  lib_mail_pw_helper_apply on || lib_warn "the password helper was not installed: ${MAIL_LAST_ERROR}"
   # The flag has to go in first: the configuration this domain needs is rendered from it, and
   # so is the certificate's name list. It is registered for rollback at the same moment, so a
   # virtual host OpenLiteSpeed refuses does not leave a domain that says it has a webmail
@@ -790,6 +808,10 @@ lib_webmail_domain_disable() {   # domain
   lib_webmail_vhost_remove "$d"
   (( OPT_DRY_RUN )) || lib_json_set "$(lib_domain_json "$d")" 'del(.mail.webmail) | del(.mail.webmail_host)'
   lib_webmail_config_apply || true
+  # nothing is left that could ask root to change a password
+  if [[ -z "$(lib_webmail_domains)" ]]; then
+    lib_mail_pw_helper_apply off
+  fi
   return 0
 }
 
@@ -900,6 +922,7 @@ lib_webmail_uninstall() {
     lib_webmail_domain_disable "$d"
   done < <(lib_webmail_domains)
   lib_cron_remove "webmail"
+  lib_mail_pw_helper_apply off
   if (( OPT_DRY_RUN )); then lib_info "[dry-run] would remove ${WM_ROOT}, ${WM_ETC} and ${WM_VAR}"; return 0; fi
   lib_rm "$WM_ROOT"
   lib_rm "$WM_VAR"
@@ -933,5 +956,50 @@ lib_webmail_main() {
     help|-h|--help) lib_usage | grep -A 8 '^  webmail ' || lib_usage ;;
     *) lib_die "Unknown webmail command: ${a}" "" "lomp webmail status|update|uninstall" ;;
   esac
+  return 0
+}
+
+# The password plugin talks to a driver, and the drivers Roundcube ships either speak to
+# something we do not run or change a password without being told the old one. This one hands
+# all three - the address, the current password and the new one - to the helper on standard
+# input, so the helper can insist on the current password before it changes anything: a
+# webmail somebody has taken over still cannot change a password it does not already know.
+lib_webmail_render_pw_driver() {
+  cat <<'EOF'
+<?php
+// Managed by lompstack - rewritten whenever a release is installed; do not edit.
+class rcube_lomp_password
+{
+    public function save($currpass, $newpass, $username)
+    {
+        $cmd = rcmail::get_instance()->config->get('password_lomp_cmd');
+        if (empty($cmd)) {
+            rcube::raise_error("Password plugin: password_lomp_cmd is not set", true);
+            return PASSWORD_ERROR;
+        }
+        $handle = popen($cmd, 'w');
+        if (!$handle) {
+            rcube::raise_error("Password plugin: cannot run {$cmd}", true);
+            return PASSWORD_ERROR;
+        }
+        // one line each, in the order the helper reads them
+        fwrite($handle, $username . "\n" . $currpass . "\n" . $newpass . "\n");
+        $rc = pclose($handle);
+        if ($rc === 0) {
+            return PASSWORD_SUCCESS;
+        }
+        rcube::raise_error("Password plugin: the helper refused the change (exit {$rc})", true);
+        return PASSWORD_ERROR;
+    }
+}
+EOF
+}
+
+# The driver belongs to the release, so it is written into every release as it is unpacked.
+lib_webmail_pw_driver_install() {   # release-dir
+  local rel="${1:-$WM_CURRENT}" dir=""
+  dir="${rel}/plugins/password/drivers"
+  [[ -d "$dir" ]] || return 0
+  lib_webmail_render_pw_driver | lib_write_file "${dir}/lomp.php" 0644 root:root
   return 0
 }

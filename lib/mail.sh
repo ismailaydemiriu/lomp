@@ -1909,6 +1909,9 @@ lib_mail_disable_main() {   # domain [--keep-data|--delete-data] [--dns-cleanup]
   # is rewritten, and Postfix would try to deliver it to the internet instead
   _mail_warn_queued "$d"
   lib_cron_remove "mail-cert:${d}"
+  # a rotation cannot finish for a domain whose mail is off, and the job would say so as root
+  # every hour for ever
+  lib_cron_remove "mail-dkim:${d}"
   # Only the records lompstack wrote, and only when asked: somebody else may be pointing that
   # name somewhere on purpose. This runs BEFORE the webmail is switched off, because the list
   # of records to remove is built from the state - and the webmail's own record is in it only
@@ -1994,9 +1997,15 @@ lib_mail_domain_purge() {   # domain
     [[ -n "$a" ]] && lib_mail_box_remove "$a"
   done < <(lib_mail_boxes "$d")
   lib_rm "$(lib_mail_alias_file "$d")"
+  # every key of this domain, not only the one it signs with: a rotation may have a second
+  # one waiting for its record, and a finished one keeps the retired key for a week
   lib_rm "${MAIL_DKIM_DIR}/${d}.${sel}.key"
+  for a in "${MAIL_DKIM_DIR}/${d}."*.key; do
+    [[ -e "$a" ]] && lib_rm "$a"
+  done
   lib_rm "${MAIL_VMAIL_HOME}/${d}"
   lib_cron_remove "mail-cert:${d}"
+  lib_cron_remove "mail-dkim:${d}"
   lib_ssl_delete "$(lib_mail_cert_name "$d")" 2>/dev/null || true
   return 0
 }
@@ -2286,7 +2295,7 @@ lib_mail_alias_list_main() {   # [domain]
 # operator is told and what lomp checks can never drift apart.
 # Fields: type <TAB> name <TAB> value <TAB> note
 _mail_dns_records() {   # domain
-  local d="$1" ip="" ipshow="" sel="" dkim="" relay=""
+  local d="$1" ip="" ipshow="" sel="" dkim="" relay="" nextsel="" nextdkim=""
   # not --no-net: with it the analysis falls back to the address of the local interface, and on
   # a NAT'd server that is an address nobody on the internet can reach. Printed into an A
   # record and an SPF record it would be a mail server that quietly cannot be delivered to.
@@ -2315,6 +2324,15 @@ _mail_dns_records() {   # domain
     printf 'TXT\t%s._domainkey.%s\t%s\tpaste it as one line; the provider splits it\n' "$sel" "$d" "$dkim"
   else
     printf 'TXT\t%s._domainkey.%s\t<no DKIM key yet>\trun: lomp mail enable %s\n' "$sel" "$d" "$d"
+  fi
+  # A rotation that has started has a second key waiting for its record. It belongs in the
+  # table from the moment it exists, because nothing signs with it until the record is there.
+  nextsel="$(lib_json_get "$(lib_domain_json "$d")" '.mail.selector_next')"
+  if [[ -n "$nextsel" ]]; then
+    nextdkim="$(lib_mail_dkim_public_of "$d" "$nextsel" || printf '')"
+    if [[ -n "$nextdkim" ]]; then
+      printf 'TXT\t%s._domainkey.%s\t%s\tthe key being rotated in; signing moves to it once this record is visible\n' "$nextsel" "$d" "$nextdkim"
+    fi
   fi
   printf 'TXT\t_dmarc.%s\tv=DMARC1; p=none; rua=mailto:dmarc@%s; adkim=r; aspf=r\tstart at p=none and read the reports before tightening it\n' "$d" "$d"
   printf 'SRV\t_imaps._tcp.%s\t0 1 993 mail.%s.\toptional: mail clients find the settings by themselves\n' "$d" "$d"
@@ -2891,6 +2909,8 @@ lib_mail_main() {
     relay)      _mail_relay_cmd "$@" ;;
     webmail)    lib_mail_installed || lib_die "Mail is not installed" "" "lomp install --with-mail"
                 _mail_webmail_cmd "$@" ;;
+    dkim)       lib_mail_installed || lib_die "Mail is not installed" "" "lomp install --with-mail"
+                _mail_dkim_cmd "$@" ;;
     backup)     lib_mail_installed || lib_die "Mail is not installed" "" "lomp install --with-mail"
                 [[ -n "${1:-}" ]] || lib_die "Which domain?" "" "lomp mail backup example.com"
                 lib_mail_backup_domain "${1,,}" "${@:2}" \
@@ -3062,6 +3082,12 @@ lib_mail_backup_domain() {   # domain [--keep N] [--tag T] [--encrypt]
   # before the restore fails verification until DNS catches up
   sel="$(lib_mail_selector "$d")"
   [[ -s "${MAIL_DKIM_DIR}/${d}.${sel}.key" ]] && cp -p "${MAIL_DKIM_DIR}/${d}.${sel}.key" "${work}/mail/dkim.key"
+  # and every other key this domain has, because a rotation in flight has a second one whose
+  # record is already published: a restore without it could never finish the rotation
+  if compgen -G "${MAIL_DKIM_DIR}/${d}.*.key" >/dev/null 2>&1; then
+    mkdir -p "${work}/mail/keys"
+    cp -p "${MAIL_DKIM_DIR}/${d}."*.key "${work}/mail/keys/" 2>/dev/null || true
+  fi
   printf '%s\n' "$sel" >"${work}/mail/selector"
   [[ -s "$(lib_domain_json "$d")" ]] && jq -c '.mail // {}' "$(lib_domain_json "$d")" >"${work}/mail/state.json"
   chmod 0600 "${work}/mail/"* 2>/dev/null || true
@@ -3177,6 +3203,16 @@ lib_mail_restore_domain() {   # domain [archive]
   [[ -s "${work}/mail/aliases" ]] && { lib_mkdir "$MAIL_ALIAS_DIR" 0750 root:root; cp "${work}/mail/aliases" "$(lib_mail_alias_file "$d")"; chmod 0640 "$(lib_mail_alias_file "$d")"; }
   # the same DKIM key, not a new one: the public half is in DNS and a new key means every
   # message this domain sends fails verification until the record is changed
+  # every key the archive carries, under the name that names its selector
+  if [[ -d "${work}/mail/keys" ]]; then
+    lib_mkdir "$MAIL_DKIM_DIR" 0750 root:_rspamd
+    for a in "${work}/mail/keys/"*.key; do
+      [[ -e "$a" ]] || continue
+      cp -p "$a" "${MAIL_DKIM_DIR}/$(basename "$a")"
+      chmod 0640 "${MAIL_DKIM_DIR}/$(basename "$a")"
+      chown root:_rspamd "${MAIL_DKIM_DIR}/$(basename "$a")" 2>/dev/null || true
+    done
+  fi
   if [[ -s "${work}/mail/dkim.key" ]]; then
     sel="$(tr -d '[:space:]' <"${work}/mail/selector" 2>/dev/null || true)"
     sel="${sel:-$(lib_mail_selector "$d")}"
@@ -3249,5 +3285,300 @@ lib_mail_restore_domain() {   # domain [archive]
   lib_ok "The mail of ${d} is back"
   # the address of this server may not be the address the records were written for
   lib_note "Check what DNS says now: lomp mail dns ${d} --check"
+  return 0
+}
+
+# =============================================================================
+#  Rotating a DKIM key
+# =============================================================================
+# A signing key is published in DNS, so it cannot simply be replaced: the moment a new key
+# signs a message, every receiver still holding the old record fails it. Rotation is therefore
+# two steps with DNS in between - make and publish the new key, keep signing with the old one,
+# and switch only once the world can see the new record. The old key stays a while after that,
+# because a message sent an hour ago may still be sitting in somebody's queue.
+MAIL_DKIM_OLD_DAYS="${MAIL_DKIM_OLD_DAYS:-7}"
+
+# A selector nobody is using yet: this month's, with a letter after it if that one is taken.
+_mail_selector_next() {   # domain -> selector
+  local d="$1" base="" cand="" c="" used=""
+  base="lomp$(date -u +%Y%m)"
+  # Every selector this domain has ever used. A retired one must never come back: its record
+  # has been taken out of DNS, but resolvers hold what they cached until its TTL runs out, and
+  # a new key under an old name is a signature those resolvers refuse.
+  used="$(lib_json_get "$(lib_domain_json "$d")" '.mail.selectors_used // [] | join(" ")')"
+  for c in "" b c d e f g h i j k l m n o p; do
+    cand="${base}${c}"
+    [[ "$cand" == "$(lib_mail_selector "$d")" ]] && continue
+    [[ -s "${MAIL_DKIM_DIR}/${d}.${cand}.key" ]] && continue
+    [[ " ${used} " == *" ${cand} "* ]] && continue
+    printf '%s' "$cand"
+    return 0
+  done
+  return 1
+}
+
+# The public half of any selector's key, not only the one in use.
+lib_mail_dkim_public_of() {   # domain selector
+  local key="${MAIL_DKIM_DIR}/${1}.${2}.key" p=""
+  [[ -s "$key" ]] || return 1
+  p="$(openssl rsa -in "$key" -pubout 2>/dev/null | grep -v -- '-----' | tr -d '\n' || true)"
+  [[ -n "$p" ]] || return 1
+  printf 'v=DKIM1; k=rsa; p=%s' "$p"
+}
+
+lib_mail_dkim_rotate_start() {   # domain
+  local d="$1" new="" key="" tmp=""
+  lib_mail_domain_enabled "$d" || { MAIL_LAST_ERROR="mail is not on for ${d}"; return 1; }
+  new="$(lib_json_get "$(lib_domain_json "$d")" '.mail.selector_next')"
+  if [[ -n "$new" ]]; then
+    lib_info "A rotation to ${new} is already under way for ${d}"
+  else
+    new="$(_mail_selector_next "$d")" || { MAIL_LAST_ERROR="no free selector for ${d} this month"; return 1; }
+  fi
+  if (( OPT_DRY_RUN )); then
+    lib_info "[dry-run] would make a second DKIM key for ${d} (selector ${new}) and publish its record"
+    return 0
+  fi
+  # The name is claimed before the key exists, and it is remembered for good: a run that is
+  # interrupted here would otherwise leave a key nothing refers to under a name nothing could
+  # use again, and a name that has been in DNS must never be handed to a second key.
+  lib_json_set "$(lib_domain_json "$d")" \
+    '.mail.selector_next = $s | .mail.rotate_started_at = $ts
+     | .mail.selectors_used = ((.mail.selectors_used // []) + [$s] | unique)' \
+    --arg s "$new" --arg ts "$(lib_iso_now)"
+  key="${MAIL_DKIM_DIR}/${d}.${new}.key"
+  if [[ ! -s "$key" ]]; then
+    lib_have rspamadm || { MAIL_LAST_ERROR="rspamadm is missing"; return 1; }
+    tmp="$(mktemp "${MAIL_DKIM_DIR}/.${d}.XXXXXX")" || { MAIL_LAST_ERROR="could not create a temporary file"; return 1; }
+    if ! rspamadm dkim_keygen -d "$d" -s "$new" -b 2048 -t rsa -k "$tmp" -o dnskey >/dev/null 2>&1 \
+       || [[ ! -s "$tmp" ]] || ! openssl rsa -in "$tmp" -noout -check >/dev/null 2>&1; then
+      rm -f "$tmp"
+      lib_json_set "$(lib_domain_json "$d")" 'del(.mail.selector_next) | del(.mail.rotate_started_at)'
+      MAIL_LAST_ERROR="rspamadm could not generate the new key"; return 1
+    fi
+    chown root:_rspamd "$tmp" 2>/dev/null || true
+    chmod 0640 "$tmp"
+    mv -f "$tmp" "$key"
+  fi
+  lib_ok "A second DKIM key for ${d} is ready (selector ${new}); ${d} still signs with $(lib_mail_selector "$d")"
+  # the record has to be in DNS before anything signs with it
+  lib_mail_dns_note "$d"
+  lib_cron_set "mail-dkim:${d}" "17 * * * * root ${BIN_LINK} mail dkim rotate ${d} --finish --quiet"
+  lib_note "The switch happens by itself once the new record is visible: lomp mail dkim status ${d}"
+  return 0
+}
+
+# Switch, but only when the world can see the new record and it is the right one.
+lib_mail_dkim_rotate_finish() {   # domain
+  local d="$1" new="" want="" got="" old="" n=0
+  new="$(lib_json_get "$(lib_domain_json "$d")" '.mail.selector_next')"
+  [[ -n "$new" ]] || { lib_info "No DKIM rotation is under way for ${d}"; return 0; }
+  want="$(lib_mail_dkim_public_of "$d" "$new")" || { MAIL_LAST_ERROR="the new key of ${d} is not readable"; return 1; }
+  got="$(_mail_dns_query TXT "${new}._domainkey.${d}")"
+  # One DKIM record at that name, and it has to BE the new key. Two records at one selector
+  # fail for every receiver, so finding a second one is a reason to wait, not to switch.
+  n="$(grep -c 'v=DKIM1' <<<"$got" || true)"
+  [[ "$n" =~ ^[0-9]+$ ]] || n=0
+  if (( n > 1 )); then
+    lib_warn "${new}._domainkey.${d} carries ${n} DKIM records; ${d} goes on signing with $(lib_mail_selector "$d")"
+    lib_note "leave exactly one there - two at one selector fail for every receiver"
+    return 0
+  fi
+  if (( n == 0 )) || [[ "${got//[[:space:]]/}" != *"${want##*p=}"* ]]; then
+    lib_info "${new}._domainkey.${d} does not carry the new key yet; ${d} goes on signing with $(lib_mail_selector "$d")"
+    return 0
+  fi
+  if (( OPT_DRY_RUN )); then lib_info "[dry-run] would switch ${d} to selector ${new}"; return 0; fi
+  old="$(lib_mail_selector "$d")"
+  lib_json_set "$(lib_domain_json "$d")" \
+    '.mail.selector = $new | .mail.selector_old = $old | .mail.selector_old_until = $until | del(.mail.selector_next) | del(.mail.rotate_started_at)' \
+    --arg new "$new" --arg old "$old" --arg until "$(date -u -d "+${MAIL_DKIM_OLD_DAYS} days" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || lib_iso_now)"
+  lib_mail_tables_apply || lib_warn "the selector map could not be rebuilt: ${MAIL_LAST_ERROR}"
+  lib_ok "${d} now signs with ${new}"
+  lib_note "The old key stays until $(lib_json_get "$(lib_domain_json "$d")" '.mail.selector_old_until') so that mail already sent still verifies"
+  lib_note "Its record can go from DNS then: ${old}._domainkey.${d}"
+  return 0
+}
+
+# The old key, once nothing it signed can still be in flight.
+lib_mail_dkim_retire_old() {   # domain
+  local d="$1" old="" until=""
+  old="$(lib_json_get "$(lib_domain_json "$d")" '.mail.selector_old')"
+  [[ -n "$old" ]] || return 0
+  until="$(lib_json_get "$(lib_domain_json "$d")" '.mail.selector_old_until')"
+  [[ -n "$until" ]] || return 0
+  [[ "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" > "$until" ]] || return 0
+  if (( OPT_DRY_RUN )); then lib_info "[dry-run] would remove the retired DKIM key ${old} of ${d}"; return 0; fi
+  lib_rm "${MAIL_DKIM_DIR}/${d}.${old}.key"
+  lib_json_set "$(lib_domain_json "$d")" 'del(.mail.selector_old) | del(.mail.selector_old_until)'
+  lib_cron_remove "mail-dkim:${d}"
+  lib_ok "The retired DKIM key of ${d} (${old}) is gone; its record can be removed from DNS"
+  return 0
+}
+
+lib_mail_dkim_status() {   # domain
+  local d="$1" cur="" new="" old=""
+  cur="$(lib_mail_selector "$d")"
+  new="$(lib_json_get "$(lib_domain_json "$d")" '.mail.selector_next')"
+  old="$(lib_json_get "$(lib_domain_json "$d")" '.mail.selector_old')"
+  lib_print_kv "Signing with" "${cur}$( [[ -s "${MAIL_DKIM_DIR}/${d}.${cur}.key" ]] || printf ' (no key!)')"
+  if [[ -n "$new" ]]; then
+    lib_print_kv "Waiting for"  "${new}._domainkey.${d} to appear in DNS"
+    lib_print_kv "Its record"   "$( (lib_mail_dkim_public_of "$d" "$new" || printf 'no key on disk') | cut -c1-58)..."
+  fi
+  if [[ -n "$old" ]]; then
+    lib_print_kv "Old key kept until" "$(lib_json_get "$(lib_domain_json "$d")" '.mail.selector_old_until')"
+  fi
+  return 0
+}
+
+_mail_dkim_cmd() {   # rotate|status <domain> [--finish|--abort]
+  local a="${1:-status}" d="${2:-}" mode="${3:-}" n=""
+  d="${d,,}"
+  case "$a" in
+    status)
+      [[ -n "$d" ]] || lib_die "Which domain?" "" "lomp mail dkim status example.com"
+      lib_mail_dkim_status "$d" ;;
+    rotate)
+      [[ -n "$d" ]] || lib_die "Which domain?" "" "lomp mail dkim rotate example.com"
+      lib_mail_domain_enabled "$d" || lib_die "Mail is not on for ${d}" "" "lomp mail enable ${d}"
+      case "$mode" in
+        --finish)
+          lib_mail_dkim_rotate_finish "$d" || lib_die "The switch to the new DKIM key failed" "${MAIL_LAST_ERROR}" "lomp mail dkim status ${d}"
+          lib_mail_dkim_retire_old "$d" ;;
+        --abort)
+          n="$(lib_json_get "$(lib_domain_json "$d")" '.mail.selector_next')"
+          [[ -n "$n" ]] || { lib_info "No DKIM rotation is under way for ${d}"; return 0; }
+          if (( ! OPT_DRY_RUN )); then
+            lib_rm "${MAIL_DKIM_DIR}/${d}.${n}.key"
+            lib_json_set "$(lib_domain_json "$d")" 'del(.mail.selector_next) | del(.mail.rotate_started_at)'
+            # the job stays while an earlier rotation still has a key to retire: it is the
+            # only thing that ever gets round to removing it
+            if [[ -z "$(lib_json_get "$(lib_domain_json "$d")" '.mail.selector_old')" ]]; then
+              lib_cron_remove "mail-dkim:${d}"
+            fi
+          fi
+          lib_ok "The rotation of ${d} was called off; it goes on signing with $(lib_mail_selector "$d")" ;;
+        "")
+          lib_mail_dkim_rotate_start "$d" || lib_die "A new DKIM key could not be prepared" "${MAIL_LAST_ERROR}" "lomp doctor" ;;
+        *) lib_die "Unknown option for 'mail dkim rotate': ${mode}" "" "lomp mail dkim rotate <domain> [--finish|--abort]" ;;
+      esac ;;
+    *) lib_die "Unknown dkim command: ${a}" "" "lomp mail dkim status|rotate <domain>" ;;
+  esac
+  return 0
+}
+
+# =============================================================================
+#  Changing a mailbox password from the webmail
+# =============================================================================
+# The passwd file is root's and the webmail runs as lompwebmail, so something has to cross
+# that line. What crosses it is one helper, run through sudo with a rule that allows exactly
+# that one command and nothing else, reading everything on standard input - no address and no
+# password is ever an argument, because /proc/<pid>/cmdline is world-readable and this runs
+# as root.
+#
+# The helper is deliberately narrow: one mailbox, only when the current password verifies,
+# only for an address that already exists, and the change itself goes through the same command
+# an operator would use - so the passwd file keeps one writer and one shape.
+MAIL_PW_HELPER="${MAIL_PW_HELPER:-${INSTALL_DIR}/webmail-passwd}"
+MAIL_PW_SUDOERS="${MAIL_PW_SUDOERS:-/etc/sudoers.d/lomp-webmail-passwd}"
+MAIL_PW_MIN="${MAIL_PW_MIN:-10}"
+MAIL_PW_GAP="${MAIL_PW_GAP:-5}"     # seconds between two attempts for one address
+
+lib_mail_render_pw_helper() {
+  cat <<EOF
+#!/usr/bin/env bash
+# Managed by lompstack - the only thing the webmail may ask root to do.
+# stdin: three lines - address, current password, new password.
+set -uo pipefail
+umask 077
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+PASSWD_FILE="${MAIL_PASSWD_FILE}"
+MIN=${MAIL_PW_MIN}
+GAP=${MAIL_PW_GAP}
+STATE=/run/lomp-webmail-passwd
+
+say()  { logger -t lomp-webmail "\$1" 2>/dev/null || true; }
+fail() { say "\$2"; printf '%s\n' "\$1" >&2; sleep 1; exit 1; }
+
+IFS= read -r addr || fail "no address" "a request with no address"
+IFS= read -r cur  || fail "no current password" "a request with no current password"
+IFS= read -r new  || fail "no new password" "a request with no new password"
+# nothing else is read: a fourth line would be somebody trying their luck
+addr="\${addr,,}"
+
+[[ "\$addr" =~ ^[a-z0-9]([a-z0-9._-]{0,62}[a-z0-9])?@[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?[.][a-z]{2,63}\$ ]] \
+  || fail "not an address this server serves" "a request for something that is not an address"
+grep -q "^\${addr}:" "\$PASSWD_FILE" 2>/dev/null \
+  || fail "no such mailbox" "a request for \${addr}, which is not a mailbox here"
+
+# One attempt per address per few seconds. This runs as root behind an unprivileged webmail,
+# so it is also the thing an attacker who has taken that webmail would use to try passwords:
+# every attempt is logged, and none of them is fast.
+mkdir -p "\$STATE" 2>/dev/null || true
+chmod 0700 "\$STATE" 2>/dev/null || true
+stamp="\${STATE}/\$(printf '%s' "\$addr" | tr -c 'a-z0-9@.' '_')"
+now="\$(date +%s)"
+if [[ -f "\$stamp" ]]; then
+  last="\$(cat "\$stamp" 2>/dev/null || printf 0)"
+  [[ "\$last" =~ ^[0-9]+\$ ]] || last=0
+  (( now - last < GAP )) && fail "too many attempts, wait a moment" "too many attempts for \${addr}"
+fi
+printf '%s' "\$now" >"\$stamp" 2>/dev/null || true
+
+# The current password has to be the current password. Dovecot is asked, with the password on
+# standard input: "doveadm pw -t" would take the stored hash as an ARGUMENT, and every user of
+# this machine can read the argument list of a root process in /proc.
+printf '%s\n' "\$cur" | doveadm auth test "\$addr" >/dev/null 2>&1 \
+  || fail "the current password is wrong" "a wrong current password for \${addr}"
+
+# and the new one has to be one this server can store. doveadm reads its input twice and,
+# when the two reads differ, hashes the EMPTY password and exits 0 - a carriage return in the
+# input is enough to cause it, so a line break is refused here rather than hashed.
+case "\$new" in *\$'\r'*|*\$'\n'*) fail "the new password may not contain a line break" "a new password with a line break for \${addr}" ;; esac
+bytes="\$(printf '%s' "\$new" | wc -c | tr -d ' ')"
+(( bytes >= MIN )) || fail "the new password is too short (\${MIN} characters at least)" "a too short new password for \${addr}"
+(( bytes <= 72 ))  || fail "the new password is too long (72 bytes at most)" "a too long new password for \${addr}"
+[[ "\$new" != "\$cur" ]] || fail "that is the password it already has" "the same password again for \${addr}"
+
+# the change itself goes through the ordinary command, which hashes it and rewrites the file
+printf '%s\n' "\$new" | "${BIN_LINK}" mail box passwd "\$addr" --quiet >/dev/null 2>&1 \
+  || fail "the mailbox could not be updated" "the passwd file could not be written for \${addr}"
+say "password changed for \${addr}"
+printf 'ok\n'
+exit 0
+EOF
+}
+
+lib_mail_render_pw_sudoers() {
+  printf '# Managed by lompstack - the webmail may run this one command as root, and nothing else.\n'
+  printf '%s ALL=(root) NOPASSWD: %s\n' "$MAIL_WEBMAIL_USER" "$MAIL_PW_HELPER"
+}
+
+# Put the helper and its rule in place, or take them away again.
+lib_mail_pw_helper_apply() {   # on|off
+  local mode="${1:-on}" tmp=""
+  if [[ "$mode" != "on" ]]; then
+    if (( OPT_DRY_RUN )); then lib_info "[dry-run] would remove ${MAIL_PW_HELPER} and its sudo rule"; return 0; fi
+    rm -f "$MAIL_PW_HELPER" "$MAIL_PW_SUDOERS"
+    return 0
+  fi
+  lib_mkdir "$(dirname "$MAIL_PW_HELPER")" 0755 root:root
+  lib_mail_render_pw_helper | lib_write_file "$MAIL_PW_HELPER" 0755 root:root
+  if (( OPT_DRY_RUN )); then
+    lib_mail_render_pw_sudoers | lib_write_file "$MAIL_PW_SUDOERS" 0440 root:root
+    return 0
+  fi
+  # visudo on a copy first: a sudoers file that does not parse takes sudo away from everybody
+  tmp="$(lib_mktemp)"
+  lib_mail_render_pw_sudoers >"$tmp"
+  chmod 0440 "$tmp"
+  if lib_have visudo && ! visudo -c -f "$tmp" >/dev/null 2>&1; then
+    rm -f "$tmp"
+    MAIL_LAST_ERROR="the sudo rule for the webmail did not parse"
+    return 1
+  fi
+  lib_write_file "$MAIL_PW_SUDOERS" 0440 root:root <"$tmp"
+  rm -f "$tmp"
   return 0
 }

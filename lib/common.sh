@@ -401,6 +401,13 @@ lib_backup_config() {
   mkdir -p "${STATE_DIR}/archive/configs" && chmod 0700 "${STATE_DIR}" "${STATE_DIR}/archive" 2>/dev/null || true
   cp -p "$path" "$dest" 2>/dev/null || true
   lib_log_write INFO "backup of ${path} -> ${dest}"
+  # Keep the last few copies of THIS file and no more. Some of these files are written by
+  # something a person can trigger over and over - a mailbox owner changing their password in
+  # the webmail rewrites the password file every time - and each copy is a copy of the
+  # credentials it holds. An unbounded archive of those is a growing pile of the same secret.
+  ls -1t "${STATE_DIR}/archive/configs/${name}."* 2>/dev/null | tail -n +"${LIB_CONFIG_KEEP:-10}" | while read -r old; do
+    [[ -n "$old" && "$old" != "$dest" ]] && rm -f "$old"
+  done || true
   printf '%s' "$dest"
 }
 
