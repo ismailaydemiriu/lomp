@@ -192,6 +192,33 @@ _svc_state() {   # unit -> active|inactive|missing
   if lib_service_active "$1"; then printf 'active'; else printf 'inactive'; fi
 }
 
+# The mail stack and the webmail as JSON, or null when this server has no mail. Read by
+# anything that watches a fleet: what the server sends as, which domains have mail and a
+# webmail, how many mailboxes each has and how long its certificate still has.
+_status_mail_json() {
+  local d="" doms="[]" one=""
+  lib_mail_installed || { printf 'null'; return 0; }
+  for d in $(lib_mail_domains); do
+    # grep -c prints 0 AND exits 1 when it counts nothing, so a "|| printf 0" fallback would
+    # hand jq the number twice and --argjson would refuse the whole document
+    one="$(jq -n --arg d "$d" \
+        --argjson boxes "$(lib_mail_boxes "$d" | wc -l | tr -d ' ')" \
+        --argjson webmail "$( [[ "$(lib_json_get "$(lib_domain_json "$d")" '.mail.webmail')" == "true" ]] && printf 'true' || printf 'false')" \
+        --arg cert "$(lib_ssl_days_left "$(lib_mail_cert_name "$d")")" \
+        '{domain:$d, mailboxes:$boxes, webmail:$webmail,
+          cert_days_left:(if $cert=="" then null else ($cert|tonumber) end)}')"
+    doms="$(jq -n --argjson a "$doms" --argjson b "$one" '$a + [$b]')"
+  done
+  jq -n --arg host "$(lib_mail_host)" --arg relay "$(lib_mail_relay_get host)" \
+        --argjson wm "$( lib_webmail_installed && printf 'true' || printf 'false')" \
+        --arg wmver "$(lib_webmail_version 2>/dev/null || true)" \
+        --argjson domains "$doms" \
+        '{hostname:$host, relay:(if $relay=="" then null else $relay end),
+          webmail:{installed:$wm, version:(if $wmver=="" then null else $wmver end)},
+          domains:$domains}'
+  return 0
+}
+
 lib_status_main() {
   local json=0 d="" svc="" st=""
   [[ "${1:-}" == "--json" ]] && json=1
@@ -228,11 +255,13 @@ lib_status_main() {
       --arg cf "$(lib_cf_status_line)" --arg admin "$(lib_panel_status_line)" \
       --arg notify "$(lib_notify_channels)" --arg schedule "$(lib_manifest_get '.backup.schedule')" \
       --arg last_backup "$last_backup" --argjson sites "$sites" --argjson apps "$(lib_app_list --json 2>/dev/null || printf '[]')" \
+      --argjson mail "$(_status_mail_json)" \
       '{host:$host, os:$os, script_version:$ver, installed_at:$inst,
         services:{lsws:$lsws, mariadb:$mariadb, redis:$redis, fail2ban:$f2b, ufw:$ufw, certbot_timer:$certbot},
         versions:{openlitespeed:$olsv, php:$phpv, mariadb:$dbv, redis:$redisv},
         resources:{ram_mb:$ram_mb, ram_used_mb:$ram_used_mb, swap_mb:$swap_mb, disk_used_pct:$disk_pct, load:$load, uptime:$uptime, reboot_required:($reboot=="yes")},
-        cloudflare:$cf, webadmin:$admin, notifications:$notify, backup:{schedule:$schedule, last_run:$last_backup}, sites:$sites, apps:$apps}'
+        cloudflare:$cf, webadmin:$admin, notifications:$notify, backup:{schedule:$schedule, last_run:$last_backup},
+        mail:$mail, sites:$sites, apps:$apps}'
     return 0
   fi
 
@@ -641,11 +670,11 @@ _doc_check_webmail() {
   else
     _doc_add FAIL "webmail: configuration" "${WM_CONF} is ${mode:-unreadable}, expected root:${WM_USER} 640: it holds the database password and the session key"
   fi
-  # the code must not be writable by the user that runs it
+  # the code must not belong to the user that runs it, or the webmail can rewrite itself
   if [[ -n "$(find "${WM_CURRENT}/program" -maxdepth 1 -user "$WM_USER" -print -quit 2>/dev/null)" ]]; then
     _doc_add FAIL "webmail: code" "${WM_USER} owns files under ${WM_CURRENT}/program; the webmail could rewrite itself"
   else
-    _doc_add OK "webmail: code" "owned by root, the webmail cannot change it"
+    _doc_add OK "webmail: code" "owned by $(stat -c %U "${WM_CURRENT}/program" 2>/dev/null || printf '?'), not by the user that runs it"
   fi
   local days=""
   while read -r d; do

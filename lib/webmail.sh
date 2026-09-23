@@ -11,6 +11,7 @@
 # database credentials.
 
 WM_USER="${MAIL_WEBMAIL_USER:-lompwebmail}"
+WM_CODE_OWNER="${WM_CODE_OWNER:-www-data}"   # owns the code; nothing on this machine runs as it
 WM_ROOT="/var/www/lomp-webmail"
 WM_RELEASES="${WM_ROOT}/releases"
 WM_CURRENT="${WM_ROOT}/current"
@@ -159,7 +160,13 @@ _wm_fetch_release() {   # version -> path of the unpacked release on stdout
   rm -rf "${dest}.part/installer"
   rm -rf "$dest"
   mv "${dest}.part" "$dest"
-  chown -R root:root "$dest"
+  # Not root, and not the user that runs it. OpenLiteSpeed refuses a document root whose
+  # owner is below its minimum uid - it says so and its own configuration test then fails -
+  # so root is out; the webmail user is out because code it owns is code it can rewrite.
+  # www-data is the conventional owner of web content here and nothing on this machine runs
+  # as it: OpenLiteSpeed runs as nobody, a site as its own user, the webmail as lompwebmail.
+  if id -u "$WM_CODE_OWNER" >/dev/null 2>&1; then chown -R "${WM_CODE_OWNER}:${WM_CODE_OWNER}" "$dest"
+  else chown -R root:root "$dest"; fi
   chmod -R go-w "$dest"
   printf '%s' "$dest"
   return 0

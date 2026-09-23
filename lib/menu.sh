@@ -101,6 +101,11 @@ COMMANDS
   webmail status                What runs, and for which domains
   webmail update [version]      Take a newer Roundcube (it also happens by itself, daily)
   webmail uninstall | purge     Remove it; "purge" drops its database too
+  mail backup <domain> [--keep N]     The mail on its own: mailboxes, aliases, the DKIM key
+  mail restore <domain> [--file A]    and the mail itself, back into the same mailboxes
+                                with the same passwords and the same key. A mailbox that is
+                                not empty is asked about first: the copy replaces what is
+                                there. Add --yes to answer it in a script
   mail relay set --host H [--port 587] --user U | relay off
                                 Send outgoing mail through another server where port 25
                                 is blocked; the password is read from stdin
@@ -110,9 +115,13 @@ COMMANDS
   doctor                        Deep health check (--json, --quiet)
   credentials <domain>|--all    Show stored credentials (never logged)
   optimize                      Re-measure the system and re-tune (shows a diff)
-  backup <domain>|--all [opts]  --remote --encrypt --keep N --dry-run
+  backup <domain>|--all [opts]  --remote --encrypt --keep N --no-mail --dry-run
+                                A domain with mail gets a second archive beside the site's,
+                                with a retention of its own: mail is measured in gigabytes
          --configure-remote     Configure rsync/rclone destination
-  restore <domain> --file <archive>   [--no-db] [--no-files]
+  restore <domain> --file <archive>   [--no-db] [--no-files] [--no-mail] [--mail-file F]
+                                The mail comes from the newest mail archive next to it, with
+                                the same mailbox passwords and the same DKIM key
   renew-ssl [domain] [opts]     --force --all --staging --wildcard
   update                        Safe package update + ordered service restarts
   self-update [--from DIR]      Pull the latest lompstack and refresh the installed

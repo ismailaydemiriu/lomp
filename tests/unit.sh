@@ -2871,6 +2871,56 @@ _js2="$TMP/json-new.json"; rm -f "$_js2"
 assert_eq  "a bad filter on a new file fails"  1 "$(run_isolated lib_json_set "$_js2" '.a = 1, .b = 2')"
 assert_true "and leaves no empty state behind" bash -c "[[ ! -e '$_js2' ]]"
 
+# =============================================================================
+# The mail of a domain is backed up on its own, and put back the same way
+_mb="$(declare -f lib_mail_backup_domain)"
+assert_has "the mail archive is its own file"      '%s-mail-%s' "$(declare -f lib_mail_backup_file)"
+assert_has "with a retention of its own"           'MAIL_BACKUP_KEEP' "$_mb"
+assert_has "there has to be room for the copy"     "_mail_free_kb" "$_mb"
+assert_has "on the mail's own filesystem"          '_mail_free_kb "$MAIL_VMAIL_HOME"' "$_mb"
+assert_has "and on the one the archive lands on"   '_mail_free_kb "$BACKUP_ROOT"' "$_mb"
+# a pipeline that fails has often printed its number already, so "|| printf 0" would append
+# a second one and the check would quietly decide there is nothing to measure
+assert_eq "a failed du reads as nothing"      0 "$(_mail_kb "")"
+assert_eq "and a good one as its number"  10240 "$(_mail_kb "10240	somewhere")"
+# the safety copy taken before a restore is not a candidate for "the newest archive"
+_bk="$TMP/backups"; mkdir -p "${_bk}/a.example"
+: >"${_bk}/a.example/a.example-mail-20260101-000000.tar.gz"
+: >"${_bk}/a.example/a.example-mail-pre-restore-20260202-000000.tar.gz"
+assert_eq "the safety copy is never the newest" "${_bk}/a.example/a.example-mail-20260101-000000.tar.gz"   "$(BACKUP_ROOT="$_bk" lib_mail_backup_latest a.example)"
+assert_has "and it is named apart"             "pre-restore" "$(lib_mail_backup_file a.example 20260202-000000 pre-restore)"
+assert_has "the DKIM key goes with it"             "dkim.key" "$_mb"
+assert_has "and the lines, which hold only hashes" "MAIL_PASSWD_FILE" "$_mb"
+# a live Maildir put straight into a tar describes a state the mailbox was never in
+assert_has "Dovecot makes the copy, not tar"       "doveadm -o plugin/quota= backup" "$(declare -f _mail_backup_maildirs)"
+# doveadm runs as vmail: the staging directory is made BY vmail, so root never creates a path
+# inside a directory that user owns
+_sd="$(declare -f _mail_stage_dir)"
+assert_has "the staging directory is vmail's own"  'runuser -u "$MAIL_VMAIL_USER" -- mktemp -d' "$_sd"
+_mr="$(declare -f lib_mail_restore_domain)"
+assert_has "a restore checks the archive first"    "sha256sum -c" "$_mr"
+assert_has "the same DKIM key comes back"          "dkim.key" "$_mr"
+assert_has "the lines before the mail"             "lib_mail_passwd_set" "$_mr"
+assert_has "the mail through Dovecot again"        "backup -R" "$_mr"
+assert_has "then the quota is recomputed"          "quota recalc" "$_mr"
+assert_has "and the webmail comes back with it"    "lib_webmail_domain_enable" "$_mr"
+_bd="$(declare -f lib_backup_domain)"
+assert_has "a site backup takes the mail too"      "lib_mail_backup_domain" "$_bd"
+assert_has "unless it is told not to"              "no_mail" "$_bd"
+_rm2="$(declare -f lib_restore_main)"
+assert_has "and a restore puts it back"            "lib_mail_restore_domain" "$_rm2"
+# the safety copy is taken AFTER the archive to restore from has been chosen, or "the newest
+# one" would mean the copy of the state being replaced
+_n_pick="$(grep -n 'lib_mail_backup_latest' <<<"$_rm2" | head -1 | cut -d: -f1)"
+_n_safe="$(grep -n 'tag pre-restore' <<<"$_rm2" | head -1 | cut -d: -f1)"
+assert_true "the archive is chosen before the safety copy"   bash -c "(( ${_n_pick:-0} > 0 && ${_n_safe:-0} > 0 && ${_n_pick:-0} < ${_n_safe:-0} ))"
+assert_has "and --encrypt reaches the mail archive too" "encrypt" "$_bd"
+# a mailbox that could not be filled is a failure, not a footnote
+assert_has "a partly filled restore says so"       "only partly back" "$_mr"
+# the archive says whose mail it holds, and a mismatch is a question
+assert_has "the manifest's domain is compared"     'jq -r' "$_mr"
+assert_has "and answering no stops it"             "belongs to" "$_mr"
+
 # a port that carries a password without TLS may answer this machine and nobody else
 eval 'ss() { printf "%s\n" "LISTEN 0 100 127.0.0.1:10587 0.0.0.0:*" "LISTEN 0 100 0.0.0.0:993 0.0.0.0:*" | awk "{print \$1, \$2, \$3, \$4, \$5}"; }'
 assert_false "a loopback port is not public"  lib_port_listening_public 10587

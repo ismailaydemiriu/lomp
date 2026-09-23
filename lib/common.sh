@@ -13,6 +13,9 @@ LIB_ERR_HANDLING=0
 # -g: modules are sourced from inside a function in setup.sh; plain "declare" would be local there
 declare -ga LIB_ROLLBACK_STACK=()
 declare -g LIB_TMP_ROOT=""
+# paths a module wants removed when the command ends, however it ends (see lib/mail.sh:
+# a staging copy of somebody's mailbox is as large as the mailbox)
+declare -ga LIB_EXTRA_CLEANUP=()
 OS_ID=""
 OS_VERSION_ID=""
 OS_CODENAME=""
@@ -213,6 +216,11 @@ lib_tmp_root_init() {
 }
 
 lib_cleanup_on_exit() {
+  local _p=""
+  for _p in ${LIB_EXTRA_CLEANUP[@]+"${LIB_EXTRA_CLEANUP[@]}"}; do
+    [[ -n "$_p" && -d "$_p" && "$_p" == */.lomp-stage.?????? ]] && rm -rf -- "$_p"
+  done
+  LIB_EXTRA_CLEANUP=()
   # the name guard makes an unset or inherited LIB_TMP_ROOT harmless
   if [[ -n "${LIB_TMP_ROOT:-}" && -d "${LIB_TMP_ROOT:-}" && "${LIB_TMP_ROOT}" == */lompstack.?????? ]]; then
     rm -rf -- "$LIB_TMP_ROOT"

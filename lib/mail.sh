@@ -2831,6 +2831,22 @@ _mail_webmail_cmd() {   # on|off|status <domain>
   return 0
 }
 
+_mail_restore_cmd() {   # domain [--file ARCHIVE]
+  local d="${1,,}" a="" file=""
+  shift || true
+  while (($# > 0)); do
+    a="$1"; shift
+    case "$a" in
+      --file) file="${1:-}"; shift ;;
+      --yes)  OPT_YES=1 ;;
+      *) lib_die "Unknown option for 'mail restore': ${a}" "" "lomp mail restore example.com [--file ARCHIVE]" ;;
+    esac
+  done
+  lib_mail_restore_domain "$d" "$file" \
+    || lib_die "The mail of ${d} could not be restored" "${MAIL_LAST_ERROR}" "lomp doctor"
+  return 0
+}
+
 # After a change that adds or removes a name, say what DNS needs - or write it.
 lib_mail_dns_note() {   # domain
   local d="$1"
@@ -2875,8 +2891,363 @@ lib_mail_main() {
     relay)      _mail_relay_cmd "$@" ;;
     webmail)    lib_mail_installed || lib_die "Mail is not installed" "" "lomp install --with-mail"
                 _mail_webmail_cmd "$@" ;;
+    backup)     lib_mail_installed || lib_die "Mail is not installed" "" "lomp install --with-mail"
+                [[ -n "${1:-}" ]] || lib_die "Which domain?" "" "lomp mail backup example.com"
+                lib_mail_backup_domain "${1,,}" "${@:2}" \
+                  || lib_die "The mail of ${1} could not be backed up" "${MAIL_LAST_ERROR}" "lomp doctor" ;;
+    restore)    lib_mail_installed || lib_die "Mail is not installed" "" "lomp install --with-mail"
+                [[ -n "${1:-}" ]] || lib_die "Which domain?" "" "lomp mail restore example.com [--file ARCHIVE]"
+                _mail_restore_cmd "$@" ;;
     help|-h|--help) lib_mail_usage ;;
     *)          lib_error "Unknown mail command: ${sub}"; printf '\n'; lib_mail_usage; exit 2 ;;
   esac
+  return 0
+}
+
+# =============================================================================
+#  Backup and restore
+# =============================================================================
+# The mail of a domain is kept in an archive of its own, next to the site's. Two reasons:
+# a mailbox is measured in gigabytes where a site is measured in megabytes, so keeping seven
+# copies of one is not keeping seven copies of the other; and mail can be put back on its own,
+# without touching the site that happens to share its name.
+MAIL_BACKUP_KEEP="${MAIL_BACKUP_KEEP:-2}"
+MAIL_BACKUP_LAST_FILE=""
+
+lib_mail_backup_file() {   # domain timestamp [tag]
+  printf '%s/%s/%s-mail-%s%s.tar.gz' "$BACKUP_ROOT" "$1" "$1" "${3:+${3}-}" "$2"
+}
+
+# The newest ORDINARY mail archive of a domain. A tagged one - the copy taken automatically
+# just before a restore, say - is deliberately not a candidate: restoring from the safety copy
+# made two minutes ago would replace every mailbox with itself and lose the archive the
+# operator actually asked for.
+lib_mail_backup_latest() {   # domain
+  local f=""
+  f="$(ls -1t "${BACKUP_ROOT}/${1}/${1}-mail-"[0-9]*.tar.gz 2>/dev/null | head -1 || true)"
+  [[ -n "$f" ]] || return 1
+  printf '%s' "$f"
+}
+
+# A consistent copy of every mailbox, made by Dovecot itself. The live Maildir is never put
+# into a tar: a message delivered while tar reads the directory lands in an archive that
+# describes a state the mailbox was never in.
+# A number from "du -sk" or nothing. A pipeline that fails has often printed its number
+# already, so a "|| printf 0" fallback would append a second one and the check that reads it
+# would quietly decide there is nothing to measure.
+_mail_kb() {   # "<kb>	<path>" -> kb
+  local n=""
+  n="$(awk '{print $1; exit}' <<<"${1:-}" 2>/dev/null || true)"
+  [[ "$n" =~ ^[0-9]+$ ]] || n=0
+  printf '%s' "$n"
+}
+
+_mail_free_kb() {   # path -> free kilobytes, 0 when it cannot be told
+  local n=""
+  n="$(df -Pk "$1" 2>/dev/null | awk 'NR==2{print $4; exit}' || true)"
+  [[ "$n" =~ ^[0-9]+$ ]] || n=0
+  printf '%s' "$n"
+}
+
+# A staging directory doveadm can actually write into. It runs as vmail, so the directory is
+# made BY vmail with mktemp - root never creates a path inside a directory that user owns, and
+# a random name cannot be swapped for a link in between.
+_mail_stage_dir() {   # -> path on stdout
+  local dir=""
+  dir="$(runuser -u "$MAIL_VMAIL_USER" -- mktemp -d "${MAIL_VMAIL_HOME}/.lomp-stage.XXXXXX" 2>/dev/null || true)"
+  [[ -n "$dir" && -d "$dir" ]] || return 1
+  # so that an interrupted run does not leave a second copy of everyone's mail behind
+  LIB_EXTRA_CLEANUP+=("$dir")
+  printf '%s' "$dir"
+}
+
+_mail_stage_drop() {   # path
+  local s="" keep=()
+  [[ -n "${1:-}" ]] || return 0
+  rm -rf "$1"
+  for s in ${LIB_EXTRA_CLEANUP[@]+"${LIB_EXTRA_CLEANUP[@]}"}; do
+    [[ "$s" == "$1" ]] || keep+=("$s")
+  done
+  LIB_EXTRA_CLEANUP=(${keep[@]+"${keep[@]}"})
+  return 0
+}
+
+# A run that was killed - Ctrl-C, a cron timeout, the OOM killer - leaves its staging copy
+# behind, and it is as large as the mail it copied. Anything older than a day is nobody's.
+_mail_stage_sweep() {
+  local dir=""
+  while read -r dir; do
+    [[ -n "$dir" ]] || continue
+    rm -rf "$dir"
+    lib_log_write INFO "left-over mail staging directory removed: ${dir}"
+  done < <(find "$MAIL_VMAIL_HOME" -maxdepth 1 -name '.lomp-stage.*' -type d -mmin +1440 2>/dev/null || true)
+  return 0
+}
+
+_mail_backup_maildirs() {   # domain staging-dir -> 0 when it wrote something
+  local d="$1" stage="$2" a="" local_part="" n=0
+  lib_have doveadm || { MAIL_LAST_ERROR="doveadm is missing"; return 1; }
+  while read -r a; do
+    [[ -n "$a" ]] || continue
+    local_part="${a%@*}"
+    runuser -u "$MAIL_VMAIL_USER" -- mkdir -p "${stage}/${local_part}" || {
+      MAIL_LAST_ERROR="could not prepare the staging directory for ${a}"; return 1; }
+    # -o plugin/quota= : a mailbox that is over quota must still be backed up
+    if ! doveadm -o plugin/quota= backup -u "$a" "maildir:${stage}/${local_part}" >/dev/null 2>>"$LOG_FILE"; then
+      MAIL_LAST_ERROR="doveadm backup failed for ${a} (the reason is in ${LOG_FILE})"
+      return 1
+    fi
+    n=$((n + 1))
+  done < <(lib_mail_boxes "$d")
+  return 0
+}
+
+# Everything that makes this domain's mail what it is, in one archive.
+lib_mail_backup_domain() {   # domain [--keep N] [--tag T] [--encrypt]
+  local d="$1"; shift || true
+  local keep="$MAIL_BACKUP_KEEP" tag="" encrypt=0 a="" work="" stage="" out="" ts="" sel=""
+  local need=0 free=0 boxes=0
+  while (($# > 0)); do
+    a="$1"; shift
+    case "$a" in
+      --keep)    keep="${1:-2}"; shift ;;
+      --tag)     tag="${1:-}"; shift ;;
+      --encrypt) encrypt=1 ;;
+      *) MAIL_LAST_ERROR="unknown option ${a}"; return 1 ;;
+    esac
+  done
+  lib_mail_installed || return 0
+  lib_mail_domain_has_traces "$d" || return 0
+  ts="$(lib_ts)"
+  out="$(lib_mail_backup_file "$d" "$ts" "$tag")"
+  if (( OPT_DRY_RUN )); then
+    lib_info "[dry-run] would write the mail of ${d} to ${out} (mailboxes, aliases, the DKIM key and the mail itself)"
+    return 0
+  fi
+  _mail_stage_sweep
+  # Room first, on both filesystems: half a copy of somebody's mail is worse than none. The
+  # consistent copy Dovecot makes lands next to the mail, the archive lands with the backups,
+  # and those are usually two different disks.
+  if [[ -d "${MAIL_VMAIL_HOME}/${d}" ]]; then
+    need="$(_mail_kb "$(du -sk "${MAIL_VMAIL_HOME}/${d}" 2>/dev/null || true)")"
+    free="$(_mail_free_kb "$MAIL_VMAIL_HOME")"
+    if (( free > 0 && need > free )); then
+      MAIL_LAST_ERROR="a copy of the mail of ${d} needs about $((need / 1024)) MB and ${MAIL_VMAIL_HOME} has $((free / 1024)) MB free"
+      return 1
+    fi
+    free="$(_mail_free_kb "$BACKUP_ROOT")"
+    if (( free > 0 && need > free )); then
+      MAIL_LAST_ERROR="the archive of ${d}'s mail needs up to $((need / 1024)) MB and ${BACKUP_ROOT} has $((free / 1024)) MB free"
+      return 1
+    fi
+  fi
+  mkdir -p "${BACKUP_ROOT}/${d}" "${BACKUP_ROOT}/.work" && chmod 0700 "${BACKUP_ROOT}/${d}" "${BACKUP_ROOT}/.work"
+  # the work directory lives with the backups, not in /tmp: the compressed copy of a mailbox
+  # is as big as the mailbox, and /tmp is the one filesystem nothing measured
+  work="$(mktemp -d "${BACKUP_ROOT}/.work/mail-${d}.XXXXXX")" || { MAIL_LAST_ERROR="cannot create a work directory"; return 1; }
+  chmod 0700 "$work"
+  mkdir -p "${work}/mail"
+  ( umask 077
+    # the lines of this domain, and the ones put aside while its mail is off. Only hashes -
+    # and 0600 inside the archive too, because an operator unpacking it to look would
+    # otherwise leave every hash of the domain world-readable.
+    lib_mail_boxes "$d" >"${work}/mail/boxes.list"
+    if [[ -s "$MAIL_PASSWD_FILE" ]]; then
+      awk -F: -v d="$d" 'index($1, "@") > 0 && substr($1, index($1, "@") + 1) == d' "$MAIL_PASSWD_FILE" >"${work}/mail/passwd" || true
+    fi
+  )
+  [[ -s "${MAIL_DISABLED_DIR}/${d}.passwd" ]] && cp -p "${MAIL_DISABLED_DIR}/${d}.passwd" "${work}/mail/passwd.parked"
+  [[ -s "$(lib_mail_alias_file "$d")" ]] && cp -p "$(lib_mail_alias_file "$d")" "${work}/mail/aliases"
+  # the DKIM key, because the public half is published: a new key means every message signed
+  # before the restore fails verification until DNS catches up
+  sel="$(lib_mail_selector "$d")"
+  [[ -s "${MAIL_DKIM_DIR}/${d}.${sel}.key" ]] && cp -p "${MAIL_DKIM_DIR}/${d}.${sel}.key" "${work}/mail/dkim.key"
+  printf '%s\n' "$sel" >"${work}/mail/selector"
+  [[ -s "$(lib_domain_json "$d")" ]] && jq -c '.mail // {}' "$(lib_domain_json "$d")" >"${work}/mail/state.json"
+  chmod 0600 "${work}/mail/"* 2>/dev/null || true
+  # The mail itself, copied by Dovecot into a directory of its own and packed from there: a
+  # live Maildir put straight into a tar describes a state the mailbox was never in. A domain
+  # that has no mailbox at all still gets an archive - its aliases and its key are in it.
+  boxes="$(lib_mail_boxes "$d" | wc -l | tr -d ' ')"
+  if (( boxes > 0 )); then
+    stage="$(_mail_stage_dir)" || { MAIL_LAST_ERROR="no staging directory under ${MAIL_VMAIL_HOME}"; rm -rf "$work"; return 1; }
+    if ! _mail_backup_maildirs "$d" "$stage"; then
+      lib_warn "the mailboxes of ${d} could not be copied: ${MAIL_LAST_ERROR}"
+      _mail_stage_drop "$stage"; rm -rf "$work"
+      return 1
+    fi
+    if ! tar -C "$stage" -czf "${work}/maildirs.tar.gz" . 2>>"$LOG_FILE"; then
+      MAIL_LAST_ERROR="the copied mailboxes could not be packed"
+      _mail_stage_drop "$stage"; rm -rf "$work"
+      return 1
+    fi
+    _mail_stage_drop "$stage"
+  else
+    lib_info "${d} has no mailbox; its aliases and its DKIM key are archived on their own"
+  fi
+  jq -n --arg d "$d" --arg ts "$(lib_iso_now)" --arg sel "$sel" --arg ver "$SCRIPT_VERSION" \
+        --arg host "$(lib_mail_host)" --argjson boxes "$boxes" \
+        '{format:1, kind:"mail", domain:$d, created_at:$ts, selector:$sel, script_version:$ver,
+          mail_host:$host, mailboxes:$boxes}' >"${work}/manifest.json"
+  ( umask 077; tar -C "$work" -czf "$out" . 2>>"$LOG_FILE" ) || {
+    MAIL_LAST_ERROR="the mail archive could not be written"
+    rm -rf "$work" "$out"
+    return 1
+  }
+  rm -rf "$work"
+  chmod 0600 "$out"
+  # the same key and the same cipher the site archive uses: a mail archive holds every
+  # password hash of the domain and its signing key, so "--encrypt" cannot mean "except this"
+  if (( encrypt )); then
+    lib_backup_key_ensure
+    if openssl enc -aes-256-cbc -md sha256 -pbkdf2 -iter 200000 -salt -in "$out" -out "${out}.enc" -pass "file:${BACKUP_KEY_FILE}" 2>>"$LOG_FILE"; then
+      rm -f "$out"; out="${out}.enc"; chmod 0600 "$out"
+    else
+      MAIL_LAST_ERROR="the mail archive could not be encrypted"
+      rm -f "$out" "${out}.enc"
+      return 1
+    fi
+  fi
+  ( cd "$(dirname "$out")" && sha256sum "$(basename "$out")" >"$(basename "$out").sha256" ) || true
+  MAIL_BACKUP_LAST_FILE="$out"
+  lib_ok "Mail backup: ${out} ($(du -h "$out" | cut -f1))"
+  # Its own retention: mail is large and the site's seven copies would be seven copies of it.
+  # Only ordinary archives are counted and removed - a tagged one is somebody's safety copy.
+  if [[ -z "$tag" && "$keep" =~ ^[0-9]+$ ]] && (( keep > 0 )); then
+    ls -1t "${BACKUP_ROOT}/${d}/${d}-mail-"[0-9]*.tar.gz* 2>/dev/null | grep -v '\.sha256$' | tail -n +$((keep + 1)) | while read -r a; do
+      rm -f "$a" "${a}.sha256"
+      lib_log_write INFO "old mail backup removed: ${a}"
+    done || true
+  fi
+  return 0
+}
+
+# Put a domain's mail back. The order is the one that works: the lines first, so Dovecot can
+# resolve the users at all, then the maps, then the mail itself into mailboxes that now exist.
+lib_mail_restore_domain() {   # domain [archive]
+  local d="$1" file="${2:-}" work="" stage="" a="" local_part="" sel="" adom=""
+  local n=0 restored=0 failed=0 have=0
+  lib_mail_installed || { MAIL_LAST_ERROR="the mail server is not installed here"; return 1; }
+  if [[ -z "$file" ]]; then
+    file="$(lib_mail_backup_latest "$d")" || { lib_info "No mail backup for ${d}"; return 0; }
+  fi
+  [[ -s "$file" ]] || { MAIL_LAST_ERROR="the mail archive ${file} is not there"; return 1; }
+  if [[ -s "${file}.sha256" ]]; then
+    ( cd "$(dirname "$file")" && sha256sum -c --quiet "$(basename "$file").sha256" >/dev/null 2>&1 ) \
+      || { MAIL_LAST_ERROR="the mail archive does not match its checksum"; return 1; }
+  fi
+  if (( OPT_DRY_RUN )); then lib_info "[dry-run] would restore the mail of ${d} from ${file}"; return 0; fi
+  work="$(lib_mktemp -d)"
+  if ! tar -C "$work" -xzf "$file" 2>>"$LOG_FILE"; then
+    MAIL_LAST_ERROR="the mail archive could not be unpacked"; rm -rf "$work"; return 1
+  fi
+  [[ -s "${work}/manifest.json" ]] || { MAIL_LAST_ERROR="${file} is not a mail archive"; rm -rf "$work"; return 1; }
+  # whose mail is in it: the archives of two domains sit in two directories with names that
+  # differ by one word, and restoring the wrong one installs another domain's aliases and
+  # another domain's DKIM key
+  adom="$(jq -r '.domain // empty' "${work}/manifest.json" 2>/dev/null || true)"
+  if [[ -n "$adom" && "$adom" != "$d" ]]; then
+    lib_warn "${file} holds the mail of ${adom}, not of ${d}"
+    lib_note "its aliases, its DKIM key and its mailbox lines would become ${d}'s"
+    if ! lib_confirm "Restore ${adom}'s mail into ${d} anyway?" n; then
+      MAIL_LAST_ERROR="the archive belongs to ${adom}"
+      rm -rf "$work"
+      return 1
+    fi
+  fi
+  lib_heading "Restoring the mail of ${d}"
+
+  # the state block, so the domain is a mail domain again before anything asks whether it is
+  # The archived block, but not at the cost of a webmail switched on since: that one has a
+  # virtual host and a certificate name in the world, and dropping the flag would leave both
+  # of them behind with nothing pointing at them.
+  if [[ -s "${work}/mail/state.json" ]]; then
+    lib_json_set "$(lib_domain_json "$d")"       '.mail = ($m + ((.mail // {}) | {webmail, webmail_host} | with_entries(select(.value != null))))'       --argjson m "$(cat "${work}/mail/state.json")"
+  fi
+  # the mailbox lines, with the passwords they had: a restore nobody can log in to is not one
+  if [[ -s "${work}/mail/passwd" ]]; then
+    while IFS= read -r a; do
+      [[ -n "$a" ]] || continue
+      lib_mail_passwd_set "${a%%:*}" "$(cut -d: -f2 <<<"$a")" "$(sed -n 's/.*storage=\([^:]*\).*/\1/p' <<<"$a")"
+      n=$((n + 1))
+    done <"${work}/mail/passwd"
+    lib_ok "${n} mailbox line(s) restored"
+  fi
+  [[ -s "${work}/mail/passwd.parked" ]] && { lib_mkdir "$MAIL_DISABLED_DIR" 0700 root:root; cp "${work}/mail/passwd.parked" "${MAIL_DISABLED_DIR}/${d}.passwd"; chmod 0600 "${MAIL_DISABLED_DIR}/${d}.passwd"; }
+  [[ -s "${work}/mail/aliases" ]] && { lib_mkdir "$MAIL_ALIAS_DIR" 0750 root:root; cp "${work}/mail/aliases" "$(lib_mail_alias_file "$d")"; chmod 0640 "$(lib_mail_alias_file "$d")"; }
+  # the same DKIM key, not a new one: the public half is in DNS and a new key means every
+  # message this domain sends fails verification until the record is changed
+  if [[ -s "${work}/mail/dkim.key" ]]; then
+    sel="$(tr -d '[:space:]' <"${work}/mail/selector" 2>/dev/null || true)"
+    sel="${sel:-$(lib_mail_selector "$d")}"
+    lib_mkdir "$MAIL_DKIM_DIR" 0750 root:_rspamd
+    cp "${work}/mail/dkim.key" "${MAIL_DKIM_DIR}/${d}.${sel}.key"
+    chmod 0640 "${MAIL_DKIM_DIR}/${d}.${sel}.key"
+    chown root:_rspamd "${MAIL_DKIM_DIR}/${d}.${sel}.key" 2>/dev/null || true
+    lib_ok "the DKIM key of ${d} is the one it was signed with before"
+  fi
+  lib_mail_tables_apply || lib_warn "the mail tables could not be rebuilt: ${MAIL_LAST_ERROR}"
+
+  # "doveadm backup -R" makes the mailbox an exact copy of the archive: a message that
+  # arrived after the backup was taken is DELETED by it. That is what a disaster recovery
+  # wants and the last thing a rollback wants, so a mailbox that is not empty is a question.
+  have=0
+  have="$(find "${MAIL_VMAIL_HOME}/${d}" -type f \( -path '*/new/*' -o -path '*/cur/*' \) 2>/dev/null | wc -l | tr -d ' ')"
+  if [[ -s "${work}/maildirs.tar.gz" ]] && (( have > 0 )); then
+    lib_warn "${d} already holds ${have} message(s). Restoring replaces them with the archived copy:"
+    lib_note "anything that arrived after $(jq -r '.created_at' "${work}/manifest.json" 2>/dev/null || printf 'the backup') is deleted."
+    if ! lib_confirm "Replace the mail of ${d} with the archived copy?" n; then
+      lib_info "The mailboxes were left as they are; the lines, aliases and the DKIM key are restored"
+      rm -f "${work}/maildirs.tar.gz"
+    fi
+  fi
+  # And now the mail, into mailboxes Dovecot can resolve. doveadm reads as vmail, so the copy
+  # is unpacked into a directory vmail made itself - root writes nothing inside a directory
+  # that user owns, and a random name cannot be swapped for a link in between.
+  if [[ -s "${work}/maildirs.tar.gz" ]]; then
+    if stage="$(_mail_stage_dir)"; then
+      # the archive is opened by root and handed over as an open file: vmail cannot read the
+      # work directory, and root does not write inside a directory vmail owns
+      if runuser -u "$MAIL_VMAIL_USER" -- tar -C "$stage" -xzf - <"${work}/maildirs.tar.gz" 2>>"$LOG_FILE"; then
+        while read -r a; do
+          [[ -n "$a" ]] || continue
+          local_part="${a%@*}"
+          [[ -d "${stage}/${local_part}" ]] || continue
+          if doveadm -o plugin/quota= backup -R -u "$a" "maildir:${stage}/${local_part}" >/dev/null 2>>"$LOG_FILE"; then
+            doveadm force-resync -u "$a" '*' >/dev/null 2>&1 || true
+            doveadm quota recalc -u "$a" >/dev/null 2>&1 || true
+            restored=$((restored + 1))
+          else
+            lib_warn "the mail of ${a} could not be put back (see ${LOG_FILE})"
+            failed=$((failed + 1))
+          fi
+        done < <(lib_mail_boxes "$d")
+        lib_ok "${restored} mailbox(es) filled again"
+      else
+        lib_warn "the archived mailboxes could not be unpacked"
+      fi
+      _mail_stage_drop "$stage"
+    else
+      lib_warn "no staging directory under ${MAIL_VMAIL_HOME}; the mail itself was not restored"
+    fi
+  fi
+  rm -rf "$work"
+  lib_mail_domain_cert_ensure "$d"
+  # again, and this time with the certificate: the SNI table copies the certificate INTO
+  # itself, so a table built before it arrived would go on presenting the server's own name
+  lib_mail_tables_apply || lib_warn "the mail tables could not be rebuilt: ${MAIL_LAST_ERROR}"
+  # the webmail, when this domain had one. In a subshell: this path can install Roundcube,
+  # and a failure there must not take a half-finished restore down with it.
+  if [[ "$(lib_json_get "$(lib_domain_json "$d")" '.mail.webmail')" == "true" ]]; then
+    ( lib_webmail_domain_enable "$d" ) || lib_warn "the webmail of ${d} could not be set up again"
+  fi
+  if (( failed > 0 )); then
+    MAIL_LAST_ERROR="${failed} mailbox(es) could not be filled"
+    lib_warn "The mail of ${d} is only partly back: ${MAIL_LAST_ERROR}"
+    return 1
+  fi
+  lib_ok "The mail of ${d} is back"
+  # the address of this server may not be the address the records were written for
+  lib_note "Check what DNS says now: lomp mail dns ${d} --check"
   return 0
 }

@@ -544,6 +544,29 @@ Roundcube's own login limit counts per account and ignores the address a request
 failed logins go to the journal and fail2ban bans by IP - through Cloudflare's API when the
 site is proxied, so the ban happens at the edge.
 
+### Backing the mail up
+
+A domain's mail is backed up with the site, into an archive of its own next to it:
+
+```bash
+sudo lomp backup example.com              # the site, and its mail beside it
+sudo lomp mail backup example.com         # only the mail
+sudo lomp mail restore example.com        # from the newest mail archive
+sudo lomp restore example.com --file <site archive>   # both, in one go
+```
+
+Two archives because a mailbox is measured in gigabytes where a site is measured in megabytes:
+the site keeps seven copies, the mail keeps two. The copy is made by Dovecot itself rather than
+by tar - a message delivered while tar reads a Maildir lands in an archive describing a state
+the mailbox was never in - and it holds the mailbox lines with their password hashes, the
+aliases, the DKIM key and the mail. Restoring gives back the same passwords and the same DKIM
+key, so mail signed before the restore still verifies and nobody has to change a mail client.
+
+A restore makes a mailbox an exact copy of the archive, so anything that arrived after the
+backup is deleted by it. A mailbox that still holds mail is therefore asked about first, and
+left alone if the answer is no; an empty one - the disaster case - is filled without a
+question. `--yes` answers it in a script.
+
 ### Closing the origin
 
 With the sites behind Cloudflare, anyone who learns the server's address can still reach it

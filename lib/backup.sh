@@ -106,7 +106,7 @@ lib_backup_verify() {   # archive -> 0 ok  (checks sha256 sidecar + tar listing 
 # =============================================================================
 lib_backup_domain() {   # domain [--keep N] [--encrypt] [--remote] [--tag T]
   local domain="$1"; shift
-  local keep="$BACKUP_KEEP" encrypt=0 remote=0 tag="" a="" work="" name="" ts="" dest="" final="" dbfile="" parts=() vh=""
+  local keep="$BACKUP_KEEP" encrypt=0 remote=0 no_mail=0 tag="" a="" work="" name="" ts="" dest="" final="" dbfile="" parts=() vh=""
   BK_ERROR=""; BK_LAST_FILE=""
   while (($# > 0)); do
     a="$1"; shift
@@ -115,6 +115,7 @@ lib_backup_domain() {   # domain [--keep N] [--encrypt] [--remote] [--tag T]
       --encrypt) encrypt=1 ;;
       --remote)  remote=1 ;;
       --tag)     tag="${1:-}"; shift ;;
+      --no-mail) no_mail=1 ;;
       *) BK_ERROR="unknown backup option ${a}"; return 1 ;;
     esac
   done
@@ -125,6 +126,10 @@ lib_backup_domain() {   # domain [--keep N] [--encrypt] [--remote] [--tag T]
   dest="${BACKUP_ROOT}/${domain}"
   if (( OPT_DRY_RUN )); then
     lib_info "[dry-run] would create ${dest}/${name}.tar.gz$( (( encrypt )) && printf '.enc') (files: public_html, private$( [[ -d "${D_HOME}/app" ]] && printf ', app without node_modules'); db: ${D_DB_NAME:-none}; vhost; state)$( (( remote )) && printf ' and upload it')"
+    if (( ! no_mail )) && lib_mail_installed && lib_mail_domain_has_traces "$domain"; then
+      lib_mail_backup_domain "$domain" ${tag:+--tag "$tag"} $( (( encrypt )) && printf -- '--encrypt') || true
+      lib_info "[dry-run] and would keep the newest ${MAIL_BACKUP_KEEP} mail archive(s), removing any older one"
+    fi
     return 0
   fi
   (( encrypt )) && lib_backup_key_ensure
@@ -185,6 +190,17 @@ lib_backup_domain() {   # domain [--keep N] [--encrypt] [--remote] [--tag T]
   lib_log_write INFO "backup created: ${final} ($(du -h "$final" | cut -f1))"
   lib_ok "Backup created: ${final} ($(du -h "$final" | cut -f1))$( (( encrypt )) && printf ' [encrypted]')"
   lib_backup_prune "$domain" "$keep"
+  # The mail goes into an archive of its own, with a retention of its own: a mailbox is
+  # measured in gigabytes where a site is measured in megabytes, and mail can be put back
+  # without touching the site that shares its name. A failure here is a warning, not a lost
+  # site backup - the one above is already written.
+  if (( ! no_mail )); then
+    MAIL_BACKUP_LAST_FILE=""
+    lib_mail_backup_domain "$domain" ${tag:+--tag "$tag"} $( (( encrypt )) && printf -- '--encrypt')       || lib_warn "the mail of ${domain} was not backed up: ${MAIL_LAST_ERROR:-no reason given}"
+    if (( remote )) && [[ -n "${MAIL_BACKUP_LAST_FILE:-}" ]]; then
+      lib_backup_remote_send "$MAIL_BACKUP_LAST_FILE" "${MAIL_BACKUP_LAST_FILE}.sha256" || true
+    fi
+  fi
   if (( remote )); then
     lib_backup_remote_send "$final" "${final}.sha256" || { lib_backup_failed "$domain"; return 1; }
   fi
@@ -211,7 +227,8 @@ lib_backup_main() {
       --encrypt) encrypt=1; passthru+=(--encrypt) ;;
       --keep)    keep="${1:-7}"; passthru+=(--keep "$keep"); shift ;;
       --tag)     tag="${1:-}"; passthru+=(--tag "$tag"); shift ;;
-      -*)        lib_die "Unknown option for backup: ${a}" "" "backup <domain>|--all [--remote] [--encrypt] [--keep N] [--tag T]" ;;
+      --no-mail) passthru+=(--no-mail) ;;
+      -*)        lib_die "Unknown option for backup: ${a}" "" "backup <domain>|--all [--remote] [--encrypt] [--keep N] [--tag T] [--no-mail]" ;;
       *)         domain="${a,,}" ;;
     esac
   done
@@ -269,8 +286,8 @@ lib_backup_schedule() {
 #  restore
 # =============================================================================
 lib_restore_main() {
-  local domain="${1:-}" file="" no_db=0 no_files=0 a="" work="" archive="" plain="" adomain=""
-  [[ -n "$domain" ]] || lib_die "Usage: setup.sh restore <domain> --file <archive> [--no-db] [--no-files]" "" "setup.sh restore example.com --file /var/backups/server-setup/example.com/example.com-20250101-030000.tar.gz"
+  local domain="${1:-}" file="" no_db=0 no_files=0 no_mail=0 mail_file="" a="" work="" archive="" plain="" adomain=""
+  [[ -n "$domain" ]] || lib_die "Usage: setup.sh restore <domain> --file <archive> [--no-db] [--no-files] [--no-mail] [--mail-file F]" "" "setup.sh restore example.com --file /var/backups/server-setup/example.com/example.com-20250101-030000.tar.gz"
   shift
   while (($# > 0)); do
     a="$1"; shift
@@ -278,6 +295,8 @@ lib_restore_main() {
       --file)     file="${1:-}"; shift ;;
       --no-db)    no_db=1 ;;
       --no-files) no_files=1 ;;
+      --no-mail)  no_mail=1 ;;
+      --mail-file) mail_file="${1:-}"; shift ;;
       *) lib_die "Unknown option for restore: ${a}" "" "restore <domain> --file <archive> [--no-db] [--no-files]" ;;
     esac
   done
@@ -329,12 +348,21 @@ lib_restore_main() {
 
   lib_note "files: $( (( no_files )) && printf 'skipped' || printf "restored into ${D_HOME} (existing files are overwritten)")"
   lib_note "database: $( (( no_db )) && printf 'skipped' || printf 'restored (tables are replaced)')"
+  if lib_mail_installed && lib_mail_domain_has_traces "$domain"; then
+    lib_note "mail: $( (( no_mail )) && printf 'skipped' || printf 'from its own archive; a mailbox that is not empty is asked about first')"
+  fi
   lib_note "a safety backup of the current state is taken first"
   lib_confirm "Proceed with the restore?" n || lib_die "Restore cancelled" "" ""
   lib_rollback_clear
 
+  # Which mail archive this restore will use, decided BEFORE the safety copy is taken: the
+  # safety copy is a mail archive too, and "the newest one" would otherwise mean the copy of
+  # the state being replaced - every mailbox restored with itself.
+  if (( ! no_mail )) && [[ -z "$mail_file" ]] && lib_mail_installed; then
+    mail_file="$(lib_mail_backup_latest "$domain" 2>/dev/null || true)"
+  fi
   if (( ! OPT_DRY_RUN )); then
-    lib_backup_domain "$domain" --tag pre-restore --keep 0 || lib_warn "safety backup failed: ${BK_ERROR} (continuing)"
+    lib_backup_domain "$domain" --tag pre-restore --keep 0 $( (( no_mail )) && printf -- '--no-mail')       || lib_warn "safety backup failed: ${BK_ERROR} (continuing)"
   fi
 
   # ---- files -----------------------------------------------------------------
@@ -379,6 +407,10 @@ lib_restore_main() {
     if [[ "$D_MODE" == "php" || "$D_MODE" == "wordpress" ]]; then lib_ols_htaccess_watch_ensure; fi
   fi
   lib_rollback_clear
+  # the mail, from its own archive: the newest one next to the site's unless another is named
+  if (( ! no_mail )) && lib_mail_installed; then
+    lib_mail_restore_domain "$domain" "$mail_file" || lib_warn "the mail of ${domain} was not restored: ${MAIL_LAST_ERROR}"
+  fi
   # a Node.js site: its dependencies are not in the archive; reinstall them and start it again
   lib_domain_state_load "$domain" >/dev/null 2>&1 || true
   lib_app_restore
