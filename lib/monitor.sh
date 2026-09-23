@@ -581,8 +581,56 @@ _doc_check_apps() {
 # none of them announce themselves when they stop being true: a service that did not come
 # back, the Dovecot include that would let every Linux account read mail, a certificate
 # running out, and a port that should not be open.
+# Ask port 25 to carry mail to a domain this server has nothing to do with. A server that says
+# yes is an open relay, and an open relay is the one mistake a mail server does not come back
+# from: it is on every blocklist within the day. Nothing is ever sent - the conversation stops
+# at RCPT TO, before DATA - so this costs the far side nothing either.
+_doc_relay_probe() {   # 0 = refuses to relay, 1 = accepted it
+  local line="" code=""
+  exec 3<>/dev/tcp/127.0.0.1/25 2>/dev/null || return 0
+  if ! read -r -t 5 line <&3; then exec 3<&- 3>&-; return 0; fi
+  printf 'EHLO doctor.invalid\r\n' >&3
+  while read -r -t 5 line <&3; do
+    if [[ "$line" == "250 "* ]]; then break; fi
+  done
+  printf 'MAIL FROM:<probe@doctor.invalid>\r\n' >&3
+  read -r -t 5 line <&3 || true
+  printf 'RCPT TO:<probe@example.net>\r\n' >&3
+  read -r -t 5 line <&3 || true
+  code="${line:0:3}"
+  printf 'QUIT\r\n' >&3
+  exec 3<&- 3>&-
+  if [[ "$code" == 2* ]]; then return 1; fi
+  return 0
+}
+
+_doc_rbl_query() { dig +short +time=3 +tries=1 "@127.0.0.1" -p 5335 "${1}.zen.spamhaus.org" A 2>/dev/null || true; }
+
+# What the receiving world thinks of this machine's address, asked through the resolver Rspamd
+# uses: Spamhaus answers a query arriving from a public resolver with a refusal that looks
+# exactly like a listing (127.255.255.x), and a server told it is blocklisted when it is not
+# has somebody chasing a problem that does not exist. For the same reason the answer counts
+# only when the address Spamhaus always lists does come back listed.
+_doc_mail_rbl() {   # -> listed|clean|unknown
+  local ip="${SYS_PUBLIC_IPV4:-}" rev="" ans="" ctl=""
+  lib_have dig || { printf 'unknown'; return 0; }
+  lib_port_listening 5335 || { printf 'unknown'; return 0; }
+  [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || { printf 'unknown'; return 0; }
+  case "$ip" in
+    10.*|127.*|192.168.*|172.1[6-9].*|172.2[0-9].*|172.3[01].*) printf 'unknown'; return 0 ;;
+  esac
+  ctl="$(_doc_rbl_query 2.0.0.127)"
+  if [[ -z "$ctl" || "$ctl" == 127.255.255.* ]]; then printf 'unknown'; return 0; fi
+  rev="$(awk -F. '{print $4"."$3"."$2"."$1}' <<<"$ip")"
+  ans="$(_doc_rbl_query "$rev")"
+  if [[ -z "$ans" ]]; then printf 'clean'; return 0; fi
+  if [[ "$ans" == 127.255.255.* ]]; then printf 'unknown'; return 0; fi
+  if [[ "$ans" == 127.* ]]; then printf 'listed'; return 0; fi
+  printf 'unknown'
+}
+
 _doc_check_mail() {
-  local s="" days="" mode="" issuer="" p="" q=""
+  local s="" days="" mode="" issuer="" p="" q="" ver="" d=""
   lib_mail_installed || return 0
   while read -r s; do
     [[ -n "$s" ]] || continue
@@ -647,6 +695,70 @@ _doc_check_mail() {
     if [[ "$q" =~ ^[0-9]+$ ]] && (( q > 50 )); then
       _doc_add WARN "mail: queue" "${q} message(s) waiting to go out (setup.sh mail queue)"
     fi
+  fi
+
+  # The three daemons judging their own files. This is the difference between "running" and
+  # "running on whatever it had before the last change".
+  if lib_mail_verify_configs; then
+    _doc_add OK "mail: configuration" "postfix, dovecot and rspamd all accept theirs"
+  else
+    _doc_add FAIL "mail: configuration" "${MAIL_LAST_ERROR}"
+  fi
+
+  # These files are Dovecot 2.3's. 2.4 renamed enough of them that a server upgraded
+  # underneath us would start with a configuration that means something else.
+  ver="$(lib_mail_dovecot_version)"
+  case "$ver" in
+    ""|2.3.*) ;;
+    *) _doc_add FAIL "mail: dovecot version" "${ver} is installed, but the files here were written for 2.3; stay on Ubuntu 22.04/24.04 for mail until lompstack speaks 2.4" ;;
+  esac
+
+  # A mail transport agent from somewhere else takes the /usr/sbin/sendmail alternative with
+  # it, and mail then leaves the machine past Postfix, and so past the filter that signs it.
+  if lib_pkg_installed msmtp-mta; then
+    _doc_add FAIL "mail: transport" "msmtp-mta is installed and owns /usr/sbin/sendmail; mail would leave this server unsigned (apt-get remove msmtp-mta)"
+  fi
+
+  if lib_port_listening 25; then
+    if _doc_relay_probe; then
+      _doc_add OK "mail: relaying" "port 25 refuses mail for a domain this server does not serve"
+    else
+      _doc_add FAIL "mail: relaying" "port 25 ACCEPTED mail for a domain this server does not serve; an open relay is on a blocklist within a day"
+    fi
+  fi
+
+  case "$(_doc_mail_rbl)" in
+    listed) _doc_add FAIL "mail: reputation" "${SYS_PUBLIC_IPV4} is on the Spamhaus list; mail from here is refused or filed as spam (https://check.spamhaus.org/)" ;;
+    clean)  _doc_add OK "mail: reputation" "${SYS_PUBLIC_IPV4} is not on the Spamhaus list" ;;
+    *)      ;;
+  esac
+
+  # The two halves of "can this server be trusted to send", neither of which it can fix
+  # itself: the provider sets the PTR record and the provider opens port 25.
+  if lib_mail_ptr_check "$(lib_mail_host)"; then
+    _doc_add OK "mail: reverse DNS" "${SYS_PUBLIC_IPV4} says it is $(lib_mail_host), and that name points back"
+  else
+    _doc_add WARN "mail: reverse DNS" "${MAIL_LAST_ERROR}"
+  fi
+  case "$(lib_mail_port25_probe)" in
+    blocked) _doc_add WARN "mail: port 25 out" "port 25 out of this server is blocked; mail can only leave through a relay (setup.sh mail relay set ...)" ;;
+    open)    _doc_add OK "mail: port 25 out" "open" ;;
+    *)       ;;
+  esac
+
+  # What DNS actually says about each domain - the lowest MX, one SPF and not two, the DKIM
+  # record carrying this server's key, _dmarc, and a mail name that is not behind Cloudflare's
+  # proxy where no mail client could reach it. The table itself is "mail dns <d> --check";
+  # doctor only needs to know whether it would come out clean.
+  if lib_have dig; then
+    while read -r d; do
+      [[ -n "$d" ]] || continue
+      if lib_mail_dns_check "$d" >/dev/null 2>&1; then
+        _doc_add OK "mail: DNS ${d}" "MX, SPF, DKIM and DMARC are published and point here"
+      else
+        _doc_add FAIL "mail: DNS ${d}" "a record is missing or points elsewhere; mail for ${d} may not arrive or may not be trusted (setup.sh mail dns ${d} --check)"
+      fi
+    done < <(lib_mail_domains)
   fi
   return 0
 }

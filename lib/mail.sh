@@ -1544,10 +1544,35 @@ lib_mail_hash_password() {   # password -> hash on stdout
   lib_have doveadm || { MAIL_LAST_ERROR="doveadm is missing (is Dovecot installed?)"; return 1; }
   hash="$(printf '%s\n%s\n' "$pw" "$pw" | doveadm pw -s BLF-CRYPT 2>/dev/null || true)"
   [[ "$hash" == '{BLF-CRYPT}'* ]] || { MAIL_LAST_ERROR="doveadm could not hash the password"; return 1; }
-  # the hash of an empty password verifies against an empty password, not against this one
-  printf '%s\n' "$pw" | doveadm pw -t "$hash" >/dev/null 2>&1 \
-    || { MAIL_LAST_ERROR="the hash doveadm produced does not match the password given"; return 1; }
+  # doveadm reads standard input twice and, when the two do not match, hashes the EMPTY
+  # password without saying so - which is why the two lines above are the same string and why
+  # a password holding a line break was refused further up. What is left to check is that
+  # doveadm produced a whole bcrypt hash and not a truncated one:
+  # {BLF-CRYPT}$2y$<cost>$<22 characters of salt><31 of digest>.
+  #
+  # It is NOT checked by handing the hash back to "doveadm pw -t": that puts the stored hash
+  # of a mailbox into the argument list of a root process, and /proc/<pid>/cmdline is readable
+  # by every user of this machine - each site here runs as one. The 0640 mode of the password
+  # file exists to keep those hashes unreadable; a check that publishes one undoes it. The
+  # password is verified after the line is written instead, by lib_mail_password_verify, which
+  # asks Dovecot itself with nothing but the address on the command line.
+  if [[ ! "$hash" =~ ^\{BLF-CRYPT\}\$2[aby]\$[0-9]{2}\$[./A-Za-z0-9]{53}$ ]]; then
+    MAIL_LAST_ERROR="doveadm produced something that is not a bcrypt hash"
+    return 1
+  fi
   printf '%s' "$hash"
+}
+
+# Does the line that was just written let this address log in? The password comes in on
+# standard input and the address is the only thing on the command line. This is the check the
+# hashing step deliberately does not do, and it covers more than that one could: the hash, the
+# shape of the passwd line, and whether Dovecot can read the file at all.
+lib_mail_password_verify() {   # address   (password on stdin) -> 0 ok, 1 no, 2 could not ask
+  local a="$1"
+  lib_have doveadm || return 2
+  lib_service_active dovecot || return 2
+  doveadm auth test "$a" >/dev/null 2>&1 || return 1
+  return 0
 }
 
 # Read a password from stdin when it is a pipe, or ask for it twice without echo.
@@ -1622,10 +1647,15 @@ lib_mail_render_senders() {
       while IFS=$'\t' read -r alias targets; do
         [[ -n "$alias" && "$alias" != \#* && -n "$targets" ]] || continue
         for t in ${targets//,/ }; do
-          lib_mail_box_exists "$t" && printf '%s\t%s\n' "$alias" "$t"
+          # "test && print" would leave the loop, and with it this whole brace group, on a
+          # non-zero status the moment the last target is a remote address - which under
+          # pipefail fails the write and takes the command down. An alias that forwards to
+          # somewhere else is ordinary, so it must not decide the exit status of anything.
+          if lib_mail_box_exists "$t"; then printf '%s\t%s\n' "$alias" "$t"; fi
         done
       done <"$f"
     done < <(lib_mail_domains)
+    true
   } | awk -F'\t' -v OFS='\t' '
       NF == 2 && $2 != "" {
         if (!($1 in seen)) { order[++n] = $1; seen[$1] = $2; next }
@@ -1895,15 +1925,26 @@ lib_mail_disable_main() {   # domain [--keep-data|--delete-data] [--dns-cleanup]
       *) lib_die "Unknown option for 'mail disable': ${a}" "" "lomp mail help" ;;
     esac
   done
-  lib_mail_domain_enabled "$d" || { lib_info "Mail is already off for ${d}"; return 0; }
+  # "Already off" is only true when the server agrees with the state. A disable that was
+  # interrupted - between the flag and the mailbox lines - leaves a domain the state calls off
+  # whose mailboxes still log in and still receive; if this guard took the state's word for it,
+  # the one command that could close that hole would refuse to run, for good.
+  if ! lib_mail_domain_enabled "$d"; then
+    if (( keep )) && [[ -z "$(lib_mail_boxes "$d")" ]]; then
+      lib_info "Mail is already off for ${d}"
+      return 0
+    fi
+    if (( ! keep )) && ! lib_mail_domain_has_traces "$d"; then
+      lib_info "Mail is already off for ${d}, and nothing of it is left"
+      return 0
+    fi
+    lib_warn "Mail is off for ${d} in the state, but not on the server yet; finishing what was started"
+  fi
   if (( keep )); then
     lib_info "Turning mail off for ${d}; the mailboxes and their mail stay where they are"
   else
     lib_confirm "Delete every mailbox of ${d} and all of its mail?" n \
       || lib_die "Nothing was deleted" "" "run it without --delete-data to keep the mail"
-  fi
-  if (( ! OPT_DRY_RUN )); then
-    lib_json_set "$(lib_domain_json "$d")" '.mail.enabled = false | .mail.disabled_at = $ts' --arg ts "$(lib_iso_now)"
   fi
   # anything still queued for this domain stops being a local destination the moment the table
   # is rewritten, and Postfix would try to deliver it to the internet instead
@@ -1926,6 +1967,12 @@ lib_mail_disable_main() {   # domain [--keep-data|--delete-data] [--dns-cleanup]
     lib_mail_boxes_park "$d"
   else
     lib_mail_domain_purge "$d"
+  fi
+  # The flag goes down LAST, after the logins are really gone. The other way round - and that
+  # is how this read until the audit - an interrupt in between left the state saying "off"
+  # while Dovecot went on answering, and the guard above then called it done.
+  if (( ! OPT_DRY_RUN )); then
+    lib_json_set "$(lib_domain_json "$d")" '.mail.enabled = false | .mail.disabled_at = $ts' --arg ts "$(lib_iso_now)"
   fi
   lib_mail_tables_apply || lib_die "The mail tables could not be rebuilt" "${MAIL_LAST_ERROR}" "lomp mail status"
   if (( keep )); then
@@ -1959,6 +2006,19 @@ lib_mail_boxes_park() {   # domain
       doveadm kick "$a" >/dev/null 2>&1 || true
     done < <(awk -F: '{print $1}' "$f")
   fi
+  return 0
+}
+
+# Take a domain's lines out of the live password file and leave the mail alone. A restore uses
+# it: the archive decides which mailboxes this domain has, and a line that was created after
+# the backup was taken is not one of them - it would otherwise survive a restore as a login
+# with a password nothing on this server knows about.
+_mail_lines_drop() {   # domain
+  local d="$1"
+  [[ -s "$MAIL_PASSWD_FILE" ]] || return 0
+  (( OPT_DRY_RUN )) && return 0
+  awk -F: -v d="$d" '!(index($1, "@") > 0 && substr($1, index($1, "@") + 1) == d)' "$MAIL_PASSWD_FILE" \
+    | lib_write_file "$MAIL_PASSWD_FILE" 0640 root:dovecot secret
   return 0
 }
 
@@ -1997,6 +2057,11 @@ lib_mail_domain_purge() {   # domain
     [[ -n "$a" ]] && lib_mail_box_remove "$a"
   done < <(lib_mail_boxes "$d")
   lib_rm "$(lib_mail_alias_file "$d")"
+  # and the lines a "mail disable" put aside. They are not in the passwd file, so the loop
+  # above never sees them - but they are every password hash the domain ever had, and
+  # "mail enable" merges them straight back in. A domain removed and later hosted for
+  # somebody else would otherwise come up with the previous owner's logins working.
+  lib_rm "${MAIL_DISABLED_DIR}/${d}.passwd"
   # every key of this domain, not only the one it signs with: a rotation may have a second
   # one waiting for its record, and a finished one keeps the retired key for a week
   lib_rm "${MAIL_DKIM_DIR}/${d}.${sel}.key"
@@ -2030,17 +2095,56 @@ lib_mail_passwd_set() {   # address hash quota
 
 # Read a password and hash it, both in this shell so that a refusal can say why. The hash comes
 # back in MAIL_HASH; the password itself is never assigned to anything that outlives the call.
-MAIL_HASH=""
+# It stays in a 0600 file named by MAIL_PW_FILE until the caller has written the line and let
+# Dovecot check it, and _mail_pw_drop removes it - on the way out of the command too, because
+# an interrupt between the two must not leave a plain-text password on the disk.
+MAIL_HASH="" MAIL_PW_FILE=""
 _mail_ask_password() {   # what (for the message only)
   local f="" rc=0
   MAIL_HASH=""
+  _mail_pw_drop
   f="$(lib_mktemp)"
+  chmod 0600 "$f" 2>/dev/null || true
   if ! lib_mail_read_password >"$f"; then rm -f "$f"; return 1; fi
   if ! lib_mail_hash_password "$(cat "$f")" >"${f}.h"; then rm -f "$f" "${f}.h"; return 1; fi
   MAIL_HASH="$(cat "${f}.h")"
-  rm -f "$f" "${f}.h"
-  [[ -n "$MAIL_HASH" ]] || { MAIL_LAST_ERROR="the password could not be hashed"; rc=1; }
+  rm -f "${f}.h"
+  MAIL_PW_FILE="$f"
+  LIB_EXTRA_CLEANUP+=("$f")
+  [[ -n "$MAIL_HASH" ]] || { MAIL_LAST_ERROR="the password could not be hashed"; _mail_pw_drop; rc=1; }
   return "$rc"
+}
+
+_mail_pw_drop() {
+  [[ -n "$MAIL_PW_FILE" ]] || return 0
+  rm -f "$MAIL_PW_FILE"
+  MAIL_PW_FILE=""
+  return 0
+}
+
+# The password that was just set, put to Dovecot. A mailbox nobody can log in to is worth
+# saying out loud straight away: the alternative is an operator handing out a password that
+# was never going to work.
+_mail_pw_confirm() {   # address
+  local a="$1" rc=0
+  [[ -n "$MAIL_PW_FILE" && -s "$MAIL_PW_FILE" ]] || { _mail_pw_drop; return 0; }
+  lib_mail_password_verify "$a" <"$MAIL_PW_FILE" || rc=$?
+  # Dovecot notices a changed password file about once a second - the same second
+  # lib_mail_box_remove waits out - so a "no" straight after the write may only mean the auth
+  # server is still answering from the line that was there before. Asked once more, a real no
+  # stays no.
+  if (( rc == 1 )); then
+    sleep 1
+    rc=0
+    lib_mail_password_verify "$a" <"$MAIL_PW_FILE" || rc=$?
+  fi
+  _mail_pw_drop
+  case "$rc" in
+    0) return 0 ;;
+    2) lib_note "Dovecot is not running, so the new password could not be tried out" ;;
+    *) lib_warn "Dovecot does not accept the password just set for ${a} - the line is written but the login does not work (lomp doctor)" ;;
+  esac
+  return 0
 }
 
 lib_mail_box_add_main() {   # address [--quota Q]   (password on stdin or asked for)
@@ -2077,6 +2181,7 @@ lib_mail_box_add_main() {   # address [--quota Q]   (password on stdin or asked 
   hash="$MAIL_HASH"
   MAIL_HASH=""
   lib_mail_passwd_set "$a" "$hash" "$quota"
+  _mail_pw_confirm "$a"
   lib_mail_domain_aliases_seed "$d" "$a"
   lib_mail_tables_apply || lib_die "The mail tables could not be rebuilt" "${MAIL_LAST_ERROR}" "lomp mail status"
   lib_ok "Mailbox ${a} created (${quota})"
@@ -2094,6 +2199,7 @@ lib_mail_box_passwd_main() {   # address
   hash="$MAIL_HASH"
   MAIL_HASH=""
   lib_mail_passwd_set "$a" "$hash" "$(lib_mail_box_quota "$a")"
+  _mail_pw_confirm "$a"
   lib_ok "Password changed for ${a}"
   lib_note "Open sessions stay open until they reconnect: lomp mail box kick ${a} closes them now"
   return 0
@@ -2741,6 +2847,17 @@ Usage: lomp mail <command>
   dns <domain> --apply [--replace-mx]   write it into Cloudflare with the stored token
   cert [domain]                         ask again for a certificate that did not come
 
+  webmail on|off|status <domain>        a webmail at webmail.<domain>; one installation
+                                        serves every domain that has it on
+
+  dkim rotate <domain>                  a second signing key, and the record to publish; an
+  dkim rotate <domain> --abort          hourly job moves the signing over once DNS carries
+  dkim status <domain>                  it, and retires the old key a week later
+
+  backup <domain> [--keep N]            the mailboxes, the aliases, the keys and the mail
+  restore <domain> [--file ARCHIVE]     put them back; a mailbox that still holds mail is
+                                        asked about first, an empty one is not
+
   status                 what the mail stack is doing, and whether it can send
   test                   check reverse DNS and whether outgoing port 25 is open
   queue                  show the Postfix queue
@@ -3026,7 +3143,7 @@ _mail_backup_maildirs() {   # domain staging-dir -> 0 when it wrote something
 lib_mail_backup_domain() {   # domain [--keep N] [--tag T] [--encrypt]
   local d="$1"; shift || true
   local keep="$MAIL_BACKUP_KEEP" tag="" encrypt=0 a="" work="" stage="" out="" ts="" sel=""
-  local need=0 free=0 boxes=0
+  local need=0 free=0 boxes=0 parked=0 form="doveadm"
   while (($# > 0)); do
     a="$1"; shift
     case "$a" in
@@ -3095,6 +3212,11 @@ lib_mail_backup_domain() {   # domain [--keep N] [--tag T] [--encrypt]
   # live Maildir put straight into a tar describes a state the mailbox was never in. A domain
   # that has no mailbox at all still gets an archive - its aliases and its key are in it.
   boxes="$(lib_mail_boxes "$d" | wc -l | tr -d ' ')"
+  parked=0
+  if [[ -s "${MAIL_DISABLED_DIR}/${d}.passwd" ]]; then
+    parked="$(grep -c . "${MAIL_DISABLED_DIR}/${d}.passwd" 2>/dev/null || true)"
+    [[ "$parked" =~ ^[0-9]+$ ]] || parked=0
+  fi
   if (( boxes > 0 )); then
     stage="$(_mail_stage_dir)" || { MAIL_LAST_ERROR="no staging directory under ${MAIL_VMAIL_HOME}"; rm -rf "$work"; return 1; }
     if ! _mail_backup_maildirs "$d" "$stage"; then
@@ -3108,13 +3230,27 @@ lib_mail_backup_domain() {   # domain [--keep N] [--tag T] [--encrypt]
       return 1
     fi
     _mail_stage_drop "$stage"
+  elif (( parked > 0 )) && [[ -d "${MAIL_VMAIL_HOME}/${d}" ]]; then
+    # Mail is off for this domain: its lines are parked, so Dovecot has no user to look up and
+    # doveadm cannot copy anything. The mail is still there, though, and a domain that is off
+    # is no longer a destination - nothing is being delivered into that tree, which makes it
+    # the one case where tar reading a Maildir directly describes a state the mailbox really
+    # was in. Leaving it out is how the nightly backup used to write archives with no mail in
+    # them at all, and then delete the archives that had it.
+    form="plain"
+    if ! tar -C "$MAIL_VMAIL_HOME" -czf "${work}/maildirs.tar.gz" "$d" 2>>"$LOG_FILE"; then
+      MAIL_LAST_ERROR="the mail of ${d} could not be packed"
+      rm -rf "$work"
+      return 1
+    fi
+    lib_info "mail is off for ${d}; its ${parked} parked mailbox(es) were archived as they lie on disk"
   else
     lib_info "${d} has no mailbox; its aliases and its DKIM key are archived on their own"
   fi
   jq -n --arg d "$d" --arg ts "$(lib_iso_now)" --arg sel "$sel" --arg ver "$SCRIPT_VERSION" \
-        --arg host "$(lib_mail_host)" --argjson boxes "$boxes" \
+        --arg host "$(lib_mail_host)" --argjson boxes "$boxes" --argjson parked "$parked" --arg form "$form" \
         '{format:1, kind:"mail", domain:$d, created_at:$ts, selector:$sel, script_version:$ver,
-          mail_host:$host, mailboxes:$boxes}' >"${work}/manifest.json"
+          mail_host:$host, mailboxes:$boxes, parked:$parked, maildirs:$form}' >"${work}/manifest.json"
   ( umask 077; tar -C "$work" -czf "$out" . 2>>"$LOG_FILE" ) || {
     MAIL_LAST_ERROR="the mail archive could not be written"
     rm -rf "$work" "$out"
@@ -3151,7 +3287,7 @@ lib_mail_backup_domain() {   # domain [--keep N] [--tag T] [--encrypt]
 # Put a domain's mail back. The order is the one that works: the lines first, so Dovecot can
 # resolve the users at all, then the maps, then the mail itself into mailboxes that now exist.
 lib_mail_restore_domain() {   # domain [archive]
-  local d="$1" file="${2:-}" work="" stage="" a="" local_part="" sel="" adom=""
+  local d="$1" file="${2:-}" work="" stage="" a="" local_part="" sel="" adom="" form=""
   local n=0 restored=0 failed=0 have=0
   lib_mail_installed || { MAIL_LAST_ERROR="the mail server is not installed here"; return 1; }
   if [[ -z "$file" ]]; then
@@ -3190,6 +3326,13 @@ lib_mail_restore_domain() {   # domain [archive]
   if [[ -s "${work}/mail/state.json" ]]; then
     lib_json_set "$(lib_domain_json "$d")"       '.mail = ($m + ((.mail // {}) | {webmail, webmail_host} | with_entries(select(.value != null))))'       --argjson m "$(cat "${work}/mail/state.json")"
   fi
+  # The archive decides which mailboxes this domain has. Whatever is live goes first - a line
+  # added since the backup is not in the archive, and leaving it would make it outlive a
+  # restore. It matters most for an archive taken while the domain's mail was off: that one
+  # carries no live lines at all, so without this the state would say "off" while Dovecot went
+  # on letting those addresses in. The mail on disk is not touched here; the archive's copy of
+  # it is put back further down.
+  _mail_lines_drop "$d"
   # the mailbox lines, with the passwords they had: a restore nobody can log in to is not one
   if [[ -s "${work}/mail/passwd" ]]; then
     while IFS= read -r a; do
@@ -3241,10 +3384,29 @@ lib_mail_restore_domain() {   # domain [archive]
   # is unpacked into a directory vmail made itself - root writes nothing inside a directory
   # that user owns, and a random name cannot be swapped for a link in between.
   if [[ -s "${work}/maildirs.tar.gz" ]]; then
+    form="$(jq -r '.maildirs // "doveadm"' "${work}/manifest.json" 2>/dev/null || printf 'doveadm')"
     if stage="$(_mail_stage_dir)"; then
       # the archive is opened by root and handed over as an open file: vmail cannot read the
       # work directory, and root does not write inside a directory vmail owns
-      if runuser -u "$MAIL_VMAIL_USER" -- tar -C "$stage" -xzf - <"${work}/maildirs.tar.gz" 2>>"$LOG_FILE"; then
+      if ! runuser -u "$MAIL_VMAIL_USER" -- tar -C "$stage" -xzf - <"${work}/maildirs.tar.gz" 2>>"$LOG_FILE"; then
+        lib_warn "the archived mailboxes could not be unpacked"
+      elif [[ "$form" == "plain" ]]; then
+        # An archive taken while the domain's mail was off holds the tree as it lay on disk,
+        # because there was no Dovecot user to copy it through. It goes back the same way,
+        # and every step is vmail's: root writes nothing inside a directory that user owns.
+        if [[ -d "${stage}/${d}" ]]; then
+          if runuser -u "$MAIL_VMAIL_USER" -- rm -rf "${MAIL_VMAIL_HOME}/${d}" \
+             && runuser -u "$MAIL_VMAIL_USER" -- mv "${stage}/${d}" "${MAIL_VMAIL_HOME}/${d}"; then
+            restored="$(runuser -u "$MAIL_VMAIL_USER" -- find "${MAIL_VMAIL_HOME}/${d}" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')"
+            lib_ok "${restored} mailbox(es) put back as they were archived; they log in again when mail is enabled for ${d}"
+          else
+            lib_warn "the archived mail of ${d} could not be moved into place (see ${LOG_FILE})"
+            failed=$((failed + 1))
+          fi
+        else
+          lib_warn "the archive holds no mail directory for ${d}"
+        fi
+      else
         while read -r a; do
           [[ -n "$a" ]] || continue
           local_part="${a%@*}"
@@ -3259,8 +3421,6 @@ lib_mail_restore_domain() {   # domain [archive]
           fi
         done < <(lib_mail_boxes "$d")
         lib_ok "${restored} mailbox(es) filled again"
-      else
-        lib_warn "the archived mailboxes could not be unpacked"
       fi
       _mail_stage_drop "$stage"
     else

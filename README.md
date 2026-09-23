@@ -41,7 +41,7 @@ after it is applied, and rolled back if the verification fails.
 | TLS | Let's Encrypt via certbot, shared ACME webroot, TLS 1.2/1.3 only, HSTS, auto-renew with an OpenLiteSpeed deploy hook |
 | Security | UFW, Fail2ban (sshd + recidive + WordPress/scanner jails), sshd drop-in hardening, unattended security updates |
 | Operations | Backups with retention/encryption/remote upload, daily health check, e-mail / Telegram / webhook alerts, `status` and `doctor` |
-| Optional | Node.js + PM2, Python venv tooling, Netdata, Cloudflare real-client-IP mode, a mail server (Postfix + Dovecot + Rspamd). None of these is installed unless you ask for it, on the command line or from the menu. |
+| Optional | Node.js + PM2, Python venv tooling, Netdata, Cloudflare real-client-IP mode, a mail server with webmail (Postfix + Dovecot + Rspamd + Roundcube). None of these is installed unless you ask for it, on the command line or from the menu. |
 
 Everything is sized from the machine it runs on: CPU count, RAM, and whether the disk is
 NVMe, SSD or spinning rust all feed into the OpenLiteSpeed, PHP, MariaDB and Redis settings.
@@ -425,6 +425,22 @@ stored with mode 0600. It never reaches a command line afterwards either: API ca
 through curl's configuration on stdin, and Fail2ban's ban action reads it from a 0600 header
 file. Set your Cloudflare SSL mode to **Full (strict)** once certificates are issued.
 
+### Closing the origin
+
+With the sites behind Cloudflare, anyone who learns the server's address can still reach it
+directly and walk around the edge:
+
+```bash
+sudo lomp firewall --web-cloudflare-only   # 80 and 443 answer Cloudflare's ranges only
+sudo lomp firewall status
+sudo lomp firewall --web-open              # undo it
+```
+
+Every site then has to be proxied (orange cloud) or it stops answering. SSH, the mail ports and
+the WebAdmin port are untouched. Because port 80 no longer answers Let's Encrypt, certificates
+switch to DNS-01, which is why this needs the API token; the weekly IP refresh keeps the rules
+in step with Cloudflare's ranges.
+
 There is no bundled WAF or ModSecurity: that job belongs to the edge.
 
 ---
@@ -588,26 +604,17 @@ the mailbox was never in - and it holds the mailbox lines with their password ha
 aliases, the DKIM key and the mail. Restoring gives back the same passwords and the same DKIM
 key, so mail signed before the restore still verifies and nobody has to change a mail client.
 
+A domain whose mail is switched off is backed up too, and this is the one case where the mail
+is read straight off the disk: its mailboxes are no longer Dovecot users, so there is nothing
+to copy them through - and no message can arrive while it is read, because a domain that is off
+is not a destination. The archive says which of the two ways it was taken, and a restore
+follows it.
+
 A restore makes a mailbox an exact copy of the archive, so anything that arrived after the
 backup is deleted by it. A mailbox that still holds mail is therefore asked about first, and
 left alone if the answer is no; an empty one - the disaster case - is filled without a
-question. `--yes` answers it in a script.
-
-### Closing the origin
-
-With the sites behind Cloudflare, anyone who learns the server's address can still reach it
-directly and walk around the edge:
-
-```bash
-sudo lomp firewall --web-cloudflare-only   # 80 and 443 answer Cloudflare's ranges only
-sudo lomp firewall status
-sudo lomp firewall --web-open              # undo it
-```
-
-Every site then has to be proxied (orange cloud) or it stops answering. SSH, the mail ports and
-the WebAdmin port are untouched. Because port 80 no longer answers Let's Encrypt, certificates
-switch to DNS-01, which is why this needs the API token; the weekly IP refresh keeps the rules
-in step with Cloudflare's ranges.
+question. `--yes` answers it in a script. The archive also decides which mailboxes the domain
+has: an address added after the backup was taken does not survive the restore as a login.
 
 ---
 

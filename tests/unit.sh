@@ -2284,6 +2284,15 @@ assert_has "a mailbox may send as itself" $'info@alpha.example\tinfo@alpha.examp
 assert_has "an alias may be used by everyone it points at" $'team@alpha.example\tinfo@alpha.example,sales@alpha.example' "$_sn"
 assert_has "including postmaster" $'postmaster@alpha.example\tinfo@alpha.example' "$_sn"
 assert_lacks "an alias that only goes outside gives nobody the right to send as it" "old@alpha.example" "$_sn"
+# ...and it must not decide the exit status either. The renderer's loops end on the test that
+# asks whether a target is local; with the last alias of the last domain pointing outside -
+# "info@ goes to my Gmail", the most ordinary alias there is - that test is the last command
+# of the brace group feeding the pipe, so under pipefail the whole write failed and took
+# "mail enable" down with it. old@alpha.example above is exactly that alias.
+( set -o pipefail; lib_mail_render_senders >/dev/null ); _sn_rc=$?
+assert_eq "the renderer still succeeds" 0 "$_sn_rc"
+( set -o pipefail; lib_mail_render_senders | cat >/dev/null ); _sn_rc=$?
+assert_eq "and so does the pipeline that writes it" 0 "$_sn_rc"
 
 # the certificate blocks only exist for names whose certificate is really on disk: a block
 # pointing at a missing file is a silent failure Dovecot never reports
@@ -2315,7 +2324,24 @@ assert_eq "one with a carriage return too"      1 "$(run_isolated lib_mail_hash_
 assert_eq "and one past bcrypt's 72 bytes"      1 "$(run_isolated lib_mail_hash_password "$(printf 'a%.0s' {1..80})")"
 _hp="$(declare -f lib_mail_hash_password)"
 assert_has "the password is fed to doveadm twice" '%s\n%s\n' "$_hp"
-assert_has "and the hash is checked against it afterwards" "doveadm pw -t" "$_hp"
+# It used to hand the fresh hash back to "doveadm pw -t <hash>" to check it. That put the
+# stored hash of a mailbox into the argument list of a root process, and /proc/<pid>/cmdline
+# is world-readable on a machine whose every site is a Linux user - the exact leak the 0640
+# mode of the password file exists to prevent. The shape of the hash is checked instead, and
+# the password itself is put to Dovecot after the line is written, with only the address on
+# the command line.
+assert_lacks "the new hash is never an argument either" "doveadm pw -t" "$_hp"
+assert_has   "a whole bcrypt hash is what comes back"   'BLF-CRYPT' "$_hp"
+assert_has   "salt and digest, to their full length"    '{53}' "$_hp"
+_pv="$(declare -f lib_mail_password_verify)"
+assert_has "the check that replaces it asks Dovecot" "doveadm auth test" "$_pv"
+assert_lacks "with no password on the command line"  '"$pw"' "$_pv"
+_pc="$(declare -f _mail_pw_confirm)"
+assert_has "and reads the password from a file, on stdin" 'lib_mail_password_verify "$a" < "$MAIL_PW_FILE"' "$_pc"
+assert_has "which is removed either way"                  "_mail_pw_drop" "$_pc"
+_ap="$(declare -f _mail_ask_password)"
+assert_has "the file is 0600 from the moment it exists"   "chmod 0600" "$_ap"
+assert_has "and goes on the cleanup list, for an interrupt" "LIB_EXTRA_CLEANUP" "$_ap"
 _br="$(declare -f lib_mail_box_remove)"
 assert_has "removing a mailbox takes the line away first" "awk -F: -v u=" "$_br"
 assert_has "then waits for Dovecot to notice" "sleep 1" "$_br"
@@ -2351,6 +2377,38 @@ assert_true  "but it is not lost"                        test -s "${MAIL_DISABLE
 lib_mail_boxes_unpark alpha.example
 assert_true  "and comes back with the hash it had"       lib_mail_box_exists "sales@alpha.example"
 assert_eq    "and its quota"                             "500M" "$(lib_mail_box_quota sales@alpha.example)"
+
+# Removing the domain has to take the parked file too. It is not in the password file, so the
+# loop over the live mailboxes never sees it - and it holds every hash the domain ever had,
+# which "mail enable" merges straight back in. Hosting the same name for somebody else later
+# would otherwise come up with the previous owner's logins working.
+lib_mail_boxes_park alpha.example
+assert_true  "a parked file is a trace of its own"   test -s "${MAIL_DISABLED_DIR}/alpha.example.passwd"
+assert_true  "so a removal still runs for it"        lib_mail_domain_has_traces alpha.example
+lib_mail_domain_purge alpha.example
+assert_false "and the parked hashes go with the domain" test -s "${MAIL_DISABLED_DIR}/alpha.example.passwd"
+assert_false "nothing of it is left"                    lib_mail_domain_has_traces alpha.example
+assert_has  "the purge names the parked file"           'MAIL_DISABLED_DIR' "$(declare -f lib_mail_domain_purge)"
+
+# The flag in domain.json goes down AFTER the logins are gone, not before: an interrupt in
+# between used to leave a domain the state called off whose mailboxes still answered, and the
+# guard at the top then refused to finish the job for good.
+_dis_body="$(sed -n '/^lib_mail_disable_main()/,/^}/p' "$ROOT/lib/mail.sh")"
+_dis_park_ln="$(grep -n 'lib_mail_boxes_park' <<<"$_dis_body" | head -1 | cut -d: -f1)"
+_dis_flag_ln="$(grep -n 'mail.enabled = false' <<<"$_dis_body" | head -1 | cut -d: -f1)"
+assert_true "the mailboxes are put aside before the flag is written" \
+  test "${_dis_park_ln:-0}" -lt "${_dis_flag_ln:-0}"
+assert_has "and 'already off' is only believed when the server agrees" 'lib_mail_boxes "$d"' "$_dis"
+# a restore is authoritative about which mailboxes a domain has
+_rs="$(declare -f lib_mail_restore_domain)"
+assert_has "a restore clears the live lines first" "_mail_lines_drop" "$_rs"
+assert_has "an archive taken with mail off goes back as it lies" 'form" == "plain"' "$_rs"
+_bk="$(declare -f lib_mail_backup_domain)"
+assert_has "and is taken that way in the first place" 'form="plain"' "$_bk"
+assert_has "because doveadm has no user to copy through" 'parked > 0' "$_bk"
+assert_has "the archive says which of the two it holds" "maildirs:" "$_bk"
+_ld="$(declare -f _mail_lines_drop)"
+assert_lacks "dropping the lines never touches the mail" "MAIL_VMAIL_HOME" "$_ld"
 
 # an address is either a mailbox or an alias: Postfix resolves the alias first, so a mailbox
 # of the same name would never see a message
@@ -2389,6 +2447,24 @@ rm -f "$MAIL_RELAY_INFO"
 
 MAIL_PASSWD_FILE="$TMP/passwd"; MAIL_ALIAS_DIR="$TMP/aliases"; MAIL_DKIM_DIR="$TMP/dkim-unused"
 rm -rf "$_m_state/alpha.example" "$_m_state/beta.example" "$_m_state/plain.example"
+
+# =============================================================================
+section "every mail command is in 'mail help'"
+# Four subcommands were added over three phases and none of them reached the help text, so
+# "lomp mail" told an operator about eleven of the fifteen commands it actually has. The help
+# is the only place these are written down, which makes an undocumented command an invisible
+# one.
+_mail_case="$(awk '/^lib_mail_main\(\)/{f=1} f{print} f && /^[}]/{exit}' "$ROOT/lib/mail.sh")"
+_mail_subs="$(grep -oE '^[[:space:]]+[a-z]+(\|[a-z]+)*\)' <<<"$_mail_case" | tr -d ' )' | cut -d'|' -f1 | grep -vE '^(\*|help|--help|-h)$' | sort -u | tr '\n' ' ')"
+_mail_help="$(lib_mail_usage)"
+assert_true "the mail dispatcher was found" test -n "$_mail_subs"
+for _sub in $_mail_subs; do
+  assert_true "'mail ${_sub}' is documented" grep -qE "^  ${_sub}( |$)" <<<"$_mail_help"
+done
+# and the ones this release added, by name, so a renamed command is caught too
+assert_has "webmail on|off|status"  "webmail on|off|status <domain>" "$_mail_help"
+assert_has "dkim rotate"            "dkim rotate <domain>" "$_mail_help"
+assert_has "backup and restore"     "restore <domain> [--file ARCHIVE]" "$_mail_help"
 
 # =============================================================================
 section "writing the records into Cloudflare"
