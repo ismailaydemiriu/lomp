@@ -3113,7 +3113,7 @@ Usage: lomp mail <command>
   test                   check reverse DNS and whether outgoing port 25 is open
   queue                  show the Postfix queue
   regenerate             rewrite every mail configuration file and restart the stack
-  relay set --host H [--port 587] --user U [--spf-include NAME]
+  relay set --host H [--port 587] --user U [--spf-include NAME] [--tls secure|encrypt]
                          send outgoing mail through another server; the password is read
                          from standard input, never from an argument
   relay off              send outgoing mail directly again

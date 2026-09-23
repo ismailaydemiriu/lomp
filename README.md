@@ -483,6 +483,10 @@ guess it: an include pointing at a name that has no SPF record makes the *whole*
 permerror, so a wrong guess is worse than nothing. Changing the relay changes what every mail
 domain's SPF record has to say, and lomp prints the domains to publish again.
 
+The relay's certificate is verified against the name you gave (`--tls secure`, the default). A
+relay whose certificate no public authority signed needs `--tls encrypt`, which requires TLS but
+checks nothing - anything that can answer for that name is then handed the credentials.
+
 What the configuration insists on:
 
 - **Port 25 offers no way to log in**, and no message is relayed to a third party without an
