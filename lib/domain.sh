@@ -326,7 +326,12 @@ lib_domain_add_main() {
   if (( DOM_OPT_WITH_DB )); then
     lib_step "MariaDB database"
     lib_db_create_for_domain "$domain"
-    lib_domain_state_load "$domain" >/dev/null 2>&1 || true
+    # it writes .db straight into domain.json (lib_json_set), so the file is read back to pick
+    # up D_DB_NAME/D_DB_USER for the summary. NOT in a dry run: nothing was written, the load
+    # fails on the missing file - and lib_domain_state_load resets the state BEFORE it looks at
+    # the file, so every D_* this run had built up (domain, mode, home, user) came back empty.
+    # The site was then created correctly and the closing summary described a nameless site.
+    if (( ! OPT_DRY_RUN )); then lib_domain_state_load "$domain" >/dev/null 2>&1 || true; fi
   fi
 
   # ---- 7 WordPress ---------------------------------------------------------

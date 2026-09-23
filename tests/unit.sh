@@ -1118,6 +1118,38 @@ D_WWW=1; D_WP=1; D_DB_NAME="sum_db"
 assert_eq "summary exits 0 for a www WordPress site"         0 "$(run_isolated lib_domain_summary)"
 lib_domain_state_reset
 
+# ...and a dry run must reach it with the state the rest of the run built up.
+# The database step reads domain.json back, because lib_db_create_for_domain writes .db into
+# the file directly rather than through the D_* globals. A dry run writes no file, so that
+# load failed - and lib_domain_state_load resets every D_* BEFORE it looks at the file. Each
+# step reported the site correctly and the closing summary then announced "Site  is ready",
+# mode php for a --static site, /public_html as the document root, and a renew-ssl command
+# for the certificate --no-ssl had just declined.
+_orig_dapply="$(declare -f lib_domain_apply_config)"; _orig_reqi="$(declare -f lib_require_installed)"
+_orig_smoke="$(declare -f lib_ols_smoke_test)"; _orig_dbi="$(declare -f lib_db_installed)"
+# lib_ols_is_installed has no definition left here - an earlier section unset it - so this one
+# is removed again below rather than restored.
+eval 'lib_ols_is_installed()    { return 0; }'
+eval 'lib_domain_apply_config() { return 0; }'
+eval 'lib_ols_smoke_test()      { return 0; }'
+eval 'lib_db_installed()        { return 0; }'
+eval 'lib_require_installed()   { return 0; }'   # the test manifest carries no .installed_at
+OPT_DRY_RUN=1
+out="$(lib_domain_add_main dry.example.com --static --no-ssl 2>&1)"
+OPT_DRY_RUN=0
+assert_has   "a dry run names the site it just described" "Site dry.example.com is ready" "$out"
+assert_has   "with its URL"           "http://dry.example.com/" "$out"
+assert_has   "the mode that was asked for" "Mode                       static" "$out"
+assert_has   "its document root"      "${SITES_ROOT}/dry.example.com/public_html" "$out"
+assert_has   "its system user"        "chown -R dry_example_com:dry_example_com" "$out"
+assert_has   "and its logs"           "${SITES_ROOT}/dry.example.com/logs/access.log" "$out"
+assert_lacks "never the reset defaults" "Mode                       php" "$out"
+assert_lacks "nor a certificate --no-ssl declined" "renew-ssl dry.example.com" "$out"
+assert_false "while the dry run itself registers nothing" lib_domain_registered dry.example.com
+unset -f lib_ols_is_installed
+eval "$_orig_dapply"; eval "$_orig_smoke"; eval "$_orig_dbi"; eval "$_orig_reqi"
+lib_domain_state_reset
+
 # =============================================================================
 section "SSH port detection (regression: a failing probe printed a fatal error)"
 sshd() { printf 'sshd: no matching key exchange method\n' >&2; return 255; }
