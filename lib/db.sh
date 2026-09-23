@@ -335,7 +335,11 @@ lib_db_recreate_from_info() {   # domain infofile
   user="$(awk -F= '$1=="DB_USER"{sub(/^[^=]*=/,""); print; exit}' "$src")"
   pass="$(awk -F= '$1=="DB_PASS"{sub(/^[^=]*=/,""); print; exit}' "$src")"
   [[ -n "$name" && -n "$user" && -n "$pass" ]] || return 1
-  (( OPT_DRY_RUN )) && return 0
+  # A real run gets DBI_* from the db.info this copies into place, by way of the
+  # lib_db_info_load inside lib_db_restore_domain. A dry run copies nothing and stops here,
+  # so it names the database itself - "would import db-x.sql.gz into " read as if the dump
+  # were going nowhere. The password is left out: nothing in a dry run has a use for it.
+  if (( OPT_DRY_RUN )); then DBI_NAME="$name"; DBI_USER="$user"; return 0; fi
   lib_db_sql_secret "recreate database ${name} and user ${user}" \
     "CREATE DATABASE IF NOT EXISTS \`${name}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 CREATE USER IF NOT EXISTS '${user}'@'localhost' IDENTIFIED BY '${pass}';

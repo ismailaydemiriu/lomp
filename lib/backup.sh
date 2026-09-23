@@ -329,12 +329,20 @@ lib_restore_main() {
   if ! lib_domain_registered "$domain"; then
     [[ -s "${work}/x/state/domain.json" ]] || lib_die "Site ${domain} is not registered and the archive carries no state" "" "add the site first: setup.sh add ${domain}"
     lib_info "Site ${domain} is not registered; recreating it from the archived state"
-    if (( ! OPT_DRY_RUN )); then
+    local recreated="${work}/domain-restored.json"
+    jq --arg d "$domain" '.domain = $d | .ssl.enabled = false | .status = "restoring" | del(.db) | del(.backup)' "${work}/x/state/domain.json" >"$recreated"
+    if (( OPT_DRY_RUN )); then
+      # A dry run writes no state file, so the steps below read the state it would have
+      # written straight out of the archive. Asking for the site's own domain.json here found
+      # nothing - and the load resets every D_* before it checks - so the dry run went on to
+      # describe creating a user with no name in a directory with no name.
+      lib_domain_state_load_file "$recreated" "$domain" || true
+    else
       mkdir -p "$(lib_domain_state_dir "$domain")" && chmod 0700 "$(lib_domain_state_dir "$domain")"
-      jq --arg d "$domain" '.domain = $d | .ssl.enabled = false | .status = "restoring" | del(.db) | del(.backup)' "${work}/x/state/domain.json" >"$(lib_domain_json "$domain")"
+      cp -f "$recreated" "$(lib_domain_json "$domain")"
       chmod 0600 "$(lib_domain_json "$domain")"
+      lib_domain_state_load "$domain" || lib_domain_state_load "$adomain" || true
     fi
-    lib_domain_state_load "$domain" || lib_domain_state_load "$adomain" || true
     D_DOMAIN="$domain"; D_HOME="$(lib_domain_home "$domain")"; D_SSL=0; D_STATUS="restoring"
     [[ -n "$D_PHP" ]] && lib_php_ensure_version "$D_PHP"
     lib_domain_user_ensure
@@ -342,7 +350,11 @@ lib_restore_main() {
     lib_domain_state_save
     lib_domain_apply_config "restore vhost ${domain}"
   fi
-  lib_domain_state_load "$domain"
+  # A real run has a domain.json by now - the site's own, or the one the block above just
+  # wrote - and reading it back is what puts the site in front of the steps that follow. A
+  # dry run of an unregistered site has none: this load failed, and being the bare statement
+  # it is, errexit ended the whole run on it.
+  if (( ! OPT_DRY_RUN )) || lib_domain_registered "$domain"; then lib_domain_state_load "$domain"; fi
   # not while a deploy of this application works in the tree the restore writes into
   if lib_app_state_load "$domain"; then _app_site_lock "$domain"; fi
 
@@ -416,8 +428,11 @@ lib_restore_main() {
   if (( ! no_mail )) && lib_mail_installed; then
     lib_mail_restore_domain "$domain" "$mail_file" || lib_warn "the mail of ${domain} was not restored: ${MAIL_LAST_ERROR}"
   fi
-  # a Node.js site: its dependencies are not in the archive; reinstall them and start it again
-  lib_domain_state_load "$domain" >/dev/null 2>&1 || true
+  # a Node.js site: its dependencies are not in the archive; reinstall them and start it again.
+  # Not in a dry run: nothing has been written since the state was loaded, so there is nothing
+  # to pick up - and for a site the dry run only pretended to register, the file is not there
+  # at all and the load would reset the state instead of refreshing it.
+  if (( ! OPT_DRY_RUN )); then lib_domain_state_load "$domain" >/dev/null 2>&1 || true; fi
   lib_app_restore
   lib_ok "Restore of ${domain} finished"
   (( D_SSL )) || lib_note "SSL is not active for ${domain}; run: setup.sh renew-ssl ${domain}"

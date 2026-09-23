@@ -34,9 +34,13 @@ _d_bool() { [[ "$1" == "true" ]] && printf '1' || printf '0'; }
 _d_json_bool() { (( ${1:-0} )) && printf 'true' || printf 'false'; }
 
 # lib_domain_state_load domain  (returns 1 when not registered)
-lib_domain_state_load() {
-  local domain="$1" f=""
-  f="$(lib_domain_json "$domain")"
+lib_domain_state_load() { lib_domain_state_load_file "$(lib_domain_json "$1")" "$1"; }
+
+# The same, out of a named file rather than the site's own. A dry run writes no domain.json,
+# so a restore that would recreate a site has to read the copy inside the archive: asking for
+# the file it did not write finds nothing, and the reset below has already happened by then.
+lib_domain_state_load_file() {   # file domain  (returns 1 when the file is not there)
+  local f="$1" domain="${2:-}"
   lib_domain_state_reset
   [[ -s "$f" ]] || return 1
   D_DOMAIN="$(lib_json_get "$f" '.domain')"

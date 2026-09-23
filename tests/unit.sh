@@ -3307,6 +3307,47 @@ assert_true  "one on every address is"        lib_port_listening_public 993
 unset -f ss
 
 # =============================================================================
+section "restore: a dry run describes the site the archive carries"
+# A dry run writes no domain.json, so a restore that would recreate a site cannot read the
+# state back from the file it did not write: lib_domain_state_load resets every D_* before it
+# looks at whether the file is there, so the dry run went on to describe creating a user with
+# no name, and rendered the vhost of a static site with PHP enabled. It reads the archived
+# copy by path instead.
+lib_domain_state_reset
+_arch="$TMP/archived-domain.json"
+D_DOMAIN="arch.example.com"; D_IDENT="arch_example_com"; D_USER="arch_example_com"
+D_GROUP="arch_example_com"; D_HOME="$SITES_ROOT/arch.example.com"; D_MODE="static"
+D_CREATED="2025-01-01T00:00:00Z"; D_STATUS="active"
+lib_domain_state_json >"$_arch"
+lib_domain_state_reset
+assert_true  "the state loads out of a file of its own" lib_domain_state_load_file "$_arch" arch.example.com
+assert_eq    "with the site's name"  "arch.example.com" "$D_DOMAIN"
+assert_eq    "its mode"              "static"           "$D_MODE"
+assert_eq    "and its system user"   "arch_example_com" "$D_USER"
+# the reset that started all of this, stated out loud: a load that finds nothing leaves nothing
+assert_false "a file that is not there fails"      lib_domain_state_load_file "$TMP/nope.json" arch.example.com
+assert_eq    "and clears the state on its way out" "" "$D_DOMAIN"
+lib_domain_state_reset
+_rm3="$(declare -f lib_restore_main)"
+assert_has "so a dry run recreating a site reads the archive" "lib_domain_state_load_file" "$_rm3"
+# This was a bare statement: a dry run of an unregistered site had no domain.json, the load
+# returned 1, and errexit ended the restore right there - after it had described the whole job.
+assert_eq "and no step reads the state back unguarded" "" \
+  "$(grep -nE '^[[:space:]]*lib_domain_state_load "\$domain"[[:space:]]*$' "$ROOT/lib/backup.sh" || true)"
+# "would import db-x.sql.gz into " - the dump read as if it were going nowhere
+_dbinfo="$TMP/archived-db.info"
+printf 'DB_NAME=arch_db\nDB_USER=arch_user\nDB_PASS=s3cret\n' >"$_dbinfo"
+DBI_NAME=""; DBI_USER=""; DBI_PASS=""
+OPT_DRY_RUN=1
+assert_true "a dry run takes the archived credentials" lib_db_recreate_from_info arch.example.com "$_dbinfo"
+OPT_DRY_RUN=0
+assert_eq "and names the database it would import into" "arch_db"   "$DBI_NAME"
+assert_eq "and the user that owns it"                   "arch_user" "$DBI_USER"
+assert_eq "while the password stays out of it"          ""          "$DBI_PASS"
+assert_false "and it created nothing" test -e "$(lib_db_info_file arch.example.com)"
+DBI_NAME=""; DBI_USER=""; DBI_PASS=""
+
+# =============================================================================
 section "no command replaces itself and skips the EXIT cleanup"
 assert_eq "no 'exec tail' in the libraries" "" "$(grep -nE '^[[:space:]]*exec tail' "$ROOT"/lib/*.sh || true)"
 
