@@ -2070,7 +2070,15 @@ assert_has "the table type follows what Postfix has" "virtual_mailbox_maps = lmd
 _pfr="$(lib_mail_render_postfix_main mail.example.com hash ipv4 smtp.example.net 2587)"
 assert_has "a relay is used where one is set" "relayhost = [smtp.example.net]:2587" "$_pfr"
 assert_has "with credentials from a map, not from here" "smtp_sasl_password_maps = hash:/etc/postfix/lomp/sasl_passwd" "$_pfr"
-assert_has "and never in the clear" "smtp_tls_security_level = encrypt" "$_pfr"
+# "encrypt" demands STARTTLS and then verifies nothing, so anything that can answer for the
+# relay's name presents whatever certificate it likes and is handed the AUTH line. "secure"
+# checks the certificate against the name in relayhost.
+assert_has "and never in the clear"        "smtp_tls_security_level = secure" "$_pfr"
+assert_has "nor to whoever answers first"  "smtp_tls_CAfile" "$_pfr"
+_pfre="$(lib_mail_render_postfix_main mail.example.com hash ipv4 smtp.example.net 2587 encrypt)"
+assert_has   "a relay with a private certificate can be told to accept less" "smtp_tls_security_level = encrypt" "$_pfre"
+assert_lacks "and then there is nothing to check it against"                 "smtp_tls_CAfile" "$_pfre"
+assert_has   "an unset TLS level reads as the safe one" "secure" "$(lib_mail_relay_get tls)"
 
 _mc="$(lib_mail_render_postfix_master)"
 assert_eq "every submission port checks sender against login" 3 "$(grep -c 'reject_authenticated_sender_login_mismatch' <<<"$_mc")"
@@ -2427,7 +2435,12 @@ assert_lacks "dropping the lines never touches the mail" "MAIL_VMAIL_HOME" "$_ld
 _ba="$(declare -f lib_mail_box_add_main)"
 assert_has "a mailbox may not be created over an alias" "is already an alias" "$_ba"
 _bd="$(declare -f lib_mail_box_del_main)"
-assert_has "deleting a mailbox repairs the aliases that pointed at it" "lib_mail_alias_forget_target" "$_bd"
+# in every domain's alias file, not only its own: sales@one.example may forward to
+# info@two.example, and deleting that mailbox used to leave the alias accepting and bouncing
+assert_has "deleting a mailbox repairs the aliases that pointed at it" "lib_mail_alias_forget_everywhere" "$_bd"
+assert_has "wherever they live" 'MAIL_ALIAS_DIR' "$(declare -f lib_mail_alias_forget_everywhere)"
+# turning a domain off deletes nothing, so those aliases are reported rather than removed
+assert_has "and turning a domain off says which ones will bounce" "_mail_alias_targets_elsewhere" "$(declare -f lib_mail_disable_main)"
 lib_mail_alias_set alpha.example "team@alpha.example" "info@alpha.example,sales@alpha.example"
 lib_mail_alias_forget_target alpha.example "sales@alpha.example"
 assert_has   "the target is taken out"     $'team@alpha.example\tinfo@alpha.example' "$(cat "$(lib_mail_alias_file alpha.example)")"
@@ -2472,6 +2485,31 @@ rm -f "$MAIL_RELAY_INFO"
 
 MAIL_PASSWD_FILE="$TMP/passwd"; MAIL_ALIAS_DIR="$TMP/aliases"; MAIL_DKIM_DIR="$TMP/dkim-unused"
 rm -rf "$_m_state/alpha.example" "$_m_state/beta.example" "$_m_state/plain.example"
+
+# =============================================================================
+section "names, keys and aliases that outlive what made them"
+# A selector that has been in DNS must never be handed to a second key: its record is gone but
+# resolvers hold what they cached, and a signature under a known name made with a different key
+# is one they refuse. The list of used names never got the FIRST one - the one every domain has.
+assert_has "enabling a domain remembers the selector it starts with" "selectors_used" "$(declare -f lib_mail_enable_main)"
+assert_has "and refuses to reuse one if the keys were deleted"       "_mail_selector_next" "$(declare -f lib_mail_enable_main)"
+# ...which is why deleting the data has to drop the name as well, and keep the list
+_pg2="$(declare -f lib_mail_domain_purge)"
+assert_has   "deleting the data drops the selector"  "del(.mail.selector)" "$_pg2"
+assert_lacks "but never the list of used names"      "del(.mail.selectors_used)" "$_pg2"
+# a rotation that was under way when mail went off has to go on when it comes back
+assert_has "enabling a domain again finishes an interrupted rotation" 'lib_cron_set "mail-dkim:' "$(declare -f lib_mail_enable_main)"
+# running the same enable twice must not be a failure half-way through
+assert_has "an existing mailbox is not an error on a second run" "is already there" "$(declare -f lib_mail_enable_main)"
+
+# The signing keys used to live under /var/lib/rspamd, a directory the _rspamd user owns -
+# and rspamd is the one component here that parses mail an attacker wrote. A symbolic link put
+# there would have been followed by root's chmod, chown and every key written afterwards.
+assert_lacks "the keys are not under rspamd's own directory" "/var/lib/rspamd/dkim" "$MAIL_DKIM_DIR"
+_de="$(declare -f lib_mail_dirs_ensure)"
+assert_has "and a link where they go is refused, not repaired" 'is a symbolic link' "$_de"
+assert_has "an older server's keys are moved across"           "_mail_dkim_dir_migrate" "$_de"
+assert_has "only the ones not there already"                   '[[ -e "${MAIL_DKIM_DIR}/${b}" ]] && continue' "$(declare -f _mail_dkim_dir_migrate)"
 
 # =============================================================================
 section "the check has to agree with the writing"
@@ -3072,6 +3110,14 @@ assert_has "and it reads the journal"                   "backend = systemd" "$(l
 _kr="$(declare -f _wm_keyring_fpr)"
 assert_has  "every primary key is read, not the first" "/^pub:/{p=1; next}" "$_kr"
 assert_has  "and the signature is checked against the pinned one" "VALIDSIG" "$(declare -f _wm_fetch_release)"
+# Upstream's updater, when it migrates a renamed configuration key, copies the live
+# configuration next to itself as config.old.php - through the symlink, so the copy is the real
+# thing - with root's umask, inside a tree every user of this machine can read. The keys
+# lompstack writes are current, so that branch is not reached today; it is one upstream rename
+# away, and what it would leave behind is the database password and the key that decrypts every
+# logged-in mailbox's IMAP password.
+assert_has "the release's configuration directory is not world-readable" 'chmod 0750 "${dest}/config"' "$(declare -f _wm_fetch_release)"
+assert_has "and such a copy is removed after an update"                  'rm -f "${rel}/config/"*.old.php' "$(declare -f lib_webmail_update)"
 # the log directory belongs to root: OpenLiteSpeed opens the vhost logs there as root, and a
 # directory the webmail user could write would let it point one at any file on the system
 assert_has "the log directory is root's" '"$WM_LOG_DIR" 0750 root:root' "$(declare -f lib_webmail_dirs_ensure)"

@@ -28,7 +28,12 @@ MAIL_PASSWD_FILE="${MAIL_PASSWD_FILE:-${MAIL_DOVECOT_DIR}/passwd}"
 MAIL_SIEVE_DIR="${MAIL_SIEVE_DIR:-/etc/dovecot/sieve}"   # the delivery user has to read these
 MAIL_RSPAMD_DIR="${MAIL_RSPAMD_DIR:-/etc/rspamd/local.d}"
 MAIL_RSPAMD_LOMP="${MAIL_RSPAMD_LOMP:-/etc/rspamd/lomp}"
-MAIL_DKIM_DIR="${MAIL_DKIM_DIR:-/var/lib/rspamd/dkim}"
+# The signing keys do NOT live under /var/lib/rspamd. That directory belongs to the _rspamd
+# user, and rspamd is the one component of this stack that parses mail an attacker wrote:
+# anything running as _rspamd could replace "dkim" with a symbolic link and wait for the
+# next run to follow it and chmod, chown and write files as root wherever it pointed.
+MAIL_DKIM_DIR="${MAIL_DKIM_DIR:-/var/lib/lompstack/dkim}"
+MAIL_DKIM_DIR_OLD="${MAIL_DKIM_DIR_OLD:-/var/lib/rspamd/dkim}"
 MAIL_APT_LIST="${MAIL_APT_LIST:-/etc/apt/sources.list.d/lomp-rspamd.list}"
 MAIL_RSPAMD_KEY="${MAIL_RSPAMD_KEY:-/etc/apt/keyrings/rspamd.gpg}"
 MAIL_REDIS_CONF="${MAIL_REDIS_CONF:-/etc/lomp-redis-rspamd.conf}"
@@ -132,9 +137,14 @@ lib_mail_resolver() {
   printf '%s' "${v:-lomp}"
 }
 
-lib_mail_relay_get() {   # field: host|port|user  -> value, empty when no relay is set
-  [[ -s "$MAIL_RELAY_INFO" ]] || { printf ''; return 0; }
-  awk -F= -v k="${1^^}" '$1==k{sub(/^[^=]*=/,""); print; exit}' "$MAIL_RELAY_INFO" || true
+lib_mail_relay_get() {   # field: host|port|user|spf_include|tls -> value, empty when unset
+  local v=""
+  [[ -s "$MAIL_RELAY_INFO" ]] || { [[ "${1,,}" == "tls" ]] && printf 'secure'; return 0; }
+  v="$(awk -F= -v k="${1^^}" '$1==k{sub(/^[^=]*=/,""); print; exit}' "$MAIL_RELAY_INFO" || true)"
+  # a relay written by an older release says nothing about TLS, and the safe reading of "not
+  # said" is the level that verifies the certificate
+  [[ "${1,,}" == "tls" && -z "$v" ]] && v="secure"
+  printf '%s' "$v"
 }
 
 # =============================================================================
@@ -142,8 +152,8 @@ lib_mail_relay_get() {   # field: host|port|user  -> value, empty when no relay 
 # =============================================================================
 # main.cf. The whole file, because a mail server assembled from package defaults plus a few
 # postconf calls is a mail server nobody can read in one sitting.
-lib_mail_render_postfix_main() {   # host maptype [ipv4|all] [relay-host] [relay-port]
-  local host="$1" t="${2:-hash}" proto="${3:-ipv4}" rhost="${4:-}" rport="${5:-587}"
+lib_mail_render_postfix_main() {   # host maptype [ipv4|all] [relay-host] [relay-port] [tls-level]
+  local host="$1" t="${2:-hash}" proto="${3:-ipv4}" rhost="${4:-}" rport="${5:-587}" rtls="${6:-secure}"
   printf '# Managed by lompstack - rewritten by "lomp mail regenerate"; local edits are lost.\n'
   printf '# The package'"'"'s own main.cf was archived under %s/archive on the first install.\n\n' "$STATE_DIR"
   printf 'compatibility_level = 3.6\n'
@@ -272,8 +282,15 @@ EOF
     printf 'smtp_sasl_password_maps = %s:%s\n' "$t" "$MAIL_SASL_MAP"
     printf 'smtp_sasl_security_options = noanonymous\n'
     printf 'smtp_sasl_tls_security_options = noanonymous\n'
-    # a password may not travel in the clear, so this one is not "may" like the direct case
-    printf 'smtp_tls_security_level = encrypt\n'
+    # A password may not travel in the clear, so this one is not "may" like the direct case -
+    # and "encrypt" is not enough either: it demands STARTTLS and then verifies nothing, so
+    # anything able to answer for the relay's name presents whatever certificate it likes and
+    # is handed the AUTH line. "secure" checks the certificate against the name in relayhost.
+    # A relay with a private or self-signed certificate can be told to accept less.
+    printf 'smtp_tls_security_level = %s\n' "$rtls"
+    if [[ "$rtls" == "secure" ]]; then
+      printf 'smtp_tls_CAfile = /etc/ssl/certs/ca-certificates.crt\n'
+    fi
   else
     printf 'smtp_tls_security_level = may\n'
   fi
@@ -817,6 +834,27 @@ lib_mail_users_ensure() {
   return 0
 }
 
+# An older server's keys, moved into the root-owned directory that replaces the one _rspamd
+# owns. Only files that are not there already are moved, so it is safe to run again.
+_mail_dkim_dir_migrate() {
+  local f="" b="" n=0
+  [[ "$MAIL_DKIM_DIR_OLD" != "$MAIL_DKIM_DIR" ]] || return 0
+  [[ -d "$MAIL_DKIM_DIR_OLD" && ! -L "$MAIL_DKIM_DIR_OLD" ]] || return 0
+  (( OPT_DRY_RUN )) && return 0
+  for f in "$MAIL_DKIM_DIR_OLD"/*.key; do
+    [[ -f "$f" ]] || continue
+    b="$(basename "$f")"
+    [[ -e "${MAIL_DKIM_DIR}/${b}" ]] && continue
+    mv -f "$f" "${MAIL_DKIM_DIR}/${b}" || { lib_warn "could not move ${b} into ${MAIL_DKIM_DIR}"; continue; }
+    chmod 0640 "${MAIL_DKIM_DIR}/${b}" 2>/dev/null || true
+    chown root:_rspamd "${MAIL_DKIM_DIR}/${b}" 2>/dev/null || true
+    n=$((n + 1))
+  done
+  (( n > 0 )) && lib_ok "${n} DKIM key(s) moved from ${MAIL_DKIM_DIR_OLD} into ${MAIL_DKIM_DIR}"
+  rmdir "$MAIL_DKIM_DIR_OLD" 2>/dev/null || true
+  return 0
+}
+
 lib_mail_dirs_ensure() {
   lib_mkdir "$MAIL_VMAIL_HOME" 0750 "${MAIL_VMAIL_USER}:${MAIL_VMAIL_USER}"
   lib_mkdir "$MAIL_POSTFIX_DIR" 0750 root:postfix
@@ -824,7 +862,13 @@ lib_mail_dirs_ensure() {
   lib_mkdir "$MAIL_DOVECOT_DIR" 0750 root:dovecot
   lib_mkdir "$MAIL_SIEVE_DIR" 0755 root:root
   lib_mkdir "$MAIL_RSPAMD_LOMP" 0755 root:root
+  # a link here would be followed by the chmod and the chown below, and by every key written
+  # afterwards: it is refused rather than repaired, because repairing it silently would hide
+  # the fact that something put it there
+  [[ -L "$MAIL_DKIM_DIR" ]] && lib_die "${MAIL_DKIM_DIR} is a symbolic link"     "the DKIM signing keys have to live in a real directory that root owns"     "look at where it points, then remove it and run this again"
+  lib_mkdir "$(dirname "$MAIL_DKIM_DIR")" 0755 root:root
   lib_mkdir "$MAIL_DKIM_DIR" 0750 root:_rspamd
+  _mail_dkim_dir_migrate
   lib_mkdir "$MAIL_STATE_DIR" 0700 root:root
   # a server installed before StateDirectoryMode was set keeps the mode systemd gave it
   if (( ! OPT_DRY_RUN )) && [[ -d "$MAIL_REDIS_DATA" ]]; then chmod 0700 "$MAIL_REDIS_DATA" 2>/dev/null || true; fi
@@ -1055,7 +1099,8 @@ lib_mail_configs_write() {   # host
   # memory at all
   (( SYS_RAM_MB > 0 )) || lib_system_analyze --no-net
 
-  lib_mail_render_postfix_main "$host" "$t" "$proto" "$rhost" "${rport:-587}" | lib_write_file "$MAIL_POSTFIX_MAIN" 0644 root:root
+  lib_mail_render_postfix_main "$host" "$t" "$proto" "$rhost" "${rport:-587}" "$(lib_mail_relay_get tls)" \
+    | lib_write_file "$MAIL_POSTFIX_MAIN" 0644 root:root
   _mail_changed_note
   lib_mail_render_postfix_master | lib_write_file "$MAIL_POSTFIX_MASTER" 0644 root:root
   _mail_changed_note
@@ -1432,9 +1477,15 @@ lib_mail_test_report() {   # [brief]
 # Where port 25 is blocked, outgoing mail goes through somebody else's server. The password
 # reaches Postfix through a 0600 map and is never an argument, so it stays out of the process
 # list; the signature is still this server's own, because Rspamd signs before the handover.
-lib_mail_relay_set() {   # host port user [spf-include]   (password on stdin)
-  local rhost="$1" rport="${2:-587}" ruser="$3" spf="${4:-}" pass=""
+lib_mail_relay_set() {   # host port user [spf-include] [tls-level]   (password on stdin)
+  local rhost="$1" rport="${2:-587}" ruser="$3" spf="${4:-}" tls="${5:-secure}" pass=""
   lib_mail_hostname_valid "$rhost" || lib_die "Invalid relay host '${rhost:-none}'" "" "--host smtp.example.net"
+  case "$tls" in
+    secure|encrypt) ;;
+    *) lib_die "Invalid --tls '${tls}'" \
+         "secure verifies the relay's certificate; encrypt only requires TLS and checks nothing" \
+         "--tls secure   (use encrypt only for a relay with a private certificate)" ;;
+  esac
   if [[ -n "$spf" ]]; then
     lib_mail_hostname_valid "$spf" || lib_die "Invalid SPF include '${spf}'" \
       "it is a domain name - the one your relay provider tells you to include" "--spf-include amazonses.com"
@@ -1460,13 +1511,18 @@ lib_mail_relay_set() {   # host port user [spf-include]   (password on stdin)
   chmod 0600 "${MAIL_SASL_MAP}.db" 2>/dev/null || true
   chmod 0600 "${MAIL_SASL_MAP}.lmdb" 2>/dev/null || true
   lib_mkdir "$MAIL_STATE_DIR" 0700 root:root
-  printf 'HOST=%s\nPORT=%s\nUSER=%s\nSPF_INCLUDE=%s\nAT=%s\n' "$rhost" "$rport" "$ruser" "$spf" "$(lib_iso_now)" \
+  printf 'HOST=%s\nPORT=%s\nUSER=%s\nSPF_INCLUDE=%s\nTLS=%s\nAT=%s\n' "$rhost" "$rport" "$ruser" "$spf" "$tls" "$(lib_iso_now)" \
     | lib_write_file "$MAIL_RELAY_INFO" 0600 root:root
   if ! lib_mail_apply "$(lib_mail_host)"; then
     lib_die "The relay could not be put into effect" "${MAIL_LAST_ERROR}" "lomp mail status"
   fi
   lib_manifest_set_json '.mail.relay' "$(jq -n --arg h "$rhost" --arg p "$rport" --arg u "$ruser" --arg s "$spf" '{host:$h, port:$p, user:$u, spf_include:$s}')"
   lib_ok "Outgoing mail now goes through ${rhost}:${rport} as ${ruser}"
+  if [[ "$tls" == "encrypt" ]]; then
+    lib_warn "The relay's certificate is not verified (--tls encrypt): anything that can answer"
+    lib_warn "for ${rhost} is handed these credentials. Use --tls secure unless the relay has a"
+    lib_warn "certificate no public authority signed."
+  fi
   # Every domain's SPF record has to name the relay as well, or the far end sees mail coming
   # from an address the domain does not list. lompstack does not guess what to put there any
   # more: it used to drop the first label off the relay's host name, which turns
@@ -1941,7 +1997,7 @@ lib_mail_domain_cert_ensure() {   # domain
 #  enable / disable
 # =============================================================================
 lib_mail_enable_main() {   # domain [--mailbox NAME] [--quota Q]
-  local d="" box="" quota="$MAIL_QUOTA_DEFAULT" a="" _first_box=""
+  local d="" box="" quota="$MAIL_QUOTA_DEFAULT" a="" _first_box="" _sel="" _used=""
   d="${1:-}"; shift || true
   lib_domain_valid "${d,,}" || lib_die "Invalid domain '${d:-none}'" "" "lomp mail enable example.com"
   d="${d,,}"
@@ -1964,15 +2020,49 @@ lib_mail_enable_main() {   # domain [--mailbox NAME] [--quota Q]
   lib_mail_installed || lib_mail_ensure || lib_die "Mail is not installed" "${MAIL_LAST_ERROR}" "lomp install --with-mail"
 
   lib_info "Turning on mail for ${d}"
+  # A domain whose keys were deleted - "mail disable --delete-data" - keeps the list of
+  # selectors it has used, and the next key must not be given one of those names: its record
+  # is out of DNS but resolvers hold what they cached, and they refuse a signature made with a
+  # different key under a name they already know.
+  if (( ! OPT_DRY_RUN )) && [[ -z "$(lib_json_get "$(lib_domain_json "$d")" '.mail.selector')" ]]; then
+    _sel="lomp$(date -u +%Y%m)"
+    _used="$(lib_json_get "$(lib_domain_json "$d")" '.mail.selectors_used // [] | join(" ")')"
+    if [[ " ${_used} " == *" ${_sel} "* ]]; then
+      _sel="$(_mail_selector_next "$d")"         || lib_die "No free DKIM selector for ${d} this month"            "every name this month has already been published for this domain" "try again next month"
+      lib_info "The usual selector has been used here before; this key gets ${_sel}"
+    fi
+    lib_json_set "$(lib_domain_json "$d")" '.mail.selector = $s' --arg s "$_sel"
+  fi
   lib_mail_dkim_ensure "$d" || lib_die "The DKIM key could not be created" "${MAIL_LAST_ERROR}" "lomp mail status"
   if (( ! OPT_DRY_RUN )); then
+    # selectors_used gets the very first selector too, not only the ones a rotation picks. A
+    # name that has been in DNS must never be handed to a second key - resolvers hold what they
+    # cached until the TTL runs out, and a new key under an old name is a signature they refuse
+    # - and without this the first name was the one name nothing remembered.
     lib_json_set "$(lib_domain_json "$d")" \
-      '.mail.enabled = true | .mail.host = $h | .mail.selector = $s | .mail.quota_default = $q | .mail.enabled_at = $ts' \
+      '.mail.enabled = true | .mail.host = $h | .mail.selector = $s | .mail.quota_default = $q | .mail.enabled_at = $ts
+       | .mail.selectors_used = ((.mail.selectors_used // []) + [$s] | unique)' \
       --arg h "mail.${d}" --arg s "$(lib_mail_selector "$d")" --arg q "$quota" --arg ts "$(lib_iso_now)"
+  fi
+  # A rotation that was under way when mail was turned off still has a key waiting for its
+  # record or an old one to retire, and the hourly job that finishes it was removed with
+  # everything else. Without it the rotation would wait for ever.
+  if [[ -n "$(lib_json_get "$(lib_domain_json "$d")" '.mail.selector_next')" \
+        || -n "$(lib_json_get "$(lib_domain_json "$d")" '.mail.selector_old')" ]]; then
+    lib_cron_set "mail-dkim:${d}" "17 * * * * root ${BIN_LINK} mail dkim rotate ${d} --finish --quiet"
+    lib_info "The DKIM rotation of ${d} goes on where it left off"
   fi
   # mailboxes that were put aside when mail was turned off come back with their passwords
   lib_mail_boxes_unpark "$d"
-  if [[ -n "$box" ]]; then
+  if [[ -n "$box" ]] && lib_mail_box_exists "${box}@${d}"; then
+    # Running the same command twice must not be a failure. It used to die here on "already
+    # exists" - after the mailbox lines had been unparked and before the certificate and the
+    # DNS records were seen to - so a second "mail enable <d> --mailbox info", and every
+    # re-enable of a domain that already had that mailbox, left the domain half done.
+    lib_info "${box}@${d} is already there; its password is unchanged"
+    lib_mail_domain_aliases_seed "$d" "${box}@${d}"
+    lib_mail_tables_apply || lib_die "The mail tables could not be rebuilt" "${MAIL_LAST_ERROR}" "lomp mail status"
+  elif [[ -n "$box" ]]; then
     lib_mail_box_add_main "${box}@${d}" --quota "$quota"
   else
     # postmaster, abuse and dmarc point at the first mailbox there is; with none, they are
@@ -1999,7 +2089,7 @@ lib_mail_enable_main() {   # domain [--mailbox NAME] [--quota Q]
 }
 
 lib_mail_disable_main() {   # domain [--keep-data|--delete-data] [--dns-cleanup]
-  local d="" keep=1 cleanup=0 a=""
+  local d="" keep=1 cleanup=0 a="" _elsewhere=""
   d="${1:-}"; shift || true
   [[ -n "$d" ]] || lib_die "Which domain?" "" "lomp mail disable example.com"
   d="${d,,}"
@@ -2055,6 +2145,13 @@ lib_mail_disable_main() {   # domain [--keep-data|--delete-data] [--dns-cleanup]
     lib_mail_boxes_park "$d"
   else
     lib_mail_domain_purge "$d"
+  fi
+  # an alias somewhere else that points into this domain now accepts mail and bounces it
+  _elsewhere="$(_mail_alias_targets_elsewhere "$d")"
+  if [[ -n "$_elsewhere" ]]; then
+    lib_warn "These aliases in other domains still point into ${d} and will bounce:"
+    printf '%s\n' "$_elsewhere" | sed 's/^/      /'
+    lib_note "They start working again when mail for ${d} is enabled; remove them with 'lomp mail alias del'"
   fi
   # The flag goes down LAST, after the logins are really gone. The other way round - and that
   # is how this read until the audit - an interrupt in between left the state saying "off"
@@ -2157,6 +2254,15 @@ lib_mail_domain_purge() {   # domain
     [[ -e "$a" ]] && lib_rm "$a"
   done
   lib_rm "${MAIL_VMAIL_HOME}/${d}"
+  # The keys are gone, so the names that pointed at them have to go with them - otherwise a
+  # later "mail enable" of this same domain would keep .mail.selector, make a NEW key and
+  # publish it under a name that is already in DNS and already cached by resolvers, and every
+  # signature under that name would be refused until the cache ran out. selectors_used is kept
+  # on purpose: that is the list of names that must never come back.
+  if (( ! OPT_DRY_RUN )) && [[ -s "$(lib_domain_json "$d")" ]]; then
+    lib_json_set "$(lib_domain_json "$d")" \
+      'del(.mail.selector) | del(.mail.selector_next) | del(.mail.selector_old) | del(.mail.selector_old_until) | del(.mail.rotate_started_at)'
+  fi
   lib_cron_remove "mail-cert:${d}"
   lib_cron_remove "mail-dkim:${d}"
   lib_ssl_delete "$(lib_mail_cert_name "$d")" 2>/dev/null || true
@@ -2330,7 +2436,7 @@ lib_mail_box_del_main() {   # address
   lib_mail_box_exists "$a" || lib_die "No such mailbox: ${a}" "" "lomp mail box list"
   lib_confirm "Delete ${a} and every message in it?" n || lib_die "Nothing was deleted" "" ""
   lib_mail_box_remove "$a"
-  lib_mail_alias_forget_target "${a#*@}" "$a"
+  lib_mail_alias_forget_everywhere "$a"
   lib_mail_tables_apply || lib_warn "the mail tables could not be rebuilt: ${MAIL_LAST_ERROR}"
   lib_ok "${a} is gone"
   return 0
@@ -2339,6 +2445,35 @@ lib_mail_box_del_main() {   # address
 # An alias pointing at a mailbox that no longer exists is worse than no alias: Postfix accepts
 # the message and bounces it afterwards. So a deleted mailbox is taken out of every alias, and
 # an alias left with nowhere to go is removed.
+# ...and in EVERY domain's alias file, not only its own. sales@one.example may forward to
+# info@two.example; deleting that mailbox used to leave the alias behind, and Postfix went on
+# accepting mail for it and bouncing it afterwards.
+lib_mail_alias_forget_everywhere() {   # address
+  local a="$1" f=""
+  [[ -d "$MAIL_ALIAS_DIR" ]] || return 0
+  for f in "$MAIL_ALIAS_DIR"/*; do
+    [[ -f "$f" ]] || continue
+    lib_mail_alias_forget_target "$(basename "$f")" "$a"
+  done
+  return 0
+}
+
+# Which aliases in OTHER domains point into this one. Turning a domain's mail off does not
+# delete anything, so these are not removed - somebody meant them, and enabling the domain
+# again makes them work - but until then they accept mail and bounce it, and that is worth
+# saying out loud.
+_mail_alias_targets_elsewhere() {   # domain -> "alias -> target" lines
+  local d="$1" f="" other=""
+  [[ -d "$MAIL_ALIAS_DIR" ]] || return 0
+  for f in "$MAIL_ALIAS_DIR"/*; do
+    [[ -f "$f" ]] || continue
+    other="$(basename "$f")"
+    [[ "$other" == "$d" ]] && continue
+    awk -F'\t' -v d="@${d}" '$1 !~ /^#/ && $2 ~ d { print "  " $1 " -> " $2 }' "$f" || true
+  done
+  return 0
+}
+
 lib_mail_alias_forget_target() {   # domain address
   local d="$1" gone="$2" f="" tmp="" changed=0
   f="$(lib_mail_alias_file "$d")"
@@ -3037,7 +3172,7 @@ _mail_dns_cmd() {
 }
 
 _mail_relay_cmd() {
-  local action="${1:-}" rhost="" rport="587" ruser="" rspf="" a=""
+  local action="${1:-}" rhost="" rport="587" ruser="" rspf="" rtls="secure" a=""
   shift || true
   while (($# > 0)); do
     a="$1"; shift
@@ -3046,12 +3181,13 @@ _mail_relay_cmd() {
       --port) rport="${1:-587}"; shift || true ;;
       --user) ruser="${1:-}"; shift || true ;;
       --spf-include) rspf="${1:-}"; shift || true ;;
+      --tls) rtls="${1:-}"; shift || true ;;
       *) lib_die "Unknown option for 'mail relay': ${a}" "" "lomp mail help" ;;
     esac
   done
   lib_mail_installed || lib_die "Mail is not installed" "" "lomp install --with-mail"
   case "$action" in
-    set) lib_mail_relay_set "$rhost" "$rport" "$ruser" "$rspf" ;;
+    set) lib_mail_relay_set "$rhost" "$rport" "$ruser" "$rspf" "$rtls" ;;
     off) lib_mail_relay_off ;;
     *)   lib_die "Unknown relay command: ${action:-none}" "" "lomp mail relay set --host smtp.example.net --user you@example.net" ;;
   esac

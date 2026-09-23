@@ -169,6 +169,15 @@ _wm_fetch_release() {   # version -> path of the unpacked release on stdout
   if id -u "$WM_CODE_OWNER" >/dev/null 2>&1; then chown -R "${WM_CODE_OWNER}:${WM_CODE_OWNER}" "$dest"
   else chown -R root:root "$dest"; fi
   chmod -R go-w "$dest"
+  # The configuration directory is not for everybody. Nothing lompstack writes into it is a
+  # secret - the real file lives outside the release and only a link points at it - but it is
+  # where upstream's own updater puts a copy of the live configuration when it migrates a
+  # renamed key, and the rest of the tree is deliberately world-readable. The PHP workers run
+  # as the webmail user, so that is the group.
+  if id -u "$WM_USER" >/dev/null 2>&1; then
+    chown "${WM_CODE_OWNER}:${WM_USER}" "${dest}/config" 2>/dev/null || true
+    chmod 0750 "${dest}/config" 2>/dev/null || true
+  fi
   printf '%s' "$dest"
   return 0
 }
@@ -494,6 +503,16 @@ lib_webmail_update() {   # [version]
     rm -rf "$rel"
     return 1
   fi
+  # Upstream's updater, when it finds a configuration key that has been renamed, first copies
+  # the live configuration next to itself as config.old.php - through the symlink, so the copy
+  # holds the real thing - with root's umask, inside a release tree every user of this machine
+  # can read. Nothing here would ever have removed it. The keys lompstack writes are current,
+  # so that branch is not reached today; it is one upstream rename away from being reached, and
+  # what it would leave behind is the database password and the key that decrypts every logged
+  # in mailbox's IMAP password. So: the copy goes, and the directory stops being world-readable.
+  rm -f "${rel}/config/"*.old.php
+  chown "root:${WM_USER}" "${rel}/config" 2>/dev/null || true
+  chmod 0750 "${rel}/config" 2>/dev/null || true
   old="$(readlink -f "$WM_CURRENT" 2>/dev/null || true)"
   _wm_current_set "$rel" || { lib_warn "the webmail could not be switched to ${want}: ${WM_LAST_ERROR}"; rm -rf "$rel"; return 1; }
   rm -f "${WM_CONF}.before"
