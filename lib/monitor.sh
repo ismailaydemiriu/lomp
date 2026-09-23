@@ -417,10 +417,21 @@ _doc_check_ssl_infra() {
   else
     _doc_add OK "certbot deploy hook" "installed"
   fi
-  if lib_cf_enabled; then
+  # The origin lock can be set up on a server that never enabled the Cloudflare integration -
+  # it asks only for a token - and its rules are a snapshot of Cloudflare's ranges. Without the
+  # weekly refresh, an edge range added after the lock reaches a closed port and the sites
+  # behind it go dark, with everything here reporting the lock as on. So the refresh is checked
+  # wherever it matters, not only where the integration is switched on.
+  if lib_cf_enabled || [[ "$(lib_manifest_get '.cloudflare.origin_lock')" == "true" ]]; then
     local age=""; age="$(lib_file_age_days "$CF_IPS_FILE")"
     if (( age > 14 )); then _doc_add WARN "cloudflare ips" "list is ${age} days old (update-cf-ips)"; else _doc_add OK "cloudflare ips" "list updated ${age} day(s) ago"; fi
-    lib_cron_has cfips && _doc_add OK "cloudflare cron" "weekly update scheduled" || _doc_add WARN "cloudflare cron" "weekly update not scheduled"
+    if lib_cron_has cfips; then
+      _doc_add OK "cloudflare cron" "weekly update scheduled"
+    elif [[ "$(lib_manifest_get '.cloudflare.origin_lock')" == "true" ]]; then
+      _doc_add FAIL "cloudflare cron" "the origin is locked to Cloudflare's ranges and nothing refreshes them; a range added by Cloudflare will be refused and the sites behind it go dark (setup.sh update-cf-ips, then setup.sh firewall status)"
+    else
+      _doc_add WARN "cloudflare cron" "weekly update not scheduled"
+    fi
     if [[ -s "$CF_INI" ]]; then
       [[ "$(stat -c %a "$CF_INI")" == "600" ]] && _doc_add OK "cloudflare token" "stored with 0600" || _doc_add FAIL "cloudflare token" "${CF_INI} is not 0600"
     fi

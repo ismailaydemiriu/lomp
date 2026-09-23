@@ -2453,12 +2453,91 @@ SYS_PUBLIC_IPV4="203.0.113.9"
 assert_has   "a real one is" "203.0.113.9" "$(_mail_dns_records alpha.example)"
 # where a relay carries the mail, its senders belong in SPF too
 MAIL_RELAY_INFO="$TMP/mail-relay.info"
-printf 'HOST=smtp.provider.example\nPORT=587\nUSER=u\n' >"$MAIL_RELAY_INFO"
-assert_has "the relay is included in SPF" "include:provider.example" "$(_mail_dns_records alpha.example)"
+printf 'HOST=smtp.provider.example\nPORT=587\nUSER=u\nSPF_INCLUDE=spf.provider.example\n' >"$MAIL_RELAY_INFO"
+assert_has "the relay is included in SPF" "include:spf.provider.example" "$(_mail_dns_records alpha.example)"
+# ...and only the include the operator gave. It used to be guessed by dropping the first label
+# of the relay's host name, which turns email-smtp.eu-west-1.amazonaws.com into
+# eu-west-1.amazonaws.com - a name with no SPF record. An include whose target has no record is
+# a permerror for the WHOLE record, so the guess threw away the ip4: term that would have
+# passed and every message the domain sent failed SPF everywhere. "--host sendgrid.net" gave
+# "include:net".
+printf 'HOST=email-smtp.eu-west-1.amazonaws.com\nPORT=587\nUSER=u\n' >"$MAIL_RELAY_INFO"
+_spfrec="$(_mail_dns_records alpha.example)"
+assert_lacks "an unknown relay is never guessed at" "include:eu-west-1.amazonaws.com" "$_spfrec"
+assert_lacks "nor any other include"                "include:" "$_spfrec"
+assert_has   "the record still names this server"   "v=spf1 ip4:203.0.113.9 ~all" "$_spfrec"
+printf 'HOST=sendgrid.net\nPORT=587\nUSER=u\n' >"$MAIL_RELAY_INFO"
+assert_lacks "and a two-label host does not become include:net" "include:net" "$(_mail_dns_records alpha.example)"
 rm -f "$MAIL_RELAY_INFO"
 
 MAIL_PASSWD_FILE="$TMP/passwd"; MAIL_ALIAS_DIR="$TMP/aliases"; MAIL_DKIM_DIR="$TMP/dkim-unused"
 rm -rf "$_m_state/alpha.example" "$_m_state/beta.example" "$_m_state/plain.example"
+
+# =============================================================================
+section "the check has to agree with the writing"
+# Two A records at a mail name send about half of all inbound SMTP to whichever address is
+# wrong. The writing side calls that a conflict and refuses; the check called it "ok", because
+# it only asked whether the right address appeared somewhere in the answer - which also said
+# yes to 85.9.13.2 when the server is 5.9.13.2.
+# Asked of the function itself, with DNS answering whatever the case under test needs.
+_dnsq_answer=""
+eval 'dig() { printf "%s" "$_dig_out"; }'
+eval '_mail_dns_query() {
+  case "$1 $2" in
+    "A mail.alpha.example") printf "%s" "$_dnsq_a" ;;
+    "MX alpha.example")     printf "10 mail.alpha.example.\n" ;;
+    TXT*)                   printf "%s" "$_dnsq_txt" ;;
+    *)                      printf "" ;;
+  esac
+}'
+SYS_PUBLIC_IPV4="203.0.113.9"
+_dnsq_txt=""
+_dnsq_a="203.0.113.9"
+_out_one="$(lib_mail_dns_check alpha.example 2>&1 || true)"
+_dnsq_a=$'203.0.113.9\n198.51.100.7'
+_out_two="$(lib_mail_dns_check alpha.example 2>&1 || true)"
+_dnsq_a="85.9.13.2"; SYS_PUBLIC_IPV4="5.9.13.2"
+_out_sub="$(lib_mail_dns_check alpha.example 2>&1 || true)"
+assert_lacks "one right address draws no complaint"          "mail.alpha.example" "$(grep -E 'more than one|says:' <<<"$_out_one" || true)"
+assert_has   "a second address at a mail name is reported"   "answers more than one address" "$_out_two"
+assert_has   "an address that merely contains the right one is reported too" "says: 85.9.13.2" "$_out_sub"
+unset -f dig _mail_dns_query
+SYS_PUBLIC_IPV4="203.0.113.9"
+
+# =============================================================================
+section "records lompstack wrote, and can still take back"
+# What lompstack published is worked out from the state, so anything removed from the state
+# first can never be named again. Both of these used to leave a record in the zone for good.
+_wd="$(declare -f lib_webmail_domain_disable)"
+_wd_rec_ln="$(grep -n '_wm_dns_record_remove' <<<"$_wd" | head -1 | cut -d: -f1)"
+_wd_flag_ln="$(grep -n 'del(.mail.webmail)' <<<"$_wd" | head -1 | cut -d: -f1)"
+assert_true "webmail.<domain> is removed before the flag that names it" \
+  test "${_wd_rec_ln:-0}" -lt "${_wd_flag_ln:-0}"
+_rt="$(declare -f lib_mail_dkim_retire_old)"
+_rt_rec_ln="$(grep -n '_mail_dkim_dns_remove' <<<"$_rt" | head -1 | cut -d: -f1)"
+_rt_st_ln="$(grep -n 'del(.mail.selector_old)' <<<"$_rt" | head -1 | cut -d: -f1)"
+assert_true "and a retired DKIM record before the selector that names it" \
+  test "${_rt_rec_ln:-0}" -lt "${_rt_st_ln:-0}"
+assert_has "a rotation given up takes its record with it" "_mail_dkim_dns_remove" "$(declare -f _mail_dkim_cmd)"
+# and only ever lompstack's own records: somebody may be pointing that name somewhere on purpose
+for _fn in _wm_dns_record_remove _mail_dkim_dns_remove; do
+  assert_has "${_fn} removes only what lompstack wrote" 'CF_RECORD_TAG' "$(declare -f "$_fn")"
+  assert_has "${_fn} says so when the zone cannot be read" "still published" "$(declare -f "$_fn")"
+done
+# a zone that cannot be looked up is not a zone with nothing in it
+assert_has "the cleanup says when it removed nothing" "are still published" "$(declare -f lib_mail_dns_cleanup)"
+# --replace-mx writes records and deletes another provider's MX, so it takes the lock like --apply
+assert_has "--replace-mx takes the global lock too" '*" --replace-mx "*' "$(sed -n '/^  case "\$cmd" in/,/^  esac/p' "$ROOT/setup.sh")"
+# changing the relay changes every domain's SPF record, and nothing here writes DNS by itself
+for _fn in lib_mail_relay_set lib_mail_relay_off; do
+  assert_has "${_fn} says which domains need their records again" "_mail_relay_dns_note" "$(declare -f "$_fn")"
+done
+# and the credentials outlive a failed apply, or Postfix comes back naming a file that is gone
+_ro="$(declare -f lib_mail_relay_off)"
+_ro_apply_ln="$(grep -n 'lib_mail_apply' <<<"$_ro" | head -1 | cut -d: -f1)"
+_ro_sasl_ln="$(grep -n 'lib_rm "\$MAIL_SASL_MAP"' <<<"$_ro" | head -1 | cut -d: -f1)"
+assert_true "the credential map is removed only after the apply succeeded" \
+  test "${_ro_apply_ln:-0}" -lt "${_ro_sasl_ln:-0}"
 
 # =============================================================================
 section "what an older server is missing, and what notices"
@@ -2693,7 +2772,9 @@ _ol="$(declare -f lib_cf_origin_lock)"
 assert_has "the lock needs a token first"       "lib_cf_token" "$_ol"
 assert_has "because HTTP-01 stops working"      "DNS-01" "$_ol"
 assert_has "it asks before closing the ports"   "lib_confirm" "$_ol"
-assert_has "the open rules go first"            "lib_ufw_delete_port_rules 80" "$_ol"
+assert_has "the open rules go, by number"       "_cf_ufw_web_rule_numbers" "$_ol"
+assert_has "and the lock checks nothing was left open" "still open port 80 or 443" "$_ol"
+assert_has "a lock schedules the refresh it promises"  "lib_cf_schedule" "$_ol"
 assert_has "and every rule carries lompstack's name" 'comment "$CF_UFW_COMMENT"' "$_ol"
 assert_has "certbot switches to DNS-01 while it is on" "lib_cf_origin_locked" "$(declare -f lib_ssl_obtain)"
 assert_has "but only with a token to switch to"        "lib_cf_origin_locked && lib_ssl_cf_token_available" "$(declare -f lib_ssl_obtain)"
@@ -2704,8 +2785,32 @@ assert_lacks "which never opens the ports in between" "lib_cf_origin_unlock" "$(
 assert_has   "the lock's own refresh cannot re-lock behind the question" "CF_LOCK_RENEWING" "$_ol"
 # a re-run of install would otherwise put "Anywhere" back next to the Cloudflare rules
 assert_has "installing again leaves a locked origin locked" "lib_cf_origin_locked" "$(declare -f lib_install_ufw)"
-# HTTP/3: OpenLiteSpeed answers QUIC on 443/udp, which the port deleter (TCP by name) misses
-assert_has "the lock closes 443/udp as well" "delete allow 443/udp" "$_ol"
+# Which rules the lock takes away, decided on the real shape of "ufw status numbered". A rule
+# may name both ports at once - 80,443/tcp is what ufw writes for a rule made that way - and
+# the per-port deletion this replaced never matched one, so a hand-made combined rule survived
+# the lock and left the ports open to the whole internet while lomp reported them closed. The
+# lock's own rules have that very shape, so they are told apart by their comment.
+_ufw_num_out='Status: active
+
+     To                         Action      From
+     --                         ------      ----
+[ 1] 22/tcp                     ALLOW IN    Anywhere
+[ 2] 80,443/tcp                 ALLOW IN    Anywhere                   # combined, made by hand
+[ 3] 443/udp                    ALLOW IN    Anywhere
+[ 4] 80/tcp                     ALLOW IN    Anywhere
+[ 5] 8080/tcp                   ALLOW IN    Anywhere
+[ 6] 80,443/tcp                 ALLOW IN    173.245.48.0/20            # lompstack cloudflare origin
+[ 7] 443/udp                    ALLOW IN    173.245.48.0/20            # lompstack cloudflare origin
+[ 8] 79:81/tcp                  ALLOW IN    203.0.113.4
+[ 9] 25/tcp                     ALLOW IN    Anywhere                   # lompstack mail'
+eval 'ufw() { printf "%s" "$_ufw_num_out"; }'
+_webnums="$(_cf_ufw_web_rule_numbers | tr '\n' ' ')"
+assert_eq  "the combined, the plain and the range rules go, highest number first" "8 4 3 2 " "$_webnums"
+assert_lacks "the lock's own rules stay"        " 6 " " $_webnums"
+assert_lacks "and so does 8080, which is not 80" " 5 " " $_webnums"
+assert_lacks "SSH is never touched"             " 1 " " $_webnums"
+assert_lacks "nor the mail ports"               " 9 " " $_webnums"
+unset -f ufw
 _ou="$(declare -f lib_cf_origin_unlock)"
 assert_has "unlocking puts the open rules back" "lib_ufw_rule allow 80/tcp" "$_ou"
 

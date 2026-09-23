@@ -182,7 +182,10 @@ main() {
     firewall) case "${rest[0]:-status}" in status|--status|"") ;; *) lib_lock ;; esac ;;
     webmail) case "${rest[0]:-status}" in status|--status|help|-h|--help|"") ;; *) lib_lock ;; esac ;;
     mail)   case "${rest[0]:-status}" in
-              dns) if [[ " ${rest[*]:-} " == *" --apply "* ]]; then lib_lock; fi ;;
+              # --replace-mx implies --apply inside the command, so it has to imply the lock
+              # out here too: on its own it was writing records, deleting another provider's
+              # MX and updating domain.json with nothing holding the lock.
+              dns) if [[ " ${rest[*]:-} " == *" --apply "* || " ${rest[*]:-} " == *" --replace-mx "* ]]; then lib_lock; fi ;;
               status|test|queue|help|-h|--help) ;;
               box|alias) if [[ "${rest[1]:-list}" != "list" ]]; then lib_lock; fi ;;
               *) lib_lock ;;

@@ -821,6 +821,31 @@ lib_webmail_domain_enable() {   # domain
   return 0
 }
 
+# Take webmail.<domain> out of Cloudflare, if lompstack is what put it there. Only records
+# carrying lompstack's own comment are touched: somebody may be pointing that name somewhere on
+# purpose, and a name this tool did not write is not this tool's to delete.
+_wm_dns_record_remove() {   # domain
+  local d="$1" host="" zone="" have="" id="" gone=0
+  [[ -n "$(lib_cf_token)" ]] || return 0
+  host="$(lib_webmail_host "$d")"
+  if (( OPT_DRY_RUN )); then lib_info "[dry-run] would remove the A record for ${host} from Cloudflare"; return 0; fi
+  if ! zone="$(lib_cf_zone_id "$host")"; then
+    lib_warn "the Cloudflare zone of ${d} could not be looked up: ${CF_LAST_ERROR:-no zone found}"
+    lib_note "${host} is still published; remove it by hand when the webmail is gone"
+    return 0
+  fi
+  if ! have="$(lib_cf_records "$zone" A "$host")"; then
+    lib_warn "could not read A ${host} from Cloudflare: ${CF_LAST_ERROR}; it may still be there"
+    return 0
+  fi
+  while read -r id; do
+    [[ -n "$id" ]] || continue
+    if lib_cf_record_delete "$zone" "$id"; then gone=$((gone + 1)); else lib_warn "could not remove A ${host}: ${CF_LAST_ERROR}"; fi
+  done < <(jq -r --arg tag "$CF_RECORD_TAG" '.[] | select((.comment // "") == $tag) | .id' <<<"$have" || true)
+  (( gone > 0 )) && lib_ok "${host} was removed from DNS"
+  return 0
+}
+
 lib_webmail_domain_disable() {   # domain
   local d="$1"
   # a domain that never had one, or a machine with no webmail at all, is not a failure. The
@@ -830,6 +855,12 @@ lib_webmail_domain_disable() {   # domain
         && ! -d "${LSWS_VHOSTS_DIR}/$(lib_webmail_vhost_name "$d")" ]]; then
     return 0
   fi
+  # The record goes BEFORE the flag does. What lompstack published for a domain is worked out
+  # from the state, and the webmail's name is in that list only while the state still says
+  # there is a webmail - so once the flag is gone, nothing could ever remove webmail.<domain>
+  # again, not even "mail disable --dns-cleanup". It would stay in the zone pointing at this
+  # server for good.
+  _wm_dns_record_remove "$d"
   lib_webmail_vhost_remove "$d"
   (( OPT_DRY_RUN )) || lib_json_set "$(lib_domain_json "$d")" 'del(.mail.webmail) | del(.mail.webmail_host)'
   lib_webmail_config_apply || true

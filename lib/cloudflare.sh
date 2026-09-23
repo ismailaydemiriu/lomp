@@ -72,12 +72,43 @@ _cf_ufw_lock_rule_ranges() {
     | sort -rn || true
 }
 
+# Every rule that opens 80 or 443 and is not one of the lock's own, by number, highest first -
+# deleting by number renumbers everything after it, and the highest is after all the others.
+#
+# A rule may name both ports at once: "80,443/tcp" is what ufw writes for a rule made that way,
+# and a port-at-a-time match never saw it. The lock deleted "80/tcp" and "443/tcp" and left a
+# combined "Anywhere" rule sitting there, so the ports stayed open to the whole internet while
+# lomp announced them closed. Ranges count for the same reason - 79:81 opens 80.
+#
+# The lock's own rules are also written "80,443/tcp", so they are told apart by their comment
+# and not by their shape: whatever matches here is about to be deleted.
+_cf_ufw_web_rule_numbers() {
+  lib_have ufw || return 0
+  ufw status numbered 2>/dev/null | awk -v tag="$CF_UFW_COMMENT" '
+    match($0, /^\[[ ]*[0-9]+\]/) {
+      num = substr($0, RSTART + 1, RLENGTH - 2); gsub(/ /, "", num)
+      if (index($0, "# " tag) > 0) next
+      rest = substr($0, RSTART + RLENGTH); sub(/^[ \t]+/, "", rest)
+      spec = rest; sub(/[ \t].*$/, "", spec)
+      slash = index(spec, "/"); if (slash > 0) spec = substr(spec, 1, slash - 1)
+      n = split(spec, parts, ",")
+      for (i = 1; i <= n; i++) {
+        if (parts[i] == "80" || parts[i] == "443") { print num; next }
+        c = index(parts[i], ":")
+        if (c > 0) {
+          lo = substr(parts[i], 1, c - 1) + 0; hi = substr(parts[i], c + 1) + 0
+          if ((80 >= lo && 80 <= hi) || (443 >= lo && 443 <= hi)) { print num; next }
+        }
+      }
+    }' | sort -rn || true
+}
+
 # Rules on 80 or 443 that are not the plain "open to everyone" ones and not the lock's own.
 # They belong to the operator, and the lock is about to delete them.
 _cf_ufw_foreign_web_rules() {
   lib_have ufw || return 0
   ufw status 2>/dev/null \
-    | grep -E '^(80|443|80,443)/(tcp|udp)' \
+    | grep -E '^([0-9,:]*\b(80|443)\b[0-9,:]*)/(tcp|udp)' \
     | grep -vF "$CF_UFW_COMMENT" \
     | grep -viE '[[:space:]]Anywhere[[:space:]]*(\(v6\))?[[:space:]]*$' || true
 }
@@ -164,14 +195,29 @@ lib_cf_origin_lock() {
     "UFW refused every rule, so the ports were left open" "ufw status, then try again"
   # a partly applied lock is not a lock: the edge addresses that were refused reach nothing
   (( n == ${#ranges[@]} )) || lib_warn "only ${n} of ${#ranges[@]} ranges could be allowed - the rest of Cloudflare's edge now gets no answer (IPv6 disabled in /etc/default/ufw?)"
-  # only now: a range rule and an "anywhere" rule together are still open to everyone
-  lib_ufw_delete_port_rules 80
-  lib_ufw_delete_port_rules 443
-  # and HTTP/3: OpenLiteSpeed answers QUIC on 443/udp, which lib_ufw_delete_port_rules (TCP
-  # by name) leaves alone. Deleting it by rule spec takes the "Anywhere" rule and not the
-  # per-range ones just added.
-  lib_run ufw --force delete allow 443/udp || true
+  # only now: a range rule and an "anywhere" rule together are still open to everyone. Every
+  # other rule that opens either port goes, by number and highest first, whatever shape it was
+  # written in - HTTP/3 on 443/udp and a combined "80,443/tcp" included.
+  local num=""
+  while read -r num; do
+    [[ -n "$num" ]] || continue
+    lib_run ufw --force delete "$num" || lib_warn "could not delete UFW rule ${num}"
+  done < <(_cf_ufw_web_rule_numbers)
+  # and then the question the lock exists to answer, asked of UFW rather than assumed: is
+  # anything still opening these ports to somebody who is not Cloudflare?
+  local left=""
+  left="$(_cf_ufw_web_rule_numbers | wc -l | tr -d ' ')"
+  if [[ "$left" =~ ^[0-9]+$ ]] && (( left > 0 )); then
+    lib_warn "${left} firewall rule(s) still open port 80 or 443 to somebody other than Cloudflare:"
+    ufw status numbered 2>/dev/null | grep -F "$(_cf_ufw_web_rule_numbers | head -1)" | sed 's/^/        /' || true
+    lib_warn "The origin is NOT closed. Look at 'ufw status numbered' and remove them by hand."
+  fi
   lib_manifest_set '.cloudflare.origin_lock' 'true'
+  # the rules are a snapshot of Cloudflare's ranges, and Cloudflare adds ranges. Without the
+  # weekly refresh the edge addresses added after today reach a closed port and the sites
+  # behind them go dark - and the lock can be set up on a server that never enabled the
+  # Cloudflare integration, where nothing else would ever have scheduled it.
+  lib_cf_schedule
   lib_ok "Ports 80 and 443 now answer ${n} Cloudflare range(s) only"
   lib_note "Certificates from here on are issued over DNS-01; the weekly IP refresh keeps these rules in step"
   return 0

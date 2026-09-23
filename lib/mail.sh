@@ -1432,9 +1432,13 @@ lib_mail_test_report() {   # [brief]
 # Where port 25 is blocked, outgoing mail goes through somebody else's server. The password
 # reaches Postfix through a 0600 map and is never an argument, so it stays out of the process
 # list; the signature is still this server's own, because Rspamd signs before the handover.
-lib_mail_relay_set() {   # host port user   (password on stdin)
-  local rhost="$1" rport="${2:-587}" ruser="$3" pass=""
+lib_mail_relay_set() {   # host port user [spf-include]   (password on stdin)
+  local rhost="$1" rport="${2:-587}" ruser="$3" spf="${4:-}" pass=""
   lib_mail_hostname_valid "$rhost" || lib_die "Invalid relay host '${rhost:-none}'" "" "--host smtp.example.net"
+  if [[ -n "$spf" ]]; then
+    lib_mail_hostname_valid "$spf" || lib_die "Invalid SPF include '${spf}'" \
+      "it is a domain name - the one your relay provider tells you to include" "--spf-include amazonses.com"
+  fi
   { [[ "$rport" =~ ^[0-9]{1,5}$ ]] && (( rport >= 1 && rport <= 65535 )); } \
     || lib_die "Invalid relay port '${rport}'" "" "--port 587"
   # the user name becomes a key in the credential map, where a space or a colon would split
@@ -1456,24 +1460,66 @@ lib_mail_relay_set() {   # host port user   (password on stdin)
   chmod 0600 "${MAIL_SASL_MAP}.db" 2>/dev/null || true
   chmod 0600 "${MAIL_SASL_MAP}.lmdb" 2>/dev/null || true
   lib_mkdir "$MAIL_STATE_DIR" 0700 root:root
-  printf 'HOST=%s\nPORT=%s\nUSER=%s\nAT=%s\n' "$rhost" "$rport" "$ruser" "$(lib_iso_now)" \
+  printf 'HOST=%s\nPORT=%s\nUSER=%s\nSPF_INCLUDE=%s\nAT=%s\n' "$rhost" "$rport" "$ruser" "$spf" "$(lib_iso_now)" \
     | lib_write_file "$MAIL_RELAY_INFO" 0600 root:root
   if ! lib_mail_apply "$(lib_mail_host)"; then
     lib_die "The relay could not be put into effect" "${MAIL_LAST_ERROR}" "lomp mail status"
   fi
-  lib_manifest_set_json '.mail.relay' "$(jq -n --arg h "$rhost" --arg p "$rport" --arg u "$ruser" '{host:$h, port:$p, user:$u}')"
+  lib_manifest_set_json '.mail.relay' "$(jq -n --arg h "$rhost" --arg p "$rport" --arg u "$ruser" --arg s "$spf" '{host:$h, port:$p, user:$u, spf_include:$s}')"
   lib_ok "Outgoing mail now goes through ${rhost}:${rport} as ${ruser}"
+  # Every domain's SPF record has to name the relay as well, or the far end sees mail coming
+  # from an address the domain does not list. lompstack does not guess what to put there any
+  # more: it used to drop the first label off the relay's host name, which turns
+  # email-smtp.eu-west-1.amazonaws.com into eu-west-1.amazonaws.com - a name with no SPF
+  # record. An include whose target has no record is a permerror for the WHOLE record, so the
+  # guess did not merely fail to help: it threw away the ip4: term that would have passed, and
+  # every message the domain sent failed SPF everywhere.
+  if [[ -z "$spf" ]]; then
+    lib_warn "The SPF record of every mail domain here still lists only this server."
+    lib_note "Your provider publishes a name to include - amazonses.com for SES, sendgrid.net"
+    lib_note "for SendGrid, spf.mandrillapp.com for Mandrill. Look yours up, then run:"
+    lib_note "  lomp mail relay set --host ${rhost} --port ${rport} --user ${ruser} --spf-include <that name>"
+  fi
+  _mail_relay_dns_note
+}
+
+# The relay is part of what every mail domain's SPF record says, and changing it changes all of
+# them at once. Nothing here writes DNS on its own - a relay is not a domain command - so it
+# says which domains need their records published again.
+_mail_relay_dns_note() {
+  local d="" n=0
+  local -a doms=()
+  while read -r d; do
+    [[ -n "$d" ]] || continue
+    doms+=("$d"); n=$((n + 1))
+  done < <(lib_mail_domains)
+  (( n > 0 )) || return 0
+  lib_warn "The SPF record of ${n} domain(s) has changed with it. Publish it again:"
+  for d in "${doms[@]}"; do lib_note "  lomp mail dns ${d} --apply      (--check shows it first)"; done
+  return 0
 }
 
 lib_mail_relay_off() {
   if [[ ! -s "$MAIL_RELAY_INFO" ]]; then lib_info "No relay is configured"; return 0; fi
   if (( OPT_DRY_RUN )); then lib_info "[dry-run] would send mail directly again"; return 0; fi
-  lib_rm "$MAIL_RELAY_INFO" "$MAIL_SASL_MAP" "${MAIL_SASL_MAP}.db" "${MAIL_SASL_MAP}.lmdb"
+  # The credentials go LAST. main.cf is rendered from the relay file, so that one has to go
+  # first - but if the apply then fails, its own snapshot puts back a main.cf that still names
+  # the credential map, and a map that is no longer there is a Postfix that cannot send at all.
+  local keep=""
+  keep="$(lib_mktemp)"; chmod 0600 "$keep" 2>/dev/null || true
+  cp -p "$MAIL_RELAY_INFO" "$keep" 2>/dev/null || true
+  lib_rm "$MAIL_RELAY_INFO"
   if ! lib_mail_apply "$(lib_mail_host)"; then
+    cp -p "$keep" "$MAIL_RELAY_INFO" 2>/dev/null || true
+    chmod 0600 "$MAIL_RELAY_INFO" 2>/dev/null || true
+    rm -f "$keep"
     lib_die "The relay could not be removed" "${MAIL_LAST_ERROR}" "lomp mail status"
   fi
+  rm -f "$keep"
+  lib_rm "$MAIL_SASL_MAP" "${MAIL_SASL_MAP}.db" "${MAIL_SASL_MAP}.lmdb"
   lib_json_set "$STATE_DIR/manifest.json" 'del(.mail.relay)'
   lib_ok "Outgoing mail goes directly again"
+  _mail_relay_dns_note
 }
 
 
@@ -2443,7 +2489,7 @@ lib_mail_alias_list_main() {   # [domain]
 # operator is told and what lomp checks can never drift apart.
 # Fields: type <TAB> name <TAB> value <TAB> note
 _mail_dns_records() {   # domain
-  local d="$1" ip="" ipshow="" sel="" dkim="" relay="" nextsel="" nextdkim=""
+  local d="$1" ip="" ipshow="" sel="" dkim="" relay="" nextsel="" nextdkim="" spf_include=""
   # not --no-net: with it the analysis falls back to the address of the local interface, and on
   # a NAT'd server that is an address nobody on the internet can reach. Printed into an A
   # record and an SPF record it would be a mail server that quietly cannot be delivered to.
@@ -2461,10 +2507,20 @@ _mail_dns_records() {   # domain
   printf 'A\tmail.%s\t%s\tDNS only - never proxied: a mail client has to reach this server itself\n' "$d" "$ipshow"
   printf 'MX\t%s\t10 mail.%s.\tthe dot at the end belongs to the record\n' "$d" "$d"
   relay="$(lib_mail_relay_get host)"
-  if [[ -n "$relay" ]]; then
+  spf_include="$(lib_mail_relay_get spf_include)"
+  if [[ -n "$relay" && -n "$spf_include" ]]; then
     # the mail leaves through somebody else's server, so their hosts have to be in the record
     # as well, or everything this domain sends fails SPF at the far end
-    printf 'TXT\t%s\tv=spf1 ip4:%s include:%s ~all\tone SPF record per domain, never two; the include covers the relay this server sends through\n' "$d" "$ipshow" "${relay#*.}"
+    printf 'TXT\t%s\tv=spf1 ip4:%s include:%s ~all\tone SPF record per domain, never two; the include covers the relay this server sends through\n' "$d" "$ipshow" "$spf_include"
+  elif [[ -n "$relay" ]]; then
+    # No include is published unless somebody says what it is. It used to be guessed, by
+    # dropping the first label of the relay's host name - which turns
+    # email-smtp.eu-west-1.amazonaws.com into eu-west-1.amazonaws.com, a name with no SPF
+    # record at all. An include whose target has no record is a permerror for the WHOLE
+    # record (RFC 7208 5.2), so the guess did not merely fail to help: it threw away the
+    # ip4: term that would have passed, and every message the domain sent failed SPF
+    # everywhere. "--host sendgrid.net" became "include:net".
+    printf 'TXT\t%s\tv=spf1 ip4:%s ~all\tone SPF record per domain, never two - see the note below about the relay\n' "$d" "$ipshow"
   else
     printf 'TXT\t%s\tv=spf1 ip4:%s ~all\tone SPF record per domain, never two\n' "$d" "$ipshow"
   fi
@@ -2605,9 +2661,17 @@ lib_mail_dns_check() {   # domain -> 0 when everything is in place
             _mail_dns_say "$C_RED" "$t" "$n" "answers ${got//$'\n'/ }, which is neither this server nor Cloudflare"
             bad=1
           fi
-        elif [[ "$got" == *"${v%.}"* ]]; then
+        elif [[ "$(grep -c . <<<"$got" || true)" != "1" ]]; then
+          # Two A records at a mail name send about half of all inbound SMTP to whichever
+          # address is wrong. The writing side calls this a conflict and refuses; the check
+          # used to call it "ok", because it only asked whether the right address appeared
+          # somewhere in the answer.
+          _mail_dns_say "$C_RED" "$t" "$n" "answers more than one address: $(tr '\n' ' ' <<<"$got")"
+          bad=1
+        elif [[ "${got%.}" == "${v%.}" ]]; then
           _mail_dns_say "$C_GRN" "$t" "$n" "ok"
         else
+          # and a plain substring said yes to 85.9.13.2 when the server is 5.9.13.2
           _mail_dns_say "$C_RED" "$t" "$n" "says: $(tr '\n' ' ' <<<"$got")"
           bad=1
         fi
@@ -2810,7 +2874,17 @@ lib_mail_dns_cleanup() {   # domain
   local d="$1" zone="" t="" n="" v="" note="" px="" gone=0 id="" have=""
   [[ -n "$(lib_cf_token)" ]] || return 0
   if (( OPT_DRY_RUN )); then lib_info "[dry-run] would remove the DNS records lompstack wrote for ${d}"; return 0; fi
-  zone="$(lib_cf_zone_id "mail.${d}")" || return 0
+  # The same rule as for a failed record read, one level up: a zone that cannot be looked up is
+  # not a zone with nothing in it. Silence here left every record lompstack ever wrote still
+  # published - MX and all - so mail went on being routed to a server that no longer takes it,
+  # and the operator was told the domain had been cleaned up. A zone still waiting for its
+  # nameservers is the ordinary way to arrive here.
+  if ! zone="$(lib_cf_zone_id "mail.${d}")"; then
+    lib_warn "the Cloudflare zone of ${d} could not be looked up: ${CF_LAST_ERROR:-no zone found}"
+    lib_warn "nothing was removed from DNS; the records lompstack wrote for ${d} are still published"
+    lib_note "list them with: lomp mail dns ${d}"
+    return 0
+  fi
   while IFS=$'\t' read -r t n v note px; do
     [[ -n "$t" ]] || continue
     [[ "$t" == "SRV" ]] && continue
@@ -2904,7 +2978,7 @@ Usage: lomp mail <command>
   test                   check reverse DNS and whether outgoing port 25 is open
   queue                  show the Postfix queue
   regenerate             rewrite every mail configuration file and restart the stack
-  relay set --host H [--port 587] --user U
+  relay set --host H [--port 587] --user U [--spf-include NAME]
                          send outgoing mail through another server; the password is read
                          from standard input, never from an argument
   relay off              send outgoing mail directly again
@@ -2963,7 +3037,7 @@ _mail_dns_cmd() {
 }
 
 _mail_relay_cmd() {
-  local action="${1:-}" rhost="" rport="587" ruser="" a=""
+  local action="${1:-}" rhost="" rport="587" ruser="" rspf="" a=""
   shift || true
   while (($# > 0)); do
     a="$1"; shift
@@ -2971,12 +3045,13 @@ _mail_relay_cmd() {
       --host) rhost="${1:-}"; shift || true ;;
       --port) rport="${1:-587}"; shift || true ;;
       --user) ruser="${1:-}"; shift || true ;;
+      --spf-include) rspf="${1:-}"; shift || true ;;
       *) lib_die "Unknown option for 'mail relay': ${a}" "" "lomp mail help" ;;
     esac
   done
   lib_mail_installed || lib_die "Mail is not installed" "" "lomp install --with-mail"
   case "$action" in
-    set) lib_mail_relay_set "$rhost" "$rport" "$ruser" ;;
+    set) lib_mail_relay_set "$rhost" "$rport" "$ruser" "$rspf" ;;
     off) lib_mail_relay_off ;;
     *)   lib_die "Unknown relay command: ${action:-none}" "" "lomp mail relay set --host smtp.example.net --user you@example.net" ;;
   esac
@@ -3612,9 +3687,40 @@ lib_mail_dkim_retire_old() {   # domain
   [[ "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" > "$until" ]] || return 0
   if (( OPT_DRY_RUN )); then lib_info "[dry-run] would remove the retired DKIM key ${old} of ${d}"; return 0; fi
   lib_rm "${MAIL_DKIM_DIR}/${d}.${old}.key"
+  # The record too, while the state still names the selector. Once selector_old is gone there
+  # is nothing left to work out the record's name from, and a DKIM record for a key that no
+  # longer exists would sit in the zone for ever - which "mail dns --check" cannot see either,
+  # because it only looks at the records that should be there.
+  _mail_dkim_dns_remove "$d" "$old"
   lib_json_set "$(lib_domain_json "$d")" 'del(.mail.selector_old) | del(.mail.selector_old_until)'
   lib_cron_remove "mail-dkim:${d}"
-  lib_ok "The retired DKIM key of ${d} (${old}) is gone; its record can be removed from DNS"
+  lib_ok "The retired DKIM key of ${d} (${old}) is gone"
+  return 0
+}
+
+# Take one selector's TXT record out of Cloudflare, if lompstack wrote it. Used when a key is
+# retired and when a rotation is given up: both leave a published record behind that nothing
+# else would ever name again.
+_mail_dkim_dns_remove() {   # domain selector
+  local d="$1" sel="$2" name="" zone="" have="" id="" gone=0
+  [[ -n "$sel" ]] || return 0
+  [[ -n "$(lib_cf_token)" ]] || return 0
+  name="${sel}._domainkey.${d}"
+  if (( OPT_DRY_RUN )); then lib_info "[dry-run] would remove the TXT record ${name} from Cloudflare"; return 0; fi
+  if ! zone="$(lib_cf_zone_id "$name")"; then
+    lib_warn "the Cloudflare zone of ${d} could not be looked up: ${CF_LAST_ERROR:-no zone found}"
+    lib_note "${name} is still published; it names a key that is gone, so remove it by hand"
+    return 0
+  fi
+  if ! have="$(lib_cf_records "$zone" TXT "$name")"; then
+    lib_warn "could not read TXT ${name} from Cloudflare: ${CF_LAST_ERROR}; it may still be there"
+    return 0
+  fi
+  while read -r id; do
+    [[ -n "$id" ]] || continue
+    if lib_cf_record_delete "$zone" "$id"; then gone=$((gone + 1)); else lib_warn "could not remove TXT ${name}: ${CF_LAST_ERROR}"; fi
+  done < <(jq -r --arg tag "$CF_RECORD_TAG" '.[] | select((.comment // "") == $tag) | .id' <<<"$have" || true)
+  (( gone > 0 )) && lib_ok "${name} was removed from DNS"
   return 0
 }
 
@@ -3651,6 +3757,9 @@ _mail_dkim_cmd() {   # rotate|status <domain> [--finish|--abort]
         --abort)
           n="$(lib_json_get "$(lib_domain_json "$d")" '.mail.selector_next')"
           [[ -n "$n" ]] || { lib_info "No DKIM rotation is under way for ${d}"; return 0; }
+          # the record the rotation asked for goes too, and while the state still names the
+          # selector: after the state is cleared nothing could work out that name again
+          _mail_dkim_dns_remove "$d" "$n"
           if (( ! OPT_DRY_RUN )); then
             lib_rm "${MAIL_DKIM_DIR}/${d}.${n}.key"
             lib_json_set "$(lib_domain_json "$d")" 'del(.mail.selector_next) | del(.mail.rotate_started_at)'

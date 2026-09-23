@@ -468,13 +468,20 @@ lompstack's to arrange:
    and where it is blocked you can send through somebody else's server instead:
 
 ```bash
-printf '%s' "$PASS" | sudo lomp mail relay set --host smtp.example.net --port 587 --user you@example.net
+printf '%s' "$PASS" | sudo lomp mail relay set --host smtp.example.net --port 587 \
+    --user you@example.net --spf-include spf.example.net
 sudo lomp mail relay off
 ```
 
 The password is read from standard input and lands in one 0600 file that Postfix reads; it is
 never an argument and never reaches the log. Mail still carries this server's own DKIM
 signature when it goes through a relay.
+
+`--spf-include` is the name your provider tells you to put in SPF - `amazonses.com` for SES,
+`sendgrid.net` for SendGrid - and without it no include is published at all. lomp does not
+guess it: an include pointing at a name that has no SPF record makes the *whole* record a
+permerror, so a wrong guess is worse than nothing. Changing the relay changes what every mail
+domain's SPF record has to say, and lomp prints the domains to publish again.
 
 What the configuration insists on:
 

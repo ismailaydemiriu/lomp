@@ -112,7 +112,7 @@ COMMANDS
                                 with the same passwords and the same key. A mailbox that is
                                 not empty is asked about first: the copy replaces what is
                                 there. Add --yes to answer it in a script
-  mail relay set --host H [--port 587] --user U | relay off
+  mail relay set --host H [--port 587] --user U [--spf-include NAME] | relay off
                                 Send outgoing mail through another server where port 25
                                 is blocked; the password is read from stdin
   remove <domain> [opts]        Remove a site  (--keep-db --keep-files --keep-ssl; alias: delete)
