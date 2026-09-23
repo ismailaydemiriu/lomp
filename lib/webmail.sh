@@ -772,9 +772,34 @@ lib_webmail_vhost_remove() {   # domain
 # =============================================================================
 #  Per domain: on, off
 # =============================================================================
+# The webmail sends through a Postfix service on 127.0.0.1:10587 and writes its filters over
+# ManageSieve on 127.0.0.1:4190. Both arrived with the webmail; a server whose mail was
+# installed before that and then self-updated still has the master.cf and the Dovecot
+# configuration of the older release, because self-update deliberately reconfigures nothing.
+# Switching a webmail on there used to produce one that could read mail and not send a single
+# message, with nothing anywhere saying why. So the mail configuration is brought up to this
+# release first - which rewrites nothing when it is already current.
+_wm_mail_stack_current() {
+  local host=""
+  (( OPT_DRY_RUN )) && return 0
+  lib_mail_installed || return 0
+  if grep -q '10587' "$MAIL_POSTFIX_MASTER" 2>/dev/null \
+     && grep -q 'managesieve-login' "$MAIL_DOVECOT_LOCAL" 2>/dev/null; then
+    return 0
+  fi
+  lib_info "The mail configuration on this server is older than the webmail; bringing it up to date"
+  host="$(lib_mail_host)"
+  if ! lib_mail_apply "$host"; then
+    WM_LAST_ERROR="the mail configuration could not be brought up to date: ${MAIL_LAST_ERROR}"
+    return 1
+  fi
+  return 0
+}
+
 lib_webmail_domain_enable() {   # domain
   local d="$1"
   lib_mail_domain_enabled "$d" || { WM_LAST_ERROR="${d} has no mail"; return 1; }
+  _wm_mail_stack_current || return 1
   lib_webmail_installed || lib_webmail_install
   lib_webmail_dirs_ensure      # also puts right an owner an older release of lomp set
   # the one thing the webmail may ask root to do, and the rule that lets it

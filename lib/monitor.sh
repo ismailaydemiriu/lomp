@@ -406,7 +406,17 @@ _doc_check_resources() {
 
 _doc_check_ssl_infra() {
   if lib_service_active certbot.timer || lib_cron_has certbot-renew; then _doc_add OK "certbot renewal" "timer/cron active"; else _doc_add WARN "certbot renewal" "certbot.timer inactive and no cron fallback"; fi
-  [[ -x "$CERTBOT_DEPLOY_HOOK" ]] && _doc_add OK "certbot deploy hook" "installed" || _doc_add FAIL "certbot deploy hook" "${CERTBOT_DEPLOY_HOOK} missing"
+  if [[ ! -x "$CERTBOT_DEPLOY_HOOK" ]]; then
+    _doc_add FAIL "certbot deploy hook" "${CERTBOT_DEPLOY_HOOK} missing"
+  elif compgen -G "${LSWS_VHOSTS_DIR}/_wm_*" >/dev/null 2>&1 && ! grep -q '_wm_' "$CERTBOT_DEPLOY_HOOK" 2>/dev/null; then
+    # OpenLiteSpeed keeps serving the certificate it started with, so a renewal only reaches a
+    # browser once it is restarted. A hook written before the webmail existed does not do that:
+    # the mail clients get the renewed certificate and every browser is handed the old one
+    # until the day it expires - and the certificate itself looks perfectly healthy meanwhile.
+    _doc_add FAIL "certbot deploy hook" "${CERTBOT_DEPLOY_HOOK} is older than this release and does not restart OpenLiteSpeed for the webmail; its certificate will look renewed while browsers get the expired one (setup.sh mail regenerate)"
+  else
+    _doc_add OK "certbot deploy hook" "installed"
+  fi
   if lib_cf_enabled; then
     local age=""; age="$(lib_file_age_days "$CF_IPS_FILE")"
     if (( age > 14 )); then _doc_add WARN "cloudflare ips" "list is ${age} days old (update-cf-ips)"; else _doc_add OK "cloudflare ips" "list updated ${age} day(s) ago"; fi
@@ -689,6 +699,16 @@ _doc_check_mail() {
       _doc_add FAIL "mail: port ${p}" "${p} answers on a public address; it belongs on the loopback only"
     fi
   done
+  # ...and where there is a webmail they have to answer at all. On a server whose mail was
+  # installed before the webmail existed, master.cf and the Dovecot configuration are the older
+  # release's: the webmail then reads mail and cannot send one, which nothing else here notices.
+  if lib_webmail_installed; then
+    for p in 4190 10587; do
+      if ! lib_port_listening "$p"; then
+        _doc_add FAIL "mail: port ${p}" "there is a webmail but nothing listens on ${p}; it cannot $( [[ "$p" == 10587 ]] && printf 'send mail' || printf 'save a filter' ) (setup.sh mail regenerate)"
+      fi
+    done
+  fi
 
   if lib_have postqueue; then
     q="$(postqueue -p 2>/dev/null | awk '/^-- /{print $5}' | head -n 1 || true)"

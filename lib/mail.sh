@@ -220,10 +220,18 @@ smtpd_client_connection_rate_limit = 30
 smtpd_client_auth_rate_limit = 10
 anvil_rate_time_unit = 60s
 
-# Only root may hand a message to sendmail(1). A site's PHP has no way to send mail as
-# somebody else; a site authenticates on 127.0.0.1:587 like any other client.
-authorized_submit_users = root
 EOF
+  # Only root and Dovecot may hand a message to sendmail(1). A site's PHP has no way to send
+  # mail as somebody else; a site authenticates on 127.0.0.1:587 like any other client.
+  #
+  # Dovecot is on the list because a sieve script belongs to it: the webmail offers a forward
+  # ("send a copy to my other address") and a holiday reply, and Pigeonhole sends both by
+  # forking sendmail(1) as the vmail user. With root alone, postdrop refused - "User vmail is
+  # not allowed to submit mail" - and Pigeonhole reads a refused hand-off as a temporary
+  # failure, so LMTP answered 4xx and Postfix re-queued the message for three days before
+  # bouncing it. One filter rule was enough to stop every message to that mailbox. vmail is
+  # not a site's user and no site can become it, so the line this setting draws is unmoved.
+  printf 'authorized_submit_users = root, %s\n' "$MAIL_VMAIL_USER"
   cat <<'EOF'
 
 # TLS. The chain is the mail host's own certificate; a site's mail name is served from the
@@ -281,6 +289,13 @@ lib_mail_render_postfix_master() {
 # chroot is off on purpose. Postfix reads the certificates and the tables before it drops
 # privileges either way, and a chroot here only means a second copy of /etc to keep in step.
 #
+# Every submission service relaxes the HELO rules main.cf sets for port 25. Those rules ask for
+# a fully-qualified name, which is right for a stranger delivering mail and wrong for a mail
+# client: Outlook says EHLO <the computer's name>, with no dot in it, and Postfix evaluates the
+# HELO list at RCPT TIME - so the account authenticated, and was then told "504 Helo command
+# rejected: need fully-qualified hostname" on the first recipient. It could receive and never
+# send. A client that has authenticated has already proved more than its HELO ever could.
+#
 # service     type  private unpriv  chroot  wakeup  maxproc command + args
 smtp          inet  n       -       n       -       -       smtpd
   -o syslog_name=postfix/smtp
@@ -291,6 +306,7 @@ submission    inet  n       -       n       -       -       smtpd
   -o smtpd_sasl_auth_enable=yes
   -o smtpd_client_restrictions=permit_sasl_authenticated,reject
   -o smtpd_relay_restrictions=permit_sasl_authenticated,reject
+  -o smtpd_helo_restrictions=permit_mynetworks,permit_sasl_authenticated,reject_invalid_helo_hostname
   -o smtpd_sender_restrictions=reject_authenticated_sender_login_mismatch
   -o milter_default_action=tempfail
 smtps         inet  n       -       n       -       -       smtpd
@@ -299,6 +315,7 @@ smtps         inet  n       -       n       -       -       smtpd
   -o smtpd_sasl_auth_enable=yes
   -o smtpd_client_restrictions=permit_sasl_authenticated,reject
   -o smtpd_relay_restrictions=permit_sasl_authenticated,reject
+  -o smtpd_helo_restrictions=permit_mynetworks,permit_sasl_authenticated,reject_invalid_helo_hostname
   -o smtpd_sender_restrictions=reject_authenticated_sender_login_mismatch
   -o milter_default_action=tempfail
 # The webmail submits here, and only the webmail: the port is bound to the loopback and no
@@ -313,6 +330,7 @@ smtps         inet  n       -       n       -       -       smtpd
   -o smtpd_sasl_security_options=noanonymous
   -o smtpd_client_restrictions=permit_sasl_authenticated,reject
   -o smtpd_relay_restrictions=permit_sasl_authenticated,reject
+  -o smtpd_helo_restrictions=permit_mynetworks,permit_sasl_authenticated,reject_invalid_helo_hostname
   -o smtpd_sender_restrictions=reject_authenticated_sender_login_mismatch
   -o milter_default_action=tempfail
 pickup        unix  n       -       n       60      1       pickup
@@ -1218,6 +1236,13 @@ lib_mail_apply() {   # host
   # the renderers: an edit made with sed still has to reach a running Dovecot.
   MAIL_CHANGED=0
   lib_mail_pam_disable
+  # The certbot deploy hook belongs to this release, and only the installer ever wrote it. A
+  # server that was installed before the webmail existed and then self-updated kept the old
+  # copy, which knows how to reload Postfix and Dovecot but not how to restart OpenLiteSpeed -
+  # so at the first renewal the mail clients got the new certificate and every browser went on
+  # being handed the old one until it expired. Writing it here means "mail regenerate" repairs
+  # it, and that a server whose mail is applied at all has the hook this release expects.
+  lib_ssl_hook_install
   if ! lib_mail_snapshot; then
     lib_warn "Nothing was changed: ${MAIL_LAST_ERROR}"
     return 1
@@ -1822,6 +1847,21 @@ lib_mail_dkim_public() {   # domain -> "v=DKIM1; k=rsa; p=..."
 # =============================================================================
 #  The certificate of one domain's mail name
 # =============================================================================
+# The webmail's virtual host names its certificate only when the files were already on disk
+# when it was written. A webmail switched on before its name resolved here got a virtual host
+# with no certificate in it, and the six-hourly job that finally obtained one rewrote Postfix's
+# and Dovecot's tables but not that file - so every browser kept getting the listener's own
+# certificate and a name-mismatch warning, while status and doctor, which look at the
+# certificate and not at the virtual host, both said it was fine. Whenever the certificate
+# moves, the virtual host is written again.
+_mail_webmail_vhost_refresh() {   # domain
+  local d="$1"
+  [[ "$(lib_json_get "$(lib_domain_json "$d")" '.mail.webmail')" == "true" ]] || return 0
+  lib_webmail_installed || return 0
+  lib_webmail_vhost_apply "$d" || lib_warn "the webmail virtual host of ${d} could not be rewritten: ${WM_LAST_ERROR}"
+  return 0
+}
+
 lib_mail_domain_cert_ensure() {   # domain
   local d="$1" cert="" name=""
   local -a names=()
@@ -1835,10 +1875,12 @@ lib_mail_domain_cert_ensure() {   # domain
   # name added, and "the file is there" would answer yes for ever without it
   if lib_ssl_cert_covers "$cert" "${names[@]}"; then
     lib_ssl_deploy_files "$cert" || lib_warn "certificate ${cert} could not be deployed: ${SSL_LAST_ERROR}"
+    _mail_webmail_vhost_refresh "$d"
     lib_cron_remove "mail-cert:${d}"
     return 0
   fi
   if lib_ssl_obtain_names "$cert" "${names[@]}"; then
+    _mail_webmail_vhost_refresh "$d"
     lib_cron_remove "mail-cert:${d}"
     return 0
   fi

@@ -2056,7 +2056,12 @@ assert_lacks "no sender rule where it would only be noise" "smtpd_sender_restric
 # being on the machine must not skip the sender rule or the quota check either
 assert_lacks "loopback gets no free pass on recipients" $'smtpd_recipient_restrictions =\n    permit_mynetworks' "$_pf"
 assert_has "the filter is reached through a socket, not a port" "smtpd_milters = unix:/run/rspamd/milter.sock" "$_pf"
-assert_has "only root may hand mail to sendmail" "authorized_submit_users = root" "$_pf"
+# Dovecot is on this list beside root because a sieve script is Dovecot's: the webmail's own
+# forward and holiday reply are sent by Pigeonhole forking sendmail(1) as vmail, and postdrop
+# refused it - which Pigeonhole reads as a temporary failure, so the message that triggered the
+# rule was re-queued for three days and then bounced. No site user can become vmail.
+assert_has "root and Dovecot may hand mail to sendmail" "authorized_submit_users = root, ${MAIL_VMAIL_USER}" "$_pf"
+assert_lacks "and nobody else"                          "authorized_submit_users = root"$'\n' "$_pf"
 assert_has "delivery belongs to Dovecot" "virtual_transport = lmtp:unix:private/dovecot-lmtp" "$_pf"
 assert_has "a full mailbox is refused at the door" "check_policy_service unix:private/quota-status" "$_pf"
 assert_has "the mail host's own certificate is served" "smtpd_tls_chain_files = ${SSL_DEPLOY_DIR}/_mailhost/privkey.pem" "$_pf"
@@ -2075,6 +2080,13 @@ assert_eq "an unsigned message never leaves the building" 3 "$(grep -c 'milter_d
 _smtp25="$(awk '/^smtp +inet/{f=1;next} /^[a-z0-9.:]+ +(inet|unix)/{f=0} f' <<<"$_mc")"
 assert_lacks "port 25 offers no authentication at all" "smtpd_sasl_auth_enable=yes" "$_smtp25"
 assert_has "and takes mail in even when the filter is down" "milter_default_action=accept" "$_smtp25"
+# Postfix evaluates the HELO rules at RCPT time, so main.cf's "needs a fully-qualified name"
+# reached authenticated clients too: Outlook says EHLO <computer name>, with no dot, and got
+# "504 Helo command rejected" on the first recipient - able to receive, never able to send.
+# Port 25 keeps the strict list, where a stranger's HELO is worth something.
+assert_eq  "every submission port relaxes the HELO rules" 3 "$(grep -c 'smtpd_helo_restrictions=permit_mynetworks,permit_sasl_authenticated,reject_invalid_helo_hostname' <<<"$_mc")"
+assert_lacks "port 25 keeps the strict ones"              "smtpd_helo_restrictions" "$_smtp25"
+assert_has  "which still ask for a name that resolves"    "reject_non_fqdn_helo_hostname" "$_pf"
 # The webmail has a submission port of its own, and it is the only one without TLS. That is
 # only safe while it is bound to the loopback: on any other address it would be a password
 # on the wire, so the address is part of the line and not a setting somewhere else.
@@ -2447,6 +2459,39 @@ rm -f "$MAIL_RELAY_INFO"
 
 MAIL_PASSWD_FILE="$TMP/passwd"; MAIL_ALIAS_DIR="$TMP/aliases"; MAIL_DKIM_DIR="$TMP/dkim-unused"
 rm -rf "$_m_state/alpha.example" "$_m_state/beta.example" "$_m_state/plain.example"
+
+# =============================================================================
+section "what an older server is missing, and what notices"
+# A webmail's virtual host names its certificate only if the files were there when it was
+# written. One switched on before its name resolved here got none, and the six-hourly job that
+# finally obtained the certificate rewrote Postfix's and Dovecot's tables but not that file -
+# so the browser got the listener's own certificate for the life of the certificate, while
+# status and doctor, which look at the certificate and not at the virtual host, said "fine".
+_ce="$(declare -f lib_mail_domain_cert_ensure)"
+assert_eq  "the virtual host is rewritten on both paths to a certificate" 2 "$(grep -c '_mail_webmail_vhost_refresh' <<<"$_ce")"
+_vr="$(declare -f _mail_webmail_vhost_refresh)"
+assert_has "only where there is a webmail" ".mail.webmail" "$_vr"
+assert_has "and it writes the virtual host"  "lib_webmail_vhost_apply" "$_vr"
+
+# The webmail sends through 127.0.0.1:10587 and saves its filters over 4190. Both came with the
+# webmail; a server installed before it and then self-updated still has the older release's
+# master.cf and Dovecot configuration, because self-update reconfigures nothing on purpose.
+# Switching a webmail on there gave one that read mail and could not send a single message.
+_sc="$(declare -f _wm_mail_stack_current)"
+assert_has "the webmail checks the server can carry it" "10587" "$_sc"
+assert_has "filters too"                                "managesieve-login" "$_sc"
+assert_has "and brings the configuration up to date"    "lib_mail_apply" "$_sc"
+assert_has "before anything else is done for the domain" "_wm_mail_stack_current" "$(declare -f lib_webmail_domain_enable)"
+# and doctor says so on a server nobody switches a webmail on again
+assert_has "doctor fails when the ports a webmail needs answer nobody" \
+  'there is a webmail but nothing listens on' "$(declare -f _doc_check_mail)"
+
+# The certbot deploy hook was only ever written by the installer. After a self-update the old
+# copy stayed: it reloads Postfix and Dovecot but does not restart OpenLiteSpeed, which holds
+# the certificate it started with - so browsers were handed the expired one from day 90 while
+# doctor read the deployed files and called it healthy.
+assert_has "applying the mail configuration rewrites the deploy hook" "lib_ssl_hook_install" "$(declare -f lib_mail_apply)"
+assert_has "and doctor knows an older hook when it sees one" '_wm_' "$(declare -f _doc_check_ssl_infra)"
 
 # =============================================================================
 section "every mail command is in 'mail help'"
