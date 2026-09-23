@@ -814,6 +814,9 @@ lib_domain_credentials_show() {
     lib_print_kv "User name" "the full address, e.g. ${box:-info@${domain} (no mailbox yet: setup.sh mail box add info@${domain})}"
     lib_print_kv "Password" "set when the mailbox was made; change it with: setup.sh mail box passwd <address>"
     while read -r box; do [[ -n "$box" ]] && lib_print_kv "Mailbox" "${box} ($(lib_mail_box_quota "$box"))"; done < <(lib_mail_boxes "$domain")
+    if [[ "$(lib_json_get "$(lib_domain_json "$domain")" '.mail.webmail')" == "true" ]]; then
+      lib_print_kv "Webmail" "https://$(lib_webmail_host "$domain")  (the same address and password)"
+    fi
     lib_print_kv "DNS"      "setup.sh mail dns ${domain} --check"
     printf '\n'
   fi

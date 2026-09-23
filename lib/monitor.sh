@@ -266,6 +266,9 @@ lib_status_main() {
   if lib_mail_installed; then
     lib_print_kv "Mail" "sends as $(lib_mail_host)$( [[ -n "$(lib_mail_relay_get host)" ]] && printf ' through %s' "$(lib_mail_relay_get host)")"
   fi
+  if lib_webmail_installed; then
+    lib_print_kv "Webmail" "Roundcube $(lib_webmail_version) for $(lib_webmail_domains | wc -l | tr -d ' ') domain(s)"
+  fi
   printf '  %sSites%s\n' "$C_BLD" "$C_RST"
   local n=0
   for d in $(lib_domains_list); do
@@ -458,6 +461,9 @@ _doc_check_domains() {
     done <<<"$D_PATH_PROXIES"
   done
   for d in "${cfg_vhosts[@]}"; do
+    # a webmail vhost belongs to a domain, not to a site of its own: it is named _wm_<ident>,
+    # which lib_domain_valid refuses, so it can only have come from here
+    [[ "$d" == _wm_* ]] && continue
     lib_domain_registered "$d" || _doc_add WARN "unmanaged vhost ${d}" "present in httpd_config.conf but not in state"
   done
   for ver in $(lib_php_installed_versions); do
@@ -590,10 +596,20 @@ _doc_check_mail() {
     _doc_add OK "mail: certificate" "${days} day(s) left (${issuer})"
   fi
 
-  # nothing on this server should be taking a password in the clear
-  for p in 143 4190 10587 11332; do
+  # 143 must not answer at all, not even on the loopback: Dovecot treats a connection from
+  # this machine as already secure, so a plain-text 143 is a password oracle for every site
+  # user here. 11332 is the milter, which belongs on a unix socket.
+  for p in 143 11332; do
     if lib_port_listening "$p"; then
-      _doc_add FAIL "mail: port ${p}" "something is listening on ${p}; this release binds none of these"
+      _doc_add FAIL "mail: port ${p}" "something is listening on ${p}; this release binds neither"
+    fi
+  done
+  # These two exist on purpose and carry a password without TLS, which is only safe while
+  # nothing outside this machine can reach them: 10587 is the webmail's submission port and
+  # 4190 is ManageSieve.
+  for p in 4190 10587; do
+    if lib_port_listening_public "$p"; then
+      _doc_add FAIL "mail: port ${p}" "${p} answers on a public address; it belongs on the loopback only"
     fi
   done
 
@@ -603,6 +619,64 @@ _doc_check_mail() {
       _doc_add WARN "mail: queue" "${q} message(s) waiting to go out (setup.sh mail queue)"
     fi
   fi
+  return 0
+}
+
+# The webmail: what runs, whether anyone could reach what it must not serve, and whether the
+# name in a browser's address bar is on the certificate it will be handed.
+_doc_check_webmail() {
+  local d="" mode="" cur="" latest="" host=""
+  lib_webmail_installed || return 0
+  cur="$(lib_webmail_version)"
+  _doc_add OK "webmail: version" "Roundcube ${cur}"
+  # the installer can print the database password; it is deleted, not merely switched off
+  if [[ -d "${WM_CURRENT}/installer" ]]; then
+    _doc_add FAIL "webmail: installer" "${WM_CURRENT}/installer exists; it can show the configuration (lomp webmail update)"
+  else
+    _doc_add OK "webmail: installer" "not on the server"
+  fi
+  mode="$(stat -c '%U:%G %a' "$WM_CONF" 2>/dev/null || true)"
+  if [[ "$mode" == "root:${WM_USER} 640" ]]; then
+    _doc_add OK "webmail: configuration" "${WM_CONF} (${mode})"
+  else
+    _doc_add FAIL "webmail: configuration" "${WM_CONF} is ${mode:-unreadable}, expected root:${WM_USER} 640: it holds the database password and the session key"
+  fi
+  # the code must not be writable by the user that runs it
+  if [[ -n "$(find "${WM_CURRENT}/program" -maxdepth 1 -user "$WM_USER" -print -quit 2>/dev/null)" ]]; then
+    _doc_add FAIL "webmail: code" "${WM_USER} owns files under ${WM_CURRENT}/program; the webmail could rewrite itself"
+  else
+    _doc_add OK "webmail: code" "owned by root, the webmail cannot change it"
+  fi
+  local days=""
+  while read -r d; do
+    [[ -n "$d" ]] || continue
+    host="$(lib_webmail_host "$d")"
+    days="$(lib_ssl_days_left "$(lib_mail_cert_name "$d")")"
+    if ! lib_ssl_cert_covers "$(lib_mail_cert_name "$d")" "$host"; then
+      _doc_add WARN "webmail: ${host}" "not on the certificate yet; a browser will warn (lomp mail cert ${d})"
+    elif [[ -z "$days" ]]; then
+      _doc_add WARN "webmail: ${host}" "no certificate deployed for it yet (lomp mail cert ${d})"
+    elif (( days < 7 )); then
+      _doc_add FAIL "webmail: ${host}" "${days} day(s) left on its certificate; renewal is not getting through (certbot renew --dry-run)"
+    elif (( days < 30 )); then
+      _doc_add WARN "webmail: ${host}" "${days} day(s) left on its certificate"
+    else
+      _doc_add OK "webmail: ${host}" "on the certificate, ${days} day(s) left"
+    fi
+  done < <(lib_webmail_domains)
+  # A virtual host with nothing behind it: _doc_check_domains skips _wm_* names, so this is
+  # the only place that would notice one left behind by a change that did not finish.
+  local -a wanted=()
+  while read -r d; do
+    [[ -n "$d" ]] && wanted+=("$(lib_webmail_vhost_name "$d")")
+  done < <(lib_webmail_domains)
+  for d in "${LSWS_VHOSTS_DIR}"/_wm_*; do
+    [[ -d "$d" ]] || continue
+    d="${d##*/}"
+    if [[ " ${wanted[*]-} " != *" ${d} "* ]]; then
+      _doc_add WARN "webmail: ${d}" "a virtual host with no domain behind it (lomp mail webmail off <domain>)"
+    fi
+  done
   return 0
 }
 
@@ -616,6 +690,7 @@ lib_doctor_run() {
   _doc_check_domains
   _doc_check_apps
   _doc_check_mail
+  _doc_check_webmail
   _doc_check_log_leaks
 }
 

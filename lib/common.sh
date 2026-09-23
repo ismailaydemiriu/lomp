@@ -683,11 +683,23 @@ lib_json_set() {
   local tmp=""
   if (( OPT_DRY_RUN )); then lib_debug "dry-run: state update skipped (${file}: ${filter})"; return 0; fi
   mkdir -p "$(dirname "$file")"
-  [[ -s "$file" ]] || printf '{}\n' >"$file"
+  local made=0
+  if [[ ! -s "$file" ]]; then printf '{}\n' >"$file"; made=1; fi
   tmp="$(lib_mktemp)"
   if ! jq "$@" "$filter" "$file" >"$tmp" 2>/dev/null; then
     rm -f "$tmp"
+    (( made )) && rm -f "$file"      # it was empty a moment ago; an empty object is not state
     lib_die "State update failed for ${file}" "invalid jq filter or corrupted JSON: ${filter}" "inspect ${file}"
+  fi
+  # A filter written with a comma - '.a = 1, .b = 2' - is a generator: jq prints the object
+  # TWICE, once with each change, and the file then holds two documents. Every later read of
+  # it returns two answers and the state is quietly broken, so it is refused here.
+  if [[ "$(jq -s 'length' "$tmp" 2>/dev/null || printf 0)" != "1" ]]; then
+    rm -f "$tmp"
+    (( made )) && rm -f "$file"      # it was not there a moment ago; an empty object is not state
+    lib_die "State update failed for ${file}" \
+      "the filter produced more than one document (a comma where a pipe belongs?): ${filter}" \
+      "fix the filter; ${file} is as it was"
   fi
   chmod 0600 "$tmp"
   mv -f "$tmp" "$file"
@@ -972,6 +984,17 @@ lib_port_listening() {   # lib_port_listening 443 [tcp|udp]
   local port="$1" proto="${2:-tcp}"
   if [[ "$proto" == "udp" ]]; then ss -ulnH 2>/dev/null | awk '{print $5}' | grep -qE "[:.]${port}\$"
   else ss -tlnH 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${port}\$"; fi
+}
+
+# Whether a port answers an address the internet can reach. A loopback listener is not one:
+# 127.0.0.1 and ::1 can only be reached from this machine, which is the whole point of the
+# ports the mail stack and the webmail talk to each other on.
+lib_port_listening_public() {   # lib_port_listening_public 10587 [tcp|udp]
+  local port="$1" proto="${2:-tcp}" f=""
+  if [[ "$proto" == "udp" ]]; then f="$(ss -ulnH 2>/dev/null | awk '{print $5}' || true)"
+  else f="$(ss -tlnH 2>/dev/null | awk '{print $4}' || true)"; fi
+  grep -E "[:.]${port}\$" <<<"$f" | grep -qvE '^(127\.|\[?::1\]?)' || return 1
+  return 0
 }
 
 # "name (pid N)" for whoever is listening on a port, or "" when it is free.

@@ -95,6 +95,12 @@ COMMANDS
   mail status|test|queue        The mail stack: what runs, reverse DNS, outgoing port 25
   mail cert [domain]            Ask again for a certificate that did not come
   mail regenerate               Rewrite every mail configuration file and restart the stack
+  mail webmail on|off <domain>  A webmail at webmail.<domain>. Every domain that has one
+                                shares a single Roundcube and a single PHP process, so the
+                                twentieth costs a vhost and nothing else
+  webmail status                What runs, and for which domains
+  webmail update [version]      Take a newer Roundcube (it also happens by itself, daily)
+  webmail uninstall | purge     Remove it; "purge" drops its database too
   mail relay set --host H [--port 587] --user U | relay off
                                 Send outgoing mail through another server where port 25
                                 is blocked; the password is read from stdin
@@ -636,6 +642,7 @@ _menu_mail() {
     printf '  %s6%s) What to put in DNS (and whether it is there)\n' "$C_CYN" "$C_RST"
     printf '  %s7%s) Can this server send? (reverse DNS, port 25)\n' "$C_CYN" "$C_RST"
     printf '  %s8%s) Turn mail off for a site\n' "$C_CYN" "$C_RST"
+    printf '  %s9%s) Webmail for a site (on, off, or what runs)\n' "$C_CYN" "$C_RST"
     printf '  %s0%s) Back\n' "$C_CYN" "$C_RST"
     printf '\n%sChoice: %s' "$C_BLD" "$C_RST"
     read -r choice </dev/tty || return 0
@@ -663,6 +670,12 @@ _menu_mail() {
       7) _menu_run mail test ;;
       8) domain="$(_menu_pick_domain)" || { _menu_pause; continue; }
          _menu_run mail disable "$domain" ;;
+      9) _menu_ask box 'Webmail: "on <domain>", "off <domain>", or empty to see what runs'
+         if [[ -z "$box" ]]; then _menu_run webmail status
+         else
+           # shellcheck disable=SC2086
+           _menu_run mail webmail $box
+         fi ;;
       0|q|Q|"") return 0 ;;
       *) printf '%sPick a number from the list.%s\n' "$C_YEL" "$C_RST" ;;
     esac

@@ -23,7 +23,7 @@ INSTALL_DIR="$TMP/install"; BIN_LINK="$TMP/lompstack"; BIN_SHORT="$TMP/lomp"; LO
 OPT_YES=1 OPT_DRY_RUN=0 OPT_QUIET=1 OPT_VERBOSE=0 OPT_NO_COLOR=1 OPT_JSON=0 OPT_NON_INTERACTIVE=1
 SCRIPT_PATH="$ROOT/setup.sh"; SCRIPT_DIR="$ROOT"
 export TMPDIR="$TMP"
-for m in common system ols php db ssl domain proxy app mail cloudflare backup monitor install menu; do
+for m in common system ols php db ssl domain proxy app mail webmail cloudflare backup monitor install menu; do
   # shellcheck source=/dev/null
   source "$ROOT/lib/$m.sh"
 done
@@ -2068,26 +2068,38 @@ assert_has "with credentials from a map, not from here" "smtp_sasl_password_maps
 assert_has "and never in the clear" "smtp_tls_security_level = encrypt" "$_pfr"
 
 _mc="$(lib_mail_render_postfix_master)"
-assert_eq "every submission port checks sender against login" 2 "$(grep -c 'reject_authenticated_sender_login_mismatch' <<<"$_mc")"
-assert_eq "and every one of them demands a password" 2 "$(grep -c 'smtpd_sasl_auth_enable=yes' <<<"$_mc")"
-assert_eq "an unsigned message never leaves the building" 2 "$(grep -c 'milter_default_action=tempfail' <<<"$_mc")"
+assert_eq "every submission port checks sender against login" 3 "$(grep -c 'reject_authenticated_sender_login_mismatch' <<<"$_mc")"
+assert_eq "and every one of them demands a password" 3 "$(grep -c 'smtpd_sasl_auth_enable=yes' <<<"$_mc")"
+assert_eq "an unsigned message never leaves the building" 3 "$(grep -c 'milter_default_action=tempfail' <<<"$_mc")"
 # what port 25 does is decided in its own block, which ends where the next service begins
 _smtp25="$(awk '/^smtp +inet/{f=1;next} /^[a-z0-9.:]+ +(inet|unix)/{f=0} f' <<<"$_mc")"
 assert_lacks "port 25 offers no authentication at all" "smtpd_sasl_auth_enable=yes" "$_smtp25"
 assert_has "and takes mail in even when the filter is down" "milter_default_action=accept" "$_smtp25"
-# the webmail's own submission port arrives with the webmail, together with the rule about
-# who may open it; until then there is no port on this machine that takes a password in clear
-assert_lacks "no cleartext submission port yet" "10587" "$_mc"
+# The webmail has a submission port of its own, and it is the only one without TLS. That is
+# only safe while it is bound to the loopback: on any other address it would be a password
+# on the wire, so the address is part of the line and not a setting somewhere else.
+assert_has  "the webmail submits on its own port" "127.0.0.1:10587 inet" "$_mc"
+_wmport="$(sed -n '/^127.0.0.1:10587/,/^[a-z0-9]/p' <<<"$_mc")"
+assert_has  "without TLS, because it never leaves the machine" "smtpd_tls_security_level=none" "$_wmport"
+assert_has  "but never without a password"                     "smtpd_sasl_auth_enable=yes"    "$_wmport"
+assert_has  "and never as somebody else"                       "reject_authenticated_sender_login_mismatch" "$_wmport"
+assert_has  "and never unsigned"                               "milter_default_action=tempfail" "$_wmport"
+assert_lacks "no other port takes a password in the clear" "smtpd_tls_security_level=none" "$_smtp25"
 
 _dc="$(lib_mail_render_dovecot_local mail.example.com)"
 assert_eq "the Dovecot configuration closes every brace it opens" 0 \
   "$(awk '{o+=gsub(/\{/,"{"); c+=gsub(/\}/,"}")} END{print o-c}' <<<"$_dc")"
 assert_has "no mailbox is opened without TLS" "ssl = required" "$_dc"
 # Dovecot treats a loopback connection as already secure, so a plain 143 would be a password
-# oracle for every user of the machine; it arrives with the webmail that needs it
+# oracle for every user of the machine - even now that there is a webmail, which speaks TLS
+# to 993 like any other client
 assert_has "plain IMAP is switched off" $'inet_listener imap {\n    port = 0' "$_dc"
 assert_has "IMAPS is the way in" $'inet_listener imaps {\n    port = 993' "$_dc"
-assert_lacks "and ManageSieve has no listener yet" "port = 4190" "$_dc"
+# ManageSieve is what the webmail's filters and holiday replies talk to. The protocol has to
+# be named here too: this file is read last and would otherwise override the line the
+# managesieved package drops into protocols.d, and the service would never start.
+assert_has "sieve is one of the protocols" "protocols = imap lmtp sieve" "$_dc"
+assert_has "and ManageSieve listens"       $'inet_listener sieve {\n    address = 127.0.0.1\n    port = 4190' "$_dc"
 assert_has "Postfix authenticates through Dovecot" "/var/spool/postfix/private/auth" "$_dc"
 assert_has "and delivers through it" "/var/spool/postfix/private/dovecot-lmtp" "$_dc"
 assert_has "every mailbox is one directory" "mail_location = maildir:/var/vmail/%Ld/%Ln/Maildir" "$_dc"
@@ -2680,6 +2692,33 @@ assert_has "both names on one certificate"  "-d mail.example.com -d webmail.exam
 assert_lacks "and the token is not an argument" "$_cf_tok" "$_cb"
 assert_eq "a certificate with no names is refused" 1 "$(run_isolated lib_ssl_obtain_names _mailhost)"
 
+# A jq filter with a comma is a generator: it prints the whole object once per change, and
+# the state file then holds two documents that every later read answers twice.
+_js="$TMP/json-set.json"; printf '{"a":1}\n' >"$_js"
+assert_eq  "a filter with a comma is refused" 1 "$(run_isolated lib_json_set "$_js" '.b = 2, .c = 3')"
+assert_eq  "and the file is left as it was"  '{"a":1}' "$(tr -d ' \n' <"$_js")"
+lib_json_set "$_js" '.b = 2 | .c = 3'
+assert_eq  "the same thing with a pipe works" '{"a":1,"b":2,"c":3}' "$(jq -c . "$_js")"
+
+# What a lineage covers is read from the certificate, not from certbot's renewal file: the
+# file says what was asked for, the certificate says what was issued. A lineage that is
+# missing a name has to be re-issued with the whole set, so the test must be exact.
+if lib_have openssl; then
+  LE_LIVE="$TMP/le"; mkdir -p "$LE_LIVE/_mail_x"
+  # MSYS2_ARG_CONV_EXCL: under Git Bash an argument starting with "/" is rewritten into a
+  # Windows path, and "/CN=..." would reach openssl as "C:/Program Files/Git/CN=...".
+  # The variable means nothing on Linux.
+  MSYS2_ARG_CONV_EXCL='/CN=' openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+    -keyout "$LE_LIVE/_mail_x/privkey.pem" -out "$LE_LIVE/_mail_x/cert.pem" \
+    -subj "/CN=mail.x.test" -addext "subjectAltName=DNS:mail.x.test,DNS:webmail.x.test" >/dev/null 2>&1
+  assert_eq   "both names are read off the certificate" "mail.x.test
+webmail.x.test" "$(lib_ssl_cert_names _mail_x)"
+  assert_true  "and it covers them"            lib_ssl_cert_covers _mail_x mail.x.test webmail.x.test
+  assert_true  "whatever the case"             lib_ssl_cert_covers _mail_x MAIL.X.TEST
+  assert_false "a name that is not on it"      lib_ssl_cert_covers _mail_x mail.x.test other.x.test
+  assert_false "and a lineage that is not there" lib_ssl_cert_covers _absent mail.x.test
+fi
+
 lib_ssl_hook_render >"$TMP/hook-mail.sh"
 assert_true "the deploy hook still parses" bash -n "$TMP/hook-mail.sh"
 _hk="$(cat "$TMP/hook-mail.sh")"
@@ -2721,6 +2760,122 @@ assert_true "which leaves fewer PHP workers" bash -c "(( $CALC_PHP_CHILDREN_TOTA
 lib_json_set "$STATE_DIR/manifest.json" 'del(.components.mail)'
 lib_system_profile
 assert_eq "and the reservation goes with the stack" 0 "$CALC_MAIL_MB"
+
+# =============================================================================
+section "the webmail"
+# Everything here is a pure renderer or a pure name, so the whole of it runs without root and
+# without Roundcube on the machine.
+assert_eq "one webmail name per domain"  "webmail.alpha.example" "$(lib_webmail_host alpha.example)"
+assert_eq "and a vhost name no site can claim" "_wm_alpha_example" "$(lib_webmail_vhost_name alpha.example)"
+# the pinned key: a fingerprint is 40 hex characters, and a wrong one must not be a typo
+assert_true "the signing key is pinned in full" bash -c "[[ \"$WM_KEY_FPR\" =~ ^[0-9A-F]{40}$ ]]"
+
+# PHP: Roundcube 1.7 runs on 8.1 up to but not including 8.6, and nothing else is offered
+eval 'lib_php_default_version() { printf "8.3"; }
+      lib_php_installed_versions() { printf "%s\n" 8.1 8.3; }'
+assert_eq "the server default when it is in range" "8.3" "$(lib_webmail_php_version)"
+eval 'lib_php_default_version() { printf "8.6"; }'
+assert_eq "otherwise the newest that is"           "8.3" "$(lib_webmail_php_version)"
+eval 'lib_php_installed_versions() { printf "%s\n" 8.0 8.6; }'
+assert_eq "and nothing at all when none fits"      1     "$(run_isolated lib_webmail_php_version)"
+eval 'lib_php_default_version() { printf "8.3"; }
+      lib_php_installed_versions() { printf "%s\n" 8.3; }'
+
+# the configuration is rendered whole from state, and never written empty: a failure on the
+# left of a pipe would otherwise put an empty file where the credentials belong
+WM_INFO="$TMP/webmail.info"; WM_CONF="$TMP/webmail-config.inc.php"; rm -f "$WM_INFO" "$WM_CONF"
+assert_eq "no state, no configuration" 1 "$(run_isolated lib_webmail_render_config)"
+lib_webmail_config_apply
+assert_true "and nothing is written"   bash -c "[[ ! -e '$WM_CONF' ]]"
+printf 'WM_DB_NAME=lomp_webmail
+WM_DB_USER=lomp_webmail
+WM_DB_PASS=S3cretDbPass0123456789012345
+WM_DES_KEY=0123456789abcdef0123456789abcdef
+' >"$WM_INFO"
+CF_IPS_FILE="$TMP/cf-ips-wm.conf"
+printf '# ranges
+173.245.48.0/20
+2400:cb00::/32
+' >"$CF_IPS_FILE"
+lib_json_set "$(lib_domain_json alpha.example)" '.mail.enabled = true | .mail.webmail = true'
+eval 'lib_domains_list() { printf "%s\n" alpha.example; }'
+_wm="$(lib_webmail_render_config)"
+assert_has "IMAP goes to Dovecot over TLS on the loopback" "imap_host'] = 'ssl://127.0.0.1:993'" "$_wm"
+assert_has "because Dovecot requires it even there"        "verify_peer' => false"                "$_wm"
+assert_has "submission is the webmail's own port"          "smtp_host'] = '127.0.0.1:10587'"      "$_wm"
+assert_has "sieve is Dovecot's"                            "managesieve_host'] = '127.0.0.1:4190'" "$_wm"
+assert_has "the installer stays off"                       "enable_installer'] = false"           "$_wm"
+assert_has "the log goes to the journal"                   "log_driver'] = 'syslog'"              "$_wm"
+assert_has "failed logins are logged, for fail2ban"        "log_logins'] = true"                  "$_wm"
+assert_has "TLS ends at the proxy"                         "use_https'] = true"                   "$_wm"
+# an unescaped dot in the host pattern would also match "webmailXalphaYexample"
+assert_has "every dot of a trusted host is escaped" "'^webmail\.alpha\.example\$'" "$_wm"
+assert_has "Cloudflare's ranges are the only trusted proxies" "'173.245.48.0/20'" "$_wm"
+assert_has "IPv6 included"                                    "'2400:cb00::/32'"  "$_wm"
+# a domain whose webmail is off is not in the list of hosts it will answer for
+lib_json_set "$(lib_domain_json alpha.example)" 'del(.mail.webmail)'
+assert_lacks "a domain without webmail is not trusted" "webmail\.alpha" "$(lib_webmail_render_config)"
+lib_json_set "$(lib_domain_json alpha.example)" '.mail.webmail = true'
+
+# the PHP the webmail runs on: the limit is address space, and OPcache maps 512 MB before the
+# first line of code. A smaller limit does not make it smaller, it makes every request a 503.
+_wmx="$(lib_webmail_render_extprocessor)"
+assert_has "the webmail has its own PHP user"  "extUser                 lompwebmail" "$_wmx"
+assert_has "a bounded number of children"      "PHP_LSAPI_CHILDREN=4"                "$_wmx"
+assert_has "and room for the OPcache segment"  "memSoftLimit            2047M"       "$_wmx"
+
+_wmv="$(lib_webmail_render_vhconf alpha.example)"
+assert_has "the docroot goes through 'current'" 'docRoot                   $VH_ROOT/current/public_html/' "$_wmv"
+assert_has "it answers for the webmail name"    "vhDomain                  webmail.alpha.example"         "$_wmv"
+assert_has "the shared PHP handles it"          "add                     lsapi:lsphp_webmail php"        "$_wmv"
+# Roundcube ships .htaccess files for Apache; reading them under OpenLiteSpeed costs a stat
+# per request and grants nothing
+assert_has "no .htaccess is read"               "autoLoadHtaccess        0"  "$_wmv"
+assert_has "ACME can still answer on port 80"   "context /.well-known/acme-challenge/" "$_wmv"
+
+# fail2ban reads every file in filter.d at start and refuses to start at all when one of them
+# is wrong - taking the SSH jail down with it. %(__prefix_line)s comes from common.conf.
+_wmf="$(lib_webmail_render_filter)"
+assert_has "the filter includes what its pattern needs" "before = common.conf" "$_wmf"
+assert_has "and matches what Roundcube writes"          "Failed login" "$_wmf"
+assert_true "the jail is banned on, not just written"   bash -c "[[ '$(lib_webmail_render_jail)' == *'enabled = true'* ]]"
+assert_has "and it reads the journal"                   "backend = systemd" "$(lib_webmail_render_jail)"
+
+# gpgv accepts a signature from ANY key in the keyring it is given, so the pin has to be
+# compared against every primary key in the file - not the first one
+_kr="$(declare -f _wm_keyring_fpr)"
+assert_has  "every primary key is read, not the first" "/^pub:/{p=1; next}" "$_kr"
+assert_has  "and the signature is checked against the pinned one" "VALIDSIG" "$(declare -f _wm_fetch_release)"
+# the log directory belongs to root: OpenLiteSpeed opens the vhost logs there as root, and a
+# directory the webmail user could write would let it point one at any file on the system
+assert_has "the log directory is root's" '"$WM_LOG_DIR" 0750 root:root' "$(declare -f lib_webmail_dirs_ensure)"
+# upstream's updater rewrites the shared configuration, and its defaults are all the unsafe
+# direction; a release that is thrown away must not leave its idea of it behind
+_up="$(declare -f lib_webmail_update)"
+assert_has "a failed update puts the configuration back" "_wm_config_restore" "$_up"
+assert_has "and a successful one is rewritten from state" "lib_webmail_config_apply" "$_up"
+assert_has "the symlink flip is checked"                  "_wm_current_set" "$_up"
+# the webmail record can only be cleaned out of DNS while the state still says there is one
+_dis="$(declare -f lib_mail_disable_main)"
+_n_clean="$(grep -n 'lib_mail_dns_cleanup' <<<"$_dis" | head -1 | cut -d: -f1)"
+_n_wmoff="$(grep -n 'lib_webmail_domain_disable' <<<"$_dis" | head -1 | cut -d: -f1)"
+assert_true "DNS is cleaned before the webmail is switched off" \
+  bash -c "(( ${_n_clean:-0} > 0 && ${_n_wmoff:-0} > 0 && ${_n_clean:-0} < ${_n_wmoff:-0} ))"
+# and the certificate is asked for both names at once
+_ce="$(declare -f lib_mail_domain_cert_ensure)"
+assert_has "the mail certificate covers the webmail too" "lib_webmail_host" "$_ce"
+assert_has "and asks what it covers, not whether it exists" "lib_ssl_cert_covers" "$_ce"
+
+# a state file this call created is not left behind as an empty object when the filter is bad
+_js2="$TMP/json-new.json"; rm -f "$_js2"
+assert_eq  "a bad filter on a new file fails"  1 "$(run_isolated lib_json_set "$_js2" '.a = 1, .b = 2')"
+assert_true "and leaves no empty state behind" bash -c "[[ ! -e '$_js2' ]]"
+
+# a port that carries a password without TLS may answer this machine and nobody else
+eval 'ss() { printf "%s\n" "LISTEN 0 100 127.0.0.1:10587 0.0.0.0:*" "LISTEN 0 100 0.0.0.0:993 0.0.0.0:*" | awk "{print \$1, \$2, \$3, \$4, \$5}"; }'
+assert_false "a loopback port is not public"  lib_port_listening_public 10587
+assert_true  "one on every address is"        lib_port_listening_public 993
+unset -f ss
 
 # =============================================================================
 section "no command replaces itself and skips the EXIT cleanup"

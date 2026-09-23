@@ -286,8 +286,10 @@ lib_cf_record_write() {   # zone [id] type name content [prio] [proxied]
     jq -n --arg t "$t" --arg n "$n" --arg c "$c" --argjson p "${prio:-10}" --arg cm "$CF_RECORD_TAG" \
       '{type:$t, name:$n, content:$c, priority:$p, ttl:300, comment:$cm}' >"$body"
   elif [[ "$t" == "A" || "$t" == "AAAA" ]]; then
+    # a proxied record has no TTL of its own - Cloudflare answers for it - and the API takes
+    # only 1 ("automatic") there, so the two are chosen together
     jq -n --arg t "$t" --arg n "$n" --arg c "$c" --argjson px "$proxied" --arg cm "$CF_RECORD_TAG" \
-      '{type:$t, name:$n, content:$c, ttl:300, proxied:$px, comment:$cm}' >"$body"
+      '{type:$t, name:$n, content:$c, ttl:(if $px then 1 else 300 end), proxied:$px, comment:$cm}' >"$body"
   else
     jq -n --arg t "$t" --arg n "$n" --arg c "$c" --arg cm "$CF_RECORD_TAG" \
       '{type:$t, name:$n, content:$c, ttl:300, comment:$cm}' >"$body"

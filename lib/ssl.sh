@@ -44,6 +44,7 @@ LOG="${LOG_FILE}"
 LSWS_BIN="${LSWS_HOME}/bin/openlitespeed"
 OLS_SERVICE="${OLS_SERVICE}"
 MAIL_SNI="${MAIL_POSTFIX_DIR}/sni"
+WM_VHOSTS="${LSWS_VHOSTS_DIR}"
 BIN="${BIN_LINK}"
 log()  { printf '%s [HOOK] %s\\n' "\$(date '+%Y-%m-%d %H:%M:%S')" "\$*" >>"\$LOG" 2>/dev/null; }
 fail() {
@@ -82,6 +83,16 @@ case "\$name" in
           log "Dovecot reloaded after renewal of \$name"
         else
           fail "Dovecot could not be reloaded after renewal of \$name."; rc=1
+        fi
+      fi
+      # This lineage also carries webmail.<domain>, and OpenLiteSpeed holds the certificate it
+      # started with: without this, the webmail would go on serving the expired one while
+      # every mail client had the new one.
+      if compgen -G "\$WM_VHOSTS/_wm_*" >/dev/null 2>&1; then
+        if "\$LSWS_BIN" -t >/dev/null 2>&1 && systemctl restart "\$OLS_SERVICE" >/dev/null 2>&1; then
+          log "OpenLiteSpeed restarted for the webmail after renewal of \$name"
+        else
+          fail "Certificate \$name renewed but OpenLiteSpeed could not be restarted for the webmail."; rc=1
         fi
       fi
     else
@@ -124,6 +135,32 @@ lib_ssl_hook_install() {
 # =============================================================================
 lib_ssl_cert_exists()  { [[ -s "${LE_LIVE}/${1}/fullchain.pem" ]]; }
 lib_ssl_deployed()     { [[ -s "${SSL_DEPLOY_DIR}/${1}/fullchain.pem" && -s "${SSL_DEPLOY_DIR}/${1}/privkey.pem" ]]; }
+
+# The names a lineage actually covers, read from the certificate rather than from certbot's
+# renewal file: the file says what was asked for, the certificate says what was issued.
+# The deployed copy first, because that is the one the servers actually present - a renewal
+# that certbot made but the deploy hook could not copy would otherwise look finished.
+lib_ssl_cert_names() {   # cert-name -> one name per line
+  local f="${SSL_DEPLOY_DIR}/${1}/fullchain.pem"
+  [[ -s "$f" ]] || f="${LE_LIVE}/${1}/cert.pem"
+  [[ -s "$f" ]] || return 1
+  openssl x509 -noout -ext subjectAltName -in "$f" 2>/dev/null \
+    | tr ',' '\n' \
+    | sed -n 's/.*DNS:[[:space:]]*\([^[:space:],]\{1,\}\).*/\1/p' \
+    | grep . || return 1
+}
+
+# Whether it covers every name given. A lineage that is missing one has to be re-issued with
+# the whole set: certbot expands a lineage in place when --cert-name names an existing one.
+lib_ssl_cert_covers() {   # cert-name name [name...]
+  local cert="$1" n="" have=""
+  shift
+  have="$(lib_ssl_cert_names "$cert")" || return 1
+  for n in "$@"; do
+    grep -qxiF "$n" <<<"$have" || return 1
+  done
+  return 0
+}
 
 lib_ssl_expiry_epoch() {   # certfile -> epoch (empty when unreadable)
   local end=""

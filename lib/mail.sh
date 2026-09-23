@@ -301,6 +301,20 @@ smtps         inet  n       -       n       -       -       smtpd
   -o smtpd_relay_restrictions=permit_sasl_authenticated,reject
   -o smtpd_sender_restrictions=reject_authenticated_sender_login_mismatch
   -o milter_default_action=tempfail
+# The webmail submits here, and only the webmail: the port is bound to the loopback and no
+# rule opens it. It is the one place without TLS, because the connection never leaves the
+# machine - but it still authenticates, and it still may only send as the account it logged
+# in with, so a compromised webmail is no better placed than a stolen password.
+127.0.0.1:10587 inet  n     -       n       -       -       smtpd
+  -o syslog_name=postfix/webmail
+  -o smtpd_tls_security_level=none
+  -o smtpd_tls_auth_only=no
+  -o smtpd_sasl_auth_enable=yes
+  -o smtpd_sasl_security_options=noanonymous
+  -o smtpd_client_restrictions=permit_sasl_authenticated,reject
+  -o smtpd_relay_restrictions=permit_sasl_authenticated,reject
+  -o smtpd_sender_restrictions=reject_authenticated_sender_login_mismatch
+  -o milter_default_action=tempfail
 pickup        unix  n       -       n       60      1       pickup
 cleanup       unix  n       -       n       -       0       cleanup
 qmgr          unix  n       -       n       300     1       qmgr
@@ -333,7 +347,10 @@ EOF
 lib_mail_render_dovecot_local() {   # host
   local host="$1"
   printf '# Managed by lompstack - rewritten by "lomp mail regenerate"; local edits are lost.\n\n'
-  printf 'protocols = imap lmtp\n'
+  # sieve is named here because this line overrides the one the managesieved package drops
+  # into protocols.d: without it the ManageSieve service never starts, and the filters and
+  # holiday replies the webmail offers have nothing to talk to
+  printf 'protocols = imap lmtp sieve\n'
   printf 'listen = *, ::\n'
   printf 'mail_location = maildir:%s/%%Ld/%%Ln/Maildir\n' "$MAIL_VMAIL_HOME"
   printf 'mail_plugins = $mail_plugins quota\n'
@@ -404,8 +421,8 @@ service quota-status {
 }
 
 # Only IMAPS. A plain-text 143 on loopback is a password oracle for every user of this
-# machine - Dovecot treats a local connection as already secure - and nothing needs it until
-# the webmail arrives, which brings its own rule about who may open it.
+# machine - Dovecot treats a local connection as already secure - so it stays closed even
+# now that there is a webmail: the webmail speaks TLS to 993 like any other client.
 service imap-login {
   inet_listener imap {
     port = 0
@@ -413,6 +430,16 @@ service imap-login {
   inet_listener imaps {
     port = 993
     ssl = yes
+  }
+}
+
+# ManageSieve, for the filters and the holiday reply the webmail offers. On the loopback
+# only: it carries a password, and the only thing on this machine that speaks it is the
+# webmail. A mail client from outside uses none of it.
+service managesieve-login {
+  inet_listener sieve {
+    address = 127.0.0.1
+    port = 4190
   }
 }
 
@@ -1447,6 +1474,9 @@ lib_mail_domain_has_traces() {   # domain
   [[ -s "${MAIL_DISABLED_DIR}/${d}.passwd" ]] && return 0
   [[ -d "${MAIL_VMAIL_HOME}/${d}" ]] && return 0
   compgen -G "${MAIL_DKIM_DIR}/${d}.*.key" >/dev/null 2>&1 && return 0
+  # a webmail is a trace too: its virtual host would otherwise outlive the site it belongs to,
+  # naming a certificate that has just been deleted
+  [[ -d "${LSWS_VHOSTS_DIR}/$(lib_webmail_vhost_name "$d")" ]] && return 0
   return 1
 }
 
@@ -1764,20 +1794,27 @@ lib_mail_dkim_public() {   # domain -> "v=DKIM1; k=rsa; p=..."
 # =============================================================================
 lib_mail_domain_cert_ensure() {   # domain
   local d="$1" cert="" name=""
+  local -a names=()
   cert="$(lib_mail_cert_name "$d")"
   name="mail.${d}"
-  if lib_ssl_cert_exists "$cert"; then
+  names=("$name")
+  # one lineage for every name this domain's mail answers to, the webmail included: two
+  # certificates would mean two things to renew and two ways for one of them to expire
+  [[ "$(lib_json_get "$(lib_domain_json "$d")" '.mail.webmail')" == "true" ]] && names+=("$(lib_webmail_host "$d")")
+  # what the lineage COVERS, not merely that it exists: a webmail switched on later needs its
+  # name added, and "the file is there" would answer yes for ever without it
+  if lib_ssl_cert_covers "$cert" "${names[@]}"; then
     lib_ssl_deploy_files "$cert" || lib_warn "certificate ${cert} could not be deployed: ${SSL_LAST_ERROR}"
     lib_cron_remove "mail-cert:${d}"
     return 0
   fi
-  if lib_ssl_obtain_names "$cert" "$name"; then
+  if lib_ssl_obtain_names "$cert" "${names[@]}"; then
     lib_cron_remove "mail-cert:${d}"
     return 0
   fi
-  lib_warn "No certificate for ${name} yet: ${SSL_LAST_ERROR}"
+  lib_warn "No certificate for ${names[*]} yet: ${SSL_LAST_ERROR}"
   lib_note "Clients reach it under ${MAIL_HOST_SHOWN:-$(lib_mail_host)} meanwhile, which is a name they can trust"
-  lib_note "Add an A record for ${name} pointing here, then run: lomp mail cert ${d}"
+  lib_note "Every name above needs a record that points here - ${names[*]} - and then: lomp mail cert ${d}"
   lib_cron_set "mail-cert:${d}" "41 */6 * * * root ${BIN_LINK} mail cert ${d} --quiet"
   return 0
 }
@@ -1872,9 +1909,13 @@ lib_mail_disable_main() {   # domain [--keep-data|--delete-data] [--dns-cleanup]
   # is rewritten, and Postfix would try to deliver it to the internet instead
   _mail_warn_queued "$d"
   lib_cron_remove "mail-cert:${d}"
-  # only the records lompstack wrote, and only when asked: somebody else may be pointing that
-  # name somewhere on purpose
+  # Only the records lompstack wrote, and only when asked: somebody else may be pointing that
+  # name somewhere on purpose. This runs BEFORE the webmail is switched off, because the list
+  # of records to remove is built from the state - and the webmail's own record is in it only
+  # while the state still says there is a webmail.
   (( cleanup )) && lib_mail_dns_cleanup "$d"
+  # the webmail is a way in to these mailboxes, so it goes with them
+  lib_webmail_domain_disable "$d"
   if (( keep )); then
     # the mailbox lines are put aside, not left in place: Dovecot's user store has no
     # per-domain switch, so a line that stays is a login that still works. They come back
@@ -1947,6 +1988,8 @@ _mail_warn_queued() {   # domain
 lib_mail_domain_purge() {   # domain
   local d="$1" a="" sel=""
   sel="$(lib_mail_selector "$d")"
+  # the webmail first: its vhost names a certificate that is about to be deleted
+  lib_webmail_domain_disable "$d"
   while read -r a; do
     [[ -n "$a" ]] && lib_mail_box_remove "$a"
   done < <(lib_mail_boxes "$d")
@@ -2278,18 +2321,23 @@ _mail_dns_records() {   # domain
   printf 'SRV\t_submissions._tcp.%s\t0 1 465 mail.%s.\toptional\n' "$d" "$d"
   printf 'SRV\t_imap._tcp.%s\t0 0 0 .\toptional: says there is no plain IMAP here\n' "$d"
   printf 'SRV\t_pop3._tcp.%s\t0 0 0 .\toptional: says there is no POP3 here\n' "$d"
+  # The webmail is a web site and belongs behind the proxy, unlike everything above it: the
+  # fifth field says so, and it is the only record of a mail domain that is orange-cloud.
+  if [[ "$(lib_json_get "$(lib_domain_json "$d")" '.mail.webmail')" == "true" ]]; then
+    printf 'A\twebmail.%s\t%s\ta web site, so this one IS proxied (orange cloud)\tproxied\n' "$d" "$ipshow"
+  fi
   return 0
 }
 
 lib_mail_dns_print() {   # domain
-  local d="$1" t="" n="" v="" note=""
+  local d="$1" t="" n="" v="" note="" px=""
   lib_heading "DNS records for ${d}"
-  lib_note "Add these at your DNS provider. At Cloudflare every one of them is grey-cloud (DNS only);"
-  lib_note "a proxied MX or mail name cannot receive mail."
+  lib_note "Add these at your DNS provider. At Cloudflare every mail record is grey-cloud (DNS only):"
+  lib_note "a proxied MX or mail name cannot receive mail. The webmail is the exception and says so."
   printf '\n'
-  while IFS=$'\t' read -r t n v note; do
+  while IFS=$'\t' read -r t n v note px; do
     [[ -n "$t" ]] || continue
-    printf '  %-4s %-38s %s\n' "$t" "$n" "$v"
+    printf '  %-4s %-38s %s%s\n' "$t" "$n" "$v" "$( [[ "$px" == "proxied" ]] && printf '   [PROXIED]' || true)"
     [[ -n "$note" ]] && printf '       %s%s%s\n' "$C_DIM" "$note" "$C_RST"
   done < <(_mail_dns_records "$d")
   printf '\n'
@@ -2303,7 +2351,8 @@ lib_mail_dns_json() {   # domain
   _mail_dns_records "$d" | jq -R -s --arg domain "$d" '
     {domain: $domain,
      records: [ split("\n")[] | select(length > 0) | split("\t")
-                | {type: .[0], name: .[1], value: .[2], note: .[3]} ]}'
+                | {type: .[0], name: .[1], value: .[2], note: .[3],
+                   proxied: (.[4] // "" | . == "proxied")} ]}'
 }
 
 # What DNS actually says today. Asked of the zone's own name servers, because a record that
@@ -2328,10 +2377,10 @@ _mail_dns_say() {   # colour type name detail
 }
 
 lib_mail_dns_check() {   # domain -> 0 when everything is in place
-  local d="$1" t="" n="" v="" note="" got="" bad=0 want="" best="" count=0
+  local d="$1" t="" n="" v="" note="" px="" got="" bad=0 want="" best="" count=0
   lib_have dig || { lib_warn "dig is not installed; DNS cannot be checked"; return 1; }
   lib_heading "DNS check for ${d}"
-  while IFS=$'\t' read -r t n v note; do
+  while IFS=$'\t' read -r t n v note px; do
     [[ -n "$t" ]] || continue
     [[ "$t" == "SRV" ]] && continue                      # optional, not worth an alarm
     [[ "$v" == "<no DKIM key yet>" ]] && continue
@@ -2378,7 +2427,19 @@ lib_mail_dns_check() {   # domain -> 0 when everything is in place
         fi
         ;;
       *)
-        if [[ "$got" == *"${v%.}"* ]]; then
+        # A proxied name answers with Cloudflare's address on purpose, so what it should say
+        # is "an address of Cloudflare's" and not this server's. Anything else is a name
+        # pointing somewhere else entirely, which is exactly what has to be reported.
+        if [[ "$px" == "proxied" ]]; then
+          if lib_cf_ips_are_cloudflare "$(tr '\n' ' ' <<<"$got")"; then
+            _mail_dns_say "$C_GRN" "$t" "$n" "proxied by Cloudflare, as it should be"
+          elif [[ "$got" == *"${v%.}"* ]]; then
+            _mail_dns_say "$C_YEL" "$t" "$n" "points here but is not proxied; turn the orange cloud on"
+          else
+            _mail_dns_say "$C_RED" "$t" "$n" "answers ${got//$'\n'/ }, which is neither this server nor Cloudflare"
+            bad=1
+          fi
+        elif [[ "$got" == *"${v%.}"* ]]; then
           _mail_dns_say "$C_GRN" "$t" "$n" "ok"
         else
           _mail_dns_say "$C_RED" "$t" "$n" "says: $(tr '\n' ' ' <<<"$got")"
@@ -2436,9 +2497,10 @@ _mail_txt_norm() {
 }
 
 # One record. Returns 0 when the zone now says what it should.
-_mail_dns_apply_one() {   # zone type name content [--replace-mx]
-  local z="$1" t="$2" n="$3" c="$4" replace="${5:-}"
+_mail_dns_apply_one() {   # zone type name content [--replace-mx] [proxied]
+  local z="$1" t="$2" n="$3" c="$4" replace="${5:-}" want_px="false"
   local existing="" mine="" others="" id="" cur="" prio=10 n_other=0 old=""
+  [[ "${6:-}" == "proxied" ]] && want_px="true"
   if ! existing="$(lib_cf_records "$z" "$t" "$n")"; then
     _mail_dns_conflict "$n" "Cloudflare could not be read: ${CF_LAST_ERROR}"
     return 1
@@ -2508,22 +2570,23 @@ _mail_dns_apply_one() {   # zone type name content [--replace-mx]
         # and a second address here sends half of all mail connections to the wrong host.
         if [[ -z "$mine" && "$n_other" == "1" \
               && "$(jq -r '.[0].content' <<<"$others")" == "$c" \
-              && "$(jq -r '.[0].proxied // false' <<<"$others")" == "false" ]]; then
+              && "$(jq -r '.[0].proxied // false' <<<"$others")" == "$want_px" ]]; then
           _mail_dns_report same "$n" "$c"
           return 0
         fi
-        _mail_dns_conflict "$n" "another A record is here: $(jq -r '[.[] | .content] | join(", ")' <<<"$others"); this name must point at this server and stay unproxied"
+        _mail_dns_conflict "$n" "another A record is here: $(jq -r '[.[] | .content] | join(", ")' <<<"$others"); this name has to point at this server$( [[ "$want_px" == "false" ]] && printf ' and stay unproxied' || true)"
         return 1
       fi
       cur="$(jq -r '.content // empty' <<<"${mine:-{\}}" 2>/dev/null || true)"
-      if [[ "$cur" == "$c" && "$(jq -r '.proxied // false' <<<"${mine:-{\}}" 2>/dev/null || printf 'true')" == "false" ]]; then
+      if [[ "$cur" == "$c" && "$(jq -r '.proxied // false' <<<"${mine:-{\}}" 2>/dev/null || printf 'x')" == "$want_px" ]]; then
         _mail_dns_report same "$n" "$c"
         return 0
       fi
-      # a proxied mail name answers with Cloudflare's address and no client can reach it
-      lib_cf_record_write "$z" "$id" A "$n" "$c" "" false \
+      # A mail name behind the proxy answers with Cloudflare's address and no mail client can
+      # reach it there. The webmail is the one name of a mail domain that belongs behind it.
+      lib_cf_record_write "$z" "$id" A "$n" "$c" "" "$want_px" \
         || { _mail_dns_conflict "$n" "$CF_LAST_ERROR"; return 1; }
-      _mail_dns_report applied "$n" "${c} (not proxied)"
+      _mail_dns_report applied "$n" "${c} ($( [[ "$want_px" == "true" ]] && printf 'proxied' || printf 'not proxied'))"
       MAIL_DNS_APPLIED=$((MAIL_DNS_APPLIED + 1))
       ;;
   esac
@@ -2531,7 +2594,7 @@ _mail_dns_apply_one() {   # zone type name content [--replace-mx]
 }
 
 lib_mail_dns_apply() {   # domain [--replace-mx]
-  local d="$1" replace="${2:-}" t="" n="" v="" note="" zone="" first=""
+  local d="$1" replace="${2:-}" t="" n="" v="" note="" px="" zone="" first=""
   [[ -n "$(lib_cf_token)" ]] || lib_die "No Cloudflare API token is stored" \
     "the records can only be written with one; they are printed instead" \
     "printf '%s' \"\$TOKEN\" | lomp install --cf-api-token -"
@@ -2552,7 +2615,7 @@ lib_mail_dns_apply() {   # domain [--replace-mx]
     return 1
   fi
   lib_heading "Writing the DNS records of ${d}"
-  while IFS=$'\t' read -r t n v note; do
+  while IFS=$'\t' read -r t n v note px; do
     [[ -n "$t" ]] || continue
     [[ "$t" == "SRV" ]] && continue                     # optional; nothing breaks without them
     # a value the table could not fill in ("<no DKIM key yet>", "<the IPv4 address of this
@@ -2563,7 +2626,7 @@ lib_mail_dns_apply() {   # domain [--replace-mx]
       MAIL_DNS_SKIPPED=$((MAIL_DNS_SKIPPED + 1))
       continue
     fi
-    _mail_dns_apply_one "$zone" "$t" "$n" "$v" "$replace" || true
+    _mail_dns_apply_one "$zone" "$t" "$n" "$v" "$replace" "$px" || true
   done < <(_mail_dns_records "$d")
   lib_json_set "$(lib_domain_json "$d")" '.mail.dns_applied_at = $ts' --arg ts "$(lib_iso_now)" 2>/dev/null || true
   printf '\n'
@@ -2578,11 +2641,11 @@ lib_mail_dns_apply() {   # domain [--replace-mx]
 
 # Take away only what lompstack wrote. A record somebody added by hand stays, whatever it says.
 lib_mail_dns_cleanup() {   # domain
-  local d="$1" zone="" t="" n="" v="" note="" gone=0 id="" have=""
+  local d="$1" zone="" t="" n="" v="" note="" px="" gone=0 id="" have=""
   [[ -n "$(lib_cf_token)" ]] || return 0
   if (( OPT_DRY_RUN )); then lib_info "[dry-run] would remove the DNS records lompstack wrote for ${d}"; return 0; fi
   zone="$(lib_cf_zone_id "mail.${d}")" || return 0
-  while IFS=$'\t' read -r t n v note; do
+  while IFS=$'\t' read -r t n v note px; do
     [[ -n "$t" ]] || continue
     [[ "$t" == "SRV" ]] && continue
     # a failed read is not an empty zone: saying nothing here would quietly leave records behind
@@ -2742,6 +2805,43 @@ _mail_relay_cmd() {
   esac
 }
 
+# The webmail of one domain. It is a mail command because that is where an operator looks
+# for it, but everything it does lives in lib/webmail.sh.
+_mail_webmail_cmd() {   # on|off|status <domain>
+  local a="${1:-status}" d="${2:-}"
+  d="${d,,}"
+  case "$a" in
+    on)
+      [[ -n "$d" ]] || lib_die "Which domain?" "" "lomp mail webmail on example.com"
+      lib_mail_domain_enabled "$d" || lib_die "Mail is not on for ${d}" "" "lomp mail enable ${d}"
+      lib_webmail_domain_enable "$d" || lib_die "The webmail could not be set up for ${d}" "${WM_LAST_ERROR}" "lomp doctor"
+      # a jail fail2ban refuses is a warning, not the end of the command: the webmail is up,
+      # and what follows tells the operator what to put in DNS
+      lib_webmail_fail2ban_apply || true
+      lib_mail_dns_note "$d"
+      ;;
+    off)
+      [[ -n "$d" ]] || lib_die "Which domain?" "" "lomp mail webmail off example.com"
+      lib_webmail_domain_disable "$d"
+      lib_ok "The webmail of ${d} is off; its mail is untouched"
+      ;;
+    status|"") lib_webmail_status ;;
+    *) lib_die "Unknown webmail command: ${a}" "" "lomp mail webmail on|off <domain>" ;;
+  esac
+  return 0
+}
+
+# After a change that adds or removes a name, say what DNS needs - or write it.
+lib_mail_dns_note() {   # domain
+  local d="$1"
+  if [[ -n "$(lib_cf_token)" ]]; then
+    lib_mail_dns_apply "$d" || lib_mail_dns_print "$d"
+  else
+    lib_mail_dns_print "$d"
+  fi
+  return 0
+}
+
 lib_mail_main() {
   local sub="${1:-status}"
   shift || true
@@ -2773,6 +2873,8 @@ lib_mail_main() {
                 lib_mail_apply "$(lib_mail_host)" || lib_die "The mail configuration could not be applied" "${MAIL_LAST_ERROR}" "lomp mail status"
                 lib_ok "Mail configuration rewritten and the stack restarted" ;;
     relay)      _mail_relay_cmd "$@" ;;
+    webmail)    lib_mail_installed || lib_die "Mail is not installed" "" "lomp install --with-mail"
+                _mail_webmail_cmd "$@" ;;
     help|-h|--help) lib_mail_usage ;;
     *)          lib_error "Unknown mail command: ${sub}"; printf '\n'; lib_mail_usage; exit 2 ;;
   esac

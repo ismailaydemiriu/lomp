@@ -518,7 +518,31 @@ provider, or an SPF record of its own, is reported and left alone — two SPF re
 every receiver, and moving somebody's mail is not a thing a provisioning script should do by
 itself. `lomp mail enable` does the same automatically when a token is there.
 
-The webmail comes in the next release.
+### Webmail
+
+```bash
+sudo lomp mail webmail on example.com
+```
+
+That is all of it: `webmail.example.com` serves Roundcube, and people sign in with their full
+address and their mailbox password. Every domain shares one installation and one PHP process,
+so the twentieth webmail costs a virtual host and nothing else.
+
+It is not a site. The code belongs to root and runs as its own user, which owns no site, no
+mail and no key; it reaches Dovecot and Postfix over the loopback only, and the port it submits
+through exists for it alone. The release comes from upstream's own tarball, checked against a
+pinned signing key before anything is unpacked, and lives in a directory per version with
+`current` pointing at the one in use - an update that does not start never gets the symlink.
+Roundcube publishes a security release every few weeks, so a daily job takes them:
+
+```bash
+sudo lomp webmail status
+sudo lomp webmail update          # also runs by itself, 04:30
+```
+
+Roundcube's own login limit counts per account and ignores the address a request came from, so
+failed logins go to the journal and fail2ban bans by IP - through Cloudflare's API when the
+site is proxied, so the ban happens at the edge.
 
 ### Closing the origin
 
@@ -644,6 +668,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
 | `lib/proxy.sh` | Path proxies: an application under a path of any site |
 | `lib/app.sh` | Node.js applications: one PM2 daemon per site as the site user, systemd units, deploy, environment, workers and scheduled jobs |
 | `lib/mail.sh` | Mail: Postfix, Dovecot, Rspamd and their configuration, the mail host's certificate, relay, deliverability checks |
+| `lib/webmail.sh` | Webmail: the verified Roundcube release, its own PHP and user, a vhost per domain, updates |
 | `lib/cloudflare.sh` | Trusted proxy ranges, real client IP, API token, edge bans |
 | `lib/backup.sh` | Backup, restore, retention, encryption, remotes, scheduling |
 | `lib/monitor.sh` | `status`, `doctor`, health check, notifications |
