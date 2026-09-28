@@ -55,6 +55,8 @@ readonly TARGET_MARIADB_NOBLE="10.11 (Ubuntu 24.04 package)"
 # ---- Fixed paths (see spec section 22) --------------------------------------
 readonly STATE_DIR="/root/.server-setup"
 readonly SITES_ROOT="/home"
+# each site's access.log and error.log; /home/<domain>/logs links here (see lib_domain_logs_dir_ensure)
+readonly SITES_LOG_ROOT="/var/log/lomp-sites"
 readonly LSWS_HOME="/usr/local/lsws"
 readonly LOG_FILE="/var/log/server_setup.log"
 readonly BACKUP_ROOT="/var/backups/server-setup"

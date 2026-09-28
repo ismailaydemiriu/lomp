@@ -15,7 +15,7 @@ DOM_OPT_WP_TITLE="" DOM_OPT_WP_ADMIN="admin" DOM_OPT_WP_EMAIL="" DOM_OPT_WP_LOCA
 DOM_OPT_MAIL=0 DOM_OPT_MAILBOX="" DOM_OPT_MAIL_QUOTA=""
 DOMAIN_CREATED_HOME=0
 DOMAIN_CREATED_USER=0
-DOMAIN_LOGS_OPENED=""   # sites whose logs lib_domain_logs_repair let OpenLiteSpeed write
+DOMAIN_LOGS_MOVED=""    # sites whose logs lib_domain_logs_repair moved out of their homes
 DOMAIN_F2B_FILTERS_CHANGED=0   # set by lib_domain_fail2ban_filters_write
 
 WPCLI_PHAR="${INSTALL_DIR}/wp-cli.phar"
@@ -477,10 +477,14 @@ lib_domain_dirs_create() {
   lib_mkdir "${D_HOME}/private/sessions" 0700 "${D_USER}:${D_GROUP}"
   lib_mkdir "${D_HOME}/private/tmp" 0700 "${D_USER}:${D_GROUP}"
   lib_mkdir "${D_HOME}/backups" 0700 "${D_USER}:${D_GROUP}"
-  lib_mkdir "${D_HOME}/logs" 0750 "root:${D_GROUP}"
-  # the site user reads its logs and cannot change them; OpenLiteSpeed's workers write them
-  lib_ols_logdir_grant "${D_HOME}/logs" \
-    || lib_warn "setfacl could not let OpenLiteSpeed into ${D_HOME}/logs; the site's logs will stay empty"
+  # the logs live outside the home, and logs/ there leads to them; the site is not served yet,
+  # so an older release's logs/ left in a kept home can be emptied right away
+  if [[ ! -e "$(lib_domain_log_dir "$D_DOMAIN")" ]] && (( ! OPT_DRY_RUN )); then
+    lib_rollback_push "rm -rf '$(lib_domain_log_dir "$D_DOMAIN")'"
+  fi
+  lib_domain_logs_dir_ensure
+  lib_domain_logs_move_old
+  lib_domain_logs_link
   if [[ "$D_MODE" == "proxy" ]]; then
     lib_mkdir "${D_HOME}/app" 0750 "${D_USER}:${D_GROUP}"
     # every static context in the vhost points at one of these; OpenLiteSpeed rejects the
@@ -566,18 +570,120 @@ lib_domain_php_probe() {
 }
 
 # =============================================================================
-#  logrotate / fail2ban regeneration (state -> config)
+#  Site logs
 # =============================================================================
+# OpenLiteSpeed's main process opens a virtual host's logs as root - it creates them, and hands
+# them to its server user, whose workers write them. So no directory on the way to them may be
+# one the site user controls, and /home/<domain> is the site user's: a logs/ kept there could be
+# renamed and replaced by a link, and root would then create and hand over files wherever that
+# pointed. The logs live in SITES_LOG_ROOT/<domain>, root's all the way down, with the same
+# rights logs/ had: the site's group reads them, nobody may enter to write them.
+# /home/<domain>/logs is a link there, for people to read them by. Nothing run as root goes
+# through it - OpenLiteSpeed, logrotate, fail2ban and "lomp logs" use the directory itself - so
+# the site user replacing it changes nothing but where its own shortcut leads.
+lib_domain_logs_dir_ensure() {
+  local dir=""; dir="$(lib_domain_log_dir "$D_DOMAIN")"
+  lib_mkdir "$SITES_LOG_ROOT" 0711 root:root
+  lib_mkdir "$dir" 0750 "root:${D_GROUP}"
+  lib_ols_logdir_grant "$dir" \
+    || lib_warn "setfacl could not let OpenLiteSpeed into ${dir}; the site's logs will stay empty"
+}
+
+# /home/<domain>/logs -> the log directory. With -T, ln never takes the name for a directory to
+# put the link into, and replacing a link it neither follows it nor anything else, so what root
+# makes here is a link in the home and nothing else. A directory or a file there is left alone:
+# an older release's logs/ is emptied and removed by lib_domain_logs_move_old first, and
+# anything else there is the site user's own.
+lib_domain_logs_link() {
+  local link="${D_HOME}/logs" dir=""
+  dir="$(lib_domain_log_dir "$D_DOMAIN")"
+  if [[ -L "$link" && "$(readlink -- "$link")" == "$dir" ]]; then return 0; fi
+  # a dry run moved nothing out of an older release's logs/, which a real run would have
+  if (( OPT_DRY_RUN )); then lib_info "[dry-run] would link ${link} to ${dir}"; return 0; fi
+  if [[ -e "$link" && ! -L "$link" ]]; then
+    lib_warn "${link} is not a link to ${dir}, where the logs of ${D_DOMAIN} are; it was left as it is"
+    return 0
+  fi
+  ln -sfnT -- "$dir" "$link" || lib_warn "could not link ${link} to ${dir}, where the logs of ${D_DOMAIN} are"
+}
+
+# An older release kept the logs in /home/<domain>/logs itself, a directory of root's. Once
+# OpenLiteSpeed no longer writes there - add and restore run this for a site that is not served
+# yet, update after the reload that moved every site's logs - what it holds goes to the log
+# directory, and the empty directory goes. The site user can rename that directory or put
+# something else in its place, so _domain_logs_move_old enters it once and checks it from the
+# inside before it reads a name there; what is not root's directory is left alone.
+lib_domain_logs_move_old() {
+  local old="${D_HOME}/logs" dir="" why="" rc=0
+  dir="$(lib_domain_log_dir "$D_DOMAIN")"
+  [[ -d "$old" && ! -L "$old" ]] || return 0
+  if (( OPT_DRY_RUN )); then lib_info "[dry-run] would move the logs in ${old} to ${dir}"; return 0; fi
+  why="$(_domain_logs_move_old "$D_HOME" "$dir" "$D_GROUP" 2>&1)" || rc=$?
+  if (( rc == 3 )); then
+    lib_warn "${old} is not the log directory an older release made (${why}); it was left as it is"
+  elif (( rc != 0 )); then
+    lib_warn "the logs in ${old} could not all be moved to ${dir}${why:+ (${why})}; the rest stays there"
+  elif rmdir -- "$old" 2>/dev/null; then
+    lib_log_write INFO "moved the logs of ${D_DOMAIN} from ${old} to ${dir}"
+  else
+    lib_warn "${old} could not be removed after its logs were moved to ${dir}"
+  fi
+  return 0
+}
+
+# Run in a subshell: it changes directory. Enters <home>/logs the way _lib_mkdir_walk enters a
+# component - not through a link, confirmed with the kernel's getcwd - and wants it root's and
+# closed to everybody else's writes, so that nobody but root can have put a name in it. Rotated
+# copies keep their names; the two live logs, which nothing writes any more, are compressed into
+# a rotated copy of their own, dated back from yesterday to the first day no copy has: a name
+# logrotate, which dates its copies with the day it runs, never makes again, so its "rotate 14"
+# deletes them in time like any other. Empty ones are dropped. Exit 3 = not that directory.
+_domain_logs_move_old() (   # home dir group
+  LIB_ERR_HANDLING=1   # an unexpected failure exits quietly; the caller reports it
+  local home="$1" dir="$2" group="$3" here="" f="" n=0 day="" name="" mode="" left=0
+  shopt -s nullglob dotglob
+  cd -P -- "$home" || exit 1
+  here="$(env pwd -P)" || exit 1
+  if [[ -L logs ]]; then printf 'a symbolic link'; exit 3; fi
+  cd -P -- logs || exit 1
+  [[ "$(env pwd -P)" == "${here%/}/logs" ]] || { printf 'it moved while it was entered'; exit 3; }
+  [[ "$(stat -c %u .)" == 0 ]] || { printf 'it does not belong to root'; exit 3; }
+  mode="$(stat -c %a .)"
+  (( (8#$mode & 8#022) == 0 )) || { printf 'others may write to it (mode %s)' "$mode"; exit 3; }
+  for f in *; do
+    [[ "$f" == access.log || "$f" == error.log ]] && continue
+    if [[ -f "$f" && ! -L "$f" ]] && mv -n -- "$f" "${dir}/" && [[ ! -e "$f" ]]; then continue; fi
+    left=1
+  done
+  for f in access.log error.log; do
+    [[ -f "$f" && ! -L "$f" ]] || continue
+    if [[ ! -s "$f" ]]; then rm -f -- "$f"; continue; fi
+    for (( n = 1; n <= 400; n++ )); do
+      day="$(date -d "-${n} day" +%Y%m%d)"
+      name="${dir}/${f}-${day}"
+      [[ -e "$name" || -e "${name}.gz" ]] || break
+    done
+    if gzip -c -- "$f" >"${name}.gz.tmp" && chmod 0640 "${name}.gz.tmp" && chown "root:${group}" "${name}.gz.tmp" \
+       && mv -n -- "${name}.gz.tmp" "${name}.gz" && [[ ! -e "${name}.gz.tmp" ]]; then
+      rm -f -- "$f"
+    else
+      rm -f -- "${name}.gz.tmp"; left=1
+    fi
+  done
+  (( ! left )) || { printf 'a name that is already in %s, or something other than a file' "$dir"; exit 1; }
+  exit 0
+)
+
 # "update" gives every site what a new one gets from lib_domain_dirs_create and the vhost
-# template: a logs/ OpenLiteSpeed's workers can enter - an older release left it closed to
-# them, so nothing was ever written there - and a vhost rendered again, which puts its error
-# log at NOTICE. One change set for all of them: one configuration test, one graceful reload,
-# the snapshot back if either fails. A logs/ somebody deleted is made again, as add makes it;
-# one that is a link or a file is named and left alone. The fail2ban filters that read the
-# logs, and the webmail's log directory, are put right as well.
+# template: its logs in SITES_LOG_ROOT, with a link in the home, and a vhost rendered again -
+# which writes them there, and puts the error log at NOTICE. The vhosts go first, in one change
+# set: one configuration test, one graceful reload, the snapshot back if either fails - and only
+# once OpenLiteSpeed writes the new directories is anything taken out of the old ones. The
+# fail2ban filters and jails, logrotate and the webmail's log directory follow.
+# DOMAIN_LOGS_MOVED names the sites whose logs were still written in their homes.
 lib_domain_logs_repair() {
-  local d="" dir="" opened=()
-  DOMAIN_LOGS_OPENED=""
+  local d="" vh="" moved=()
+  DOMAIN_LOGS_MOVED=""
   lib_ols_is_installed || return 0
   [[ -n "$(lib_domains_list)" ]] || return 0
   lib_system_profile
@@ -585,28 +691,34 @@ lib_domain_logs_repair() {
   while read -r d; do
     [[ -n "$d" ]] || continue
     lib_domain_state_load "$d" || continue
-    dir="${D_HOME}/logs"
-    if [[ -L "$dir" || ( -e "$dir" && ! -d "$dir" ) ]]; then
-      lib_warn "${dir} is not a directory; the logs of ${d} were left as they are"
-    else
-      if [[ ! -d "$dir" ]]; then lib_mkdir "$dir" 0750 "root:${D_GROUP}"; opened+=("$d")
-      elif ! lib_ols_logdir_open "$dir"; then opened+=("$d"); fi
-      lib_ols_logdir_grant "$dir" || lib_warn "setfacl could not let OpenLiteSpeed into ${dir}"
-    fi
+    vh="${LSWS_VHOSTS_DIR}/${d}/vhconf.conf"
+    if grep -qF '$VH_ROOT/logs/' "$vh" 2>/dev/null; then moved+=("$d"); fi
+    lib_domain_logs_dir_ensure
     lib_ols_vhconf_write "$d"
   done < <(lib_domains_list)
   # a dry run has nothing to test or reload when no vhost would change
   if (( OLS_PENDING_RELOAD || ! OPT_DRY_RUN )); then lib_ols_change_commit "site logs"; fi
+  while read -r d; do
+    [[ -n "$d" ]] || continue
+    lib_domain_state_load "$d" || continue
+    lib_domain_logs_move_old
+    lib_domain_logs_link
+  done < <(lib_domains_list)
+  lib_domain_logrotate_regen
   # and what reads them: an older release's fail2ban filters matched none of their lines
   lib_domain_fail2ban_regen
   if lib_webmail_installed; then lib_webmail_dirs_ensure; fi
-  DOMAIN_LOGS_OPENED="${opened[*]-}"
+  DOMAIN_LOGS_MOVED="${moved[*]-}"
   return 0
 }
 
+# =============================================================================
+#  logrotate / fail2ban regeneration (state -> config)
+# =============================================================================
+
 lib_domain_logrotate_regen() {
   local d="" line="" u="" g="" h="" paths=() apps=()
-  while read -r d; do [[ -n "$d" ]] && paths+=("$(lib_domain_home "$d")/logs/*.log"); done < <(lib_domains_list)
+  while read -r d; do [[ -n "$d" ]] && paths+=("$(lib_domain_log_dir "$d")/*.log"); done < <(lib_domains_list)
   # Node.js sites: PM2 writes into the site user's own ~/.pm2, so logrotate works there as that
   # user (as root it would follow whatever links the user put in place of the logs)
   while read -r d; do
@@ -667,9 +779,18 @@ EOF
 }
 
 lib_domain_fail2ban_regen() {
-  local d="" logs=() enabled=true
+  local d="" f="" logs=() enabled=true
   lib_pkg_installed fail2ban || return 0
-  while read -r d; do [[ -n "$d" ]] && logs+=("$(lib_domain_home "$d")/logs/access.log"); done < <(lib_domains_list)
+  # Only logs that are there: fail2ban will not load a jail none of whose files it finds, and a
+  # jail it cannot load takes the whole reload down, sshd's jail with it. OpenLiteSpeed makes a
+  # site's access.log when it loads the vhost, so every caller that just added or moved a site
+  # finds it; a server whose sites still log into their homes (install run again before update
+  # moved them) has none there yet.
+  while read -r d; do
+    [[ -n "$d" ]] || continue
+    f="$(lib_domain_log_dir "$d")/access.log"
+    if [[ -e "$f" ]]; then logs+=("$f"); fi
+  done < <(lib_domains_list)
   ((${#logs[@]} == 0)) && { enabled=false; logs=("/dev/null"); }
   lib_domain_fail2ban_filters_write
   local filters_changed="$DOMAIN_F2B_FILTERS_CHANGED"
@@ -940,7 +1061,8 @@ lib_domain_logs_main() {
   done
   domain="${domain,,}"
   lib_domain_registered "$domain" || lib_die "Site ${domain} is not registered" "" "setup.sh list"
-  local dir=""; dir="$(lib_domain_home "$domain")/logs"
+  # the directory itself, not the link in the home: that one is the site user's to change
+  local dir=""; dir="$(lib_domain_log_dir "$domain")"
   [[ "$which" != "error" ]]  && files+=("${dir}/access.log")
   [[ "$which" != "access" ]] && files+=("${dir}/error.log")
   # A missing log is not created here: made by root, it is a file OpenLiteSpeed's workers
@@ -972,7 +1094,7 @@ lib_domain_remove_main() {
   lib_domain_registered "$domain" || lib_die "Site ${domain} is not registered" "" "setup.sh list"
   lib_domain_state_load "$domain"
   printf '\n%sThis will remove %s%s\n' "$C_BLD" "$domain" "$C_RST"
-  lib_note "vhost + listener maps (archived), $( (( keep_files )) && printf 'files KEPT' || printf "files ${D_HOME} DELETED"), $( (( keep_db )) && printf 'database KEPT' || printf 'database DROPPED'), $( (( keep_ssl )) && printf 'certificate KEPT' || printf 'certificate deleted')"
+  lib_note "vhost + listener maps (archived), $( (( keep_files )) && printf 'files KEPT' || printf "files ${D_HOME} and logs $(lib_domain_log_dir "$domain") DELETED"), $( (( keep_db )) && printf 'database KEPT' || printf 'database DROPPED'), $( (( keep_ssl )) && printf 'certificate KEPT' || printf 'certificate deleted')"
   lib_note "a safety backup (files + database) is written to ${BACKUP_ROOT}/${domain}/ first"
   if lib_mail_installed && lib_mail_domain_has_traces "$domain"; then
     lib_warn "Every mailbox of ${domain} and all of its mail is deleted too, and the safety backup does NOT include it"
@@ -1033,9 +1155,9 @@ lib_domain_remove_main() {
 
   lib_step "Files and system user"
   if (( keep_files )); then
-    lib_info "files and user kept (--keep-files)"
+    lib_info "files, logs and user kept (--keep-files)"
   else
-    lib_rm "$D_HOME"
+    lib_rm "$D_HOME" "$(lib_domain_log_dir "$domain")"
     lib_rm "${OLS_CACHE_DIR}/${domain}"
     if (( ! OPT_DRY_RUN )) && id -u "$D_USER" >/dev/null 2>&1; then
       pkill -u "$D_USER" >/dev/null 2>&1 || true

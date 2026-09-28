@@ -640,8 +640,8 @@ lib_ols_logs_prune_ensure() {
   lib_cron_set ols-logs "45 4 * * * root $(lib_ols_logs_prune_cmd)"
 }
 
-# A virtual host's own logs - a site's /home/<domain>/logs/*.log, a webmail's - are created by
-# the main process as root and handed to the server user (nobody), and it is the worker
+# A virtual host's own logs - a site's ${SITES_LOG_ROOT}/<domain>/*.log, a webmail's - are created
+# by the main process as root and handed to the server user (nobody), and it is the worker
 # processes, running as that user, that write them and reopen them by path. A directory they
 # cannot enter kept every site's access.log and error.log empty, and with them the fail2ban
 # web jails that read them. Search permission is all they need: the files are theirs already,
@@ -1016,13 +1016,13 @@ EOF
 enableGzip                1
 enableIpGeo               0
 
-errorlog \$VH_ROOT/logs/error.log {
+errorlog $(lib_domain_log_dir "$D_DOMAIN")/error.log {
   useServer               0
   logLevel                NOTICE
   rollingSize             0
 }
 
-accesslog \$VH_ROOT/logs/access.log {
+accesslog $(lib_domain_log_dir "$D_DOMAIN")/access.log {
   useServer               0
   logReferer              1
   logUserAgent            1

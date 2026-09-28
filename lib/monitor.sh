@@ -475,13 +475,18 @@ _doc_check_domains() {
     [[ -d "${D_HOME}/public_html" ]] || _doc_add FAIL "site ${d}: files" "${D_HOME}/public_html missing"
     id -u "$D_USER" >/dev/null 2>&1 || _doc_add FAIL "site ${d}: user" "system user ${D_USER} missing"
     [[ -f "${LSWS_VHOSTS_DIR}/${d}/vhconf.conf" ]] || _doc_add FAIL "site ${d}: vhconf" "${LSWS_VHOSTS_DIR}/${d}/vhconf.conf missing"
-    # the fail2ban web jails read the access logs, so logs nobody writes also mean no bans
-    logs="${D_HOME}/logs"
-    if [[ -L "$logs" ]]; then _doc_add FAIL "site ${d}: logs" "${logs} is a symbolic link, and OpenLiteSpeed opens the site's logs through it as root (make it a directory again)"
-    elif [[ ! -e "$logs" ]]; then _doc_add WARN "site ${d}: logs" "${logs} is missing, so the site has no logs (lomp update makes it again)"
-    elif [[ ! -d "$logs" ]]; then _doc_add WARN "site ${d}: logs" "${logs} is not a directory, so the site has no logs (make it one again)"
-    elif lib_ols_logdir_open "$logs"; then _doc_add OK "site ${d}: logs" "OpenLiteSpeed writes ${logs}"
-    else _doc_add WARN "site ${d}: logs" "OpenLiteSpeed cannot enter ${logs}, so the site's logs stay empty and the fail2ban web jails see nothing (lomp update fixes it)"; fi
+    # OpenLiteSpeed opens the logs as root, so every directory on the way must be root's (see
+    # lib_domain_logs_dir_ensure); and the fail2ban web jails read them, so logs nobody writes
+    # also mean no bans
+    logs="$(lib_domain_log_dir "$d")"
+    if grep -qF '$VH_ROOT/logs/' "${LSWS_VHOSTS_DIR}/${d}/vhconf.conf" 2>/dev/null; then
+      _doc_add FAIL "site ${d}: logs" "OpenLiteSpeed opens them as root in ${D_HOME}/logs, which the site user can replace with a link (lomp update moves them to ${logs})"
+    elif [[ -L "$logs" ]]; then _doc_add FAIL "site ${d}: logs" "${logs} is a symbolic link, and OpenLiteSpeed opens the site's logs through it as root (remove the link; lomp update makes the directory again)"
+    elif [[ ! -d "$logs" ]]; then _doc_add WARN "site ${d}: logs" "${logs} is missing, so the site has no logs (lomp update makes it again)"
+    elif [[ "$(stat -c %u "$logs")" != 0 ]]; then _doc_add FAIL "site ${d}: logs" "${logs} does not belong to root, and OpenLiteSpeed opens the site's logs there as root (lomp update hands it back)"
+    elif ! lib_ols_logdir_open "$logs"; then _doc_add WARN "site ${d}: logs" "OpenLiteSpeed cannot enter ${logs}, so the site's logs stay empty and the fail2ban web jails see nothing (lomp update fixes it)"
+    elif [[ "$(readlink -- "${D_HOME}/logs" 2>/dev/null || true)" != "$logs" ]]; then _doc_add WARN "site ${d}: logs" "OpenLiteSpeed writes ${logs}, but ${D_HOME}/logs does not lead there (lomp update puts the link back)"
+    else _doc_add OK "site ${d}: logs" "OpenLiteSpeed writes ${logs} (${D_HOME}/logs leads there)"; fi
     if lib_ols_conf_block_exists virtualhost "$d"; then
       maps="$(lib_ols_conf_map_get "$OLS_LISTENER_HTTP" "$d")"
       [[ -n "$maps" ]] && _doc_add OK "site ${d}: vhost" "configured (${maps})" || _doc_add FAIL "site ${d}: vhost" "no listener map in ${OLS_LISTENER_HTTP}"

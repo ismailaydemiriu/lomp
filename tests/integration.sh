@@ -254,17 +254,23 @@ PHP_OWNER="$(ps -eo user:32,args | awk -v d="$IDENT" '$0 ~ "lsphp" && $1 == d {p
 check_eq "lsphp runs as the site user" "$IDENT" "${PHP_OWNER:-<none>}"
 rm -f "/home/${TEST_DOMAIN}/public_html/itest.php"
 
-# the site's own logs, written by OpenLiteSpeed's workers (nobody) - PHP's errors included
+# the site's own logs, written by OpenLiteSpeed's workers (nobody) - PHP's errors included - in
+# a directory that is root's all the way down, with a link to it in the home
+SITE_LOGS="/var/log/lomp-sites/${TEST_DOMAIN}"
+check_eq "the site's logs are root's" "root:${IDENT} 750" "$(stat -c '%U:%G %a' "$SITE_LOGS")"
+check_eq "and logs/ in the home leads there" "$SITE_LOGS" "$(readlink "/home/${TEST_DOMAIN}/logs")"
+check_not "the vhost writes nothing into the home" grep -qF '$VH_ROOT/logs' "${LSWS_HOME}/conf/vhosts/${TEST_DOMAIN}/vhconf.conf"
 check_eq "site request for the access log" "200" "$(http_code "$TEST_DOMAIN" "/?itest-log=$$")"
-check "the request is in the site's access.log" log_gets "/home/${TEST_DOMAIN}/logs/access.log" "itest-log=$$"
+check "the request is in the site's access.log" log_gets "${SITE_LOGS}/access.log" "itest-log=$$"
+check "which the site user can read through its link" runuser -u "$IDENT" -- grep -qF "itest-log=$$" "/home/${TEST_DOMAIN}/logs/access.log"
 http_code "$TEST_DOMAIN" "/.env?itest-f2b=$$" >/dev/null
-log_gets "/home/${TEST_DOMAIN}/logs/access.log" "itest-f2b=$$" || true
+log_gets "${SITE_LOGS}/access.log" "itest-f2b=$$" || true
 check "fail2ban's probe filter matches OpenLiteSpeed's lines" bash -c \
-  "fail2ban-regex '/home/${TEST_DOMAIN}/logs/access.log' /etc/fail2ban/filter.d/server-setup-web-probe.conf | grep -qE '[1-9][0-9]* matched'"
+  "fail2ban-regex '${SITE_LOGS}/access.log' /etc/fail2ban/filter.d/server-setup-web-probe.conf | grep -qE '[1-9][0-9]* matched'"
 printf '<?php trigger_error("itest-php-warning-%s", E_USER_WARNING); echo "ok";' "$$" >"/home/${TEST_DOMAIN}/public_html/itest-err.php"
 chown "${IDENT}:${IDENT}" "/home/${TEST_DOMAIN}/public_html/itest-err.php"
 http_code "$TEST_DOMAIN" /itest-err.php >/dev/null
-check "a PHP warning is in the site's error.log" log_gets "/home/${TEST_DOMAIN}/logs/error.log" "itest-php-warning-$$"
+check "a PHP warning is in the site's error.log" log_gets "${SITE_LOGS}/error.log" "itest-php-warning-$$"
 rm -f "/home/${TEST_DOMAIN}/public_html/itest-err.php"
 
 printf 'secret\n' >"/home/${TEST_DOMAIN}/private/secret.txt"
@@ -436,6 +442,7 @@ step "T13  remove the site"
 rc="$(run_setup remove remove "$TEST_DOMAIN" --yes --no-color)"
 check_eq "remove exits 0" 0 "$rc"
 check_not "home directory removed" test -e "/home/${TEST_DOMAIN}"
+check_not "and its logs with it" test -e "/var/log/lomp-sites/${TEST_DOMAIN}"
 check_not "system user removed" id -u "$IDENT"
 check_not "vhost config removed" test -e "${LSWS_HOME}/conf/vhosts/${TEST_DOMAIN}"
 check_not "vhost unregistered from httpd_config" grep -q "virtualhost ${TEST_DOMAIN}" "${LSWS_HOME}/conf/httpd_config.conf"

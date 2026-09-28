@@ -379,7 +379,7 @@ you are already in.
 /home/<domain>/               0711  <user>:<user>     one Linux user per site, nologin shell
 ├── public_html/              0755  document root
 ├── private/                  0700  sessions, temp uploads, secrets - never served
-├── logs/                     0750  access.log, error.log with PHP's errors (rotated by logrotate)
+├── logs -> /var/log/lomp-sites/<domain>/   access.log, error.log with PHP's errors
 ├── backups/                  0700
 ├── app/                      proxy mode only: your Node/Python application
 └── .pm2/                     0700  Node.js sites: PM2 state, ecosystem file, logs, job scripts
@@ -389,9 +389,15 @@ PHP runs as the site's own user through a per-vhost LSAPI processor, so one comp
 site cannot read another site's files. Directory listing is off, and requests for dotfiles,
 `.git`, `.env`, `*.sql`, `*.bak` and `wp-config.php` are refused.
 
-`logs/` belongs to root: the site user can read its logs but not change them, and an ACL lets
-OpenLiteSpeed's worker processes (`nobody`) in to write them. Servers set up before that ACL
-existed never wrote a site log; `sudo lomp update` adds it to every site.
+The logs themselves are in `/var/log/lomp-sites/<domain>/` (0750 root:`<user>`, rotated daily
+by logrotate, 14 days kept), and `logs` in the home is a link there. OpenLiteSpeed opens a
+site's logs as root, so no directory on the way to them may belong to the site user, who owns
+the home: a `logs/` kept in it could be swapped for a link, and root would create and hand over
+log files wherever that pointed. The site user can read its logs but not change them, and an
+ACL lets OpenLiteSpeed's worker processes (`nobody`) in to write them. Nothing run as root goes
+through the link, so a site user who replaces it only changes where its own shortcut leads.
+Servers set up by an older release kept the logs in the home; `sudo lomp update` moves them,
+with their history, and puts the link in their place.
 
 ---
 
@@ -401,6 +407,7 @@ existed never wrote a site log; `sudo lomp update` adds it to every site.
 |---|---|
 | `/root/.server-setup/` | State and credentials, mode 0700 (`manifest.json`, `domains/<domain>/…`, archives) |
 | `/home/<domain>/` | Site files |
+| `/var/log/lomp-sites/<domain>/` | The site's `access.log` and `error.log` (`/home/<domain>/logs` links here) |
 | `/usr/local/lsws/conf/vhosts/<domain>/` | Generated vhost configuration |
 | `/usr/local/lsws/logs/` | OpenLiteSpeed's own logs (the WebAdmin's are in `admin/logs/`), the server log written at NOTICE rather than the package's DEBUG. OpenLiteSpeed rolls them at 10 MB; a daily job deletes the rolled files once they are older than 14 days |
 | `/etc/sysctl.d/99-production-server.conf` | Kernel tuning |

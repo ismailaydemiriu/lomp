@@ -835,6 +835,7 @@ lib_domain_state_dir() { printf '%s/domains/%s' "$STATE_DIR" "$1"; }
 lib_domain_json()      { printf '%s/domains/%s/domain.json' "$STATE_DIR" "$1"; }
 lib_domain_registered() { [[ -s "$(lib_domain_json "$1")" ]]; }
 lib_domain_home()      { printf '%s/%s' "$SITES_ROOT" "$1"; }
+lib_domain_log_dir()   { printf '%s/%s' "$SITES_LOG_ROOT" "$1"; }
 
 lib_domains_list() {   # prints registered domains, one per line
   local d=""

@@ -1100,9 +1100,9 @@ lib_update_main() {
   lib_manifest_set '.last_update' "$(lib_iso_now)"
   # last: a vhost OpenLiteSpeed refuses ends the run here, with the update itself recorded
   lib_domain_logs_repair
-  if [[ -n "$DOMAIN_LOGS_OPENED" ]]; then
-    if (( OPT_DRY_RUN )); then lib_info "[dry-run] would let OpenLiteSpeed write the logs of: ${DOMAIN_LOGS_OPENED}"
-    else lib_ok "OpenLiteSpeed can now write the logs of: ${DOMAIN_LOGS_OPENED}"; fi
+  if [[ -n "$DOMAIN_LOGS_MOVED" ]]; then
+    if (( OPT_DRY_RUN )); then lib_info "[dry-run] would move the logs of these sites out of their homes into ${SITES_LOG_ROOT}: ${DOMAIN_LOGS_MOVED}"
+    else lib_ok "The logs of these sites moved out of their homes into ${SITES_LOG_ROOT} (logs/ in each home leads there): ${DOMAIN_LOGS_MOVED}"; fi
   fi
   if (( DOMAIN_F2B_FILTERS_CHANGED )); then
     if (( OPT_DRY_RUN )); then lib_info "[dry-run] would rewrite the fail2ban web filters, which match no access log line as they are"

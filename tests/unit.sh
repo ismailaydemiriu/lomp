@@ -13,7 +13,7 @@ cleanup() { rm -rf "$TMP"; }
 SCRIPT_VERSION="test"; SCRIPT_VERSION_LINE="1.0"
 TIMEZONE="Europe/Istanbul"; ADMIN_PORT="7080"; PHP_VERSION="8.3"; ADMIN_ACCESS="tunnel"; ADMIN_ALLOWED_IP=""; DEFAULT_EMAIL=""; SSH_PORT=""
 DB_BUFFER_PERCENT=""; REDIS_MAX_PERCENT=""; BACKUP_KEEP="7"; BACKUP_SCHEDULE=""; FAIL2BAN_IGNORE_IP=""
-STATE_DIR="$TMP/state"; SITES_ROOT="$TMP/home"; LSWS_HOME="$TMP/lsws"; LOG_FILE="$TMP/server_setup.log"
+STATE_DIR="$TMP/state"; SITES_ROOT="$TMP/home"; SITES_LOG_ROOT="$TMP/sitelogs"; LSWS_HOME="$TMP/lsws"; LOG_FILE="$TMP/server_setup.log"
 BACKUP_ROOT="$TMP/backups"; ACME_ROOT="$TMP/acme"; SSL_DEPLOY_DIR="$TMP/ssl"
 SYSCTL_FILE="$TMP/sysctl.conf"; LIMITS_FILE="$TMP/limits.conf"; MARIADB_TUNED_FILE="$TMP/60-tuned.cnf"
 FAIL2BAN_JAIL_FILE="$TMP/jail.conf"; FAIL2BAN_WEB_JAIL_FILE="$TMP/jail-web.conf"; CRON_FILE="$TMP/cron"
@@ -697,7 +697,8 @@ assert_eq "append once" 1 "$(grep -c '^include x$' "$TMP/kv.ini")"
 _ini_set "$TMP/nd.conf" web "bind to" "127.0.0.1"; _ini_set "$TMP/nd.conf" web "bind to" "*"; _ini_set "$TMP/nd.conf" web "allow connections from" "localhost"
 assert_eq "ini set" "$(printf '[web]\n    bind to = *\n    allow connections from = localhost')" "$(cat "$TMP/nd.conf")"
 lib_domain_logrotate_regen
-assert_has "logrotate site path" "$SITES_ROOT/example.com/logs/*.log" "$(cat "$LOGROTATE_SITES_FILE")"
+assert_has "logrotate site path" "$SITES_LOG_ROOT/example.com/*.log" "$(cat "$LOGROTATE_SITES_FILE")"
+assert_lacks "and nothing in the site's home" "$SITES_ROOT/example.com/logs" "$(cat "$LOGROTATE_SITES_FILE")"
 assert_has "logrotate copytruncate" "copytruncate" "$(cat "$LOGROTATE_SITES_FILE")"
 mkdir -p "$TMP/f2b"; mv_filter_dir="$TMP/f2b"
 lib_domain_fail2ban_filters_write 2>/dev/null || true
@@ -1314,19 +1315,22 @@ assert_eq "second regen is also clean" 0 "$rc"
 # renders two constructs the empty case never reaches: the indented multi-line "logpath"
 # continuation, and the two-line Cloudflare action block. Both are fail2ban syntax that
 # silently disables a jail when it comes out wrong, so assert on them directly.
-for d in alpha.example beta.example; do
-  mkdir -p "$STATE_DIR/domains/$d" "$SITES_ROOT/$d/logs"
+for d in alpha.example beta.example gamma.example; do
+  mkdir -p "$STATE_DIR/domains/$d" "$SITES_LOG_ROOT/$d"
   printf '{"domain":"%s"}\n' "$d" >"$STATE_DIR/domains/$d/domain.json"
 done
+: >"$SITES_LOG_ROOT/alpha.example/access.log"; : >"$SITES_LOG_ROOT/beta.example/access.log"
 printf 'dns_cloudflare_api_token = Xv8sQ2pLm9TzR4kWn1bYc7dEf0g\n' >"$CF_INI"
 : >"$CF_F2B_ACTION"
 lib_manifest_set '.cloudflare.account_id' 'acc0123456789'
 assert_eq "regen succeeds with sites and a Cloudflare token" 0 "$(run_isolated lib_domain_fail2ban_regen)"
 out="$(cat "$FAIL2BAN_WEB_JAIL_FILE")"
 assert_has "jails enabled once a site exists" "enabled = true" "$out"
-assert_has "first site logpath" "logpath = ${SITES_ROOT}/alpha.example/logs/access.log" "$out"
+assert_has "first site logpath" "logpath = ${SITES_LOG_ROOT}/alpha.example/access.log" "$out"
 # fail2ban only reads the second path as part of logpath while the line stays indented
-assert_has "second site is an indented continuation" $'\n          '"${SITES_ROOT}/beta.example/logs/access.log" "$out"
+assert_has "second site is an indented continuation" $'\n          '"${SITES_LOG_ROOT}/beta.example/access.log" "$out"
+# fail2ban refuses a jail none of whose files exist, and the reload with it
+assert_lacks "a site whose access.log is not there yet is left out" "gamma.example" "$out"
 assert_eq "cloudflare action reaches both jails" 2 "$(grep -c 'server-setup-cloudflare' <<<"$out")"
 assert_eq "both jails still inherit action_" 2 "$(grep -c '^action = %(action_)s$' <<<"$out")"
 assert_has "account passed to the action" 'cfaccount="acc0123456789"' "$out"
@@ -2379,49 +2383,127 @@ assert_true "and writes nothing" cmp -s "$CRON_FILE" "$TMP/cron.dry"
 cp "$TMP/cron.keep" "$CRON_FILE"
 
 # =============================================================================
-section "site logs: OpenLiteSpeed's workers can write them"
-# OpenLiteSpeed's main process creates a vhost's logs as root and hands them to nobody; the
-# workers, running as nobody, write them. /home/<domain>/logs is root's 0750, so with no way
-# in every site's logs stayed empty - and so did what the fail2ban web jails read.
+section "site logs: root's all the way down, and a link in the home"
+# OpenLiteSpeed's main process opens a vhost's logs as root, creates them and hands them to
+# nobody, whose workers write them. So they live in SITES_LOG_ROOT/<domain>, root's all the way
+# down, and /home/<domain>/logs - in a directory the site user owns - is only a link there.
 lib_rollback_clear
 lib_domain_state_reset
 D_DOMAIN="logs.example.com"; D_IDENT="logs_example_com"; D_USER="logs_example_com"; D_GROUP="logs_example_com"
 D_HOME="$SITES_ROOT/logs.example.com"; D_MODE="php"; D_PHP="8.3"; D_PHP_CHILDREN=4; D_MEMORY="256M"; D_UPLOAD="64M"
+_ld="$SITES_LOG_ROOT/logs.example.com"
 : >"$SETFACL_LOG"
-assert_eq  "the directory setup exits 0" 0 "$(run_isolated lib_domain_dirs_create)"
-assert_has "OpenLiteSpeed's user may enter logs/, never through a link" "-P -m u:nobody:x ${D_HOME}/logs" "$(cat "$SETFACL_LOG")"
-if (( CAN_CHMOD )); then assert_eq "which stays 0750" 750 "$(stat -c %a "${D_HOME}/logs")"; fi
+assert_eq   "the directory setup exits 0" 0 "$(run_isolated lib_domain_dirs_create)"
+assert_true "it makes the site's log directory" test -d "$_ld"
+if (( CAN_CHMOD )); then
+  assert_eq "0750, as logs/ was"                      750 "$(stat -c %a "$_ld")"
+  assert_eq "under a root others may only pass through" 711 "$(stat -c %a "$SITES_LOG_ROOT")"
+fi
+assert_has   "OpenLiteSpeed's user may enter it, never through a link" "-P -m u:nobody:x ${_ld}" "$(cat "$SETFACL_LOG")"
+assert_lacks "and nothing in the home is opened for it" "u:nobody:x ${D_HOME}/logs" "$(cat "$SETFACL_LOG")"
+if (( CAN_SYMLINK )); then assert_eq "logs/ in the home leads there" "$_ld" "$(readlink "${D_HOME}/logs")"; fi
 : >"$SETFACL_LOG"
 OPT_DRY_RUN=1; _rc="$(run_isolated lib_domain_dirs_create)"; OPT_DRY_RUN=0
 assert_eq "a dry run exits 0" 0 "$_rc"
 assert_eq "and sets no ACL"   "" "$(cat "$SETFACL_LOG")"
 : >"$RUNUSER_LOG"
-lib_ols_logdir_open "${D_HOME}/logs" || true
-assert_has "whether they can is asked of that user" "-u nobody -- test -x ${D_HOME}/logs" "$(cat "$RUNUSER_LOG")"
+lib_ols_logdir_open "$_ld" || true
+assert_has "whether they can is asked of that user" "-u nobody -- test -x ${_ld}" "$(cat "$RUNUSER_LOG")"
+_vh="$(lib_ols_render_vhconf)"
+assert_has   "the vhost writes its error log there" "errorlog ${_ld}/error.log {" "$_vh"
+assert_has   "and its access log"                   "accesslog ${_ld}/access.log {" "$_vh"
+assert_lacks "and nothing into the site's home"     '$VH_ROOT/logs' "$_vh"
 # PHP's warnings, fatal errors and error_log() lines arrive as "[NOTICE] ... [STDERR]"
 _lvl() { awk '/^errorlog /,/^}/' | awk '$1 == "logLevel" { print $2 }'; }
 assert_eq "so the site's error log is at NOTICE" "NOTICE" "$(lib_ols_render_vhconf | _lvl)"
 assert_eq "the catch-all's stays at WARN"        "WARN"   "$(lib_ols_render_default_vhconf | _lvl)"
 assert_has "the webmail's log directory is opened the same way" 'lib_ols_logdir_grant "$WM_LOG_DIR"' "$(declare -f lib_webmail_dirs_ensure)"
 assert_lacks "lomp logs creates no log file as root" "touch" "$(declare -f lib_domain_logs_main)"
+assert_has   "and follows the directory, not the link" 'lib_domain_log_dir "$domain"' "$(declare -f lib_domain_logs_main)"
+assert_has   "remove deletes the logs with the files" 'lib_rm "$D_HOME" "$(lib_domain_log_dir "$domain")"' "$(declare -f lib_domain_remove_main)"
+
+# a link the site user put in place of logs/ is replaced, and where it led is never read or
+# written; a directory of the user's own is left alone
+if (( CAN_SYMLINK )); then
+  mkdir -p "$TMP/lv-victim"; printf 'keep\n' >"$TMP/lv-victim/error.log"
+  rm -f "${D_HOME}/logs"; ln -s "$TMP/lv-victim" "${D_HOME}/logs"
+  assert_eq "a link elsewhere: the setup exits 0" 0 "$(run_isolated lib_domain_dirs_create)"
+  assert_eq "and logs/ leads to the log directory again" "$_ld" "$(readlink "${D_HOME}/logs")"
+  assert_eq "where the other one led is as it was" "error.log" "$(ls -A "$TMP/lv-victim")"
+  assert_eq "to the byte" "keep" "$(cat "$TMP/lv-victim/error.log")"
+fi
+rm -rf "${D_HOME}/logs"; mkdir -p "${D_HOME}/logs"; printf 'mine\n' >"${D_HOME}/logs/notes.txt"
+_out="$(lib_domain_logs_link 2>&1)"
+assert_true "a directory of the user's own is left alone" test -f "${D_HOME}/logs/notes.txt"
+assert_has  "and named" "${D_HOME}/logs is not a link to ${_ld}" "$_out"
+rm -rf "${D_HOME}/logs"
+
+# An older release's logs/ - root's directory in the home. Once nothing writes there its
+# history moves to the log directory, and it goes. The suite runs as whoever runs it, so the
+# one question the move asks about the directory's owner is answered here.
+eval 'stat() { if [[ "$*" == "-c %u ." && -n "${FAKE_OWNER_UID:-}" ]]; then printf "%s\n" "$FAKE_OWNER_UID"; else command stat "$@"; fi; }'
+_old="${D_HOME}/logs"
+_y1="$(date -d '-1 day' +%Y%m%d)"; _y2="$(date -d '-2 day' +%Y%m%d)"
+_mk_old() {   # logs/ as a day of OpenLiteSpeed and logrotate leave it
+  rm -rf "$_old"; mkdir -p "$_old"; chmod 0750 "$_old"
+  printf 'A-live\n' >"$_old/access.log"; : >"$_old/error.log"
+  printf 'A-rotated\n' >"$_old/access.log-20260101"
+  printf 'E-rotated\n' | gzip -c >"$_old/error.log-20251231.gz"
+}
+if (( CAN_CHMOD )); then
+  _mk_old
+  rm -rf "$_ld"; mkdir -p "$_ld"; printf 'new\n' >"$_ld/access.log"
+  printf 'taken\n' | gzip -c >"$_ld/access.log-${_y1}.gz"
+  FAKE_OWNER_UID=0
+  _out="$(lib_domain_logs_move_old 2>&1)"
+  assert_false "the old directory goes"                 test -e "$_old"
+  assert_eq    "a rotated copy keeps its name"          "A-rotated" "$(cat "$_ld/access.log-20260101")"
+  assert_eq    "a compressed one too"                   "E-rotated" "$(gzip -dc "$_ld/error.log-20251231.gz")"
+  assert_eq    "the old live log becomes a copy dated before the last one" "A-live" "$(gzip -dc "$_ld/access.log-${_y2}.gz" 2>/dev/null || true)"
+  assert_eq    "which is left as it was"                "taken" "$(gzip -dc "$_ld/access.log-${_y1}.gz")"
+  assert_eq    "the log OpenLiteSpeed writes now is not touched" "new" "$(cat "$_ld/access.log")"
+  assert_eq    "an empty one is dropped"                "error.log-20251231.gz" "$(ls "$_ld" | grep '^error\.log' | paste -sd' ' -)"
+  assert_eq    "and nothing half-written stays"         "" "$(ls -A "$_ld" | grep '\.tmp$' || true)"
+  assert_eq    "all of it quietly"                      "" "$_out"
+  # ...and nothing that is not that directory
+  _mk_old; FAKE_OWNER_UID=1000
+  _out="$(lib_domain_logs_move_old 2>&1)"
+  assert_eq  "one that is not root's is left as it is" "A-live" "$(cat "$_old/access.log")"
+  assert_has "and named" "is not the log directory an older release made (it does not belong to root)" "$_out"
+  _mk_old; FAKE_OWNER_UID=0; chmod 0770 "$_old"
+  _out="$(lib_domain_logs_move_old 2>&1)"
+  assert_true "nor one its group may write to" test -f "$_old/access.log"
+  assert_has  "which is named as well" "others may write to it (mode 770)" "$_out"
+  rm -rf "$_old"
+  if (( CAN_SYMLINK )); then
+    ln -s "$TMP/lv-victim" "$_old"
+    assert_eq "a link in its place: nothing to move" 0 "$(run_isolated lib_domain_logs_move_old)"
+    assert_eq "entered directly, the link is refused" 3 "$(run_isolated _domain_logs_move_old "$D_HOME" "$_ld" "$D_GROUP")"
+    assert_eq "and nothing is read or moved from where it leads" "error.log" "$(ls -A "$TMP/lv-victim")"
+    rm -f "$_old"
+  fi
+fi
+unset FAKE_OWNER_UID
 lib_domain_state_reset
 
-# update gives the sites of an older release the same: lr1's logs were closed to
-# OpenLiteSpeed, lr2's were already open, lr3's logs/ is a link (a file where the suite
-# cannot make one), and lr4's was deleted
+# update moves the sites of an older release: lr1 keeps its logs in its home, lr2 is done
+# already, lr3's logs/ is a link the site user planted (a file where the suite cannot make
+# one), and lr4 has no logs/ at all
 _orig_cb="$(declare -f lib_ols_change_begin)"; _orig_cc="$(declare -f lib_ols_change_commit)"
-_orig_lo="$(declare -f lib_ols_logdir_open)"; _orig_wi="$(declare -f lib_webmail_installed)"
+_orig_wi="$(declare -f lib_webmail_installed)"
 _orig_wd="$(declare -f lib_webmail_dirs_ensure)"; _orig_rg="$(declare -f lib_domain_fail2ban_regen)"
 _lr_calls="$TMP/lr-calls"
+_lr1_old() { if [[ -d "$SITES_ROOT/lr1.example.com/logs" && ! -L "$SITES_ROOT/lr1.example.com/logs" ]]; then printf 'there'; else printf 'gone'; fi; }
 # lib_ols_is_installed has no definition left here (an earlier section unset it), so this one
 # is removed again below rather than restored
 eval 'lib_ols_is_installed()    { return 0; }'
 eval 'lib_ols_change_begin()    { OLS_PENDING_RELOAD=0; printf "begin\n" >>"$_lr_calls"; }'
-eval 'lib_ols_change_commit()   { printf "commit %s pending=%s\n" "$1" "$OLS_PENDING_RELOAD" >>"$_lr_calls"; OLS_PENDING_RELOAD=0; }'
-eval 'lib_ols_logdir_open()     { [[ -e "$1/.open" ]]; }'
+# the old logs/ has to be there still when OpenLiteSpeed is reloaded: nothing moves before
+eval 'lib_ols_change_commit()   { printf "commit %s pending=%s lr1-old=%s\n" "$1" "$OLS_PENDING_RELOAD" "$(_lr1_old)" >>"$_lr_calls"; OLS_PENDING_RELOAD=0; }'
 eval 'lib_webmail_installed()   { return 1; }'
 eval 'lib_webmail_dirs_ensure() { printf "webmail dirs\n" >>"$_lr_calls"; }'
 eval 'lib_domain_fail2ban_regen() { printf "f2b\n" >>"$_lr_calls"; }'
+FAKE_OWNER_UID=0
 _state_save="$STATE_DIR"; STATE_DIR="$TMP/lr-state"
 for _d in lr1.example.com lr2.example.com lr3.example.com lr4.example.com; do
   _i="${_d//./_}"
@@ -2430,42 +2512,65 @@ for _d in lr1.example.com lr2.example.com lr3.example.com lr4.example.com; do
     '{domain:$d, ident:$i, user:$i, group:$i, home:$h, mode:"php",
       php:{version:"8.3", children:4, memory_limit:"256M", upload_max:"64M"}}' >"$STATE_DIR/domains/$_d/domain.json"
 done
-mkdir -p "$SITES_ROOT/lr1.example.com/logs" "$SITES_ROOT/lr2.example.com/logs"
-: >"$SITES_ROOT/lr2.example.com/logs/.open"
-if (( CAN_SYMLINK )); then mkdir -p "$TMP/lr-victim"; ln -s "$TMP/lr-victim" "$SITES_ROOT/lr3.example.com/logs"
-else : >"$SITES_ROOT/lr3.example.com/logs"; fi
-mkdir -p "$LSWS_VHOSTS_DIR/lr1.example.com"
 _lr_old_vhconf() { printf 'errorlog $VH_ROOT/logs/error.log {\n  logLevel                WARN\n}\n'; }
-_lr_old_vhconf >"$LSWS_VHOSTS_DIR/lr1.example.com/vhconf.conf"
+mkdir -p "$SITES_ROOT/lr1.example.com/logs"; chmod 0750 "$SITES_ROOT/lr1.example.com/logs"
+printf 'lr1-live\n' >"$SITES_ROOT/lr1.example.com/logs/access.log"
+printf 'lr1-rotated\n' >"$SITES_ROOT/lr1.example.com/logs/access.log-20260102"
+mkdir -p "$SITES_LOG_ROOT/lr2.example.com"
+if (( CAN_SYMLINK )); then
+  ln -s "$SITES_LOG_ROOT/lr2.example.com" "$SITES_ROOT/lr2.example.com/logs"
+  mkdir -p "$TMP/lr-victim"; printf 'v\n' >"$TMP/lr-victim/access.log"
+  ln -s "$TMP/lr-victim" "$SITES_ROOT/lr3.example.com/logs"
+else
+  : >"$SITES_ROOT/lr3.example.com/logs"
+fi
+for _d in lr1 lr3; do
+  mkdir -p "$LSWS_VHOSTS_DIR/${_d}.example.com"; _lr_old_vhconf >"$LSWS_VHOSTS_DIR/${_d}.example.com/vhconf.conf"
+done
 : >"$SETFACL_LOG"; : >"$_lr_calls"
 lib_domain_logs_repair >"$TMP/lr-out" 2>&1
-assert_eq  "the sites OpenLiteSpeed could not write are named" "lr1.example.com lr4.example.com" "$DOMAIN_LOGS_OPENED"
-assert_has "they get the ACL"                  "-P -m u:nobody:x ${SITES_ROOT}/lr1.example.com/logs" "$(cat "$SETFACL_LOG")"
-assert_has "and so, harmlessly, do the others" "-P -m u:nobody:x ${SITES_ROOT}/lr2.example.com/logs" "$(cat "$SETFACL_LOG")"
-assert_lacks "a logs/ that is not a directory is left alone" "lr3.example.com" "$(cat "$SETFACL_LOG")"
-assert_has "and named"                         "${SITES_ROOT}/lr3.example.com/logs is not a directory" "$(cat "$TMP/lr-out")"
-if (( CAN_SYMLINK )); then assert_eq "nothing reached what the link points at" "" "$(ls -A "$TMP/lr-victim")"; fi
-assert_true "a deleted logs/ is made again"    test -d "${SITES_ROOT}/lr4.example.com/logs"
-if (( CAN_CHMOD )); then assert_eq "as add makes it" 750 "$(stat -c %a "${SITES_ROOT}/lr4.example.com/logs")"; fi
-assert_has "with the ACL"                      "-P -m u:nobody:x ${SITES_ROOT}/lr4.example.com/logs" "$(cat "$SETFACL_LOG")"
+assert_eq "the sites that still logged into their homes are named" "lr1.example.com lr3.example.com" "$DOMAIN_LOGS_MOVED"
+assert_eq "no vhost writes into a home any more" "" "$(grep -l '$VH_ROOT/logs' "$LSWS_VHOSTS_DIR"/lr?.example.com/vhconf.conf || true)"
 assert_eq "every vhost is rendered again, its error log at NOTICE" "NOTICE NOTICE NOTICE NOTICE" \
   "$(for _d in lr1 lr2 lr3 lr4; do _lvl <"$LSWS_VHOSTS_DIR/${_d}.example.com/vhconf.conf"; done | paste -sd' ' -)"
-assert_eq "in one change set, and fail2ban's filters after it" "begin|commit site logs pending=1|f2b" "$(paste -sd'|' - <"$_lr_calls")"
-# once the ACL is there, a second run has nothing to name and nothing to reload
-: >"$SITES_ROOT/lr1.example.com/logs/.open"; : >"$SITES_ROOT/lr4.example.com/logs/.open" || true
+for _d in lr1 lr2 lr3 lr4; do
+  assert_has "${_d} has its log directory, open to OpenLiteSpeed" "-P -m u:nobody:x ${SITES_LOG_ROOT}/${_d}.example.com" "$(cat "$SETFACL_LOG")"
+done
+assert_eq "one change set, reloaded before anything moves, then fail2ban" \
+  "begin|commit site logs pending=1 lr1-old=there|f2b" "$(paste -sd'|' - <"$_lr_calls")"
+if (( CAN_CHMOD )); then
+  assert_eq   "lr1's history is in its log directory" "lr1-rotated" "$(cat "$SITES_LOG_ROOT/lr1.example.com/access.log-20260102")"
+  assert_eq   "with its last live log"                "lr1-live" "$(gzip -dc "$SITES_LOG_ROOT/lr1.example.com/access.log-${_y1}.gz" 2>/dev/null || true)"
+  assert_false "and its old logs/ is gone"            test -d "$SITES_ROOT/lr1.example.com/logs" -a ! -L "$SITES_ROOT/lr1.example.com/logs"
+fi
+if (( CAN_SYMLINK )); then
+  if (( CAN_CHMOD )); then assert_eq "its logs/ leads there now" "${SITES_LOG_ROOT}/lr1.example.com" "$(readlink "$SITES_ROOT/lr1.example.com/logs")"; fi
+  assert_eq "the planted link is replaced"             "${SITES_LOG_ROOT}/lr3.example.com" "$(readlink "$SITES_ROOT/lr3.example.com/logs")"
+  assert_eq "and nothing reached where it led"         "access.log" "$(ls -A "$TMP/lr-victim")"
+  assert_eq "a site with no logs/ gets the link"       "${SITES_LOG_ROOT}/lr4.example.com" "$(readlink "$SITES_ROOT/lr4.example.com/logs")"
+else
+  assert_true "a file in place of logs/ is left alone" test -f "$SITES_ROOT/lr3.example.com/logs"
+fi
+assert_has   "logrotate reads the log directories" "${SITES_LOG_ROOT}/lr1.example.com/*.log" "$(cat "$LOGROTATE_SITES_FILE")"
+assert_lacks "and no longer the homes"             "${SITES_ROOT}/lr1.example.com/logs" "$(cat "$LOGROTATE_SITES_FILE")"
+# a second run has nothing to move and nothing to reload
 : >"$_lr_calls"
 lib_domain_logs_repair >"$TMP/lr-out" 2>&1
-assert_eq "a second run names nothing"         "" "$DOMAIN_LOGS_OPENED"
-assert_eq "and reloads nothing"                "begin|commit site logs pending=0|f2b" "$(paste -sd'|' - <"$_lr_calls")"
+assert_eq "a second run names nothing" "" "$DOMAIN_LOGS_MOVED"
+assert_has "and reloads nothing"       "commit site logs pending=0" "$(cat "$_lr_calls")"
 # a dry run says what it would do and does none of it
-rm -f "$SITES_ROOT/lr1.example.com/logs/.open"
+rm -rf "$SITES_ROOT/lr1.example.com/logs" "$SITES_LOG_ROOT/lr1.example.com"
+mkdir -p "$SITES_ROOT/lr1.example.com/logs"; printf 'lr1-live\n' >"$SITES_ROOT/lr1.example.com/logs/access.log"
 _lr_old_vhconf >"$LSWS_VHOSTS_DIR/lr1.example.com/vhconf.conf"
 cp "$LSWS_VHOSTS_DIR/lr1.example.com/vhconf.conf" "$TMP/lr-vh-before"
 : >"$SETFACL_LOG"
-OPT_DRY_RUN=1; lib_domain_logs_repair >"$TMP/lr-out" 2>&1; OPT_DRY_RUN=0
-assert_eq   "a dry run names what it would open" "lr1.example.com" "$DOMAIN_LOGS_OPENED"
-assert_eq   "sets no ACL"                        "" "$(cat "$SETFACL_LOG")"
-assert_true "and writes no vhost"                cmp -s "$LSWS_VHOSTS_DIR/lr1.example.com/vhconf.conf" "$TMP/lr-vh-before"
+OPT_DRY_RUN=1; OPT_QUIET=0 lib_domain_logs_repair >"$TMP/lr-out" 2>&1; OPT_DRY_RUN=0
+assert_eq    "a dry run names what it would move" "lr1.example.com" "$DOMAIN_LOGS_MOVED"
+assert_has   "and says so"                        "would move the logs in ${SITES_ROOT}/lr1.example.com/logs" "$(cat "$TMP/lr-out")"
+assert_eq    "sets no ACL"                        "" "$(cat "$SETFACL_LOG")"
+assert_true  "writes no vhost"                    cmp -s "$LSWS_VHOSTS_DIR/lr1.example.com/vhconf.conf" "$TMP/lr-vh-before"
+assert_true  "moves nothing"                      test -f "$SITES_ROOT/lr1.example.com/logs/access.log"
+assert_false "and makes no directory"             test -e "$SITES_LOG_ROOT/lr1.example.com"
 eval 'lib_webmail_installed() { return 0; }'
 : >"$_lr_calls"
 lib_domain_logs_repair >"$TMP/lr-out" 2>&1
@@ -2474,16 +2579,19 @@ assert_has "a server with the webmail gets its log directory put right too" "web
 OPT_DRY_RUN=1; lib_domain_logs_repair >"$TMP/lr-out" 2>&1; OPT_DRY_RUN=0
 assert_lacks "a dry run with no vhost to change has nothing to test or reload" "commit" "$(cat "$_lr_calls")"
 STATE_DIR="$_state_save"
-eval "$_orig_cb"; eval "$_orig_cc"; eval "$_orig_lo"; eval "$_orig_wi"; eval "$_orig_wd"; eval "$_orig_rg"
-unset -f _lr_old_vhconf lib_ols_is_installed
+eval "$_orig_cb"; eval "$_orig_cc"; eval "$_orig_wi"; eval "$_orig_wd"; eval "$_orig_rg"
+unset -f _lr_old_vhconf _lr1_old _mk_old lib_ols_is_installed stat
+unset FAKE_OWNER_UID
 lib_domain_state_reset
 _up="$(declare -f lib_update_main)"
 assert_has  "update runs it" 'lib_domain_logs_repair' "$_up"
 _n_rec="$(grep -n "'.last_update'" <<<"$_up" | head -1 | cut -d: -f1 || true)"
 _n_rep="$(grep -n 'lib_domain_logs_repair' <<<"$_up" | head -1 | cut -d: -f1 || true)"
 assert_true "after the update itself is recorded" test "${_n_rep:-0}" -gt "${_n_rec:-0}"
-assert_has  "doctor checks every site's logs" 'lib_ols_logdir_open "$logs"' "$(declare -f _doc_check_domains)"
-assert_has  "and the webmail's"               'lib_ols_logdir_open "$WM_LOG_DIR"' "$(declare -f _doc_check_webmail)"
+_dc="$(declare -f _doc_check_domains)"
+assert_has  "doctor checks every site's logs"              'lib_ols_logdir_open "$logs"' "$_dc"
+assert_has  "and fails a vhost that still writes into the home" '$VH_ROOT/logs/' "$_dc"
+assert_has  "and the webmail's"                            'lib_ols_logdir_open "$WM_LOG_DIR"' "$(declare -f _doc_check_webmail)"
 
 # ...and the fail2ban web jails have to match what is written there. fail2ban cuts the date
 # out before it applies a failregex - "[28/Sep/2026:19:56:50 +0300]" becomes "[]" - and both
