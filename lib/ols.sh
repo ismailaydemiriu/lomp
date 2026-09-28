@@ -16,6 +16,7 @@ OLS_CACHE_DIR="${LSWS_HOME}/cachedata"
 OLS_CIPHERS="ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305"
 OLS_APT_LIST="/etc/apt/sources.list.d/litespeed.list"
 OLS_LEGACY_APT_LIST="/etc/apt/sources.list.d/lst_debian_repo.list"
+OLS_LOG_KEEP_DAYS=14    # rolled server logs older than this are deleted (a site's logs: logrotate, 14 days)
 
 OLS_TX_FILE=""          # working copy of httpd_config.conf during a transaction
 OLS_SNAPSHOT=""         # conf/ snapshot taken by lib_ols_change_begin
@@ -602,6 +603,26 @@ lib_ols_recent_errors() {   # [lines]
 }
 
 lib_ols_restart() { lib_systemctl restart "$OLS_SERVICE"; }
+
+# =============================================================================
+#  Server logs: rolled files are deleted after OLS_LOG_KEEP_DAYS
+# =============================================================================
+# OpenLiteSpeed rolls error.log, access.log and stderr.log - and a virtual host's own error
+# log, such as the catch-all's _default.error.log - at 10M into <name>.YYYY_MM_DD[.NN][.gz]
+# beside the live file. It deletes old ones only in the moment it rolls that same log again,
+# so the files of a log that stopped growing stay for ever, and stderr.log has no keepDays at
+# all: its rolled files are never deleted (src/http/httplogsource.cpp, src/log4cxx/logrotate.cpp).
+# Only names carrying that date stamp match; the live logs are never touched. -H follows a logs
+# directory that was moved to another disk and linked back; nothing below it is followed, and
+# -type f leaves links alone.
+lib_ols_logs_prune_cmd() {
+  local rolled="'*.log.[0-9][0-9][0-9][0-9]_[0-9][0-9]_[0-9][0-9]*'"
+  printf '%s' "find -H ${LSWS_HOME}/logs ${LSWS_HOME}/admin/logs -maxdepth 1 -type f -name ${rolled} -mtime +${OLS_LOG_KEEP_DAYS} -delete"
+}
+
+lib_ols_logs_prune_ensure() {
+  lib_cron_set ols-logs "45 4 * * * root $(lib_ols_logs_prune_cmd)"
+}
 
 # =============================================================================
 #  .htaccess: read once

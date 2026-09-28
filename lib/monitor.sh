@@ -440,6 +440,11 @@ _doc_check_ssl_infra() {
 
 _doc_check_cron() {
   lib_cron_has healthcheck && _doc_add OK "healthcheck cron" "daily" || _doc_add WARN "healthcheck cron" "not scheduled (re-run install)"
+  # a server installed before the entry existed only gets it from an install re-run
+  if lib_ols_is_installed; then
+    if lib_cron_has ols-logs; then _doc_add OK "ols logs cron" "rolled logs older than ${OLS_LOG_KEEP_DAYS} days are deleted daily"
+    else _doc_add WARN "ols logs cron" "not scheduled: OpenLiteSpeed's rolled logs pile up in ${LSWS_HOME}/logs (re-run install)"; fi
+  fi
   local pending=""
   if [[ -n "$(lib_ols_htaccess_docroots)" ]]; then
     if lib_cron_has htaccess; then _doc_add OK "htaccess cron" "a changed .htaccess takes effect within a minute"

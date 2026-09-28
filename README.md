@@ -382,6 +382,7 @@ site cannot read another site's files. Directory listing is off, and requests fo
 | `/root/.server-setup/` | State and credentials, mode 0700 (`manifest.json`, `domains/<domain>/…`, archives) |
 | `/home/<domain>/` | Site files |
 | `/usr/local/lsws/conf/vhosts/<domain>/` | Generated vhost configuration |
+| `/usr/local/lsws/logs/` | OpenLiteSpeed's own logs (the WebAdmin's are in `admin/logs/`). It rolls them at 10 MB; a daily job deletes the rolled files once they are older than 14 days |
 | `/etc/sysctl.d/99-production-server.conf` | Kernel tuning |
 | `/etc/security/limits.d/99-production-server.conf` | Open file and process limits |
 | `/etc/mysql/mariadb.conf.d/60-production-tuned.cnf` | MariaDB tuning |

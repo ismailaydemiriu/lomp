@@ -167,6 +167,7 @@ check "fail2ban web jail is 0600" test "$(stat -c %a /etc/fail2ban/jail.d/server
 check "fail2ban accepted the generated configuration" fail2ban-client ping
 check "sshd jail is loaded" bash -c "fail2ban-client status sshd >/dev/null 2>&1"
 check_eq "unknown Host gets 403 (catch-all vhost)" "403" "$(http_code unknown-host.invalid)"
+check "OpenLiteSpeed's rolled logs are cleaned up daily" grep -q '# server-setup:ols-logs$' /etc/cron.d/server-setup
 
 # =============================================================================
 step "T04  install is idempotent (second run changes nothing)"

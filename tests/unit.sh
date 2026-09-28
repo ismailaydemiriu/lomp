@@ -2075,6 +2075,58 @@ if command -v flock >/dev/null 2>&1; then
 fi
 
 # =============================================================================
+section "OpenLiteSpeed's own logs: rolled files go after a while, live ones stay"
+# OpenLiteSpeed deletes a rolled log only while it rolls the same log again, and never one of
+# stderr.log's. The daily entry is a plain find, so it is run here for real, against files
+# aged the way a server ages them.
+assert_has "install schedules the cleanup" 'lib_ols_logs_prune_ensure' "$(declare -f lib_install_cron)"
+lib_ols_logs_prune_ensure
+_pl="$(grep '# server-setup:ols-logs$' "$CRON_FILE" || true)"
+assert_has   "it runs daily, as root, over both log directories" "45 4 * * * root find -H ${LSWS_HOME}/logs ${LSWS_HOME}/admin/logs " "$_pl"
+assert_has   "and keeps OLS_LOG_KEEP_DAYS days" "-mtime +${OLS_LOG_KEEP_DAYS} -delete" "$_pl"
+assert_lacks "the line holds no %, which cron would turn into a line break" "%" "$_pl"
+assert_has   "doctor notices a server without it" 'lib_cron_has ols-logs' "$(declare -f _doc_check_cron)"
+_pl_home="$TMP/pl"; _pl_dir="$TMP/pl/logs"; _pl_adm="$TMP/pl/admin/logs"
+_pl_age() { mkdir -p "$(dirname "$1")"; : >"$1"; touch -d "-$2 days" "$1"; }
+_pl_old=$((OLS_LOG_KEEP_DAYS + 2)); _pl_new=$((OLS_LOG_KEEP_DAYS - 1))
+_pl_live=(error.log access.log stderr.log _default.error.log lsrestart.log)
+_pl_rolled=(error.log.2026_08_01 error.log.2026_08_01.01 access.log.2026_08_01.gz stderr.log.2026_08_01 _default.error.log.2026_08_01.02)
+# the live logs of a quiet server are old as well: only the name may decide
+for _f in "${_pl_live[@]}"; do _pl_age "${_pl_dir}/${_f}" 40; done
+for _f in "${_pl_rolled[@]}"; do _pl_age "${_pl_dir}/${_f}" "$_pl_old"; done
+_pl_age "${_pl_dir}/error.log.2026_09_20" "$_pl_new"
+_pl_age "${_pl_dir}/notes.txt" 40
+_pl_age "${_pl_dir}/error.log.2026_07_01/inner.log.2026_07_01" 40
+touch -d '-40 days' "${_pl_dir}/error.log.2026_07_01"
+_pl_age "${_pl_adm}/access.log" 40
+_pl_age "${_pl_adm}/access.log.2026_08_01" "$_pl_old"
+_pl_cmd="$(LSWS_HOME="$_pl_home" lib_ols_logs_prune_cmd)"
+assert_eq "the cleanup exits 0" 0 "$(run_isolated bash -c "$_pl_cmd")"
+for _f in "${_pl_live[@]}"; do assert_true "a live ${_f} stays, however old" test -e "${_pl_dir}/${_f}"; done
+for _f in "${_pl_rolled[@]}"; do assert_false "an old ${_f} goes" test -e "${_pl_dir}/${_f}"; done
+assert_true  "a rolled log younger than that stays" test -e "${_pl_dir}/error.log.2026_09_20"
+assert_true  "a file OpenLiteSpeed did not roll stays" test -e "${_pl_dir}/notes.txt"
+assert_true  "a directory with a rolled name stays, and what is in it" test -e "${_pl_dir}/error.log.2026_07_01/inner.log.2026_07_01"
+assert_false "the WebAdmin's old rolled log goes" test -e "${_pl_adm}/access.log.2026_08_01"
+assert_true  "and its live log stays" test -e "${_pl_adm}/access.log"
+if (( CAN_SYMLINK )); then
+  # a link with a rolled name is left alone, and so is the file it points at. The link itself
+  # is aged too: a fresh one would stay for its age alone and prove nothing about -type f.
+  _pl_age "$TMP/pl-victim" 40
+  ln -s "$TMP/pl-victim" "${_pl_dir}/access.log.2026_07_02"
+  touch -h -d '-40 days' "${_pl_dir}/access.log.2026_07_02"
+  run_isolated bash -c "$_pl_cmd" >/dev/null
+  assert_true "a link with a rolled name stays" test -L "${_pl_dir}/access.log.2026_07_02"
+  assert_true "and so does the file it points at" test -e "$TMP/pl-victim"
+  # a logs directory moved to another disk and linked back is still cleaned
+  _pl_age "$TMP/pl-moved/error.log.2026_08_01" "$_pl_old"
+  mkdir -p "$TMP/pl2/admin/logs"; ln -s "$TMP/pl-moved" "$TMP/pl2/logs"
+  assert_eq    "a linked logs directory is cleaned as well" 0 "$(run_isolated bash -c "$(LSWS_HOME="$TMP/pl2" lib_ols_logs_prune_cmd)")"
+  assert_false "its old rolled log is gone" test -e "$TMP/pl-moved/error.log.2026_08_01"
+fi
+unset -f _pl_age
+
+# =============================================================================
 section "the mail server's own configuration"
 # These assertions are the mail server's security policy in the only form that matters: the
 # lines Postfix and Dovecot actually read. A renderer is pure, so a test can read every one of
