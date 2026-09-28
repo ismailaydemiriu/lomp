@@ -246,6 +246,11 @@ lib_system_render_sysctl() {
     "fs.nr_open=2097152"
     "fs.inotify.max_user_watches=524288"
     "fs.inotify.max_user_instances=1024"
+    # Ubuntu's defaults, kept here because root works in trees the site users own (fix-owner,
+    # the WordPress install, restore): no hard link to a file a user does not own, and no
+    # following another user's link in a world-writable sticky directory such as /tmp
+    "fs.protected_hardlinks=1"
+    "fs.protected_symlinks=1"
     "net.core.somaxconn=65535"
     "net.core.netdev_max_backlog=65536"
     "net.core.rmem_max=16777216"

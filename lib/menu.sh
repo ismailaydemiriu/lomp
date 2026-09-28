@@ -120,6 +120,9 @@ COMMANDS
   status                        Services, versions, resources, sites (--json)
   doctor                        Deep health check (--json, --quiet)
   credentials <domain>|--all    Show stored credentials (never logged)
+  fix-owner <domain>|--all      Hand a site's files back to its own user after uploading as
+                                root (WinSCP, scp). Only what is someone else's changes;
+                                logs/ and the file modes stay as they are
   optimize                      Re-measure the system and re-tune (shows a diff)
   backup <domain>|--all [opts]  --remote --encrypt --keep N --no-mail --dry-run
                                 A domain with mail gets a second archive beside the site's,
@@ -302,6 +305,7 @@ lib_menu_main() {
     _menu_item  6 "Node.js apps (PM2) and path proxies"
     _menu_item  7 "Remove a site"
     _menu_item 20 "Mail: domains, mailboxes, DNS"
+    _menu_item 21 "Fix file ownership (after uploading as root)"
     _menu_group "SERVER"
     _menu_item  8 "Status"
     _menu_item  9 "Health check"
@@ -329,6 +333,7 @@ lib_menu_main() {
       6) _menu_apps ;;
       7) _menu_remove_site ;;
       20) _menu_mail ;;
+      21) _menu_fix_owner ;;
       8) _menu_run status ;;
       9) _menu_run doctor ;;
       10) _menu_run panel ;;
@@ -661,6 +666,21 @@ _menu_remove_site() {
   _menu_ask keep "Keep the files? (y/n)" "n"
   [[ "${keep,,}" == y* ]] && args+=(--keep-files)
   _menu_run remove "${args[@]}"
+}
+
+# Files uploaded as root (WinSCP, scp) stay root's, and PHP, which runs as the site's own
+# user, cannot change them. This hands them over, every site at once unless one is picked.
+_menu_fix_owner() {
+  local what="" domain=""
+  printf '\n  %s\n' "Files uploaded as root go to their site's own user; what already is the site's stays as it is."
+  printf '  1) Every site\n  2) One site\n'
+  _menu_ask what "Choice" "1"
+  if [[ "$what" == "2" ]]; then
+    domain="$(_menu_pick_domain)" || { _menu_pause; return 0; }
+    _menu_run fix-owner "$domain"
+  else
+    _menu_run fix-owner --all
+  fi
 }
 
 _menu_mail() {

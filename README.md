@@ -173,6 +173,16 @@ sudo lomp add example.com --www
 This creates the system user, the directory tree, the vhost, requests a certificate and
 runs a smoke test. Upload your files to `/home/example.com/public_html/`.
 
+Files uploaded as root (WinSCP or scp logged in as root, an archive root unpacked) stay root's.
+PHP runs as the site's own user (`example_com`), so until the files are handed over it cannot
+change them: WordPress cannot update itself or store an upload. This hands them over:
+
+```bash
+sudo lomp fix-owner example.com     # or --all for every site; item 21 in the menu does the same
+```
+
+Only what belongs to someone else changes; `logs` stays root's and the file modes stay as they are.
+
 If DNS is not ready yet, add the site without TLS and issue the certificate later:
 
 ```bash
@@ -197,6 +207,7 @@ sudo lomp db list                                   # every site's database, use
 sudo lomp credentials shop.example.com              # database / WordPress / SSL details
 sudo lomp list                                      # all sites in a table
 sudo lomp logs shop.example.com                     # tail access and error logs
+sudo lomp fix-owner --all                           # files uploaded as root back to each site's user
 sudo lomp backup --all --encrypt                    # back up every site
 sudo lomp restore shop.example.com --file /var/backups/server-setup/shop.example.com/....tar.gz
 sudo lomp renew-ssl --all                           # renew every certificate

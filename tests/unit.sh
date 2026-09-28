@@ -1251,7 +1251,7 @@ assert_has   "a dry run names the site it just described" "Site dry.example.com 
 assert_has   "with its URL"           "http://dry.example.com/" "$out"
 assert_has   "the mode that was asked for" "Mode                       static" "$out"
 assert_has   "its document root"      "${SITES_ROOT}/dry.example.com/public_html" "$out"
-assert_has   "its system user"        "chown -R dry_example_com:dry_example_com" "$out"
+assert_has   "its system user"        "dry_example_com (uploaded as root? setup.sh fix-owner dry.example.com)" "$out"
 assert_has   "and its logs"           "${SITES_ROOT}/dry.example.com/logs/access.log" "$out"
 assert_lacks "never the reset defaults" "Mode                       php" "$out"
 assert_has   "the certificate --no-ssl declined as not requested" "not requested (once DNS points here: setup.sh renew-ssl dry.example.com)" "$out"
@@ -4172,6 +4172,302 @@ assert_has "and restarts the workers for what it added" '-n "$PHP_EXTS_ADDED"' "
 eval "$_orig_pkgfns"; unset FAKE_MODS FAKE_REPO
 # shellcheck source=/dev/null
 source "$ROOT/lib/php.sh"
+
+# =============================================================================
+section "fix-owner: files uploaded as root go back to the site's user"
+# Files uploaded as root stay root's, and PHP, which runs as the site's user, cannot change
+# them. The suite cannot own a file as anybody else, so the numbers fix-owner compares with
+# come from a stub: the runner's own (nothing to hand over) or the next uid (all of it is
+# someone else's). chown is a program find starts, so a fake one on -execdir's PATH records
+# every call and every name it was handed, as a full path.
+_fo_saved="$(declare -p DOM_FIX_OWNER_PATH DOM_HARDLINKS_SYSCTL DOM_MOUNTINFO STATE_DIR)"
+_fo_orig_ids="$(declare -f _domain_fix_owner_ids)"
+_fo_orig_rt="$(declare -f lib_require_tools)"
+eval 'lib_require_tools() { return 0; }
+      _domain_fix_owner_ids() { printf "%s" "$_fo_ids"; }'
+_fo_bin="$TMP/fo-bin"; _fo_calls="$TMP/fo-calls"; _fo_out="$TMP/fo-out"
+mkdir -p "$_fo_bin"
+# A name that is not relative to the directory chown runs in ("./x") is logged as PATH: it
+# would be looked up from the top again, through whatever a site user swapped in meanwhile.
+cat >"$_fo_bin/chown" <<EOF
+#!/bin/sh
+d="\$(pwd -P)"
+printf 'fake-chown %s\n' "\$*" >&2
+printf 'call %s %s %s\n' "\$1" "\$2" "\$3" >>"${_fo_calls}"
+shift 3
+for f in "\$@"; do
+  case "\$f" in
+    ./*/*|../*) printf 'PATH %s\n' "\$f" >>"${_fo_calls}" ;;
+    ./*)        printf '%s/%s\n' "\$d" "\${f#./}" >>"${_fo_calls}" ;;
+    *)          printf 'PATH %s\n' "\$f" >>"${_fo_calls}" ;;
+  esac
+done
+EOF
+chmod 0755 "$_fo_bin/chown"
+DOM_FIX_OWNER_PATH="${_fo_bin}:/usr/bin:/bin"
+DOM_HARDLINKS_SYSCTL="$TMP/fo-hardlinks"; printf '1\n' >"$DOM_HARDLINKS_SYSCTL"
+DOM_MOUNTINFO="$TMP/fo-mountinfo"; : >"$DOM_MOUNTINFO"
+# a state directory of its own, so that --all sees only the sites made here - through the real
+# lib_domains_list, which the webmail section above leaves stubbed
+STATE_DIR="$TMP/fo-state"; mkdir -p "$STATE_DIR"
+eval "$(sed -n '/^lib_domains_list() {/,/^}/p' "$ROOT/lib/common.sh")"
+# fix-owner run the way the command runs it (errexit armed); prints the exit status, and the
+# output goes to $_fo_out
+_fo() {
+  local rc=0 prev=""
+  prev="$(trap -p ERR || true)"
+  trap - ERR
+  set +e
+  ( set -Eeuo pipefail; shopt -s lastpipe; OPT_QUIET=0; lib_domain_fix_owner_main "$@" ) >"$_fo_out" 2>&1
+  rc=$?
+  set -e
+  [[ -z "$prev" ]] || eval "$prev"
+  printf '%s' "$rc"
+}
+
+lib_domain_state_reset
+D_DOMAIN="own.example.com"; D_IDENT="own_example_com"; D_USER="own_example_com"; D_GROUP="own_example_com"
+D_HOME="$SITES_ROOT/own.example.com"; D_MODE="php"; D_PHP="8.3"
+lib_domain_state_save
+_fo_h="$SITES_ROOT/own.example.com"; _fo_ld="$SITES_LOG_ROOT/own.example.com"
+mkdir -p "$_fo_h/public_html/wp-content/uploads" "$_fo_h/private/sessions" "$_fo_h/.ssh" "$_fo_ld"
+printf '<?php\n' >"$_fo_h/public_html/index.php"
+printf 'jpg' >"$_fo_h/public_html/wp-content/uploads/a.jpg"
+printf 'zip' >"$_fo_h/site.zip"
+printf 'log\n' >"$_fo_ld/access.log"
+if (( CAN_SYMLINK )); then ln -s "$_fo_ld" "$_fo_h/logs"; else mkdir -p "$_fo_h/logs"; printf 'log\n' >"$_fo_h/logs/access.log"; fi
+_fo_hp="$(cd "$_fo_h" && pwd -P)"
+read -r _fo_u _fo_g < <(stat -c '%u %g' "$_fo_h/public_html/index.php")
+_fo_mine="${_fo_u} ${_fo_g}"; _fo_other="$(( _fo_u + 1 )) ${_fo_g}"
+# everything in the home but logs/: what a run has to hand over when none of it is the site's
+_fo_all="$(find "$_fo_h" -path "$_fo_h/logs" -prune -o -printf . | wc -c)"; _fo_all=$(( _fo_all ))
+
+assert_eq  "no domain is an error"               1 "$(_fo)"
+assert_has "which says so"                       "Domain missing" "$(cat "$_fo_out")"
+assert_eq  "--all and a domain do not mix"       1 "$(_fo --all own.example.com)"
+assert_eq  "an unknown option is refused"        1 "$(_fo --force)"
+assert_eq  "a site that is not registered too"   1 "$(_fo nosuch.example.com)"
+assert_eq  "and a name that is no domain"        1 "$(_fo ../etc)"
+
+_fo_ids="$_fo_other"
+printf '0\n' >"$DOM_HARDLINKS_SYSCTL"; : >"$_fo_calls"
+assert_eq  "without protected hard links it refuses to start" 1 "$(_fo own.example.com)"
+assert_has "and says why" "fs.protected_hardlinks is off" "$(cat "$_fo_out")"
+assert_eq  "before chown ever runs" "" "$(cat "$_fo_calls")"
+rm -f "$DOM_HARDLINKS_SYSCTL"
+assert_eq  "a setting it cannot read counts as off" 1 "$(_fo own.example.com)"
+OPT_DRY_RUN=1
+assert_eq  "a dry run only warns about it" 0 "$(_fo own.example.com)"
+assert_has "that a real run would refuse" "a real run refuses to start" "$(cat "$_fo_out")"
+OPT_DRY_RUN=0
+printf '1\n' >"$DOM_HARDLINKS_SYSCTL"
+
+_fo_ids="$_fo_mine"; : >"$_fo_calls"
+assert_eq  "a site whose files are all its own exits 0" 0 "$(_fo own.example.com)"
+assert_has "and says so" "own.example.com: everything already belongs to own_example_com" "$(cat "$_fo_out")"
+assert_eq  "without starting chown: nothing is re-dated" "" "$(cat "$_fo_calls")"
+
+_fo_ids="$_fo_other"; : >"$_fo_calls"
+OPT_DRY_RUN=1
+assert_eq  "a dry run of a site that is all someone else's exits 0" 0 "$(_fo own.example.com)"
+assert_has "and counts what a real run would change" "would hand ${_fo_all} files and directories to own_example_com:own_example_com" "$(cat "$_fo_out")"
+OPT_DRY_RUN=0
+assert_eq  "without starting chown" "" "$(cat "$_fo_calls")"
+
+# the fake chown changes nothing, so what it was handed is still someone else's afterwards
+assert_eq  "what is still someone else's after the run is an error" 1 "$(_fo own.example.com)"
+assert_has "named as such" "own.example.com: not all of it changed hands (${_fo_all} of ${_fo_all} left)" "$(cat "$_fo_out")"
+_fo_log="$(cat "$_fo_calls")"
+assert_has   "chown changes links, never what they name, and takes no name for an option" "call -h -- own_example_com:own_example_com" "$_fo_log"
+assert_has   "the home itself is handed over"      "${_fo_hp}"$'\n' "${_fo_log}"$'\n'
+assert_has   "the document root"                   "${_fo_hp}/public_html"$'\n' "${_fo_log}"$'\n'
+assert_has   "a file deep inside it"               "${_fo_hp}/public_html/wp-content/uploads/a.jpg" "$_fo_log"
+assert_has   "private/"                            "${_fo_hp}/private/sessions" "$_fo_log"
+assert_has   "the dot directories"                 "${_fo_hp}/.ssh" "$_fo_log"
+assert_has   "and whatever was put in the home"    "${_fo_hp}/site.zip" "$_fo_log"
+assert_lacks "but never logs"                      "${_fo_hp}/logs" "$_fo_log"
+assert_lacks "nor the logs behind it"              "access.log" "$_fo_log"
+assert_eq    "every name is handed over once"      "$_fo_all" "$(grep -vc '^call ' <<<"$_fo_log")"
+assert_lacks "each one relative to the directory chown runs in" "PATH " "$_fo_log"
+
+# a server an older release set up: logs/ is still a directory in the home, and must stay root's
+if (( CAN_SYMLINK )); then
+  rm -f "$_fo_h/logs"; mkdir -p "$_fo_h/logs"; printf 'log\n' >"$_fo_h/logs/access.log"
+  : >"$_fo_calls"
+  _fo "own.example.com" >/dev/null
+  assert_lacks "logs/ as a directory is left alone as well" "${_fo_hp}/logs" "$(cat "$_fo_calls")"
+  rm -rf "$_fo_h/logs"; ln -s "$_fo_ld" "$_fo_h/logs"
+fi
+
+# a file with a second name may have it outside the site - pnpm, cp -al - so the site is left
+# as it is, and one moved into logs/ counts too: it could be moved back under a name the run
+# is changing
+CAN_HARDLINK=0
+ln "$_fo_h/site.zip" "$TMP/.fo-linkprobe" 2>/dev/null && [[ "$(stat -c %h "$_fo_h/site.zip")" == 2 ]] && CAN_HARDLINK=1
+rm -f "$TMP/.fo-linkprobe"
+if (( CAN_HARDLINK )); then
+  ln "$_fo_h/public_html/index.php" "$_fo_h/public_html/index-copy.php"
+  : >"$_fo_calls"
+  assert_eq    "a file with a second name stops the site" 1 "$(_fo own.example.com)"
+  assert_has   "saying why" "never hands over a device node or a file with more than one name, and the site has 2 of them" "$(cat "$_fo_out")"
+  assert_has   "and naming it" "public_html/index-copy.php" "$(cat "$_fo_out")"
+  assert_eq    "before chown ever runs" "" "$(cat "$_fo_calls")"
+  # and should one be moved into place after that look, the change itself passes it over
+  : >"$_fo_calls"
+  _domain_fix_owner_apply "$_fo_h" "$(( _fo_u + 1 ))" "$_fo_g" 2>/dev/null || true
+  assert_has   "the change hands over the rest" "${_fo_hp}/public_html/wp-content" "$(cat "$_fo_calls")"
+  assert_lacks "but not a file with a second name" "index-copy.php" "$(cat "$_fo_calls")"
+  assert_lacks "nor its other name" "${_fo_hp}/public_html/index.php" "$(cat "$_fo_calls")"
+  rm -f "$_fo_h/public_html/index-copy.php"
+  if (( CAN_SYMLINK )); then
+    rm -f "$_fo_h/logs"; mkdir -p "$_fo_h/logs"; printf 's' >"$_fo_h/logs/stash"; ln "$_fo_h/logs/stash" "$_fo_h/logs/stash2"
+    : >"$_fo_calls"
+    assert_eq  "a second name hidden in logs/ stops it too" 1 "$(_fo own.example.com)"
+    assert_eq  "before chown ever runs" "" "$(cat "$_fo_calls")"
+    rm -rf "$_fo_h/logs"; ln -s "$_fo_ld" "$_fo_h/logs"
+  fi
+  # the runner's own file with a second name belongs to the site already: nothing to look at
+  _fo_ids="$_fo_mine"
+  ln "$_fo_h/public_html/index.php" "$_fo_h/public_html/index-copy.php"
+  assert_eq    "a second name on a file that is the site's already is no reason to stop" 0 "$(_fo own.example.com)"
+  rm -f "$_fo_h/public_html/index-copy.php"
+  _fo_ids="$_fo_other"
+fi
+if (( EUID == 0 )) && [[ "${OSTYPE:-}" != msys* && "${OSTYPE:-}" != cygwin* ]]; then
+  mknod "$_fo_h/public_html/disk" b 7 0
+  : >"$_fo_calls"
+  assert_eq  "a device node stops the site" 1 "$(_fo own.example.com)"
+  assert_has "and is named" "public_html/disk" "$(cat "$_fo_out")"
+  assert_eq  "before chown ever runs" "" "$(cat "$_fo_calls")"
+  rm -f "$_fo_h/public_html/disk"
+fi
+
+# something mounted inside the home: chown cannot tell its top from a directory
+printf '36 25 8:1 / %s rw,relatime shared:1 - ext4 /dev/sdb1 rw\n' "$_fo_h/public_html/shared" >"$DOM_MOUNTINFO"
+: >"$_fo_calls"
+assert_eq  "a mount inside the home stops the site" 1 "$(_fo own.example.com)"
+assert_has "naming it" "mounted inside the home, at ${_fo_h}/public_html/shared" "$(cat "$_fo_out")"
+assert_eq  "before chown ever runs" "" "$(cat "$_fo_calls")"
+printf '36 25 8:1 / %s rw - ext4 /dev/sdb1 rw\n36 25 8:1 / %s.old/x rw - ext4 /dev/sdb2 rw\n' "$_fo_h" "$_fo_h" >"$DOM_MOUNTINFO"
+_fo_ids="$_fo_mine"
+assert_eq  "the home as a mount of its own, or a neighbour's, is no reason" 0 "$(_fo own.example.com)"
+: >"$DOM_MOUNTINFO"
+
+# names come out of the site user's hands: no terminal control sequence reaches the screen
+_fo_ids="$_fo_other"
+if (( CAN_HARDLINK && CAN_SYMLINK )); then
+  _fo_bad="$_fo_h/public_html/bad"$'\033'"]0;owned"$'\007'"name"
+  mkdir -p "$_fo_bad"; ln "$_fo_h/site.zip" "$_fo_bad/görsel.zip"
+  _fo own.example.com >/dev/null
+  assert_lacks "an escape character in a name is not printed" $'\033' "$(cat "$_fo_out")"
+  assert_has   "it is shown as a question mark, and a Turkish letter as itself" "bad?]0;owned?name/görsel.zip" "$(cat "$_fo_out")"
+  rm -rf "$_fo_bad"
+fi
+# ... and none reaches the log through what chown says about it either
+if (( CAN_SYMLINK )); then
+  _fo_esc="$_fo_h/public_html/esc"$'\033'"[31mred"
+  mkdir -p "$_fo_esc"
+  _fo_ls="$(wc -c <"$LOG_FILE")"
+  _fo own.example.com >/dev/null
+  _fo_newlog="$(tail -c +"$(( _fo_ls + 1 ))" "$LOG_FILE")"
+  assert_has   "what chown says goes to the log" "fake-chown -h -- own_example_com:own_example_com" "$_fo_newlog"
+  assert_lacks "without a control character a name brought along" $'\033' "$_fo_newlog"
+  rmdir "$_fo_esc"
+fi
+
+# --all: every registered site, on past one that fails, and an exit status that tells
+lib_domain_state_reset
+D_DOMAIN="own2.example.com"; D_IDENT="own2_example_com"; D_USER="own2_example_com"; D_GROUP="own2_example_com"
+D_HOME="$SITES_ROOT/own2.example.com"; D_MODE="static"
+lib_domain_state_save   # no home on disk
+_fo_ids="$_fo_mine"
+assert_eq  "--all with one site failing exits 1" 1 "$(_fo --all)"
+assert_has "the others are still done" "own.example.com: everything already belongs to own_example_com" "$(cat "$_fo_out")"
+assert_has "the failing one is named"  "own2.example.com: ${SITES_ROOT}/own2.example.com is not a directory; nothing changed" "$(cat "$_fo_out")"
+assert_has "and counted"               "1 of 2 site(s) could not be handed over completely" "$(cat "$_fo_out")"
+rm -rf "${STATE_DIR}/domains/own2.example.com"
+assert_eq  "--all over sites that are all fine exits 0" 0 "$(_fo --all)"
+STATE_DIR="$TMP/fo-none"
+assert_eq  "--all without a site exits 0" 0 "$(_fo --all)"
+assert_has "and says there is none" "No sites have been added yet." "$(cat "$_fo_out")"
+STATE_DIR="$TMP/fo-state"
+
+# the account behind the numbers: it has to be this site's, and never root
+eval "$_fo_orig_ids"
+if command -v getent >/dev/null 2>&1 && getent passwd root >/dev/null 2>&1; then
+  D_USER="nosuch_fo_account"; D_GROUP="nosuch_fo_account"
+  assert_has "an account that is gone is named" "its user nosuch_fo_account does not exist" "$(_domain_fix_owner_ids /home/x || true)"
+  D_USER="root"; D_GROUP="root"
+  assert_has "root is never a site's account" "is not a site account" "$(_domain_fix_owner_ids "$(getent passwd root | cut -d: -f6)" || true)"
+  if (( EUID != 0 )); then
+    D_USER="$(id -un)"; D_GROUP="$(id -gn)"
+    assert_has "an account with another home is refused" "the home of ${D_USER} is" "$(_domain_fix_owner_ids /home/elsewhere.example.com || true)"
+    assert_eq  "the account of this home gives its numbers" "$(id -u) $(id -g)" \
+      "$(_domain_fix_owner_ids "$(getent passwd "$D_USER" | cut -d: -f6)" || true)"
+  fi
+fi
+
+# as root, for real: the files change hands, links are changed and never followed, and what
+# they lead to - a file root keeps outside the site - stays root's
+if (( EUID == 0 )) && [[ "${OSTYPE:-}" != msys* && "${OSTYPE:-}" != cygwin* ]] && id -u nobody >/dev/null 2>&1; then
+  eval '_domain_fix_owner_ids() { printf "%s" "$_fo_ids"; }'
+  DOM_FIX_OWNER_PATH="/usr/sbin:/usr/bin:/sbin:/bin"
+  lib_domain_state_reset
+  D_DOMAIN="real.example.com"; D_IDENT="real_example_com"; D_USER="nobody"; D_GROUP="$(id -gn nobody)"
+  D_HOME="$SITES_ROOT/real.example.com"; D_MODE="php"
+  lib_domain_state_save
+  _fo_r="$SITES_ROOT/real.example.com"; _fo_v="$TMP/fo-victim"
+  mkdir -p "$_fo_r/public_html/deep/er" "$_fo_r/logs" "$_fo_v/dir"
+  printf 'secret' >"$_fo_v/secret"; printf 'inner' >"$_fo_v/dir/inner"; printf 'x' >"$_fo_r/public_html/deep/er/page.html"
+  printf 'log' >"$_fo_r/logs/error.log"
+  ln -s "$_fo_v/secret" "$_fo_r/secret-link"
+  ln -s "$_fo_v/dir" "$_fo_r/public_html/deep/dir-link"
+  ln -s "$_fo_v/secret" "$_fo_r/public_html/deep/er/file-link"
+  _fo_ids="$(id -u nobody) $(id -g nobody)"
+  assert_eq  "a real run exits 0" 0 "$(_fo real.example.com)"
+  assert_has "and reports what it handed over" "files and directories handed to nobody:" "$(cat "$_fo_out")"
+  printf 'r' >"$_fo_r/public_html/one-more.txt"
+  assert_eq  "one more upload" 0 "$(_fo real.example.com)"
+  assert_has "is one file, in the singular" "real.example.com: 1 file or directory handed to nobody:" "$(cat "$_fo_out")"
+  assert_eq  "nothing in the home but logs/ is root's any more" "" \
+    "$(find "$_fo_r" -path "$_fo_r/logs" -prune -o -uid 0 -print)"
+  assert_eq  "the links themselves changed hands" "$(id -u nobody)" "$(stat -c %u "$_fo_r/public_html/deep/dir-link")"
+  assert_eq  "logs/ stays root's"                "0 0" "$(stat -c '%u %g' "$_fo_r/logs")"
+  assert_eq  "and so does what is in it"         "0" "$(stat -c %u "$_fo_r/logs/error.log")"
+  assert_eq  "a file a link led to stays root's" "0 0" "$(stat -c '%u %g' "$_fo_v/secret")"
+  assert_eq  "a directory a link led to too"     "0 0 0" "$(stat -c '%u %g' "$_fo_v/dir") $(stat -c %u "$_fo_v/dir/inner")"
+  assert_eq  "a second run has nothing to do" 0 "$(_fo real.example.com)"
+  assert_has "and says so" "real.example.com: everything already belongs to nobody" "$(cat "$_fo_out")"
+  rm -rf "$_fo_r" "$_fo_v" "${STATE_DIR}/domains/real.example.com"
+fi
+
+# the menu: item 21, every site unless one is picked
+_mfo() {   # [answer] -> the command the menu runs
+  (
+    eval '_menu_ask() { local -n _o="$1"; _o="${_mfa:-${3:-}}"; }
+          _menu_run() { printf "%s\n" "$*"; }
+          _menu_pick_domain() { printf "picked.example.com"; }
+          _menu_pause() { :; }'
+    _mfa="${1:-}"
+    _menu_fix_owner 2>/dev/null | tail -n 1
+  )
+}
+assert_eq  "the menu hands over every site by default" "fix-owner --all" "$(_mfo)"
+assert_eq  "or the one picked"                         "fix-owner picked.example.com" "$(_mfo 2)"
+_menu_block="$(awk '/_menu_group "SITES"/{f=1} f{print} f && /^[[:space:]]*esac/{exit}' "$ROOT/lib/menu.sh")"
+assert_has "it is item 21 of the main menu"   '_menu_item 21 "Fix file ownership (after uploading as root)"' "$_menu_block"
+assert_has "which opens it"                   '21) _menu_fix_owner ;;' "$_menu_block"
+assert_has "the command is dispatched"        'fix-owner)      lib_domain_fix_owner_main "${rest[@]}" || exit 1 ;;' "$(cat "$ROOT/setup.sh")"
+assert_has "and in the command reference"     "fix-owner <domain>|--all" "$(lib_usage)"
+assert_has "a new site's summary points at it" 'setup.sh fix-owner ${D_DOMAIN}' "$(declare -f lib_domain_summary)"
+if [[ -e /proc/sys/fs/protected_hardlinks ]]; then
+  assert_has "lomp's sysctl file keeps hard links protected" "fs.protected_hardlinks = 1" "$(lib_system_render_sysctl)"
+  assert_has "and links in sticky directories"              "fs.protected_symlinks = 1" "$(lib_system_render_sysctl)"
+fi
+
+eval "$_fo_saved"; eval "$_fo_orig_ids"; eval "$_fo_orig_rt"
+rm -rf "$_fo_h" "$_fo_ld"
+lib_domain_state_reset
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 if (( FAIL > 0 )); then exit 1; fi

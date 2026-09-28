@@ -955,11 +955,11 @@ lib_domain_summary() {
   if lib_app_state_load "$D_DOMAIN"; then
     lib_print_kv "Application" "${D_HOME}/app, run by PM2 ($(lib_app_unit_name "$D_IDENT")): ${APP_RESULT:-prepared}"
     if [[ "$APP_RESULT" != "running" ]]; then
-      lib_print_kv "Next"      "put the code into ${D_HOME}/app (chown -R ${D_USER}:${D_GROUP}), then: setup.sh app deploy ${D_DOMAIN}"
+      lib_print_kv "Next"      "put the code into ${D_HOME}/app (copied as root? setup.sh fix-owner ${D_DOMAIN}), then: setup.sh app deploy ${D_DOMAIN}"
     fi
   fi
   lib_print_kv "Document root" "${D_HOME}/public_html"
-  lib_print_kv "System user" "${D_USER} (upload with: chown -R ${D_USER}:${D_GROUP})"
+  lib_print_kv "System user" "${D_USER} (uploaded as root? setup.sh fix-owner ${D_DOMAIN})"
   [[ -n "$D_PHP" ]] && lib_print_kv "PHP" "${D_PHP} (memory ${D_MEMORY}, upload ${D_UPLOAD}, workers ${D_PHP_CHILDREN})"
   lib_print_kv "Logs"        "${D_HOME}/logs/access.log, error.log  (setup.sh logs ${D_DOMAIN})"
   lib_print_kv "SSL"         "$sslline"
@@ -1103,6 +1103,195 @@ lib_domain_logs_main() {
   # not "exec": that replaced this process and skipped the EXIT trap, which left the per-run
   # temporary directory behind every time a log was followed
   tail -n "$lines" -F "${files[@]}" || true
+}
+
+# =============================================================================
+#  fix-owner: files uploaded as root go back to the site's user
+# =============================================================================
+# Files uploaded as root - WinSCP or scp logged in as root, an archive root unpacked - stay
+# root's, and PHP runs as the site's own user: WordPress cannot update itself or store an
+# upload until they are handed over. Doing that means root working in a tree the site user
+# controls, so every step below is written against that user.
+DOM_FIX_OWNER_PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+DOM_HARDLINKS_SYSCTL="/proc/sys/fs/protected_hardlinks"
+DOM_MOUNTINFO="/proc/self/mountinfo"
+
+lib_domain_fix_owner_usage() {
+  cat <<'EOF'
+Usage: setup.sh fix-owner <domain>... | --all
+  Hand a site's files back to its own user and group after uploading as root (WinSCP, scp,
+  an archive unpacked by root). Only what belongs to someone else changes; logs/ stays
+  root's and the file modes stay as they are. With --dry-run it only counts.
+EOF
+}
+
+# A hard link is how a chown run by root could reach past a site: it changes the file, and the
+# file may have another name anywhere on the disk. With fs.protected_hardlinks=1 - Ubuntu's
+# default, and in lomp's sysctl file - a user can link only a file it owns or may read and
+# write, so a site user cannot plant /etc/shadow in its site for this command to hand over.
+lib_domain_hardlinks_protected() {
+  local v=""
+  v="$(cat "$DOM_HARDLINKS_SYSCTL" 2>/dev/null || true)"
+  [[ "$v" == "1" ]]
+}
+
+# A name out of a site's tree, fit for a terminal: its owner chose it, control characters too.
+_domain_printable() { local s="$1"; printf '%s' "${s//[[:cntrl:]]/?}"; }
+
+_domain_n_entries() {   # count
+  if (( $1 == 1 )); then printf '1 file or directory'; else printf '%d files and directories' "$1"; fi
+}
+
+# The numbers the files go to, once the account proves to be this site's: it exists, it is not
+# root, and its home is the site's - the pairing useradd made when the site was added
+# (lib_domain_user_ensure). Prints "uid gid", or why not.
+_domain_fix_owner_ids() {   # home
+  local pw="" uid="" gid="" dir=""
+  pw="$(getent passwd "$D_USER" 2>/dev/null || true)"
+  [[ -n "$pw" ]] || { printf 'its user %s does not exist' "$D_USER"; return 1; }
+  IFS=: read -r _ _ uid _ _ dir _ <<<"$pw"
+  gid="$(getent group "$D_GROUP" 2>/dev/null | cut -d: -f3 || true)"
+  [[ -n "$gid" ]] || { printf 'its group %s does not exist' "$D_GROUP"; return 1; }
+  [[ "$uid" =~ ^[0-9]+$ && "$gid" =~ ^[0-9]+$ && "$uid" != 0 && "$gid" != 0 ]] \
+    || { printf '%s:%s is not a site account (uid %s, gid %s)' "$D_USER" "$D_GROUP" "$uid" "$gid"; return 1; }
+  [[ "$dir" == "$1" ]] || { printf 'the home of %s is %s, not %s' "$D_USER" "$dir" "$1"; return 1; }
+  printf '%s %s' "$uid" "$gid"
+}
+
+# Mount points below the home. chown cannot tell a directory from the top of a mounted
+# filesystem, and one bind-mounted into a site - shared with other sites, say - would become
+# that site's user's. (Field 5 of mountinfo; without the file there is nothing to report.)
+_domain_mounts_below() {   # dir
+  awk -v p="$1/" 'index($5, p) == 1 { print $5 }' "$DOM_MOUNTINFO" 2>/dev/null || true
+}
+
+# What this command never hands over: a device node gives its owner the disk or the memory
+# behind it, and a file with a second name may have that name outside the site. Only root makes
+# such things in a site - tar unpacking devices, pnpm or bun installing from root's store,
+# cp -al, rsync --link-dest - and sorting them out is not a job for a bulk command. logs/ is
+# searched too: something moved there before the run could be moved back under a name the run
+# is about to change. Prints the paths, NUL-separated.
+_domain_fix_owner_hazards() {   # home uid gid
+  find -P "$1" -xdev \( ! -uid "$2" -o ! -gid "$3" \) \
+    \( -type b -o -type c -o \( ! -type d -links +1 \) \) -print0 2>/dev/null || true
+}
+
+# How many in the home belong to someone else: the home itself included, logs/ left out.
+_domain_fix_owner_count() {   # home uid gid
+  local n=""
+  n="$( { find -P "$1" -xdev \( -path "$1/logs" -prune \) -o \( ! -uid "$2" -o ! -gid "$3" \) -printf . 2>/dev/null || true; } | wc -c)"
+  printf '%d' "$(( n ))"
+}
+
+# The change, in one pass. -execdir runs chown from the directory find holds open, on names
+# relative to it, so a directory swapped for a link while the run is under way takes chown
+# nowhere new; chown -h changes a link itself, never what it names; -xdev keeps to the home's
+# filesystem. Devices and files with a second name stay out here too, in case one was moved
+# into place after the look for them. find refuses -execdir under a PATH with a relative entry,
+# so it gets a fixed one rather than whatever the operator's is.
+_domain_fix_owner_apply() {   # home uid gid
+  PATH="$DOM_FIX_OWNER_PATH" find -P "$1" -xdev \( -path "$1/logs" -prune \) -o \
+    \( ! -uid "$2" -o ! -gid "$3" \) ! -type b ! -type c \( -type d -o -links 1 \) \
+    -execdir chown -h -- "${D_USER}:${D_GROUP}" {} +
+}
+
+# One site: its home and everything below it but logs/, which leads to - or, on a server an
+# older release set up, still is - the log directory root has to keep. Only what belongs to
+# someone else changes: a chown re-dates a file (ctime), and the .htaccess check reloads
+# OpenLiteSpeed for a .htaccess that looks changed. A site that fails a check is left exactly
+# as it is. Returns 1 when not all of it could be handed over.
+lib_domain_fix_owner() {   # domain
+  local domain="$1" home="" ids="" uid="" gid="" mounts="" n=0 left=0 f=""
+  local -a hazards=()
+  home="$(lib_domain_home "$domain")"
+  lib_domain_state_load "$domain" || { lib_error "${domain} is not registered"; return 1; }
+  if [[ -L "$home" || ! -d "$home" ]]; then
+    lib_error "${domain}: ${home} is not a directory; nothing changed"
+    return 1
+  fi
+  if ! ids="$(_domain_fix_owner_ids "$home")"; then
+    lib_error "${domain}: ${ids}; nothing changed"
+    return 1
+  fi
+  read -r uid gid <<<"$ids"
+  mounts="$(_domain_mounts_below "$home")"
+  if [[ -n "$mounts" ]]; then
+    lib_error "${domain}: a filesystem is mounted inside the home, at $(_domain_printable "${mounts%%$'\n'*}"); nothing changed"
+    return 1
+  fi
+  mapfile -d '' hazards < <(_domain_fix_owner_hazards "$home" "$uid" "$gid")
+  if ((${#hazards[@]} > 0)); then
+    lib_error "${domain}: nothing changed - this command never hands over a device node or a file with more than one name, and the site has ${#hazards[@]} of them:"
+    for f in "${hazards[@]:0:5}"; do lib_note "$(_domain_printable "$f")"; done
+    if ((${#hazards[@]} > 5)); then lib_note "... and $(( ${#hazards[@]} - 5 )) more"; fi
+    lib_note "look at them with ls -li, take away what is not this site's, then run it again"
+    return 1
+  fi
+  n="$(_domain_fix_owner_count "$home" "$uid" "$gid")"
+  if (( n == 0 )); then
+    lib_ok "${domain}: everything already belongs to ${D_USER}"
+    return 0
+  fi
+  if (( OPT_DRY_RUN )); then
+    lib_info "[dry-run] ${domain}: would hand $(_domain_n_entries "$n") to ${D_USER}:${D_GROUP}"
+    return 0
+  fi
+  lib_log_write CMD "fix-owner ${domain}: chown -h ${D_USER}:${D_GROUP} what belongs to someone else in ${home} (${n})"
+  # what find and chown complain about goes to the log, without the control characters a name
+  # the site user chose could bring along
+  { _domain_fix_owner_apply "$home" "$uid" "$gid" 2>&1 >/dev/null || true; } \
+    | tr -d '\000-\011\013-\037\177' | lib_mask_secrets >>"$LOG_FILE" 2>/dev/null || true
+  left="$(_domain_fix_owner_count "$home" "$uid" "$gid")"
+  if (( left > 0 )); then
+    lib_warn "${domain}: not all of it changed hands (${left} of ${n} left) - an upload still under way, or a file made immutable (lsattr); run it again once the upload is done"
+    return 1
+  fi
+  lib_ok "${domain}: $(_domain_n_entries "$n") handed to ${D_USER}:${D_GROUP}"
+}
+
+lib_domain_fix_owner_main() {
+  local a="" all=0 d="" failed=0
+  local -a domains=()
+  while (($# > 0)); do
+    a="$1"; shift
+    case "$a" in
+      --all)     all=1 ;;
+      -h|--help) lib_domain_fix_owner_usage; return 0 ;;
+      -*)        lib_domain_fix_owner_usage >&2; lib_die "Unknown option for fix-owner: ${a}" "" "see the usage above" ;;
+      *)         domains+=("${a,,}") ;;
+    esac
+  done
+  if (( all )) && ((${#domains[@]} > 0)); then lib_die "--all and a domain cannot be combined" "" "setup.sh fix-owner --all"; fi
+  if (( ! all )) && ((${#domains[@]} == 0)); then
+    lib_domain_fix_owner_usage >&2
+    lib_die "Domain missing" "" "setup.sh fix-owner example.com   (every site: setup.sh fix-owner --all)"
+  fi
+  lib_require_tools
+  for d in "${domains[@]}"; do
+    lib_domain_valid "$d" || lib_die "Invalid domain name '${d}'" "" "setup.sh list"
+    lib_domain_registered "$d" || lib_die "Site ${d} is not registered" "" "setup.sh list"
+  done
+  if ! lib_domain_hardlinks_protected; then
+    if (( OPT_DRY_RUN )); then
+      lib_warn "fs.protected_hardlinks is off; a real run refuses to start until it is on (sysctl -w fs.protected_hardlinks=1)"
+    else
+      lib_die "fs.protected_hardlinks is off" \
+        "without it a site user can hard-link a file it does not own - /etc/shadow, say - into its site, and this command would hand that file over" \
+        "sysctl -w fs.protected_hardlinks=1 (Ubuntu's default; setup.sh optimize writes it for good), then run it again"
+    fi
+  fi
+  if (( all )); then
+    mapfile -t domains < <(lib_domains_list)
+    if ((${#domains[@]} == 0)); then lib_info "No sites have been added yet."; return 0; fi
+  fi
+  for d in "${domains[@]}"; do
+    lib_domain_fix_owner "$d" || failed=$((failed + 1))
+  done
+  if (( failed > 0 )); then
+    lib_warn "${failed} of ${#domains[@]} site(s) could not be handed over completely; see above"
+    return 1
+  fi
+  return 0
 }
 
 # =============================================================================

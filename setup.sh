@@ -228,6 +228,7 @@ main() {
     status)         lib_status_main "${rest[@]}" ;;
     doctor)         lib_doctor_main "${rest[@]}" || exit 1 ;;
     credentials)    lib_domain_credentials_main "${rest[@]}" ;;
+    fix-owner)      lib_domain_fix_owner_main "${rest[@]}" || exit 1 ;;
     optimize)       lib_optimize_main "${rest[@]}" ;;
     backup)         lib_backup_main "${rest[@]}" ;;
     restore)        lib_restore_main "${rest[@]}" ;;
