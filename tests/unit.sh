@@ -1017,6 +1017,23 @@ assert_eq "menu exits 0 when non-interactive" 0 "$(run_isolated lib_menu_main)"
 OPT_NON_INTERACTIVE=1   # the suite runs non-interactive throughout
 assert_has "command name prefers the short alias" "lomp" "$(_menu_cmd_name)"
 
+# Adding a site from the menu with Enter everywhere. A site usually goes in before its DNS
+# moves here, so no certificate is asked for yet, and the contact is the site's own address.
+_madd() {   # domain [question=answer...] -> the command the menu runs
+  (
+    eval '_menu_ask() { local -n _o="$1"; _o="${_ma[$1]-${3:-}}"; }
+          _menu_run() { printf "%s\n" "$*"; }
+          lib_mail_installed() { return 1; }'
+    declare -A _ma=([domain]="$1"); shift
+    for _kv in "$@"; do _ma[${_kv%%=*}]="${_kv#*=}"; done
+    _menu_add_site 2>/dev/null | tail -n 1
+  )
+}
+assert_eq "Enter everywhere: www, no certificate yet, info@ the site" \
+  "add KumeSos.com --www --no-ssl --email info@kumesos.com" "$(_madd KumeSos.com)"
+assert_eq "a certificate and another address when asked for" \
+  "add kumesos.com --email ops@example.org" "$(_madd kumesos.com www=n ssl=y email=ops@example.org)"
+
 # =============================================================================
 section "smoke test expectations per site mode"
 # A proxy site is created before its application is deployed, so 502/503 from an absent
@@ -1123,6 +1140,7 @@ D_DOMAIN="sum.example.com"; D_MODE="php"; D_HOME="${SITES_ROOT}/sum.example.com"
 D_USER="sum_example_com"; D_GROUP="sum_example_com"; D_PHP="8.3"
 D_SSL=0; D_SSL_WANTED=0
 assert_eq "summary exits 0 when SSL was never wanted"        0 "$(run_isolated lib_domain_summary)"
+assert_has "and tells you how to get one once DNS points here" "renew-ssl sum.example.com" "$(lib_domain_summary 2>&1)"
 D_SSL_WANTED=1
 assert_eq "summary exits 0 when SSL is wanted but not active" 0 "$(run_isolated lib_domain_summary)"
 assert_has "and it tells you how to get one" "renew-ssl" "$(lib_domain_summary 2>&1)"
@@ -1137,8 +1155,8 @@ lib_domain_state_reset
 # the file directly rather than through the D_* globals. A dry run writes no file, so that
 # load failed - and lib_domain_state_load resets every D_* BEFORE it looks at the file. Each
 # step reported the site correctly and the closing summary then announced "Site  is ready",
-# mode php for a --static site, /public_html as the document root, and a renew-ssl command
-# for the certificate --no-ssl had just declined.
+# mode php for a --static site, /public_html as the document root, and the certificate --no-ssl
+# had just declined as one that failed ("not active (run: setup.sh renew-ssl ...)").
 _orig_dapply="$(declare -f lib_domain_apply_config)"; _orig_reqi="$(declare -f lib_require_installed)"
 _orig_smoke="$(declare -f lib_ols_smoke_test)"; _orig_dbi="$(declare -f lib_db_installed)"
 # lib_ols_is_installed has no definition left here - an earlier section unset it - so this one
@@ -1158,7 +1176,8 @@ assert_has   "its document root"      "${SITES_ROOT}/dry.example.com/public_html
 assert_has   "its system user"        "chown -R dry_example_com:dry_example_com" "$out"
 assert_has   "and its logs"           "${SITES_ROOT}/dry.example.com/logs/access.log" "$out"
 assert_lacks "never the reset defaults" "Mode                       php" "$out"
-assert_lacks "nor a certificate --no-ssl declined" "renew-ssl dry.example.com" "$out"
+assert_has   "the certificate --no-ssl declined as not requested" "not requested (once DNS points here: setup.sh renew-ssl dry.example.com)" "$out"
+assert_lacks "never as one that failed" "not active (run: setup.sh renew-ssl" "$out"
 assert_false "while the dry run itself registers nothing" lib_domain_registered dry.example.com
 unset -f lib_ols_is_installed
 eval "$_orig_dapply"; eval "$_orig_smoke"; eval "$_orig_dbi"; eval "$_orig_reqi"
@@ -1318,6 +1337,11 @@ assert_has  "Databases is item 5"        '_menu_item  5 "Databases"' "$_menu_blo
 assert_has  "and item 5 opens it"        '5) _menu_databases ;;' "$_menu_block"
 assert_has  "Node.js apps is item 6"     '6) _menu_apps ;;' "$_menu_block"
 assert_has  "Status is still item 8"     '8) _menu_run status ;;' "$_menu_block"
+# "renew-ssl --all" passes over a site added without a certificate, so the menu needs a way
+# to get that site its first one
+assert_has  "Certificates is item 11"    '11) _menu_certificates ;;' "$_menu_block"
+_body="$(awk '/^_menu_certificates\(\)/{f=1} f{print} f && /^[}]/{exit}' "$ROOT/lib/menu.sh")"
+assert_has  "which gets one site a certificate" '_menu_run renew-ssl "$domain"' "$_body"
 # ... and the same must hold for every other menu built from _menu_item (submenus included)
 _menu_fns="$(grep -oE '^_?[a-z_]+\(\)' "$ROOT/lib/menu.sh" | tr -d '()' | tr '\n' ' ' || true)"
 _menu_checked=0

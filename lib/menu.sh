@@ -306,7 +306,7 @@ lib_menu_main() {
     _menu_item  8 "Status"
     _menu_item  9 "Health check"
     _menu_item 10 "Open WebAdmin panel"
-    _menu_item 11 "Renew certificates"
+    _menu_item 11 "Certificates (a new site's first one, renewals)"
     _menu_item 12 "Back up sites"
     _menu_item 13 "Restore a site"
     _menu_group "MAINTENANCE"
@@ -332,7 +332,7 @@ lib_menu_main() {
       8) _menu_run status ;;
       9) _menu_run doctor ;;
       10) _menu_run panel ;;
-      11) _menu_run renew-ssl --all ;;
+      11) _menu_certificates ;;
       12) _menu_backup ;;
       13) _menu_restore ;;
       14) _menu_run update ;;
@@ -378,10 +378,12 @@ _menu_add_site() {
   _menu_ask www "Also serve www.${domain}? (y/n)" "y"
   [[ "${www,,}" == y* ]] && args+=(--www)
 
-  _menu_ask ssl "Request a Let's Encrypt certificate now? DNS must already point here (y/n)" "y"
+  # "n" by default: a site usually goes in before its DNS moves here. The certificate comes
+  # later, from "Certificates" in this menu.
+  _menu_ask ssl "Request a Let's Encrypt certificate now? DNS must already point here (y/n)" "n"
   [[ "${ssl,,}" == y* ]] || args+=(--no-ssl)
 
-  _menu_ask email "Contact e-mail" "$DEFAULT_EMAIL"
+  _menu_ask email "Contact e-mail" "info@${domain,,}"
   [[ -n "$email" ]] && args+=(--email "$email")
 
   # only where this server actually runs mail; otherwise the question is an offer it cannot keep
@@ -424,6 +426,27 @@ _menu_databases() {
     case "$choice" in
       1) _menu_run db list ;;
       2) domain="$(_menu_pick_domain)" && _menu_run db "$domain" || _menu_pause ;;
+      0|q|Q|"") return 0 ;;
+      *) printf '%sPick a number from the list.%s\n' "$C_YEL" "$C_RST" ;;
+    esac
+  done
+}
+
+# A site added without a certificate is not asking for one, so "renew-ssl --all" passes it
+# over. Item 1 is how such a site gets its first certificate once its DNS points here.
+_menu_certificates() {
+  local choice="" domain=""
+  while true; do
+    printf '\n %sCERTIFICATES%s\n' "$C_BLD" "$C_RST"
+    _menu_rule
+    _menu_item 1 "Get a certificate for a site (its DNS must point here)"
+    _menu_item 2 "Renew every certificate"
+    _menu_item 0 "Back"
+    printf '\n%sChoice: %s' "$C_BLD" "$C_RST"
+    read -r choice </dev/tty || return 0
+    case "$choice" in
+      1) domain="$(_menu_pick_domain)" && _menu_run renew-ssl "$domain" || _menu_pause ;;
+      2) _menu_run renew-ssl --all ;;
       0|q|Q|"") return 0 ;;
       *) printf '%sPick a number from the list.%s\n' "$C_YEL" "$C_RST" ;;
     esac

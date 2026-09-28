@@ -735,15 +735,15 @@ define('FS_METHOD', 'direct');" || lib_die "wp config create failed" "database c
 #  summary / credentials / list / logs
 # =============================================================================
 lib_domain_summary() {
-  local sslline="" hint=""
+  local sslline=""
   sslline="$(lib_ssl_status_line "$D_DOMAIN")"
   # NOT 'sslline="...$( (( x )) && printf ... )"'. A command substitution whose last command
   # is a conditional that turns out false exits 1; a plain assignment adopts that status, and
   # errexit then kills the run. This fired on a real "add" AFTER the site had been created
   # and every step had reported OK - the only casualty was the summary nobody got to read.
   if (( ! D_SSL )); then
-    if (( D_SSL_WANTED )); then hint=" (run: setup.sh renew-ssl ${D_DOMAIN})"; fi
-    sslline="not active${hint}"
+    if (( D_SSL_WANTED )); then sslline="not active (run: setup.sh renew-ssl ${D_DOMAIN})"
+    else sslline="not requested (once DNS points here: setup.sh renew-ssl ${D_DOMAIN})"; fi
   fi
   printf '\n%s%sSite %s is ready%s\n' "$C_BLD" "$C_GRN" "$D_DOMAIN" "$C_RST"
   lib_print_kv "URL"         "$( (( D_SSL )) && printf 'https' || printf 'http')://${D_DOMAIN}/$( (( D_WWW )) && printf '  (+ www)')"
