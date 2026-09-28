@@ -35,7 +35,7 @@ after it is applied, and rolled back if the verification fails.
 | Layer | What is installed and tuned |
 |---|---|
 | Web server | OpenLiteSpeed from the official LiteSpeed repository, HTTP/2, HTTP/3 (QUIC), Brotli/gzip, catch-all vhost that returns 403 for unknown hostnames |
-| PHP | LSPHP (default 8.3, any version per site) with curl, mbstring, mysqli, PDO, gd, imagick, xml, zip, intl, bcmath, soap, opcache, redis, fileinfo, exif |
+| PHP | LSPHP (default 8.3, any version per site) with curl, mbstring, mysqli, PDO (MySQL and SQLite), sqlite3, gd, imagick, xml, zip, intl, bcmath, soap, opcache, redis, apcu, fileinfo, exif |
 | Database | MariaDB bound to 127.0.0.1, hardened, InnoDB tuned to your RAM and disk type, slow query log on |
 | Cache | Redis on localhost with a generated password, `allkeys-lru`, memory capped by RAM share |
 | TLS | Let's Encrypt via certbot, shared ACME webroot, TLS 1.2/1.3 only, HSTS, auto-renew with an OpenLiteSpeed deploy hook |

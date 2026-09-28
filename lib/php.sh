@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
 # lib/php.sh - LSPHP installation, required extensions, php.ini tuning, CLI links.
 
-PHP_REQUIRED_EXTS="curl mbstring mysqli pdo_mysql gd imagick xml zip intl bcmath soap opcache redis fileinfo exif"
+# Every LSPHP version must load these. Most are compiled into lsphpXX itself; the framework basics
+# on the second line are checked too, so a build without one is reported by install and update
+# instead of breaking an application at runtime.
+PHP_REQUIRED_EXTS="curl mbstring mysqli pdo_mysql sqlite3 pdo_sqlite gd imagick xml zip intl bcmath soap opcache redis apcu fileinfo exif"
+PHP_REQUIRED_EXTS+=" ctype dom filter iconv openssl pdo phar posix session simplexml sodium tokenizer xmlreader xmlwriter zlib"
+PHP_EXTS_ADDED=""   # packages lib_php_ensure_extensions installed during this run
 PHP_INI_FILE=""
 PHP_INI_SCAN_DIR=""
 PHP_INI_CHANGED=0
@@ -35,20 +40,22 @@ lib_php_default_version() {
 
 # Base package set for a version (verified against the LiteSpeed repository naming).
 _php_packages() {
-  local tag=""; tag="$(lib_php_tag "$1")"
-  printf '%s %s-common %s-mysql %s-opcache %s-curl %s-imagick %s-intl %s-redis\n' \
-    "$tag" "$tag" "$tag" "$tag" "$tag" "$tag" "$tag" "$tag"
+  local tag="" p="" out=""; tag="$(lib_php_tag "$1")"
+  out="$tag"
+  for p in common mysql sqlite3 opcache curl imagick intl redis apcu; do out+=" ${tag}-${p}"; done
+  printf '%s\n' "$out"
 }
 
 # lib_php_install <version>  (idempotent)
 lib_php_install() {
-  local ver="$1" pkgs=() p=""
+  local ver="$1" pkgs=() p="" existing=0 added=""
   lib_php_valid_version "$ver" || lib_die "Invalid PHP version '${ver}'" "expected e.g. 8.2 / 8.3 / 8.4" "use --php 8.3"
   if (( OPT_DRY_RUN )) && ! lib_php_installed "$ver"; then
     lib_info "[dry-run] would install $(_php_packages "$ver"), verify extensions (${PHP_REQUIRED_EXTS}) and write the php.ini drop-in"
     return 0
   fi
   if lib_php_installed "$ver"; then
+    existing=1
     lib_ok "LSPHP ${ver} already installed ($(lib_php_full_version "$ver"))"
   else
     lib_apt_update
@@ -62,8 +69,11 @@ lib_php_install() {
     lib_ok "LSPHP ${ver} installed ($(lib_php_full_version "$ver"))"
   fi
   if (( ! OPT_DRY_RUN )) || lib_php_installed "$ver"; then
+    added="$PHP_EXTS_ADDED"
     lib_php_ensure_extensions "$ver"
     lib_php_write_ini "$ver"
+    # workers that were already running never load an extension installed under them
+    if (( existing )) && [[ "$PHP_EXTS_ADDED" != "$added" ]]; then lib_php_restart_workers; fi
   else
     lib_info "[dry-run] would verify extensions and write php.ini overrides for LSPHP ${ver}"
   fi
@@ -80,27 +90,37 @@ lib_php_register() {   # record version in manifest
 }
 
 # Verify every required extension is loaded; try lsphpXX-<ext> packages for missing ones.
+# What it installs goes into PHP_EXTS_ADDED: running workers only load it after a restart.
 lib_php_ensure_extensions() {
-  local ver="$1" cli="" mods="" ext="" pkg="" missing=() tag=""
+  local ver="$1" cli="" mods="" ext="" pkg="" missing=() tag="" tried=" "
   cli="$(lib_php_cli "$ver")"; tag="$(lib_php_tag "$ver")"
   [[ -x "$cli" ]] || return 0
   mods="$("$cli" -m 2>/dev/null | tr '[:upper:]' '[:lower:]')"
   for ext in $PHP_REQUIRED_EXTS; do
     _php_has_ext "$mods" "$ext" && continue
     case "$ext" in
-      mysqli|pdo_mysql) pkg="${tag}-mysql" ;;
-      *)                pkg="${tag}-${ext}" ;;
+      mysqli|pdo_mysql)   pkg="${tag}-mysql" ;;
+      sqlite3|pdo_sqlite) pkg="${tag}-sqlite3" ;;
+      *)                  pkg="${tag}-${ext}" ;;
     esac
-    if lib_pkg_available "$pkg" && ! lib_pkg_installed "$pkg"; then
-      lib_apt_install "$pkg" || true
+    if [[ "$tried" != *" ${pkg} "* ]] && lib_pkg_available "$pkg" && ! lib_pkg_installed "$pkg"; then
+      tried+="${pkg} "
+      if lib_apt_install "$pkg" && (( ! OPT_DRY_RUN )); then PHP_EXTS_ADDED+="${PHP_EXTS_ADDED:+ }${pkg}"; fi
       mods="$("$cli" -m 2>/dev/null | tr '[:upper:]' '[:lower:]')"
     fi
-    _php_has_ext "$mods" "$ext" || missing+=("$ext")
+    _php_has_ext "$mods" "$ext" && continue
+    # a dry run installs nothing, so what the package would bring cannot show up yet
+    (( OPT_DRY_RUN )) && [[ "$tried" == *" ${pkg} "* ]] && continue
+    missing+=("$ext")
   done
   if ((${#missing[@]} > 0)); then
     lib_warn "LSPHP ${ver}: extensions still missing: ${missing[*]} (install ${tag}-dev and build via PECL if required)"
-  else
+  elif [[ "$tried" == " " ]]; then
     lib_ok "LSPHP ${ver}: all required extensions present"
+  elif (( OPT_DRY_RUN )); then
+    lib_info "[dry-run] LSPHP ${ver}: would install${tried% } for the extensions it lacks"
+  else
+    lib_ok "LSPHP ${ver}: all required extensions present (installed${tried% })"
   fi
 }
 

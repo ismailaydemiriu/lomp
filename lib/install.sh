@@ -979,7 +979,7 @@ lib_update_main() {
   lib_require_installed
   lib_system_analyze --no-net
   lib_steps_begin 6
-  local ts="" snap="" before_ols="" before_db="" before_redis="" before_php="" after_ols="" after_db="" after_redis="" after_php=""
+  local ts="" snap="" before_ols="" before_db="" before_redis="" before_php="" after_ols="" after_db="" after_redis="" after_php="" v=""
   ts="$(lib_ts)"
 
   lib_step "Configuration backups"
@@ -1005,6 +1005,8 @@ lib_update_main() {
     lib_run apt-get -y -q -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold upgrade || lib_die "apt-get upgrade failed" "see the log" "fix apt problems (apt-get -f install) and re-run"
     lib_run apt-get -y -q autoremove || true
   fi
+  # an older release installed fewer extensions: bring every installed version up to today's set
+  for v in $(lib_php_installed_versions); do lib_php_ensure_extensions "$v"; done
 
   lib_step "Versions after"
   after_ols="$(lib_ols_version)"; after_db="$(lib_db_version)"; after_redis="$(lib_redis_version)"; after_php="$(lib_php_summary_line)"
@@ -1032,6 +1034,9 @@ lib_update_main() {
       lib_ols_restart; lib_ols_wait_ready 40 || lib_die "OpenLiteSpeed unhealthy after update" "journalctl -u lsws" ""
       lib_php_restart_workers
       lib_ok "OpenLiteSpeed restarted and healthy"
+    elif [[ -n "$PHP_EXTS_ADDED" ]]; then
+      lib_php_restart_workers
+      lib_ok "PHP workers restarted to load ${PHP_EXTS_ADDED}"
     else lib_ok "OpenLiteSpeed/PHP unchanged (no restart)"; fi
   fi
 

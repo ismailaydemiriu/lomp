@@ -3833,6 +3833,70 @@ assert_has "and does so by extracting the archive" "-xzpf -" "$_rlog"
 eval "$_orig_rt"; eval "$_orig_ri"
 lib_domain_state_reset
 
+# =============================================================================
+section "PHP extensions: SQLite and APCu by default, and update adds what a server lacks"
+# a real server had no pdo_sqlite, and the application on it did not start
+assert_eq "the base set brings SQLite and APCu" \
+  "lsphp83 lsphp83-common lsphp83-mysql lsphp83-sqlite3 lsphp83-opcache lsphp83-curl lsphp83-imagick lsphp83-intl lsphp83-redis lsphp83-apcu" \
+  "$(_php_packages 8.3)"
+for _e in sqlite3 pdo_sqlite apcu ctype tokenizer phar; do assert_has "${_e} is required" " ${_e} " " ${PHP_REQUIRED_EXTS} "; done
+_orig_pkgfns="$(declare -f lib_pkg_available lib_pkg_installed lib_apt_install)"
+_fx="$TMP/fakeext"; mkdir -p "$_fx/bin"; export FAKE_MODS="$_fx/mods"
+printf '#!/usr/bin/env bash\ncat "$FAKE_MODS"\n' >"$_fx/bin/php"; chmod +x "$_fx/bin/php"
+_ext_reset() {   # "php -m" of a build without the three, and nothing installed yet
+  local e=""
+  for e in $PHP_REQUIRED_EXTS; do
+    case "$e" in sqlite3|pdo_sqlite|apcu) ;; opcache) printf 'Zend OPcache\n' ;; *) printf '%s\n' "$e" ;; esac
+  done >"$FAKE_MODS"
+  : >"$_fx/installed"; : >"$_fx/calls"; PHP_EXTS_ADDED=""; FAKE_REPO="lsphp83-sqlite3 lsphp83-apcu"
+}
+eval 'lib_php_cli()       { printf "%s/bin/php" "$_fx"; }
+      lib_pkg_available() { [[ " ${FAKE_REPO} " == *" $1 "* ]]; }
+      lib_pkg_installed() { grep -qx -- "$1" "$_fx/installed"; }
+      lib_apt_install() {   # logs the call; outside a dry run the modules of the package appear
+        printf "%s\n" "$*" >>"$_fx/calls"
+        (( OPT_DRY_RUN )) && return 0
+        printf "%s\n" "$@" >>"$_fx/installed"
+        case "$1" in *-sqlite3) printf "sqlite3\npdo_sqlite\n" >>"$FAKE_MODS" ;; *-apcu) printf "apcu\n" >>"$FAKE_MODS" ;; esac
+      }
+      lib_php_restart_workers() { printf "restart\n" >>"$_fx/calls"; }'
+_ext_reset
+assert_eq "it exits 0 under errexit" 0 "$(run_isolated lib_php_ensure_extensions 8.3)"
+_ext_reset
+OPT_QUIET=0 lib_php_ensure_extensions 8.3 >"$_fx/out" 2>&1
+assert_eq  "SQLite's two extensions share one package, installed once" "$(printf 'lsphp83-sqlite3\nlsphp83-apcu')" "$(cat "$_fx/calls")"
+assert_eq  "the caller learns what was added" "lsphp83-sqlite3 lsphp83-apcu" "$PHP_EXTS_ADDED"
+assert_has "and the report names it" "all required extensions present (installed lsphp83-sqlite3 lsphp83-apcu)" "$(cat "$_fx/out")"
+: >"$_fx/calls"; lib_php_ensure_extensions 8.3 >/dev/null 2>&1
+assert_eq  "a second run installs nothing" "" "$(cat "$_fx/calls")"
+_ext_reset; FAKE_REPO="lsphp83-sqlite3"
+OPT_QUIET=0 lib_php_ensure_extensions 8.3 >"$_fx/out" 2>&1
+assert_has "one the repository lacks is reported" "extensions still missing: apcu" "$(cat "$_fx/out")"
+_ext_reset; OPT_DRY_RUN=1
+assert_eq "a dry run exits 0 under errexit" 0 "$(run_isolated lib_php_ensure_extensions 8.3)"
+_ext_reset
+OPT_QUIET=0 lib_php_ensure_extensions 8.3 >"$_fx/out" 2>&1
+OPT_DRY_RUN=0
+assert_eq    "a dry run names each package once" "$(printf 'lsphp83-sqlite3\nlsphp83-apcu')" "$(cat "$_fx/calls")"
+assert_eq    "adds nothing" "" "$PHP_EXTS_ADDED"
+assert_has   "says what it would install" "would install lsphp83-sqlite3 lsphp83-apcu" "$(cat "$_fx/out")"
+assert_lacks "and calls nothing missing" "still missing" "$(cat "$_fx/out")"
+_ext_reset
+eval 'lib_php_installed()    { return 0; }
+      lib_php_full_version() { printf "8.3.33"; }
+      lib_php_write_ini()    { return 0; }
+      lib_php_register()     { return 0; }'
+lib_php_install 8.3 >/dev/null 2>&1
+assert_eq "a version that is already serving gets its workers restarted" "restart" "$(tail -n 1 "$_fx/calls")"
+: >"$_fx/calls"; lib_php_install 8.3 >/dev/null 2>&1
+assert_eq "but not when nothing was added" "" "$(cat "$_fx/calls")"
+_upd="$(declare -f lib_update_main)"
+assert_has "update checks every installed version" 'lib_php_ensure_extensions "$v"' "$_upd"
+assert_has "and restarts the workers for what it added" '-n "$PHP_EXTS_ADDED"' "$_upd"
+eval "$_orig_pkgfns"; unset FAKE_MODS FAKE_REPO
+# shellcheck source=/dev/null
+source "$ROOT/lib/php.sh"
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 if (( FAIL > 0 )); then exit 1; fi
 exit 0
