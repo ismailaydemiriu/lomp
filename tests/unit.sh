@@ -2645,7 +2645,9 @@ cp "$LSWS_VHOSTS_DIR/lr1.example.com/vhconf.conf" "$TMP/lr-vh-before"
 : >"$SETFACL_LOG"
 OPT_DRY_RUN=1; OPT_QUIET=0 lib_domain_logs_repair >"$TMP/lr-out" 2>&1; OPT_DRY_RUN=0
 assert_eq    "a dry run names what it would move" "lr1.example.com" "$DOMAIN_LOGS_MOVED"
-assert_has   "and says so"                        "would move the logs in ${SITES_ROOT}/lr1.example.com/logs" "$(cat "$TMP/lr-out")"
+# (the home comes out of domain.json, which the native jq of Git Bash writes as a C:/ path)
+assert_has   "and says so"                        "would move the logs in " "$(cat "$TMP/lr-out")"
+assert_has   "naming the site's old logs/"        "/lr1.example.com/logs to ${SITES_LOG_ROOT}/lr1.example.com" "$(cat "$TMP/lr-out")"
 assert_eq    "sets no ACL"                        "" "$(cat "$SETFACL_LOG")"
 assert_true  "writes no vhost"                    cmp -s "$LSWS_VHOSTS_DIR/lr1.example.com/vhconf.conf" "$TMP/lr-vh-before"
 assert_true  "moves nothing"                      test -f "$SITES_ROOT/lr1.example.com/logs/access.log"
