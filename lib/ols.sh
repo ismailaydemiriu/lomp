@@ -640,6 +640,23 @@ lib_ols_logs_prune_ensure() {
   lib_cron_set ols-logs "45 4 * * * root $(lib_ols_logs_prune_cmd)"
 }
 
+# A virtual host's own logs - a site's /home/<domain>/logs/*.log, a webmail's - are created by
+# the main process as root and handed to the server user (nobody), and it is the worker
+# processes, running as that user, that write them and reopen them by path. A directory they
+# cannot enter kept every site's access.log and error.log empty, and with them the fail2ban
+# web jails that read them. Search permission is all they need: the files are theirs already,
+# and nothing is created or renamed there but by root. -P skips a link that was put in the
+# directory's place rather than following it.
+lib_ols_logdir_grant() {   # dir
+  (( OPT_DRY_RUN )) && return 0
+  setfacl -P -m "u:$(lib_ols_user):x" "$1"
+}
+
+# Can the worker processes reach the logs in this directory?
+lib_ols_logdir_open() {   # dir
+  runuser -u "$(lib_ols_user)" -- test -x "$1" 2>/dev/null
+}
+
 # =============================================================================
 #  .htaccess: read once
 # =============================================================================
@@ -992,13 +1009,16 @@ vhDomain                  ${D_DOMAIN}
 EOF
   (( D_WWW )) && printf 'vhAliases                 www.%s\n' "$D_DOMAIN"
   [[ -n "$D_EMAIL" ]] && printf 'adminEmails               %s\n' "$D_EMAIL"
+  # NOTICE, because that is the level PHP's warnings, fatal errors and error_log() lines arrive
+  # at ("[STDERR] PHP Fatal error: ..."): at WARN the site's error.log never saw one. A 404 is
+  # INFO, so nothing else comes with them. The server log gets every line as well.
   cat <<EOF
 enableGzip                1
 enableIpGeo               0
 
 errorlog \$VH_ROOT/logs/error.log {
   useServer               0
-  logLevel                WARN
+  logLevel                NOTICE
   rollingSize             0
 }
 

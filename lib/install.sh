@@ -640,7 +640,7 @@ lib_selfupdate_main() {
   lib_install_self "$src"
   lib_manifest_set '.install.updated_at' "$(lib_iso_now)"
   lib_ok "Now running lompstack ${SCRIPT_VERSION}$( [[ -n "$(lib_manifest_get '.install.revision')" ]] && printf ' (%s)' "$(lib_manifest_get '.install.revision')")"
-  lib_note "Nothing on the server was reconfigured. 'sudo lomp update' adds the scheduled tasks a newer release brings; 'sudo lomp doctor' checks its state."
+  lib_note "Nothing on the server was reconfigured. 'sudo lomp update' applies what a newer release changes (scheduled tasks, site logs); 'sudo lomp doctor' checks its state."
 }
 
 lib_install_manifest() {
@@ -1046,6 +1046,16 @@ lib_update_main() {
   lib_manifest_set '.components.mariadb' "$after_db"
   lib_manifest_set '.components.redis' "$after_redis"
   lib_manifest_set '.last_update' "$(lib_iso_now)"
+  # last: a vhost OpenLiteSpeed refuses ends the run here, with the update itself recorded
+  lib_domain_logs_repair
+  if [[ -n "$DOMAIN_LOGS_OPENED" ]]; then
+    if (( OPT_DRY_RUN )); then lib_info "[dry-run] would let OpenLiteSpeed write the logs of: ${DOMAIN_LOGS_OPENED}"
+    else lib_ok "OpenLiteSpeed can now write the logs of: ${DOMAIN_LOGS_OPENED}"; fi
+  fi
+  if (( DOMAIN_F2B_FILTERS_CHANGED )); then
+    if (( OPT_DRY_RUN )); then lib_info "[dry-run] would rewrite the fail2ban web filters, which match no access log line as they are"
+    else lib_ok "The fail2ban web filters now match OpenLiteSpeed's access log lines"; fi
+  fi
   lib_system_reboot_required && lib_warn "Reboot required to activate the new kernel/libraries."
   lib_ok "Update finished"
 }

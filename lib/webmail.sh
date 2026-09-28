@@ -358,11 +358,14 @@ lib_webmail_dirs_ensure() {
   lib_mkdir "$WM_ETC"      0755 root:root
   lib_mkdir "$WM_VAR"      0750 "root:${WM_USER}"
   lib_mkdir "${WM_VAR}/temp" 0750 "${WM_USER}:${WM_USER}"
-  # OpenLiteSpeed opens the vhost logs here as root. A directory the webmail user could write
-  # would let it replace a log file with a symlink to anything on the system and have root
-  # append attacker-chosen text to it - the access log carries the User-Agent verbatim. The
-  # webmail itself logs to syslog and never writes here.
+  # OpenLiteSpeed creates the vhost logs here as root and hands them to its server user, whose
+  # worker processes write them: that user may enter (lib_ols_logdir_grant) and nothing more.
+  # A directory the webmail user could write would let it replace a log file with a symlink
+  # to anything on the system and have root create and hand over that file, which then gets
+  # attacker-chosen text - the access log carries the User-Agent verbatim. The webmail itself
+  # logs to syslog and never writes here.
   lib_mkdir "$WM_LOG_DIR"  0750 root:root
+  lib_ols_logdir_grant "$WM_LOG_DIR" || lib_warn "setfacl could not let OpenLiteSpeed into ${WM_LOG_DIR}; the webmail's logs will stay empty"
   return 0
 }
 

@@ -467,7 +467,7 @@ _doc_check_cron() {
 }
 
 _doc_check_domains() {
-  local d="" code="" days="" maps="" ver=""
+  local d="" code="" days="" maps="" ver="" logs=""
   local -a cfg_vhosts=()
   while read -r d; do [[ -n "$d" && "$d" != "$OLS_DEFAULT_VHOST" ]] && cfg_vhosts+=("$d"); done < <(lib_ols_conf_vhosts)
   for d in $(lib_domains_list); do
@@ -475,6 +475,13 @@ _doc_check_domains() {
     [[ -d "${D_HOME}/public_html" ]] || _doc_add FAIL "site ${d}: files" "${D_HOME}/public_html missing"
     id -u "$D_USER" >/dev/null 2>&1 || _doc_add FAIL "site ${d}: user" "system user ${D_USER} missing"
     [[ -f "${LSWS_VHOSTS_DIR}/${d}/vhconf.conf" ]] || _doc_add FAIL "site ${d}: vhconf" "${LSWS_VHOSTS_DIR}/${d}/vhconf.conf missing"
+    # the fail2ban web jails read the access logs, so logs nobody writes also mean no bans
+    logs="${D_HOME}/logs"
+    if [[ -L "$logs" ]]; then _doc_add FAIL "site ${d}: logs" "${logs} is a symbolic link, and OpenLiteSpeed opens the site's logs through it as root (make it a directory again)"
+    elif [[ ! -e "$logs" ]]; then _doc_add WARN "site ${d}: logs" "${logs} is missing, so the site has no logs (lomp update makes it again)"
+    elif [[ ! -d "$logs" ]]; then _doc_add WARN "site ${d}: logs" "${logs} is not a directory, so the site has no logs (make it one again)"
+    elif lib_ols_logdir_open "$logs"; then _doc_add OK "site ${d}: logs" "OpenLiteSpeed writes ${logs}"
+    else _doc_add WARN "site ${d}: logs" "OpenLiteSpeed cannot enter ${logs}, so the site's logs stay empty and the fail2ban web jails see nothing (lomp update fixes it)"; fi
     if lib_ols_conf_block_exists virtualhost "$d"; then
       maps="$(lib_ols_conf_map_get "$OLS_LISTENER_HTTP" "$d")"
       [[ -n "$maps" ]] && _doc_add OK "site ${d}: vhost" "configured (${maps})" || _doc_add FAIL "site ${d}: vhost" "no listener map in ${OLS_LISTENER_HTTP}"
@@ -825,6 +832,8 @@ _doc_check_webmail() {
   else
     _doc_add OK "webmail: code" "owned by $(stat -c %U "${WM_CURRENT}/program" 2>/dev/null || printf '?'), not by the user that runs it"
   fi
+  if lib_ols_logdir_open "$WM_LOG_DIR"; then _doc_add OK "webmail: logs" "OpenLiteSpeed writes ${WM_LOG_DIR}"
+  else _doc_add WARN "webmail: logs" "OpenLiteSpeed cannot enter ${WM_LOG_DIR}, so the webmail's access and error logs stay empty (lomp update fixes it)"; fi
   local days=""
   while read -r d; do
     [[ -n "$d" ]] || continue

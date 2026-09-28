@@ -56,6 +56,16 @@ http_code() {   # http_code <host> [path]
   curl -s -o /dev/null -w '%{http_code}' --max-time 10 -H "Host: ${1}" "http://127.0.0.1${2:-/}" 2>/dev/null || printf '000'
 }
 
+# OpenLiteSpeed writes an access log line a moment after the request, not with it
+log_gets() {   # log_gets <file> <text>  - waits up to 15 s for the text to appear
+  local i=0
+  while (( i < 15 )); do
+    grep -qF -- "$2" "$1" 2>/dev/null && return 0
+    sleep 1; i=$(( i + 1 ))
+  done
+  return 1
+}
+
 managed_hashes() {   # fingerprint of every generated config file (manifest excluded: it has timestamps)
   local f=""
   for f in /etc/sysctl.d/99-production-server.conf \
@@ -243,6 +253,19 @@ note "PHP reported: ${PHP_BODY:-<empty>}"
 PHP_OWNER="$(ps -eo user:32,args | awk -v d="$IDENT" '$0 ~ "lsphp" && $1 == d {print $1; exit}')"
 check_eq "lsphp runs as the site user" "$IDENT" "${PHP_OWNER:-<none>}"
 rm -f "/home/${TEST_DOMAIN}/public_html/itest.php"
+
+# the site's own logs, written by OpenLiteSpeed's workers (nobody) - PHP's errors included
+check_eq "site request for the access log" "200" "$(http_code "$TEST_DOMAIN" "/?itest-log=$$")"
+check "the request is in the site's access.log" log_gets "/home/${TEST_DOMAIN}/logs/access.log" "itest-log=$$"
+http_code "$TEST_DOMAIN" "/.env?itest-f2b=$$" >/dev/null
+log_gets "/home/${TEST_DOMAIN}/logs/access.log" "itest-f2b=$$" || true
+check "fail2ban's probe filter matches OpenLiteSpeed's lines" bash -c \
+  "fail2ban-regex '/home/${TEST_DOMAIN}/logs/access.log' /etc/fail2ban/filter.d/server-setup-web-probe.conf | grep -qE '[1-9][0-9]* matched'"
+printf '<?php trigger_error("itest-php-warning-%s", E_USER_WARNING); echo "ok";' "$$" >"/home/${TEST_DOMAIN}/public_html/itest-err.php"
+chown "${IDENT}:${IDENT}" "/home/${TEST_DOMAIN}/public_html/itest-err.php"
+http_code "$TEST_DOMAIN" /itest-err.php >/dev/null
+check "a PHP warning is in the site's error.log" log_gets "/home/${TEST_DOMAIN}/logs/error.log" "itest-php-warning-$$"
+rm -f "/home/${TEST_DOMAIN}/public_html/itest-err.php"
 
 printf 'secret\n' >"/home/${TEST_DOMAIN}/private/secret.txt"
 check_not "private/ is outside the document root" test "$(http_code "$TEST_DOMAIN" /private/secret.txt)" = "200"

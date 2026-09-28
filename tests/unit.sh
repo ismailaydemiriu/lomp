@@ -38,6 +38,9 @@ runuser() {
   shift 3
   "$@"
 }
+# nor are there ACL tools everywhere, or an OpenLiteSpeed user to name: a record again
+SETFACL_LOG="$TMP/setfacl.log"
+setfacl() { printf '%s\n' "$*" >>"$SETFACL_LOG"; }
 # Git Bash runs the native jq.exe, which writes CRLF unless given -b: a multi-line result then
 # carries a \r at the end of every line but the last. Servers and CI (Linux) are unaffected.
 if [[ "${OSTYPE:-}" == msys* || "${OSTYPE:-}" == cygwin* ]]; then
@@ -2302,6 +2305,146 @@ assert_true "and writes nothing" cmp -s "$CRON_FILE" "$TMP/cron.dry"
 cp "$TMP/cron.keep" "$CRON_FILE"
 
 # =============================================================================
+section "site logs: OpenLiteSpeed's workers can write them"
+# OpenLiteSpeed's main process creates a vhost's logs as root and hands them to nobody; the
+# workers, running as nobody, write them. /home/<domain>/logs is root's 0750, so with no way
+# in every site's logs stayed empty - and so did what the fail2ban web jails read.
+lib_rollback_clear
+lib_domain_state_reset
+D_DOMAIN="logs.example.com"; D_IDENT="logs_example_com"; D_USER="logs_example_com"; D_GROUP="logs_example_com"
+D_HOME="$SITES_ROOT/logs.example.com"; D_MODE="php"; D_PHP="8.3"; D_PHP_CHILDREN=4; D_MEMORY="256M"; D_UPLOAD="64M"
+: >"$SETFACL_LOG"
+assert_eq  "the directory setup exits 0" 0 "$(run_isolated lib_domain_dirs_create)"
+assert_has "OpenLiteSpeed's user may enter logs/, never through a link" "-P -m u:nobody:x ${D_HOME}/logs" "$(cat "$SETFACL_LOG")"
+if (( CAN_CHMOD )); then assert_eq "which stays 0750" 750 "$(stat -c %a "${D_HOME}/logs")"; fi
+: >"$SETFACL_LOG"
+OPT_DRY_RUN=1; _rc="$(run_isolated lib_domain_dirs_create)"; OPT_DRY_RUN=0
+assert_eq "a dry run exits 0" 0 "$_rc"
+assert_eq "and sets no ACL"   "" "$(cat "$SETFACL_LOG")"
+: >"$RUNUSER_LOG"
+lib_ols_logdir_open "${D_HOME}/logs" || true
+assert_has "whether they can is asked of that user" "-u nobody -- test -x ${D_HOME}/logs" "$(cat "$RUNUSER_LOG")"
+# PHP's warnings, fatal errors and error_log() lines arrive as "[NOTICE] ... [STDERR]"
+_lvl() { awk '/^errorlog /,/^}/' | awk '$1 == "logLevel" { print $2 }'; }
+assert_eq "so the site's error log is at NOTICE" "NOTICE" "$(lib_ols_render_vhconf | _lvl)"
+assert_eq "the catch-all's stays at WARN"        "WARN"   "$(lib_ols_render_default_vhconf | _lvl)"
+assert_has "the webmail's log directory is opened the same way" 'lib_ols_logdir_grant "$WM_LOG_DIR"' "$(declare -f lib_webmail_dirs_ensure)"
+assert_lacks "lomp logs creates no log file as root" "touch" "$(declare -f lib_domain_logs_main)"
+lib_domain_state_reset
+
+# update gives the sites of an older release the same: lr1's logs were closed to
+# OpenLiteSpeed, lr2's were already open, lr3's logs/ is a link (a file where the suite
+# cannot make one), and lr4's was deleted
+_orig_cb="$(declare -f lib_ols_change_begin)"; _orig_cc="$(declare -f lib_ols_change_commit)"
+_orig_lo="$(declare -f lib_ols_logdir_open)"; _orig_wi="$(declare -f lib_webmail_installed)"
+_orig_wd="$(declare -f lib_webmail_dirs_ensure)"; _orig_rg="$(declare -f lib_domain_fail2ban_regen)"
+_lr_calls="$TMP/lr-calls"
+# lib_ols_is_installed has no definition left here (an earlier section unset it), so this one
+# is removed again below rather than restored
+eval 'lib_ols_is_installed()    { return 0; }'
+eval 'lib_ols_change_begin()    { OLS_PENDING_RELOAD=0; printf "begin\n" >>"$_lr_calls"; }'
+eval 'lib_ols_change_commit()   { printf "commit %s pending=%s\n" "$1" "$OLS_PENDING_RELOAD" >>"$_lr_calls"; OLS_PENDING_RELOAD=0; }'
+eval 'lib_ols_logdir_open()     { [[ -e "$1/.open" ]]; }'
+eval 'lib_webmail_installed()   { return 1; }'
+eval 'lib_webmail_dirs_ensure() { printf "webmail dirs\n" >>"$_lr_calls"; }'
+eval 'lib_domain_fail2ban_regen() { printf "f2b\n" >>"$_lr_calls"; }'
+_state_save="$STATE_DIR"; STATE_DIR="$TMP/lr-state"
+for _d in lr1.example.com lr2.example.com lr3.example.com lr4.example.com; do
+  _i="${_d//./_}"
+  mkdir -p "$STATE_DIR/domains/$_d" "$SITES_ROOT/$_d/public_html"
+  jq -n --arg d "$_d" --arg i "$_i" --arg h "$SITES_ROOT/$_d" \
+    '{domain:$d, ident:$i, user:$i, group:$i, home:$h, mode:"php",
+      php:{version:"8.3", children:4, memory_limit:"256M", upload_max:"64M"}}' >"$STATE_DIR/domains/$_d/domain.json"
+done
+mkdir -p "$SITES_ROOT/lr1.example.com/logs" "$SITES_ROOT/lr2.example.com/logs"
+: >"$SITES_ROOT/lr2.example.com/logs/.open"
+if (( CAN_SYMLINK )); then mkdir -p "$TMP/lr-victim"; ln -s "$TMP/lr-victim" "$SITES_ROOT/lr3.example.com/logs"
+else : >"$SITES_ROOT/lr3.example.com/logs"; fi
+mkdir -p "$LSWS_VHOSTS_DIR/lr1.example.com"
+_lr_old_vhconf() { printf 'errorlog $VH_ROOT/logs/error.log {\n  logLevel                WARN\n}\n'; }
+_lr_old_vhconf >"$LSWS_VHOSTS_DIR/lr1.example.com/vhconf.conf"
+: >"$SETFACL_LOG"; : >"$_lr_calls"
+lib_domain_logs_repair >"$TMP/lr-out" 2>&1
+assert_eq  "the sites OpenLiteSpeed could not write are named" "lr1.example.com lr4.example.com" "$DOMAIN_LOGS_OPENED"
+assert_has "they get the ACL"                  "-P -m u:nobody:x ${SITES_ROOT}/lr1.example.com/logs" "$(cat "$SETFACL_LOG")"
+assert_has "and so, harmlessly, do the others" "-P -m u:nobody:x ${SITES_ROOT}/lr2.example.com/logs" "$(cat "$SETFACL_LOG")"
+assert_lacks "a logs/ that is not a directory is left alone" "lr3.example.com" "$(cat "$SETFACL_LOG")"
+assert_has "and named"                         "${SITES_ROOT}/lr3.example.com/logs is not a directory" "$(cat "$TMP/lr-out")"
+if (( CAN_SYMLINK )); then assert_eq "nothing reached what the link points at" "" "$(ls -A "$TMP/lr-victim")"; fi
+assert_true "a deleted logs/ is made again"    test -d "${SITES_ROOT}/lr4.example.com/logs"
+if (( CAN_CHMOD )); then assert_eq "as add makes it" 750 "$(stat -c %a "${SITES_ROOT}/lr4.example.com/logs")"; fi
+assert_has "with the ACL"                      "-P -m u:nobody:x ${SITES_ROOT}/lr4.example.com/logs" "$(cat "$SETFACL_LOG")"
+assert_eq "every vhost is rendered again, its error log at NOTICE" "NOTICE NOTICE NOTICE NOTICE" \
+  "$(for _d in lr1 lr2 lr3 lr4; do _lvl <"$LSWS_VHOSTS_DIR/${_d}.example.com/vhconf.conf"; done | paste -sd' ' -)"
+assert_eq "in one change set, and fail2ban's filters after it" "begin|commit site logs pending=1|f2b" "$(paste -sd'|' - <"$_lr_calls")"
+# once the ACL is there, a second run has nothing to name and nothing to reload
+: >"$SITES_ROOT/lr1.example.com/logs/.open"; : >"$SITES_ROOT/lr4.example.com/logs/.open" || true
+: >"$_lr_calls"
+lib_domain_logs_repair >"$TMP/lr-out" 2>&1
+assert_eq "a second run names nothing"         "" "$DOMAIN_LOGS_OPENED"
+assert_eq "and reloads nothing"                "begin|commit site logs pending=0|f2b" "$(paste -sd'|' - <"$_lr_calls")"
+# a dry run says what it would do and does none of it
+rm -f "$SITES_ROOT/lr1.example.com/logs/.open"
+_lr_old_vhconf >"$LSWS_VHOSTS_DIR/lr1.example.com/vhconf.conf"
+cp "$LSWS_VHOSTS_DIR/lr1.example.com/vhconf.conf" "$TMP/lr-vh-before"
+: >"$SETFACL_LOG"
+OPT_DRY_RUN=1; lib_domain_logs_repair >"$TMP/lr-out" 2>&1; OPT_DRY_RUN=0
+assert_eq   "a dry run names what it would open" "lr1.example.com" "$DOMAIN_LOGS_OPENED"
+assert_eq   "sets no ACL"                        "" "$(cat "$SETFACL_LOG")"
+assert_true "and writes no vhost"                cmp -s "$LSWS_VHOSTS_DIR/lr1.example.com/vhconf.conf" "$TMP/lr-vh-before"
+eval 'lib_webmail_installed() { return 0; }'
+: >"$_lr_calls"
+lib_domain_logs_repair >"$TMP/lr-out" 2>&1
+assert_has "a server with the webmail gets its log directory put right too" "webmail dirs" "$(cat "$_lr_calls")"
+: >"$_lr_calls"
+OPT_DRY_RUN=1; lib_domain_logs_repair >"$TMP/lr-out" 2>&1; OPT_DRY_RUN=0
+assert_lacks "a dry run with no vhost to change has nothing to test or reload" "commit" "$(cat "$_lr_calls")"
+STATE_DIR="$_state_save"
+eval "$_orig_cb"; eval "$_orig_cc"; eval "$_orig_lo"; eval "$_orig_wi"; eval "$_orig_wd"; eval "$_orig_rg"
+unset -f _lr_old_vhconf lib_ols_is_installed
+lib_domain_state_reset
+_up="$(declare -f lib_update_main)"
+assert_has  "update runs it" 'lib_domain_logs_repair' "$_up"
+_n_rec="$(grep -n "'.last_update'" <<<"$_up" | head -1 | cut -d: -f1 || true)"
+_n_rep="$(grep -n 'lib_domain_logs_repair' <<<"$_up" | head -1 | cut -d: -f1 || true)"
+assert_true "after the update itself is recorded" test "${_n_rep:-0}" -gt "${_n_rec:-0}"
+assert_has  "doctor checks every site's logs" 'lib_ols_logdir_open "$logs"' "$(declare -f _doc_check_domains)"
+assert_has  "and the webmail's"               'lib_ols_logdir_open "$WM_LOG_DIR"' "$(declare -f _doc_check_webmail)"
+
+# ...and the fail2ban web jails have to match what is written there. fail2ban cuts the date
+# out before it applies a failregex - "[28/Sep/2026:19:56:50 +0300]" becomes "[]" - and both
+# filters wanted a character between the brackets, so they matched no line. These are
+# OpenLiteSpeed's lines with the date cut; grep -P reads the patterns as fail2ban's Python does.
+lib_domain_fail2ban_filters_write
+_f2b_match() {   # filter line -> 0 when its failregex matches the line
+  local re=""
+  re="$(sed -n 's/^failregex = //p' "${FAIL2BAN_FILTER_DIR}/$1.conf")"
+  printf '%s\n' "$2" | grep -qP -- "${re//<HOST>/[0-9.]+}"
+}
+if printf 'x\n' | grep -qP 'x' 2>/dev/null; then
+  assert_true  "a probe for /.env is caught"     _f2b_match server-setup-web-probe '203.0.113.7 - - [] "GET /.env?x HTTP/1.1" 403 1240 "-" "curl/8.5.0"'
+  assert_true  "over HTTP/2 too"                  _f2b_match server-setup-web-probe '203.0.113.7 - - [] "GET /.git/config HTTP/2" 404 1240 "-" "curl/8.5.0"'
+  assert_false "a page that is served is not"     _f2b_match server-setup-web-probe '203.0.113.9 - - [] "GET / HTTP/1.1" 200 386 "-" "Mozilla/5.0"'
+  assert_true  "a WordPress login POST is caught" _f2b_match server-setup-wp-login '203.0.113.8 - - [] "POST /wp-login.php HTTP/2" 200 1249 "-" "Mozilla/5.0"'
+  assert_true  "and one to xmlrpc.php"            _f2b_match server-setup-wp-login '203.0.113.8 - - [] "POST //xmlrpc.php HTTP/1.1" 403 1249 "-" "Mozilla/5.0"'
+  assert_false "the login page itself is not"     _f2b_match server-setup-wp-login '203.0.113.9 - - [] "GET /wp-login.php HTTP/1.1" 200 386 "-" "Mozilla/5.0"'
+fi
+# fail2ban reads a rewritten filter only on a reload, and the jail file did not change
+_orig_sa="$(declare -f lib_service_active)"; _orig_run="$(declare -f lib_run)"; _orig_pi="$(declare -f lib_pkg_installed)"
+eval 'lib_pkg_installed()  { [[ "$1" == "fail2ban" ]]; }'
+eval 'lib_service_active() { return 0; }'
+eval 'lib_run()            { printf "%s\n" "$*" >>"$TMP/f2b-runs"; }'
+lib_domain_fail2ban_regen >/dev/null 2>&1
+printf 'failregex = an older release\n' >"${FAIL2BAN_FILTER_DIR}/server-setup-web-probe.conf"
+: >"$TMP/f2b-runs"
+lib_domain_fail2ban_regen >/dev/null 2>&1
+assert_has "a rewritten filter reloads fail2ban" "fail2ban-client reload" "$(cat "$TMP/f2b-runs")"
+: >"$TMP/f2b-runs"
+lib_domain_fail2ban_regen >/dev/null 2>&1
+assert_eq  "an unchanged one does not"           "" "$(cat "$TMP/f2b-runs")"
+eval "$_orig_sa"; eval "$_orig_run"; eval "$_orig_pi"
+
+# =============================================================================
 section "the mail server's own configuration"
 # These assertions are the mail server's security policy in the only form that matters: the
 # lines Postfix and Dovecot actually read. A renderer is pure, so a test can read every one of
@@ -3385,7 +3528,7 @@ assert_has  "and the signature is checked against the pinned one" "VALIDSIG" "$(
 # logged-in mailbox's IMAP password.
 assert_has "the release's configuration directory is not world-readable" 'chmod 0750 "${dest}/config"' "$(declare -f _wm_fetch_release)"
 assert_has "and such a copy is removed after an update"                  'rm -f "${rel}/config/"*.old.php' "$(declare -f lib_webmail_update)"
-# the log directory belongs to root: OpenLiteSpeed opens the vhost logs there as root, and a
+# the log directory belongs to root: OpenLiteSpeed creates the vhost logs there as root, and a
 # directory the webmail user could write would let it point one at any file on the system
 assert_has "the log directory is root's" '"$WM_LOG_DIR" 0750 root:root' "$(declare -f lib_webmail_dirs_ensure)"
 # upstream's updater rewrites the shared configuration, and its defaults are all the unsafe

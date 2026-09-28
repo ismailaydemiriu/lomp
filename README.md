@@ -204,7 +204,8 @@ sudo lomp panel                                     # open the WebAdmin panel fo
 sudo lomp self-update                               # pull the latest code, server untouched
 sudo lomp optimize                                  # re-measure hardware, show a diff, re-tune
 sudo lomp update                                    # safe package update, ordered restarts, and
-                                                    # the scheduled tasks a newer release brings
+                                                    # what a newer release changes (scheduled
+                                                    # tasks, site logs)
 sudo lomp remove old.example.com --keep-db          # remove a site, keep its database
 ```
 
@@ -365,7 +366,7 @@ you are already in.
 /home/<domain>/               0711  <user>:<user>     one Linux user per site, nologin shell
 ├── public_html/              0755  document root
 ├── private/                  0700  sessions, temp uploads, secrets - never served
-├── logs/                     0750  access.log, error.log (rotated by logrotate)
+├── logs/                     0750  access.log, error.log with PHP's errors (rotated by logrotate)
 ├── backups/                  0700
 ├── app/                      proxy mode only: your Node/Python application
 └── .pm2/                     0700  Node.js sites: PM2 state, ecosystem file, logs, job scripts
@@ -374,6 +375,10 @@ you are already in.
 PHP runs as the site's own user through a per-vhost LSAPI processor, so one compromised
 site cannot read another site's files. Directory listing is off, and requests for dotfiles,
 `.git`, `.env`, `*.sql`, `*.bak` and `wp-config.php` are refused.
+
+`logs/` belongs to root: the site user can read its logs but not change them, and an ACL lets
+OpenLiteSpeed's worker processes (`nobody`) in to write them. Servers set up before that ACL
+existed never wrote a site log; `sudo lomp update` adds it to every site.
 
 ---
 

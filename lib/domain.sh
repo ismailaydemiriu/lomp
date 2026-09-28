@@ -15,6 +15,8 @@ DOM_OPT_WP_TITLE="" DOM_OPT_WP_ADMIN="admin" DOM_OPT_WP_EMAIL="" DOM_OPT_WP_LOCA
 DOM_OPT_MAIL=0 DOM_OPT_MAILBOX="" DOM_OPT_MAIL_QUOTA=""
 DOMAIN_CREATED_HOME=0
 DOMAIN_CREATED_USER=0
+DOMAIN_LOGS_OPENED=""   # sites whose logs lib_domain_logs_repair let OpenLiteSpeed write
+DOMAIN_F2B_FILTERS_CHANGED=0   # set by lib_domain_fail2ban_filters_write
 
 WPCLI_PHAR="${INSTALL_DIR}/wp-cli.phar"
 WPCLI_BIN="/usr/local/bin/wp"
@@ -476,6 +478,9 @@ lib_domain_dirs_create() {
   lib_mkdir "${D_HOME}/private/tmp" 0700 "${D_USER}:${D_GROUP}"
   lib_mkdir "${D_HOME}/backups" 0700 "${D_USER}:${D_GROUP}"
   lib_mkdir "${D_HOME}/logs" 0750 "root:${D_GROUP}"
+  # the site user reads its logs and cannot change them; OpenLiteSpeed's workers write them
+  lib_ols_logdir_grant "${D_HOME}/logs" \
+    || lib_warn "setfacl could not let OpenLiteSpeed into ${D_HOME}/logs; the site's logs will stay empty"
   if [[ "$D_MODE" == "proxy" ]]; then
     lib_mkdir "${D_HOME}/app" 0750 "${D_USER}:${D_GROUP}"
     # every static context in the vhost points at one of these; OpenLiteSpeed rejects the
@@ -563,6 +568,42 @@ lib_domain_php_probe() {
 # =============================================================================
 #  logrotate / fail2ban regeneration (state -> config)
 # =============================================================================
+# "update" gives every site what a new one gets from lib_domain_dirs_create and the vhost
+# template: a logs/ OpenLiteSpeed's workers can enter - an older release left it closed to
+# them, so nothing was ever written there - and a vhost rendered again, which puts its error
+# log at NOTICE. One change set for all of them: one configuration test, one graceful reload,
+# the snapshot back if either fails. A logs/ somebody deleted is made again, as add makes it;
+# one that is a link or a file is named and left alone. The fail2ban filters that read the
+# logs, and the webmail's log directory, are put right as well.
+lib_domain_logs_repair() {
+  local d="" dir="" opened=()
+  DOMAIN_LOGS_OPENED=""
+  lib_ols_is_installed || return 0
+  [[ -n "$(lib_domains_list)" ]] || return 0
+  lib_system_profile
+  lib_ols_change_begin
+  while read -r d; do
+    [[ -n "$d" ]] || continue
+    lib_domain_state_load "$d" || continue
+    dir="${D_HOME}/logs"
+    if [[ -L "$dir" || ( -e "$dir" && ! -d "$dir" ) ]]; then
+      lib_warn "${dir} is not a directory; the logs of ${d} were left as they are"
+    else
+      if [[ ! -d "$dir" ]]; then lib_mkdir "$dir" 0750 "root:${D_GROUP}"; opened+=("$d")
+      elif ! lib_ols_logdir_open "$dir"; then opened+=("$d"); fi
+      lib_ols_logdir_grant "$dir" || lib_warn "setfacl could not let OpenLiteSpeed into ${dir}"
+    fi
+    lib_ols_vhconf_write "$d"
+  done < <(lib_domains_list)
+  # a dry run has nothing to test or reload when no vhost would change
+  if (( OLS_PENDING_RELOAD || ! OPT_DRY_RUN )); then lib_ols_change_commit "site logs"; fi
+  # and what reads them: an older release's fail2ban filters matched none of their lines
+  lib_domain_fail2ban_regen
+  if lib_webmail_installed; then lib_webmail_dirs_ensure; fi
+  DOMAIN_LOGS_OPENED="${opened[*]-}"
+  return 0
+}
+
 lib_domain_logrotate_regen() {
   local d="" line="" u="" g="" h="" paths=() apps=()
   while read -r d; do [[ -n "$d" ]] && paths+=("$(lib_domain_home "$d")/logs/*.log"); done < <(lib_domains_list)
@@ -600,20 +641,28 @@ EOF
   return 0
 }
 
+# fail2ban cuts the date out of a line before it applies a failregex, so of
+# "[28/Sep/2026:19:56:50 +0300]" a filter sees "[]". Both filters used to want a character
+# between those brackets and matched no line at all: nobody was ever banned. "*" takes the
+# empty pair. DOMAIN_F2B_FILTERS_CHANGED says whether either file was rewritten.
 lib_domain_fail2ban_filters_write() {
+  local changed=0
   lib_mkdir "$FAIL2BAN_FILTER_DIR" 0755 root:root
   cat <<'EOF' | lib_write_file "${FAIL2BAN_FILTER_DIR}/server-setup-wp-login.conf" 0644 root:root
 # Managed by lompstack - WordPress login / xmlrpc brute force (OpenLiteSpeed combined access log)
 [Definition]
-failregex = ^<HOST> \S+ \S+ \[[^\]]+\] "POST /+(?:wp-login\.php|xmlrpc\.php)[^"]*" (?:200|403)
+failregex = ^<HOST> \S+ \S+ \[[^\]]*\] "POST /+(?:wp-login\.php|xmlrpc\.php)[^"]*" (?:200|403)
 ignoreregex =
 EOF
+  changed=$(( changed + LIB_FILE_CHANGED ))
   cat <<'EOF' | lib_write_file "${FAIL2BAN_FILTER_DIR}/server-setup-web-probe.conf" 0644 root:root
 # Managed by lompstack - vulnerability scanners probing well-known paths
 [Definition]
-failregex = ^<HOST> \S+ \S+ \[[^\]]+\] "(?:GET|POST|HEAD) /+(?:\.env|\.git|\.aws|\.ssh|wp-config\.php|phpmyadmin|pma|adminer|cgi-bin|vendor/phpunit|wp-content/plugins/[^/]+/[^"]*\.php)[^"]*" (?:403|404)
+failregex = ^<HOST> \S+ \S+ \[[^\]]*\] "(?:GET|POST|HEAD) /+(?:\.env|\.git|\.aws|\.ssh|wp-config\.php|phpmyadmin|pma|adminer|cgi-bin|vendor/phpunit|wp-content/plugins/[^/]+/[^"]*\.php)[^"]*" (?:403|404)
 ignoreregex =
 EOF
+  changed=$(( changed + LIB_FILE_CHANGED ))
+  DOMAIN_F2B_FILTERS_CHANGED=$(( changed > 0 ))
   return 0
 }
 
@@ -623,6 +672,7 @@ lib_domain_fail2ban_regen() {
   while read -r d; do [[ -n "$d" ]] && logs+=("$(lib_domain_home "$d")/logs/access.log"); done < <(lib_domains_list)
   ((${#logs[@]} == 0)) && { enabled=false; logs=("/dev/null"); }
   lib_domain_fail2ban_filters_write
+  local filters_changed="$DOMAIN_F2B_FILTERS_CHANGED"
   # rewrites the action and its 0600 header file; both are idempotent, and this is where a
   # server that stored its token before the header file existed picks it up
   if [[ -n "$(lib_cf_token)" ]]; then lib_cf_fail2ban_action_write; fi
@@ -637,7 +687,8 @@ lib_domain_fail2ban_regen() {
     printf '\n[server-setup-web-probe]\nenabled = %s\nfilter = server-setup-web-probe\nbackend = auto\nport = http,https\nmaxretry = 5\nfindtime = 10m\nbantime = 6h\nlogpath = %s\n' "$enabled" "$(lib_join $'\n          ' "${logs[@]}")"
     if [[ -n "$cf_action" ]]; then printf '%s\n' "$cf_action"; fi
   } | lib_write_file "$FAIL2BAN_WEB_JAIL_FILE" 0600 root:root
-  if (( LIB_FILE_CHANGED )) && (( ! OPT_DRY_RUN )) && lib_service_active fail2ban; then
+  # fail2ban reads a changed filter again only on a reload, as it does a changed jail
+  if (( LIB_FILE_CHANGED || filters_changed )) && (( ! OPT_DRY_RUN )) && lib_service_active fail2ban; then
     lib_run fail2ban-client reload || lib_warn "fail2ban reload failed (see log)"
   fi
   return 0
@@ -892,7 +943,8 @@ lib_domain_logs_main() {
   local dir=""; dir="$(lib_domain_home "$domain")/logs"
   [[ "$which" != "error" ]]  && files+=("${dir}/access.log")
   [[ "$which" != "access" ]] && files+=("${dir}/error.log")
-  for a in "${files[@]}"; do [[ -f "$a" ]] || touch "$a" 2>/dev/null || true; done
+  # A missing log is not created here: made by root, it is a file OpenLiteSpeed's workers
+  # cannot write. OpenLiteSpeed puts it back itself, and tail -F waits for it.
   printf '%sFollowing %s (Ctrl-C to stop)%s\n' "$C_DIM" "${files[*]}" "$C_RST"
   # not "exec": that replaced this process and skipped the EXIT trap, which left the per-run
   # temporary directory behind every time a log was followed

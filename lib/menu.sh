@@ -129,8 +129,8 @@ COMMANDS
                                 The mail comes from the newest mail archive next to it, with
                                 the same mailbox passwords and the same DKIM key
   renew-ssl [domain] [opts]     --force --all --staging --wildcard
-  update                        Safe package update + ordered service restarts; also adds
-                                the scheduled tasks a newer lompstack brings
+  update                        Safe package update + ordered service restarts; also applies
+                                what a newer lompstack changes (scheduled tasks, site logs)
   self-update [--from DIR]      Pull the latest lompstack and refresh the installed
                                 copy. Changes nothing on the server itself (update does).
   update-cf-ips                 Refresh Cloudflare IP ranges
