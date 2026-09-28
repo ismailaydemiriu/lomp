@@ -2127,6 +2127,55 @@ fi
 unset -f _pl_age
 
 # =============================================================================
+section "the server log is written at NOTICE, not the package's DEBUG"
+# The two log blocks are the package's own, byte for byte (dist/conf/httpd_config.conf.in).
+# printf rather than a heredoc: an editor would strip the trailing blanks they carry.
+_lv="$TMP/lv.conf"
+printf '%s\n' \
+  'user                             nobody' \
+  'group                            nogroup' \
+  '' \
+  'errorlog logs/error.log {' \
+  '        logLevel             DEBUG' \
+  '        debugLevel           0' \
+  '        rollingSize          10M' \
+  '        enableStderrLog      1' \
+  '}' \
+  '    ' \
+  'accessLog logs/access.log {' \
+  '        rollingSize          10M    ' \
+  '        keepDays             30    ' \
+  '        compressArchive      0' \
+  '        logReferer           1     ' \
+  '        logUserAgent         1' \
+  '}' \
+  '    ' \
+  'virtualhost inline {' \
+  '  errorlog $VH_ROOT/logs/error.log {' \
+  '    logLevel             DEBUG' \
+  '  }' \
+  '}' >"$_lv"
+_lv_access="$(sed -n '/^accessLog/,/^}/p' "$_lv")"
+OLS_TX_FILE="$_lv"
+_ols_tx_server_log_level
+assert_eq  "the server log goes to NOTICE"  "NOTICE" "$(lib_ols_tx_block_get errorlog logs/error.log logLevel)"
+assert_eq  "its rolling size stays"          "10M"    "$(lib_ols_tx_block_get errorlog logs/error.log rollingSize)"
+assert_eq  "and so does stderr.log"          "1"      "$(lib_ols_tx_block_get errorlog logs/error.log enableStderrLog)"
+assert_eq  "the access log is not touched"   "$_lv_access" "$(sed -n '/^accessLog/,/^}/p' "$_lv")"
+assert_has "nor a log nested in a virtual host" $'  errorlog $VH_ROOT/logs/error.log {\n    logLevel             DEBUG' "$(cat "$_lv")"
+assert_eq  "the file still parses" 0 "$(run_isolated _ols_braces_balanced "$_lv")"
+cp "$_lv" "$_lv.1"; _ols_tx_server_log_level
+assert_true "a second run changes nothing" cmp -s "$_lv" "$_lv.1"
+# once the WebAdmin saved it, the block is named after the full path
+printf 'errorlog $SERVER_ROOT/logs/error.log {\n  logLevel                INFO\n  rollingSize             10M\n}\n' >"$_lv"
+_ols_tx_server_log_level
+assert_eq "a block the WebAdmin saved as well" "NOTICE" "$(lib_ols_tx_block_get errorlog '$SERVER_ROOT/logs/error.log' logLevel)"
+printf 'user nobody\n' >"$_lv"; cp "$_lv" "$_lv.1"; _ols_tx_server_log_level
+assert_true "without a server log block nothing is added" cmp -s "$_lv" "$_lv.1"
+OLS_TX_FILE=""
+assert_has "install and optimize apply it" '_ols_tx_server_log_level' "$(declare -f lib_ols_tx_apply_server_settings)"
+
+# =============================================================================
 section "the mail server's own configuration"
 # These assertions are the mail server's security policy in the only form that matters: the
 # lines Postfix and Dovecot actually read. A renderer is pure, so a test can read every one of

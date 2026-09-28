@@ -605,8 +605,24 @@ lib_ols_recent_errors() {   # [lines]
 lib_ols_restart() { lib_systemctl restart "$OLS_SERVICE"; }
 
 # =============================================================================
-#  Server logs: rolled files are deleted after OLS_LOG_KEEP_DAYS
+#  Server logs: what goes in, and how long it stays
 # =============================================================================
+# The package ships the server log at DEBUG. debugLevel 0 keeps the debug output itself out,
+# but every INFO line still goes in, and on a test server about 70% of error.log was "Close
+# SO_REUSEPORT" lines written on each restart. NOTICE keeps restarts, warnings and errors
+# (lib_ols_recent_errors reads only [ERROR]). The block is named after its file, which is
+# logs/error.log as shipped and $SERVER_ROOT/logs/error.log once the WebAdmin saved it, so it
+# is found rather than named; only a top-level block is the server's.
+_ols_tx_server_log_level() {
+  local names="" log=""
+  names="$(_ols_block_names "$OLS_TX_FILE" errorlog)"
+  while read -r log; do
+    [[ -n "$log" ]] || continue
+    lib_ols_tx_block_set errorlog "$log" logLevel NOTICE
+  done <<<"$names"
+  return 0
+}
+
 # OpenLiteSpeed rolls error.log, access.log and stderr.log - and a virtual host's own error
 # log, such as the catch-all's _default.error.log - at 10M into <name>.YYYY_MM_DD[.NN][.gz]
 # beside the live file. It deletes old ones only in the moment it rolls that same log again,
@@ -1337,6 +1353,7 @@ lib_ols_tx_apply_server_settings() {
   lib_ols_tx_top_set gracefulRestartTimeout 300
   lib_ols_tx_top_set indexFiles "index.html, index.php"
   [[ -n "$(lib_ols_tx_top_get useIpInProxyHeader)" ]] || lib_ols_tx_top_set useIpInProxyHeader 0
+  _ols_tx_server_log_level
 
   if ! lib_ols_tx_block_exists tuning ""; then lib_ols_tx_block_put tuning "" <<<$'tuning  {\n}'; fi
   lib_ols_tx_block_set tuning "" maxConnections "$CALC_OLS_MAX_CONN"

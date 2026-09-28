@@ -168,6 +168,8 @@ check "fail2ban accepted the generated configuration" fail2ban-client ping
 check "sshd jail is loaded" bash -c "fail2ban-client status sshd >/dev/null 2>&1"
 check_eq "unknown Host gets 403 (catch-all vhost)" "403" "$(http_code unknown-host.invalid)"
 check "OpenLiteSpeed's rolled logs are cleaned up daily" grep -q '# server-setup:ols-logs$' /etc/cron.d/server-setup
+check "the server log is written at NOTICE" \
+  bash -c "sed -n '/^errorlog/,/^}/p' ${LSWS_HOME}/conf/httpd_config.conf | grep -qE '^[[:space:]]*logLevel[[:space:]]+NOTICE'"
 
 # =============================================================================
 step "T04  install is idempotent (second run changes nothing)"
