@@ -859,12 +859,23 @@ _cron_header_ensure() {   # file
   fi
 }
 
+# An entry that is already there is replaced where it stands; only a new one goes last. Moved
+# to the end, an unchanged entry would still change the file: every install or update run
+# would write it again, each putting the lines back in its own order. ENVIRON rather than
+# -v, which would read the backslashes in a command as escapes.
 lib_cron_set() {
   local id="$1" entry="$2" tmp=""
   tmp="$(lib_mktemp)"
-  if [[ -f "$CRON_FILE" ]]; then grep -v -- "# server-setup:${id}\$" "$CRON_FILE" >"$tmp" || true; fi
+  if [[ -f "$CRON_FILE" ]]; then
+    CRON_MARK="# server-setup:${id}" CRON_LINE="${entry} # server-setup:${id}" awk '
+      BEGIN { m = ENVIRON["CRON_MARK"]; e = ENVIRON["CRON_LINE"] }
+      length($0) >= length(m) && substr($0, length($0) - length(m) + 1) == m { if (!done) print e; done = 1; next }
+      { print }
+      END { if (!done) print e }' "$CRON_FILE" >"$tmp"
+  else
+    printf '%s # server-setup:%s\n' "$entry" "$id" >"$tmp"
+  fi
   _cron_header_ensure "$tmp"
-  printf '%s # server-setup:%s\n' "$entry" "$id" >>"$tmp"
   lib_write_file "$CRON_FILE" 0644 root:root <"$tmp"
   rm -f "$tmp"
 }

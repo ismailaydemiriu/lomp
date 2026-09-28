@@ -656,6 +656,20 @@ lib_cron_set "wpcron:example.com" "*/5 * * * * example_com true"
 lib_cron_remove healthcheck
 assert_false "cron removed" lib_cron_has healthcheck
 assert_true "cron other kept" lib_cron_has "wpcron:example.com"
+lib_cron_set a1 "1 * * * * root true"; lib_cron_set a2 "2 * * * * root true"; lib_cron_set a3 "3 * * * * root true"
+lib_cron_set a2 "22 * * * * root true"
+assert_eq  "cron: an entry is replaced where it stands" "a1 a2 a3" "$(grep -oE 'server-setup:a[0-9]$' "$CRON_FILE" | cut -d: -f2 | paste -sd' ' -)"
+assert_has "cron: with its new schedule" "22 * * * * root true # server-setup:a2" "$(cat "$CRON_FILE")"
+lib_cron_set a2 "22 * * * * root true"
+assert_eq  "cron: setting it to what it is writes nothing" 0 "$LIB_FILE_CHANGED"
+lib_cron_set a4 "4 * * * * root printf 'a\\b'"
+assert_eq  "cron: a new entry goes last, backslashes as written" "4 * * * * root printf 'a\\b' # server-setup:a4" "$(tail -n 1 "$CRON_FILE")"
+printf '9 * * * * root dup # server-setup:a1\n' >>"$CRON_FILE"
+lib_cron_set xa1 "5 * * * * root other"
+lib_cron_set a1 "11 * * * * root true"
+assert_eq  "cron: a duplicate collapses into the first" 1 "$(grep -c 'server-setup:a1$' "$CRON_FILE")"
+assert_has "cron: an id that only ends like another is left alone" "5 * * * * root other # server-setup:xa1" "$(cat "$CRON_FILE")"
+for _c in a1 a2 a3 a4 xa1; do lib_cron_remove "$_c"; done
 lib_backup_schedule "daily 03:00"
 assert_has "schedule daily" "0 3 * * * root $BIN_LINK backup --all" "$(cat "$CRON_FILE")"
 lib_backup_schedule "weekly sun 04:30"
@@ -2050,7 +2064,7 @@ assert_eq  "and not at all when nothing changed since the last start" "1" "$(_ht
 assert_eq  "the check exits 0 with errexit armed" 0 "$(run_isolated lib_ols_htaccess_check_main)"
 
 assert_has "add --wordpress reloads once WordPress wrote its .htaccess" 'lib_ols_htaccess_reload' "$(declare -f lib_domain_add_main)"
-assert_has "install schedules the check" 'lib_ols_htaccess_watch_ensure' "$(declare -f lib_install_cron)"
+assert_has "install schedules the check" 'lib_ols_htaccess_watch_ensure' "$(declare -f lib_install_cron_base)"
 lib_ols_htaccess_watch_ensure
 assert_has "the check runs every minute, as root" "* * * * * root ${BIN_LINK} htaccess-check --quiet # server-setup:htaccess" "$(cat "$CRON_FILE")"
 assert_has "setup.sh: the check waits for no lock" 'htaccess-check) ;;' "$(cat "$ROOT/setup.sh")"
@@ -2084,7 +2098,7 @@ section "OpenLiteSpeed's own logs: rolled files go after a while, live ones stay
 # OpenLiteSpeed deletes a rolled log only while it rolls the same log again, and never one of
 # stderr.log's. The daily entry is a plain find, so it is run here for real, against files
 # aged the way a server ages them.
-assert_has "install schedules the cleanup" 'lib_ols_logs_prune_ensure' "$(declare -f lib_install_cron)"
+assert_has "install schedules the cleanup" 'lib_ols_logs_prune_ensure' "$(declare -f lib_install_cron_base)"
 lib_ols_logs_prune_ensure
 _pl="$(grep '# server-setup:ols-logs$' "$CRON_FILE" || true)"
 assert_has   "it runs daily, as root, over both log directories" "45 4 * * * root find -H ${LSWS_HOME}/logs ${LSWS_HOME}/admin/logs " "$_pl"
@@ -2179,6 +2193,37 @@ printf 'user nobody\n' >"$_lv"; cp "$_lv" "$_lv.1"; _ols_tx_server_log_level
 assert_true "without a server log block nothing is added" cmp -s "$_lv" "$_lv.1"
 OLS_TX_FILE=""
 assert_has "install and optimize apply it" '_ols_tx_server_log_level' "$(declare -f lib_ols_tx_apply_server_settings)"
+
+# =============================================================================
+section "update adds the scheduled tasks an older release did not write"
+# self-update reconfigures nothing, so a server installed before the log cleanup existed gets
+# it from update, which writes the same base tasks install does
+assert_has "install writes the base tasks" 'lib_install_cron_base' "$(declare -f lib_install_cron)"
+assert_has "and so does update"            'lib_install_cron_base' "$(declare -f lib_update_main)"
+cp "$CRON_FILE" "$TMP/cron.keep"
+rm -f "$CRON_FILE"
+lib_install_cron_base
+assert_eq "a server with none gets all three" "healthcheck htaccess ols-logs" "$INS_CRON_ADDED"
+assert_eq "and exactly the ones it names"     3 "$(grep -c '# server-setup:' "$CRON_FILE")"
+# one from before the cleanup, with entries of its own after the base ones
+lib_cron_set "wpcron:example.com" "*/5 * * * * example_com true"
+lib_cron_set backup "0 3 * * * root ${BIN_LINK} backup --all --yes --quiet"
+lib_cron_remove ols-logs
+cp "$CRON_FILE" "$TMP/cron.before"
+lib_install_cron_base
+assert_eq  "an older server gets the one it lacks" "ols-logs" "$INS_CRON_ADDED"
+assert_has "at the end" "# server-setup:ols-logs" "$(tail -n 1 "$CRON_FILE")"
+assert_eq  "and every other line stays where it was" "$(cat "$TMP/cron.before")" "$(grep -v '# server-setup:ols-logs$' "$CRON_FILE")"
+cp "$CRON_FILE" "$TMP/cron.after"
+lib_install_cron_base
+assert_eq   "a second run finds nothing missing" "" "$INS_CRON_ADDED"
+assert_true "and leaves the file as it was" cmp -s "$CRON_FILE" "$TMP/cron.after"
+lib_cron_remove ols-logs
+cp "$CRON_FILE" "$TMP/cron.dry"
+OPT_DRY_RUN=1; lib_install_cron_base >/dev/null; OPT_DRY_RUN=0
+assert_eq   "a dry run names what it would add" "ols-logs" "$INS_CRON_ADDED"
+assert_true "and writes nothing" cmp -s "$CRON_FILE" "$TMP/cron.dry"
+cp "$TMP/cron.keep" "$CRON_FILE"
 
 # =============================================================================
 section "the mail server's own configuration"

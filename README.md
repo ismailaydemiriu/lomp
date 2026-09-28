@@ -203,7 +203,8 @@ sudo lomp renew-ssl --all                           # renew every certificate
 sudo lomp panel                                     # open the WebAdmin panel for your address
 sudo lomp self-update                               # pull the latest code, server untouched
 sudo lomp optimize                                  # re-measure hardware, show a diff, re-tune
-sudo lomp update                                    # safe package update, ordered restarts
+sudo lomp update                                    # safe package update, ordered restarts, and
+                                                    # the scheduled tasks a newer release brings
 sudo lomp remove old.example.com --keep-db          # remove a site, keep its database
 ```
 

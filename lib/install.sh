@@ -11,6 +11,7 @@ INS_NODE_DEFAULT_MAJOR=24
 PM2_MAJOR=7   # installed once per server; every Node site runs its own PM2 daemon as the site user
 INS_MARIADB="" INS_REDIS_PERSIST=0 INS_AUTO_REBOOT=0 INS_SKIP_UPGRADE=0 INS_BACKUP_SCHEDULE=""
 INS_ADMIN_ACCESS_SET=0   # was --admin-access / --admin-ip given on THIS run?
+INS_CRON_ADDED=""        # ids lib_install_cron_base found missing, for update to report
 
 # =============================================================================
 #  Arguments
@@ -514,10 +515,22 @@ EOF
   lib_ok "logrotate configured (${LOGROTATE_SELF_FILE}, ${LOGROTATE_SITES_FILE})"
 }
 
-lib_install_cron() {
+# The scheduled tasks every server has, whatever it was installed with. install writes them,
+# and so does update: self-update reconfigures nothing, so update is how a server set up by an
+# older release gets the ones added since. The backup and Cloudflare entries stay with install,
+# which knows how they were configured.
+lib_install_cron_base() {
+  local id="" added=()
+  for id in healthcheck htaccess ols-logs; do lib_cron_has "$id" || added+=("$id"); done
   lib_cron_set healthcheck "15 6 * * * root ${BIN_LINK} healthcheck"
   lib_ols_htaccess_watch_ensure
   lib_ols_logs_prune_ensure
+  INS_CRON_ADDED="${added[*]-}"
+  return 0
+}
+
+lib_install_cron() {
+  lib_install_cron_base
   if [[ -n "$INS_BACKUP_SCHEDULE" ]]; then
     lib_backup_schedule "$INS_BACKUP_SCHEDULE" "$(lib_manifest_get '.backup.schedule_flags')"
   fi
@@ -604,7 +617,7 @@ lib_selfupdate_main() {
   lib_install_self "$src"
   lib_manifest_set '.install.updated_at' "$(lib_iso_now)"
   lib_ok "Now running lompstack ${SCRIPT_VERSION}$( [[ -n "$(lib_manifest_get '.install.revision')" ]] && printf ' (%s)' "$(lib_manifest_get '.install.revision')")"
-  lib_note "Nothing on the server was reconfigured. Run 'sudo lomp doctor' to check its state."
+  lib_note "Nothing on the server was reconfigured. 'sudo lomp update' adds the scheduled tasks a newer release brings; 'sudo lomp doctor' checks its state."
 }
 
 lib_install_manifest() {
@@ -1002,6 +1015,10 @@ lib_update_main() {
   lib_step "Housekeeping"
   lib_cf_enabled && { lib_cf_update_ips || true; }
   lib_install_self
+  lib_install_cron_base
+  if [[ -z "$INS_CRON_ADDED" ]]; then lib_ok "Scheduled tasks in ${CRON_FILE} are all in place"
+  elif (( OPT_DRY_RUN )); then lib_info "[dry-run] would add to ${CRON_FILE}, which this server is missing: ${INS_CRON_ADDED}"
+  else lib_ok "Added to ${CRON_FILE}, which this server was missing: ${INS_CRON_ADDED}"; fi
   lib_manifest_set '.components.openlitespeed' "$after_ols"
   lib_manifest_set '.components.mariadb' "$after_db"
   lib_manifest_set '.components.redis' "$after_redis"
