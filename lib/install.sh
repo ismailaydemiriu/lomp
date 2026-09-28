@@ -1102,7 +1102,7 @@ lib_update_main() {
   lib_domain_logs_repair
   if [[ -n "$DOMAIN_LOGS_MOVED" ]]; then
     if (( OPT_DRY_RUN )); then lib_info "[dry-run] would move the logs of these sites out of their homes into ${SITES_LOG_ROOT}: ${DOMAIN_LOGS_MOVED}"
-    else lib_ok "The logs of these sites moved out of their homes into ${SITES_LOG_ROOT} (logs/ in each home leads there): ${DOMAIN_LOGS_MOVED}"; fi
+    else lib_ok "These sites now write their logs in ${SITES_LOG_ROOT}/<domain>, no longer in their homes: ${DOMAIN_LOGS_MOVED}"; fi
   fi
   if (( DOMAIN_F2B_FILTERS_CHANGED )); then
     if (( OPT_DRY_RUN )); then lib_info "[dry-run] would rewrite the fail2ban web filters, which match no access log line as they are"

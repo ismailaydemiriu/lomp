@@ -1562,6 +1562,9 @@ lib_ols_admin_tunnel_cmd() {
 lib_ols_vhconf_write() {   # domain  (uses D_* state)
   local dir="${LSWS_VHOSTS_DIR}/${1}"
   lib_mkdir "$dir" 0750 lsadm:lsadm
+  # the vhost names the site's log directory, which has to be there, and root's, before
+  # OpenLiteSpeed loads it - whichever command renders it: add, update, renew-ssl, proxy, app
+  lib_domain_logs_dir_ensure
   lib_ols_render_vhconf | lib_write_file "${dir}/vhconf.conf" 0640 lsadm:lsadm
   (( LIB_FILE_CHANGED )) && OLS_PENDING_RELOAD=1
   return 0

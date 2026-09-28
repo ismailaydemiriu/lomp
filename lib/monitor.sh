@@ -466,6 +466,15 @@ _doc_check_cron() {
   else _doc_add WARN "backup schedule" "not configured (install --backup-schedule \"daily 03:00\")"; fi
 }
 
+# A directory only root can change: root's, and neither its group nor others may write to it
+# (the group bits show an ACL's mask, so a write granted by ACL counts as well)
+_doc_root_only() {   # dir
+  local owner="" mode=""
+  owner="$(stat -c %u "$1" 2>/dev/null)" || return 1
+  mode="$(stat -c %a "$1" 2>/dev/null)" || return 1
+  [[ "$owner" == 0 ]] && (( (8#$mode & 8#022) == 0 ))
+}
+
 _doc_check_domains() {
   local d="" code="" days="" maps="" ver="" logs=""
   local -a cfg_vhosts=()
@@ -479,12 +488,15 @@ _doc_check_domains() {
     # lib_domain_logs_dir_ensure); and the fail2ban web jails read them, so logs nobody writes
     # also mean no bans
     logs="$(lib_domain_log_dir "$d")"
-    if grep -qF '$VH_ROOT/logs/' "${LSWS_VHOSTS_DIR}/${d}/vhconf.conf" 2>/dev/null; then
+    if lib_domain_logs_in_home "$d"; then
       _doc_add FAIL "site ${d}: logs" "OpenLiteSpeed opens them as root in ${D_HOME}/logs, which the site user can replace with a link (lomp update moves them to ${logs})"
     elif [[ -L "$logs" ]]; then _doc_add FAIL "site ${d}: logs" "${logs} is a symbolic link, and OpenLiteSpeed opens the site's logs through it as root (remove the link; lomp update makes the directory again)"
     elif [[ ! -d "$logs" ]]; then _doc_add WARN "site ${d}: logs" "${logs} is missing, so the site has no logs (lomp update makes it again)"
-    elif [[ "$(stat -c %u "$logs")" != 0 ]]; then _doc_add FAIL "site ${d}: logs" "${logs} does not belong to root, and OpenLiteSpeed opens the site's logs there as root (lomp update hands it back)"
+    elif ! _doc_root_only "$logs" || ! _doc_root_only "$SITES_LOG_ROOT"; then
+      _doc_add FAIL "site ${d}: logs" "${logs} or ${SITES_LOG_ROOT} can be changed by another user than root, and OpenLiteSpeed opens the site's logs there as root (lomp update hands them back)"
     elif ! lib_ols_logdir_open "$logs"; then _doc_add WARN "site ${d}: logs" "OpenLiteSpeed cannot enter ${logs}, so the site's logs stay empty and the fail2ban web jails see nothing (lomp update fixes it)"
+    elif [[ ! -f "${logs}/access.log" ]]; then _doc_add WARN "site ${d}: logs" "OpenLiteSpeed has not made ${logs}/access.log yet, so the fail2ban web jails leave the site out (lomp update reloads it)"
+    elif [[ -d "${D_HOME}/logs" && ! -L "${D_HOME}/logs" ]]; then _doc_add WARN "site ${d}: logs" "OpenLiteSpeed writes ${logs}, but ${D_HOME}/logs is still a directory: move what is left in it to ${logs} and remove it, then lomp update puts the link there"
     elif [[ "$(readlink -- "${D_HOME}/logs" 2>/dev/null || true)" != "$logs" ]]; then _doc_add WARN "site ${d}: logs" "OpenLiteSpeed writes ${logs}, but ${D_HOME}/logs does not lead there (lomp update puts the link back)"
     else _doc_add OK "site ${d}: logs" "OpenLiteSpeed writes ${logs} (${D_HOME}/logs leads there)"; fi
     if lib_ols_conf_block_exists virtualhost "$d"; then

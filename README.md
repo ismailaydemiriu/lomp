@@ -397,7 +397,9 @@ log files wherever that pointed. The site user can read its logs but not change 
 ACL lets OpenLiteSpeed's worker processes (`nobody`) in to write them. Nothing run as root goes
 through the link, so a site user who replaces it only changes where its own shortcut leads.
 Servers set up by an older release kept the logs in the home; `sudo lomp update` moves them,
-with their history, and puts the link in their place.
+with their history, and puts the link in their place. Until it has, `self-update` alone leaves
+them where they are, and logrotate and fail2ban keep reading them there. The logs now take up
+space on the filesystem that holds `/var/log`, not the one with `/home`.
 
 ---
 

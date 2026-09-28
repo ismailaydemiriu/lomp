@@ -255,7 +255,7 @@ check_eq "lsphp runs as the site user" "$IDENT" "${PHP_OWNER:-<none>}"
 rm -f "/home/${TEST_DOMAIN}/public_html/itest.php"
 
 # the site's own logs, written by OpenLiteSpeed's workers (nobody) - PHP's errors included - in
-# a directory that is root's all the way down, with a link to it in the home
+# a directory only root can change, with a link to it in the home
 SITE_LOGS="/var/log/lomp-sites/${TEST_DOMAIN}"
 check_eq "the site's logs are root's" "root:${IDENT} 750" "$(stat -c '%U:%G %a' "$SITE_LOGS")"
 check_eq "and logs/ in the home leads there" "$SITE_LOGS" "$(readlink "/home/${TEST_DOMAIN}/logs")"
