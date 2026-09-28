@@ -236,8 +236,9 @@ PHP and WordPress sites read `.htaccess`, within two limits that come from OpenL
   virtual host instead, and WordPress sites refuse to run any PHP file under
   `wp-content/uploads`.
 - A `.htaccess` is read when OpenLiteSpeed loads, not when it changes. A cron job checks every
-  minute and reloads OpenLiteSpeed once a `.htaccess` has changed - a WordPress permalink
-  setting, a plugin, a hand edit - so a change takes effect within about a minute. A reload
+  minute and reloads OpenLiteSpeed once a `.htaccess` has arrived or changed - a new site
+  uploaded or unpacked with its original file dates, a WordPress permalink setting, a plugin, a
+  hand edit - so a change takes effect within about a minute. A reload
   restarts the server, which pauses every site for a moment; `doctor` lists a change that is
   still waiting.
 

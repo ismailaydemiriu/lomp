@@ -658,7 +658,12 @@ lib_ols_htaccess_docroots() {   # -> one document root per line
   return 0
 }
 
-# The first .htaccess that changed after OpenLiteSpeed last started, or nothing. The trees
+# The first .htaccess that arrived or changed after OpenLiteSpeed last started, or nothing.
+# Judged by the change time (ctime), which the kernel sets whenever a file is written, moved
+# in or re-dated, and never by the modification time: unzip, tar, rsync -a and an SFTP client
+# that keeps dates (WinSCP by default) give the file its source's older date, so a site
+# uploaded that way onto a new domain kept its .htaccess out of effect until a manual restart.
+# A chown or chmod counts as a change too, which costs at most one needless reload. The trees
 # belong to the site users: find neither follows links nor reads files, and stops after 30 s.
 lib_ols_htaccess_pending() {
   local started="" since="" root=""
@@ -672,7 +677,7 @@ lib_ols_htaccess_pending() {
     if [[ -d "$root" ]]; then roots+=("$root"); fi
   done < <(lib_ols_htaccess_docroots)
   ((${#roots[@]} > 0)) || return 0
-  timeout 30 find "${roots[@]}" -maxdepth 4 -name .htaccess -type f -newermt "@${since}" -print -quit 2>/dev/null \
+  timeout 30 find "${roots[@]}" -maxdepth 4 -name .htaccess -type f -newerct "@${since}" -print -quit 2>/dev/null \
     | head -n 1 | tr -c '[:print:]\n' '?' || true
 }
 

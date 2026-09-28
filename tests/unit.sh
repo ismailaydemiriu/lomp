@@ -2014,12 +2014,17 @@ assert_lacks "a static site's is not (OpenLiteSpeed never reads it)" "$_ht_st" "
 _orig_olsrun="$(declare -f lib_ols_running)"; _orig_htreload="$(declare -f lib_ols_htaccess_reload)"
 eval 'lib_ols_running() { return "${_ht_running_rc:-0}"; }'
 eval 'systemctl() { if [[ "$*" == *ActiveEnterTimestamp* ]]; then printf "%s\n" "$_ht_started"; fi; return 0; }'
+# A file cannot be made to have arrived earlier (its change time is the kernel's), so the
+# server's start is what moves. The modification time can be anything: unzip, tar, rsync -a
+# and an SFTP client that keeps dates (WinSCP does by default) write the one from the source.
+: >"$_ht_wp/.htaccess"; : >"$_ht_st/.htaccess"
+_ht_started="@$(( $(date +%s) + 1 ))"
+assert_eq "an .htaccess that was there when the server started is in effect" "" "$(lib_ols_htaccess_pending)"
 _ht_started="@$(( $(date +%s) - 600 ))"
-: >"$_ht_wp/.htaccess"; touch -d '-20 minutes' "$_ht_wp/.htaccess"
-: >"$_ht_st/.htaccess"
-assert_eq "an .htaccess older than the running server is in effect" "" "$(lib_ols_htaccess_pending)"
-: >"$_ht_wp/wp-content/uploads/.htaccess"
-assert_eq "one written after the server started waits for a reload" "$_ht_wp/wp-content/uploads/.htaccess" "$(lib_ols_htaccess_pending)"
+assert_eq "one written after the server started waits for a reload" "$_ht_wp/.htaccess" "$(lib_ols_htaccess_pending)"
+rm -f "$_ht_wp/.htaccess"   # the check names the first one it finds
+: >"$_ht_wp/wp-content/uploads/.htaccess"; touch -d '-3 days' "$_ht_wp/wp-content/uploads/.htaccess"
+assert_eq "so does one unpacked or uploaded with its older date" "$_ht_wp/wp-content/uploads/.htaccess" "$(lib_ols_htaccess_pending)"
 _ht_started=""
 assert_eq "without a start time (not run by systemd) nothing is said" "" "$(lib_ols_htaccess_pending)"
 _ht_started="@$(( $(date +%s) - 600 ))"; _ht_running_rc=1
@@ -2039,9 +2044,9 @@ assert_eq  "but not within a minute of the last start" "1" "$(_ht_count)"
 _ht_started="@$(( $(date +%s) - 600 ))"; _ht_flock_rc=1
 ( lib_ols_htaccess_check_main ) >/dev/null 2>&1
 assert_eq  "nor while another command holds the lock" "1" "$(_ht_count)"
-_ht_flock_rc=0; touch -d '-20 minutes' "$_ht_wp/wp-content/uploads/.htaccess"
+_ht_flock_rc=0; _ht_started="@$(( $(date +%s) + 1 ))"
 ( lib_ols_htaccess_check_main ) >/dev/null 2>&1
-assert_eq  "and not at all when nothing changed" "1" "$(_ht_count)"
+assert_eq  "and not at all when nothing changed since the last start" "1" "$(_ht_count)"
 assert_eq  "the check exits 0 with errexit armed" 0 "$(run_isolated lib_ols_htaccess_check_main)"
 
 assert_has "add --wordpress reloads once WordPress wrote its .htaccess" 'lib_ols_htaccess_reload' "$(declare -f lib_domain_add_main)"
