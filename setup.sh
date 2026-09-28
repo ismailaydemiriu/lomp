@@ -19,7 +19,10 @@ shopt -s lastpipe        # "render | lib_write_file" must run the writer in this
 umask 022
 export LC_ALL=C.UTF-8 LANG=C.UTF-8
 
-readonly SCRIPT_VERSION="1.0.0"
+# The release line is the only part of the version written by hand. The last number counts the
+# commits on main since lompstack 1.0.0, so every change that reaches main raises it and nobody
+# edits it. SCRIPT_VERSION is built from both once the modules are loaded (lib_version_detect).
+readonly SCRIPT_VERSION_LINE="1.0"
 
 # =============================================================================
 #  USER CONFIGURATION - adjust to taste (command-line flags override these)
@@ -99,6 +102,8 @@ for _m in common system ols php db ssl domain proxy app mail webmail cloudflare 
   _ss_load_module "$_m"
 done
 unset _m
+SCRIPT_VERSION="$(lib_version_detect "$SCRIPT_DIR")"
+readonly SCRIPT_VERSION
 
 
 lib_version() {

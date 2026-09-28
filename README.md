@@ -214,6 +214,19 @@ Global flags work everywhere: `--yes`, `--dry-run`, `--quiet`, `--verbose`, `--n
 
 `sudo ./setup.sh help` prints the complete reference.
 
+### Updating lomp
+
+```bash
+sudo lomp self-update     # pull main into /opt/lomp and install it; the server is not touched
+sudo lomp update          # then let the new release bring the server up to date
+```
+
+The version is `1.0.<n>`, where `n` counts the commits on `main` since 1.0.0. Every change that
+reaches `main` raises it, and nobody edits it by hand. `self-update` shows the step, e.g.
+`Checkout updated: 1.0.60 (a48af2a) -> 1.0.63 (5c1e2f0)`, and `lomp --version` prints the
+installed version. A copy whose commits cannot be counted (a shallow clone, or a directory that is
+not a git checkout) shows `1.0.x`.
+
 ### Site options worth knowing
 
 | Flag | Effect |

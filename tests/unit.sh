@@ -10,7 +10,7 @@ TMP="$(mktemp -d "${TMPDIR:-/tmp}/ss-unit.XXXXXX")"
 cleanup() { rm -rf "$TMP"; }
 
 # ---- globals normally provided by setup.sh (all paths redirected into TMP) --
-SCRIPT_VERSION="test"
+SCRIPT_VERSION="test"; SCRIPT_VERSION_LINE="1.0"
 TIMEZONE="Europe/Istanbul"; ADMIN_PORT="7080"; PHP_VERSION="8.3"; ADMIN_ACCESS="tunnel"; ADMIN_ALLOWED_IP=""; DEFAULT_EMAIL=""; SSH_PORT=""
 DB_BUFFER_PERCENT=""; REDIS_MAX_PERCENT=""; BACKUP_KEEP="7"; BACKUP_SCHEDULE=""; FAIL2BAN_IGNORE_IP=""
 STATE_DIR="$TMP/state"; SITES_ROOT="$TMP/home"; LSWS_HOME="$TMP/lsws"; LOG_FILE="$TMP/server_setup.log"
@@ -1006,6 +1006,80 @@ printf 'if then fi\n' >"$SRC_BAD/lib/broken.sh"
 assert_eq "a checkout that does not parse is refused" 1 "$(run_isolated lib_install_self "$SRC_BAD")"
 assert_has "the good installation survived" "marker-v2" "$(cat "${INSTALL_DIR}/setup.sh")"
 assert_false "the broken module was not installed" test -f "${INSTALL_DIR}/lib/broken.sh"
+
+# =============================================================================
+section "version number (counted by git, carried by the installed copy)"
+# setup.sh declares only the release line; the last number counts the commits since the first
+# one, so every change that reaches main raises it and nobody edits a number. The copy under
+# INSTALL_DIR is no checkout, so lib_install_self writes the version into its VERSION file.
+if lib_have git; then
+  # the fixture's commits must not depend on this machine's git configuration (signing, hooks)
+  mkdir -p "$TMP/vgit-home"
+  vgit() {
+    HOME="$TMP/vgit-home" XDG_CONFIG_HOME="$TMP/vgit-home" GIT_CONFIG_NOSYSTEM=1 \
+      git -c user.name=unit -c user.email=unit@example.invalid -c init.defaultBranch=main "$@"
+  }
+  VREPO="$TMP/vrepo"
+  mkdir -p "$VREPO/lib"
+  printf '#!/usr/bin/env bash\nreadonly SCRIPT_VERSION_LINE="2.5"\necho vrepo\n' >"$VREPO/setup.sh"
+  printf '# lib a\n' >"$VREPO/lib/a.sh"
+  vgit init -q "$VREPO"
+  vgit -C "$VREPO" add -A
+  vgit -C "$VREPO" commit -q -m first
+  vgit -C "$VREPO" commit -q --allow-empty -m second
+  vgit -C "$VREPO" commit -q --allow-empty -m third
+  assert_eq "a checkout counts the commits after the first" "2.5.2" "$(lib_version_detect "$VREPO")"
+  assert_eq "an older revision counts fewer" "1" "$(lib_version_count "$VREPO" HEAD~1)"
+  assert_eq "no revision, no count" "" "$(lib_version_count "$VREPO" "")"
+  vgit -C "$VREPO" commit -q --allow-empty -m fourth
+  assert_eq "each commit raises it by one" "2.5.3" "$(lib_version_detect "$VREPO")"
+
+  # a shallow clone has lost the commits it would count: say so rather than print a wrong number
+  cp -a "$VREPO" "$TMP/vshallow"
+  vgit -C "$TMP/vshallow" rev-parse HEAD~1 >"$TMP/vshallow/.git/shallow"
+  assert_eq "a shallow clone gives no count" "2.5.x" "$(lib_version_detect "$TMP/vshallow")"
+  assert_eq "nor does a plain directory" "${SCRIPT_VERSION_LINE}.x" "$(lib_version_detect "$SRC_GOOD")"
+
+  lib_install_self "$VREPO" >/dev/null 2>&1
+  assert_eq "the installed copy carries its version" "2.5.3" "$(cat "${INSTALL_DIR}/VERSION")"
+  assert_eq "and reports it" "2.5.3" "$(lib_version_detect "$INSTALL_DIR")"
+  assert_false "no staged VERSION left behind" test -e "${INSTALL_DIR}/VERSION.new"
+
+  # a copy that an older release installed has no VERSION: it is counted in the checkout it came
+  # from, at the revision recorded then - not at wherever that checkout's HEAD is now
+  rm -f "${INSTALL_DIR}/VERSION"
+  vgit -C "$VREPO" commit -q --allow-empty -m fifth
+  assert_eq "a copy without VERSION counts at its recorded revision" "2.5.3" "$(lib_version_detect "$INSTALL_DIR")"
+  printf 'garbage\n' >"${INSTALL_DIR}/VERSION"
+  assert_eq "a VERSION that is no version is not believed" "2.5.x" "$(lib_version_detect "$INSTALL_DIR")"
+
+  # setup.sh works its version out when it starts, before anything prints it
+  VCOPY="$TMP/vcopy"
+  mkdir -p "$VCOPY"; cp -a "$ROOT/setup.sh" "$ROOT/lib" "$VCOPY/"
+  printf '7.7.7\n' >"$VCOPY/VERSION"
+  assert_eq "setup.sh --version prints its copy's version" "setup.sh 7.7.7" "$(bash "$VCOPY/setup.sh" --version 2>&1 | head -n 1)"
+
+  # self-update shows the checkout's step from one version to the next, and ends with the version
+  # it installed, not the one of the release that is running
+  vgit clone -q "$VREPO" "$TMP/vclone"
+  vgit -C "$VREPO" commit -q --allow-empty -m sixth
+  V_OLD="$(git -C "$TMP/vclone" rev-parse --short HEAD)"; V_NEW="$(git -C "$VREPO" rev-parse --short HEAD)"
+  V_OUT="$(OPT_QUIET=0; eval 'lib_require_tools() { :; }; lib_require_installed() { :; }'
+           lib_selfupdate_main --from "$TMP/vclone" 2>&1)"
+  assert_has "self-update names both versions" "Checkout updated: 2.5.4 (${V_OLD}) -> 2.5.5 (${V_NEW})" "$V_OUT"
+  assert_has "and the one it installed" "Now running lompstack 2.5.5 (${V_NEW})" "$V_OUT"
+  V_OUT="$(OPT_QUIET=0; eval 'lib_require_tools() { :; }; lib_require_installed() { :; }'
+           lib_selfupdate_main --from "$TMP/vclone" 2>&1)"
+  assert_has "a second run finds nothing new" "Already at the latest revision: 2.5.5 (${V_NEW})" "$V_OUT"
+
+  # a directory that is no checkout installs as "x", with no revision left over from before
+  lib_install_self "$SRC_GOOD" >/dev/null 2>&1
+  assert_eq "a copy of a plain directory has no count" "${SCRIPT_VERSION_LINE}.x" "$(lib_version_detect "$INSTALL_DIR")"
+  assert_eq "and no revision" "" "$(lib_manifest_get '.install.revision')"
+  unset -f vgit
+else
+  section "  (no git: version number tests skipped)"
+fi
 
 # =============================================================================
 section "interactive menu"

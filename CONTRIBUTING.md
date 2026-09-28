@@ -27,6 +27,9 @@ changes is "would a staff SRE run this on their own box".
   group, such as one site's jobs), never by editing `/etc/cron.d/server-setup` directly. A
   schedule must be validated first: cron ignores the whole file when one line is malformed.
 - User-facing text is English; the log file must stay greppable.
+- Never bump the version by hand. `setup.sh` declares only the release line
+  (`SCRIPT_VERSION_LINE`, e.g. `1.0`); the last number is the count of commits since 1.0.0,
+  worked out by `lib_version_detect`. Change the line only when a new release line starts.
 
 ## Before you open a pull request
 

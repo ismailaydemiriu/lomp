@@ -561,6 +561,44 @@ lib_install_cron() {
   lib_ok "Scheduled tasks in ${CRON_FILE} (healthcheck daily 06:15, .htaccess changes every minute, OpenLiteSpeed logs older than ${OLS_LOG_KEEP_DAYS} days removed daily 04:45$( lib_cf_enabled && printf ', cloudflare ips weekly')$( [[ -n "$INS_BACKUP_SCHEDULE" ]] && printf ', backups %s' "$INS_BACKUP_SCHEDULE"))"
 }
 
+# The version is <release line>.<n>. setup.sh declares the line (SCRIPT_VERSION_LINE), and n is
+# the number of commits since the repository's first one, lompstack 1.0.0. Every change that
+# reaches main raises n, so nobody edits a number and parallel branches never fight over one.
+# A checkout counts its commits; the copy under INSTALL_DIR is no checkout, so lib_install_self
+# writes the version into its VERSION file. "x" stands for a count nobody could make.
+lib_version_count() {   # <checkout> <revision> -> commits after the first one, or nothing
+  local n=""
+  [[ -n "$1" && -n "$2" && -e "${1}/.git" ]] && lib_have git || return 0
+  # a shallow clone has lost the commits it would count
+  [[ "$(git -C "$1" rev-parse --is-shallow-repository 2>/dev/null)" == "false" ]] || return 0
+  n="$(git -C "$1" rev-list --count "$2" -- 2>/dev/null)" || return 0
+  [[ "$n" =~ ^[1-9][0-9]*$ ]] && printf '%s\n' "$((n - 1))"
+  return 0
+}
+
+lib_version_line() {   # <dir holding setup.sh> -> the release line that setup.sh declares
+  local l=""
+  l="$(sed -n 's/^readonly SCRIPT_VERSION_LINE="\([^"]*\)".*/\1/p' "${1}/setup.sh" 2>/dev/null || true)"
+  l="${l%%$'\n'*}"
+  [[ "$l" =~ ^[0-9]+\.[0-9]+$ ]] || l="$SCRIPT_VERSION_LINE"
+  printf '%s\n' "$l"
+}
+
+lib_version_detect() {   # <dir holding setup.sh> -> the version of the lompstack copy in it
+  local dir="$1" v="" n=""
+  if [[ -e "${dir}/.git" ]]; then
+    n="$(lib_version_count "$dir" HEAD)"
+  elif [[ -f "${dir}/VERSION" ]]; then
+    IFS= read -r v <"${dir}/VERSION" || true
+    if [[ "$v" =~ ^[0-9]+\.[0-9]+\.([0-9]+|x)$ ]]; then printf '%s\n' "$v"; return 0; fi
+  elif [[ "$dir" -ef "$INSTALL_DIR" ]]; then
+    # installed by a release that wrote no VERSION yet: count in the checkout it came from, at the
+    # revision it came from (that checkout's HEAD may have moved on since)
+    n="$(lib_version_count "$(lib_manifest_get '.install.source_dir')" "$(lib_manifest_get '.install.revision')")"
+  fi
+  printf '%s.%s\n' "$(lib_version_line "$dir")" "${n:-x}"
+}
+
 # Copy this checkout to INSTALL_DIR and link the command. The source directory is
 # remembered so "self-update" can find the checkout later, when the running copy is the
 # installed one and $SCRIPT_DIR points at INSTALL_DIR.
@@ -579,13 +617,19 @@ lib_install_self() {   # [source_dir]
     cp -a "${src}/lib" "${INSTALL_DIR}/lib.new"
     chmod 0644 "${INSTALL_DIR}"/lib.new/*.sh
     install -m 0755 "${src}/setup.sh" "${INSTALL_DIR}/setup.sh.new"
+    # the copy is no checkout and cannot count its commits later, so its version goes with it
+    lib_version_detect "$src" >"${INSTALL_DIR}/VERSION.new"
+    chmod 0644 "${INSTALL_DIR}/VERSION.new"
     [[ -d "${INSTALL_DIR}/lib" ]] && mv "${INSTALL_DIR}/lib" "${INSTALL_DIR}/lib.old"
     mv "${INSTALL_DIR}/lib.new" "${INSTALL_DIR}/lib"
     mv -f "${INSTALL_DIR}/setup.sh.new" "${INSTALL_DIR}/setup.sh"
+    mv -f "${INSTALL_DIR}/VERSION.new" "${INSTALL_DIR}/VERSION"
     rm -rf "${INSTALL_DIR}/lib.old"
     lib_manifest_set '.install.source_dir' "$src"
-    if [[ -d "${src}/.git" ]] && lib_have git; then
+    if [[ -e "${src}/.git" ]] && lib_have git; then
       lib_manifest_set '.install.revision' "$(git -C "$src" rev-parse --short HEAD 2>/dev/null || printf 'unknown')"
+    else
+      lib_manifest_set '.install.revision' ""   # a plain directory has no revision: keep no stale one
     fi
   fi
   ln -sfn "${INSTALL_DIR}/setup.sh" "$BIN_LINK"
@@ -604,7 +648,7 @@ lib_install_self() {   # [source_dir]
 #  self-update - refresh the installed copy from the checkout it came from
 # =============================================================================
 lib_selfupdate_main() {
-  local src="" before="" after="" a=""
+  local src="" before="" after="" a="" v_before="" v_after=""
   while (($# > 0)); do
     a="$1"; shift
     case "$a" in
@@ -627,19 +671,22 @@ lib_selfupdate_main() {
 
   if [[ -d "${src}/.git" ]] && lib_have git; then
     before="$(git -C "$src" rev-parse --short HEAD 2>/dev/null || printf 'unknown')"
+    v_before="$(lib_version_detect "$src")"
     lib_info "Fetching the latest revision into ${src}"
     lib_run git -C "$src" pull --ff-only \
       || lib_die "git pull failed in ${src}" "local edits or a diverged branch" "inspect it: git -C ${src} status"
     after="$(git -C "$src" rev-parse --short HEAD 2>/dev/null || printf 'unknown')"
-    if [[ "$before" == "$after" ]]; then lib_ok "Already at the latest revision (${after})"
-    else lib_ok "Checkout updated: ${before} -> ${after}"; fi
+    v_after="$(lib_version_detect "$src")"
+    if [[ "$before" == "$after" ]]; then lib_ok "Already at the latest revision: ${v_after} (${after})"
+    else lib_ok "Checkout updated: ${v_before} (${before}) -> ${v_after} (${after})"; fi
   else
     lib_info "${src} is not a git checkout; copying it as it is"
   fi
 
   lib_install_self "$src"
   lib_manifest_set '.install.updated_at' "$(lib_iso_now)"
-  lib_ok "Now running lompstack ${SCRIPT_VERSION}$( [[ -n "$(lib_manifest_get '.install.revision')" ]] && printf ' (%s)' "$(lib_manifest_get '.install.revision')")"
+  # the version just installed, not SCRIPT_VERSION: that is the release doing the update
+  lib_ok "Now running lompstack $(lib_version_detect "$INSTALL_DIR")$( [[ -n "$(lib_manifest_get '.install.revision')" ]] && printf ' (%s)' "$(lib_manifest_get '.install.revision')")"
   lib_note "Nothing on the server was reconfigured. 'sudo lomp update' applies what a newer release changes (scheduled tasks, site logs); 'sudo lomp doctor' checks its state."
 }
 
