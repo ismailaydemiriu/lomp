@@ -11,6 +11,7 @@ INS_NODE_DEFAULT_MAJOR=24
 PM2_MAJOR=7   # installed once per server; every Node site runs its own PM2 daemon as the site user
 INS_MARIADB="" INS_REDIS_PERSIST=0 INS_AUTO_REBOOT=0 INS_SKIP_UPGRADE=0 INS_BACKUP_SCHEDULE=""
 INS_ADMIN_ACCESS_SET=0   # was --admin-access / --admin-ip given on THIS run?
+INS_PHP_SET=0 INS_ADMIN_PORT_SET=0 INS_TIMEZONE_SET=0   # and --php / --admin-port / --timezone?
 INS_CRON_ADDED=""        # ids lib_install_cron_base found missing, for update to report
 
 # =============================================================================
@@ -21,11 +22,11 @@ lib_install_parse_args() {
   while (($# > 0)); do
     a="$1"; shift
     case "$a" in
-      --php)             PHP_VERSION="${1:-}"; shift ;;
-      --timezone)        TIMEZONE="${1:-}"; shift ;;
+      --php)             PHP_VERSION="${1:-}"; INS_PHP_SET=1; shift ;;
+      --timezone)        TIMEZONE="${1:-}"; INS_TIMEZONE_SET=1; shift ;;
       --admin-ip)        ADMIN_ALLOWED_IP="${1:-}"; ADMIN_ACCESS="ip"; INS_ADMIN_ACCESS_SET=1; shift ;;
       --admin-access)    ADMIN_ACCESS="${1:-}"; INS_ADMIN_ACCESS_SET=1; shift ;;
-      --admin-port)      ADMIN_PORT="${1:-}"; shift ;;
+      --admin-port)      ADMIN_PORT="${1:-}"; INS_ADMIN_PORT_SET=1; shift ;;
       --email)           DEFAULT_EMAIL="${1:-}"; shift ;;
       --ssh-port)        SSH_PORT="${1:-}"; shift ;;
       --with-node)       INS_WITH_NODE=1 ;;
@@ -55,21 +56,43 @@ lib_install_parse_args() {
       *) lib_die "Unknown option for install: ${a}" "" "see: setup.sh help" ;;
     esac
   done
-  lib_php_valid_version "$PHP_VERSION" || lib_die "Invalid --php '${PHP_VERSION}'" "expected e.g. 8.3" "--php 8.3"
+  # Re-runs: --php, --admin-port and --timezone that are not repeated keep the values this
+  # server was installed with. They used to fall back to the defaults at the top of setup.sh,
+  # so a bare re-run - and every optional component the menu adds - installed another LSPHP
+  # as the default, moved the WebAdmin port (lib_install_ufw then deleted the rule for the
+  # port really in use) and reset the timezone. Read before the checks below: a stored value
+  # has to pass the same checks as its flag (the timezone's is in lib_system_timezone_apply),
+  # and an error names the manifest rather than a flag nobody typed.
+  local v="" php_kept="" port_kept=""
+  if [[ -s "$STATE_DIR/manifest.json" ]] && lib_have jq; then
+    if (( ! INS_PHP_SET )); then
+      v="$(lib_manifest_get '.params.php')"
+      if [[ -n "$v" ]]; then PHP_VERSION="$v"; php_kept=" (kept from ${STATE_DIR}/manifest.json)"; fi
+    fi
+    if (( ! INS_ADMIN_PORT_SET )); then
+      v="$(lib_manifest_get '.params.admin_port')"
+      if [[ -n "$v" ]]; then ADMIN_PORT="$v"; port_kept=" (kept from ${STATE_DIR}/manifest.json)"; fi
+    fi
+    if (( ! INS_TIMEZONE_SET )); then
+      v="$(lib_manifest_get '.params.timezone')"
+      if [[ -n "$v" ]]; then TIMEZONE="$v"; fi
+    fi
+  fi
+  lib_php_valid_version "$PHP_VERSION" || lib_die "Invalid --php '${PHP_VERSION}'${php_kept}" "expected e.g. 8.3" "--php 8.3"
   if [[ -n "$DEFAULT_EMAIL" ]]; then
     lib_email_valid "$DEFAULT_EMAIL" || lib_die "Invalid --email '${DEFAULT_EMAIL}'" \
       "the address goes into httpd_config.conf and into mail headers, so it may not contain spaces, quotes, backslashes or line breaks" \
       "--email you@example.com"
   fi
   [[ "$ADMIN_PORT" =~ ^[0-9]{2,5}$ ]] && (( ADMIN_PORT >= 1024 && ADMIN_PORT <= 65535 )) \
-    || lib_die "Invalid --admin-port '${ADMIN_PORT}'" "expected a port between 1024 and 65535" "--admin-port 7574"
+    || lib_die "Invalid --admin-port '${ADMIN_PORT}'${port_kept}" "expected a port between 1024 and 65535" "--admin-port 7574"
   # lib_ssh_ports is called directly: SYS_SSH_PORTS is still the module default "22" here,
   # because lib_system_analyze only runs after the arguments are parsed. Unquoted on
   # purpose (several ports possible); an "if" body, not a trailing "&&", so the loop
   # cannot end on a false test and return 1 under errexit.
   for _p in 80 443 3306 6379 25 465 587 993 143 4190 10587 11332 11333 11334 5335 $(lib_ssh_ports); do
     if [[ "$ADMIN_PORT" == "$_p" ]]; then
-      lib_die "--admin-port ${ADMIN_PORT} is already used by another service" \
+      lib_die "--admin-port ${ADMIN_PORT}${port_kept} is already used by another service" \
         "the WebAdmin panel cannot share a port with the web server, database, cache, mail or SSH" \
         "pick a free port, e.g. --admin-port 7574"
     fi
@@ -98,7 +121,7 @@ lib_install_parse_args() {
   [[ "$ADMIN_ACCESS" == "ip" ]] || ADMIN_ALLOWED_IP=""
   [[ "$BACKUP_KEEP" =~ ^[0-9]+$ ]] || lib_die "Invalid backup keep count '${BACKUP_KEEP}'" "" "--backup-keep 7"
   [[ -n "$INS_BACKUP_SCHEDULE" ]] || INS_BACKUP_SCHEDULE="$BACKUP_SCHEDULE"
-  # Re-runs: keep previously chosen values when the flag is not repeated (idempotent re-run)
+  # Re-runs: keep the other previously chosen values when the flag is not repeated (idempotent re-run)
   if [[ -s "$STATE_DIR/manifest.json" ]] && lib_have jq; then
     # Only inherit the stored mode when the operator did NOT ask for one. Testing
     # ADMIN_ACCESS == tunnel cannot tell "not given" from "explicitly tunnel", which made

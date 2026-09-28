@@ -2006,6 +2006,58 @@ assert_has   "pm2 pinned to one major" 'pm2@${PM2_MAJOR}' "$_node_fn"
 assert_has   "the major is recorded" ".params.node_major" "$_node_fn"
 
 # =============================================================================
+section "install re-run keeps --php, --admin-port and --timezone (regression: a bare re-run reset them)"
+# These three were never read back from the manifest. A server installed with --php 8.2
+# --admin-port 7574 --timezone UTC got LSPHP 8.3 as its default, its WebAdmin back on 7080 (the
+# firewall rule for 7574 deleted) and its timezone reset whenever "install" ran without the
+# original flags - which is also how the menu adds Node.js, Python, Netdata and mail.
+_mf="$STATE_DIR/manifest.json"; cp "$_mf" "$TMP/manifest.rerun.save"
+_rerun_manifest() {   # php admin_port timezone -> the manifest an earlier install leaves
+  jq -n --arg php "$1" --arg ap "$2" --arg tz "$3" \
+    '{version:"test", installed_at:"2026-09-01T00:00:00Z", components:{},
+      params:{php:$php, admin_port:$ap, timezone:$tz, admin_access:"tunnel", admin_ip:""}}' >"$_mf"
+}
+_rerun_values() {   # the three settings a run ends up with, from the defaults setup.sh carries
+  ( PHP_VERSION="8.3"; ADMIN_PORT="7080"; TIMEZONE="Europe/Istanbul"
+    lib_install_parse_args "$@" >/dev/null 2>&1
+    printf '%s %s %s' "$PHP_VERSION" "$ADMIN_PORT" "$TIMEZONE" )
+}
+_rerun_manifest 8.2 7574 UTC
+assert_eq "a re-run without the flags keeps all three" "8.2 7574 UTC" "$(_rerun_values --skip-upgrade)"
+assert_eq "and gets through the checks with errexit armed" 0 "$(run_isolated lib_install_parse_args --skip-upgrade)"
+assert_eq "one flag changes its own setting only" "8.4 7574 UTC" "$(_rerun_values --php 8.4 --skip-upgrade)"
+# a flag is a flag even when it names the built-in default: "== default" cannot mean "not given"
+assert_eq "explicit flags win, even the built-in defaults" "8.3 7080 Europe/Istanbul" \
+  "$(_rerun_values --php 8.3 --admin-port 7080 --timezone Europe/Istanbul --skip-upgrade)"
+assert_eq "and any other value" "8.4 7575 Asia/Tokyo" \
+  "$(_rerun_values --php 8.4 --admin-port 7575 --timezone Asia/Tokyo --skip-upgrade)"
+assert_eq "explicit flags get through the checks with errexit armed" 0 \
+  "$(run_isolated lib_install_parse_args --php 8.3 --admin-port 7080 --timezone Europe/Istanbul --skip-upgrade)"
+assert_eq "without a manifest the defaults apply" "8.3 7080 Europe/Istanbul" \
+  "$(STATE_DIR="$TMP/no-state"; _rerun_values --skip-upgrade)"
+assert_eq "a first install gets through the checks with errexit armed" 0 \
+  "$(STATE_DIR="$TMP/no-state"; run_isolated lib_install_parse_args --skip-upgrade)"
+jq -n '{version:"test", components:{}, params:{}}' >"$_mf"
+assert_eq "as they do while the manifest holds no settings yet" "8.3 7080 Europe/Istanbul" "$(_rerun_values --skip-upgrade)"
+# a stored value is checked like the flag it stands in for, and the error says where it came from
+_rerun_manifest 8 7574 UTC
+assert_eq "a stored PHP version that is no version is refused" 1 "$(run_isolated lib_install_parse_args --skip-upgrade)"
+assert_has "naming the manifest, not a flag nobody typed" "'8' (kept from ${STATE_DIR}/manifest.json)" \
+  "$( ( lib_install_parse_args --skip-upgrade ) 2>&1 || true )"
+assert_eq "--php replaces it" 0 "$(run_isolated lib_install_parse_args --php 8.2 --skip-upgrade)"
+_rerun_manifest 8.2 587 UTC
+assert_eq "a stored WebAdmin port that mail needs is refused" 1 "$(run_isolated lib_install_parse_args --skip-upgrade)"
+_rerun_manifest 8.2 99 UTC
+assert_eq "so is one below 1024" 1 "$(run_isolated lib_install_parse_args --skip-upgrade)"
+assert_eq "--admin-port replaces it" 0 "$(run_isolated lib_install_parse_args --admin-port 7574 --skip-upgrade)"
+# the timezone is checked where --timezone is, by the step that sets it. timedatectl is stubbed:
+# a stored value that slipped through must not reset the timezone of the machine running this.
+_rerun_manifest 8.2 7574 Mars/Olympus_Mons
+_rerun_tz_step() { timedatectl() { return 0; }; lib_install_parse_args --skip-upgrade; lib_system_timezone_apply; }
+assert_eq "a stored timezone that does not exist is refused" 1 "$(run_isolated _rerun_tz_step)"
+cp "$TMP/manifest.rerun.save" "$_mf"
+
+# =============================================================================
 section ".htaccess is read once: the check that reloads OpenLiteSpeed"
 # OpenLiteSpeed reads a document root's .htaccess while loading and never again, so a new or
 # changed one only works after a reload. WordPress wrote its own after the last reload of
