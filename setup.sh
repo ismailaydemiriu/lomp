@@ -230,6 +230,7 @@ main() {
     credentials)    lib_domain_credentials_main "${rest[@]}" ;;
     fix-owner)      lib_domain_fix_owner_main "${rest[@]}" || exit 1 ;;
     optimize)       lib_optimize_main "${rest[@]}" ;;
+    php-cleanup)    lib_php_cleanup_main "${rest[@]}" || exit 1 ;;
     backup)         lib_backup_main "${rest[@]}" ;;
     restore)        lib_restore_main "${rest[@]}" ;;
     renew-ssl)      lib_ssl_renew_main "${rest[@]}" ;;

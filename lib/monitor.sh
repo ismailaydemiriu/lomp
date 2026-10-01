@@ -476,7 +476,7 @@ _doc_root_only() {   # dir
 }
 
 _doc_check_domains() {
-  local d="" code="" days="" maps="" ver="" logs=""
+  local d="" code="" days="" maps="" ver="" logs="" extra=0
   local -a cfg_vhosts=()
   while read -r d; do [[ -n "$d" && "$d" != "$OLS_DEFAULT_VHOST" ]] && cfg_vhosts+=("$d"); done < <(lib_ols_conf_vhosts)
   for d in $(lib_domains_list); do
@@ -551,6 +551,8 @@ _doc_check_domains() {
   done
   for ver in $(lib_php_installed_versions); do
     lib_ols_conf_block_exists extprocessor "lsphp${ver//./}" || _doc_add WARN "php ${ver}" "no server-level extprocessor (run optimize)"
+    extra="$(lib_php_cleanup_candidates "$ver" | wc -l)"
+    if (( extra > 0 )); then _doc_add WARN "php ${ver}: packages" "${extra} packages an 'lsphp${ver//./}*' install added are still here, beyond what lomp installs (lomp php-cleanup lists them and asks)"; fi
   done
 }
 

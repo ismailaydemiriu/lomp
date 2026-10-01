@@ -268,3 +268,165 @@ lib_php_summary_line() {   # for status: "8.3 (8.3.12), 8.2 (8.2.24)"
   for v in $(lib_php_installed_versions); do out+=("${v} ($(lib_php_full_version "$v"))"); done
   ((${#out[@]})) && lib_join ', ' "${out[@]}" || printf 'none'
 }
+
+# =============================================================================
+#  php-cleanup - undo "apt-get install lsphp83*"
+# =============================================================================
+# The wildcard installs every package of a version: the debug symbols, the module sources,
+# -dev and with it a compiler, and with Recommends the distribution's own PHP beside this one.
+# apt's history says exactly what such a run added, so that - and nothing else - can go: not
+# lomp's own set, not what was on the server before, not what was marked as manually installed
+# since.
+PHP_APT_HISTORY="/var/log/apt/history.log"   # and its rotated copies
+declare -ga PHP_CLEAN_REMOVE=() PHP_CLEAN_EXTS=() PHP_CLEAN_MANUAL=() PHP_CLEAN_HELD=()
+PHP_CLEAN_EXTRA=""    # what a purge would take along that the wildcard did not install
+PHP_CLEAN_PURGED=0
+
+# Every package a "... install <tag>*" run added, one per line, from apt's history.
+_php_wildcard_added() {   # tag
+  local f=""
+  for f in "$PHP_APT_HISTORY"*; do
+    [[ -f "$f" ]] || continue
+    zcat -f -- "$f" 2>/dev/null || true
+    printf '\n'
+  done | awk -v re=" ${1}[^ ]*[*]" '
+    BEGIN { RS = "" }
+    { hit = 0; inst = ""; n = split($0, l, "\n")
+      for (i = 1; i <= n; i++) {
+        if (l[i] ~ /^Commandline: / && l[i] ~ re) hit = 1
+        if (l[i] ~ /^Install: /) inst = substr(l[i], 10)
+      }
+      if (hit && inst != "") print inst }' \
+    | sed 's/([^)]*)//g' | tr ',' '\n' | sed 's/^ *//; s/[: ].*//; /^$/d' | sort -u
+}
+
+# What lomp installs for a version itself (igbinary comes with redis).
+_php_keep() {   # version
+  printf '%s %s-igbinary' "$(_php_packages "$1")" "$(lib_php_tag "$1")"
+}
+
+# What is left of a wildcard install that lomp did not ask for, one per line. Cheap enough for
+# doctor: it reads the history and asks dpkg, and simulates nothing.
+lib_php_cleanup_candidates() {   # version
+  local tag="" keep="" p=""
+  tag="$(lib_php_tag "$1")"; keep=" $(_php_keep "$1") "
+  for p in $(_php_wildcard_added "$tag"); do
+    [[ "$keep" == *" $p "* ]] && continue
+    if lib_pkg_installed "$p"; then printf '%s\n' "$p"; fi
+  done
+  return 0
+}
+
+_php_purge_sim() {   # apt-get arguments -> the packages that run would remove
+  { LC_ALL=C apt-get -s "$@" 2>/dev/null || true; } | awk '$1 == "Purg" || $1 == "Remv" { sub(/:.*/, "", $2); print $2 }' | sort -u
+}
+
+# What a purge of the arguments would take along besides them.
+_php_purge_collateral() {
+  _php_purge_sim purge "$@" | grep -vxF -f <(printf '%s\n' "$@") || true
+}
+
+# Sorts a version's candidates into PHP_CLEAN_REMOVE (with the extension packages among them in
+# PHP_CLEAN_EXTS), PHP_CLEAN_MANUAL (marked as manually installed since) and PHP_CLEAN_HELD
+# (something that stays needs them). All of them go when purging them takes nothing else along.
+# When it would, apt is asked what nothing needs any more, and the rest stays. PHP_CLEAN_EXTRA
+# is what even that list would drag along: the caller stops on it.
+lib_php_cleanup_plan() {   # version
+  local tag="" auto="" gone="" p="" cand=() ext=() sim=()
+  tag="$(lib_php_tag "$1")"
+  PHP_CLEAN_REMOVE=(); PHP_CLEAN_EXTS=(); PHP_CLEAN_MANUAL=(); PHP_CLEAN_HELD=(); PHP_CLEAN_EXTRA=""
+  auto=" $(apt-mark showauto 2>/dev/null | tr '\n' ' ') "
+  for p in $(lib_php_cleanup_candidates "$1"); do
+    if [[ "$p" == "$tag"-* ]]; then ext+=("$p")
+    elif [[ "$auto" != *" $p "* ]]; then PHP_CLEAN_MANUAL+=("$p"); continue
+    fi
+    cand+=("$p")
+  done
+  ((${#cand[@]})) || return 0
+  if [[ -z "$(_php_purge_collateral "${cand[@]}")" ]]; then
+    PHP_CLEAN_REMOVE=("${cand[@]}")
+  else
+    if ((${#ext[@]})); then sim=(purge --autoremove "${ext[@]}"); else sim=(autoremove --purge); fi
+    gone=" $(_php_purge_sim -o APT::AutoRemove::RecommendsImportant=false -o APT::AutoRemove::SuggestsImportant=false "${sim[@]}" | tr '\n' ' ') "
+    for p in "${cand[@]}"; do
+      if [[ "$gone" == *" $p "* ]]; then PHP_CLEAN_REMOVE+=("$p"); else PHP_CLEAN_HELD+=("$p"); fi
+    done
+    ((${#PHP_CLEAN_REMOVE[@]})) || return 0
+    PHP_CLEAN_EXTRA="$(_php_purge_collateral "${PHP_CLEAN_REMOVE[@]}" | tr '\n' ' ')"
+    PHP_CLEAN_EXTRA="${PHP_CLEAN_EXTRA% }"
+  fi
+  for p in "${PHP_CLEAN_REMOVE[@]}"; do
+    if [[ "$p" == "$tag"-* ]]; then PHP_CLEAN_EXTS+=("$p"); fi
+  done
+  return 0
+}
+
+_php_cleanup_one() {   # version -> 1 when it had to stop
+  local ver="$1" tag="" out="" size=""
+  tag="$(lib_php_tag "$ver")"
+  if [[ -z "$(_php_wildcard_added "$tag")" ]]; then
+    lib_ok "LSPHP ${ver}: apt's history has no '${tag}*' install, so there is nothing to undo"
+    return 0
+  fi
+  lib_php_cleanup_plan "$ver"
+  ((${#PHP_CLEAN_MANUAL[@]} == 0)) || lib_info "Kept, marked as manually installed since: ${PHP_CLEAN_MANUAL[*]}"
+  ((${#PHP_CLEAN_HELD[@]} == 0))   || lib_info "Kept, still needed by packages that stay: ${PHP_CLEAN_HELD[*]}"
+  if [[ -n "$PHP_CLEAN_EXTRA" ]]; then
+    lib_error "LSPHP ${ver}: stopped, nothing was changed. apt would also remove packages that '${tag}*' did not install: ${PHP_CLEAN_EXTRA}"
+    return 1
+  fi
+  if ((${#PHP_CLEAN_REMOVE[@]} == 0)); then
+    lib_ok "LSPHP ${ver}: nothing to remove; what '${tag}*' added beyond lomp's own set is gone"
+    return 0
+  fi
+  lib_info "LSPHP ${ver}: '${tag}*' added these ${#PHP_CLEAN_REMOVE[@]} packages beyond what lomp installs:"
+  printf '%s ' "${PHP_CLEAN_REMOVE[@]}" | fold -s -w 96 | sed 's/^/        /'; printf '\n'
+  size="$( { LC_ALL=C apt-get purge --assume-no "${PHP_CLEAN_REMOVE[@]}" 2>/dev/null || true; } | grep -o '[0-9.,]* [kMG]B disk space will be freed' || true)"
+  [[ -z "$size" ]] || lib_info "${size}"
+  if ((${#PHP_CLEAN_EXTS[@]})); then
+    lib_warn "PHP extensions among them, which every site stops loading: ${PHP_CLEAN_EXTS[*]}"
+    lib_note "A site that needs one of them (ionCube, IMAP, LDAP, PostgreSQL ...) breaks without it: answer no then, and purge the others by hand."
+  fi
+  if (( OPT_DRY_RUN )); then lib_info "[dry-run] would purge them"; return 0; fi
+  if ! lib_confirm "Purge these ${#PHP_CLEAN_REMOVE[@]} packages?" n; then lib_info "Nothing changed."; return 0; fi
+  lib_run env DEBIAN_FRONTEND=noninteractive apt-get purge -y -q "${PHP_CLEAN_REMOVE[@]}" \
+    || lib_die "apt-get purge failed" "see the log" "fix apt problems (apt-get -f install) and run it again"
+  PHP_CLEAN_PURGED=1
+  # an ini left behind for a purged extension would warn on every request
+  out="$("$(lib_php_cli "$ver")" -d display_startup_errors=1 -d display_errors=1 -d log_errors=0 -r 'echo "ok";' 2>&1 || true)"
+  if [[ "$out" == "ok" ]]; then lib_ok "LSPHP ${ver}: ${#PHP_CLEAN_REMOVE[@]} packages purged, and PHP starts cleanly"
+  else lib_warn "LSPHP ${ver} prints at startup: ${out:0:300}"; fi
+  lib_php_ensure_extensions "$ver"
+  return 0
+}
+
+lib_php_cleanup_main() {
+  local a="" ver="" v="" rc=0 versions=()
+  while (($# > 0)); do
+    a="$1"; shift
+    case "$a" in
+      --php) ver="${1:-}"; shift || true ;;
+      -h|--help) printf 'Usage: lomp php-cleanup [--php 8.3]\n'; return 0 ;;
+      *) lib_die "Unknown option for php-cleanup: ${a}" "" "php-cleanup [--php 8.3]" ;;
+    esac
+  done
+  lib_require_tools
+  lib_require_installed
+  if [[ -n "$ver" ]]; then
+    lib_php_valid_version "$ver" || lib_die "Invalid PHP version '${ver}'" "expected e.g. 8.2 / 8.3 / 8.4" "use --php 8.3"
+    lib_php_installed "$ver" || lib_die "LSPHP ${ver} is not installed" "" "lomp status lists the installed versions"
+    versions=("$ver")
+  else
+    for v in $(lib_php_installed_versions); do versions+=("$v"); done
+  fi
+  ((${#versions[@]})) || { lib_ok "No LSPHP version is installed"; return 0; }
+  PHP_CLEAN_PURGED=0
+  for v in "${versions[@]}"; do _php_cleanup_one "$v" || rc=1; done
+  if (( PHP_CLEAN_PURGED )); then
+    lib_php_restart_workers   # running workers still carry the old set
+    lib_run apt-get clean || true
+    if lib_have gcc; then lib_note "gcc is still installed: it was there before the wildcard install, or something that stays needs it."; fi
+    if [[ -e /usr/bin/php ]]; then lib_note "/usr/bin/php still exists: it was there before the wildcard install, or something that stays needs it."; fi
+  fi
+  return "$rc"
+}

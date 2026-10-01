@@ -215,6 +215,9 @@ sudo lomp panel                                     # open the WebAdmin panel fo
 sudo lomp self-update                               # pull the latest code and apply what it
                                                     # changes on the server (no packages)
 sudo lomp optimize                                  # re-measure hardware, show a diff, re-tune
+sudo lomp php-cleanup                               # undo an "apt-get install lsphp83*": purge the
+                                                    # compiler, debug symbols and the rest it added
+                                                    # beyond lomp's own PHP packages (asks first)
 sudo lomp update                                    # safe package update, ordered restarts, and
                                                     # what a newer release changes (scheduled
                                                     # tasks, site homes and logs)

@@ -124,6 +124,9 @@ COMMANDS
                                 root (WinSCP, scp). Only what is someone else's changes;
                                 logs/ and the file modes stay as they are
   optimize                      Re-measure the system and re-tune (shows a diff)
+  php-cleanup [--php 8.3]       Undo an "apt-get install lsphp83*": purge what it added beyond
+                                lomp's own PHP packages (compiler, debug symbols, sources,
+                                the distribution's PHP). Shows the list and asks first
   backup <domain>|--all [opts]  --remote --encrypt --keep N --no-mail --dry-run
                                 A domain with mail gets a second archive beside the site's,
                                 with a retention of its own: mail is measured in gigabytes
@@ -320,6 +323,7 @@ lib_menu_main() {
     _menu_item 16 "Re-tune to hardware"
     _menu_item 17 "Notifications"
     _menu_item 18 "Optional components (Node.js, Python, Netdata, Mail)"
+    _menu_item 22 "Remove extra PHP packages (after apt install lsphp83*)"
     _menu_item 19 "Command reference"
     _menu_item  0 "Exit"
     printf '\n%sChoice: %s' "$C_BLD" "$C_RST"
@@ -344,6 +348,7 @@ lib_menu_main() {
       14) _menu_run update ;;
       15) _menu_run self-update ;;
       16) _menu_run optimize ;;
+      22) _menu_run php-cleanup ;;
       17) _menu_run notify --show ;;
       18) _menu_runtimes ;;
       19) lib_usage | ${PAGER:-less} 2>/dev/null || lib_usage; _menu_pause ;;

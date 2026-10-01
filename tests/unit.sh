@@ -4570,6 +4570,118 @@ eval "$_fo_saved"; eval "$_fo_orig_ids"; eval "$_fo_orig_rt"
 rm -rf "$_fo_h" "$_fo_ld"
 lib_domain_state_reset
 
+# =============================================================================
+section "php-cleanup: what 'apt-get install lsphp83*' added goes, and nothing else"
+# The wildcard brings a compiler, debug symbols, the module sources and the distribution's own
+# PHP. apt's history names what that one run installed; only that is ever a candidate.
+_pc="$TMP/phpclean"; mkdir -p "$_pc"
+_pc_saved="$(declare -f lib_pkg_installed lib_php_cli lib_run lib_php_restart_workers lib_php_ensure_extensions lib_php_installed_versions lib_php_installed lib_require_tools lib_require_installed)"
+_pc_hist="$PHP_APT_HISTORY"; PHP_APT_HISTORY="$_pc/history.log"
+cat >"$PHP_APT_HISTORY" <<'EOF'
+
+Start-Date: 2026-09-20  10:00:00
+Commandline: apt-get install -y -q --no-install-recommends lsphp83 lsphp83-common
+Install: lsphp83:amd64 (8.3.33-1+noble), lsphp83-common:amd64 (8.3.33-1+noble)
+End-Date: 2026-09-20  10:00:09
+
+Start-Date: 2026-09-27  21:14:02
+Commandline: apt-get install lsphp83*
+Requested-By: someone (1000)
+Install: lsphp83-dev:amd64 (8.3.33-1+noble), gcc:amd64 (4:13.2.0-7ubuntu1, automatic), lsphp83-sqlite3:amd64 (8.3.33-1+noble), lsphp83-ioncube:amd64 (14.0-1), php8.3-cli:amd64 (8.3.6-0ubuntu0.24.04.5, automatic), libtool:amd64 (2.4.7-7build1, automatic), gdb:amd64 (15.0, automatic), lsphp83-igbinary:amd64 (3.2-1)
+End-Date: 2026-09-27  21:15:40
+
+Start-Date: 2026-09-28  09:00:00
+Commandline: apt-get install htop lsphp83-ldap
+Install: htop:amd64 (3.3.0-4build1), lsphp83-ldap:amd64 (8.3.33-1+noble)
+End-Date: 2026-09-28  09:00:03
+EOF
+printf '\nStart-Date: 2026-08-01  08:00:00\nCommandline: apt install lsphp83* -y\nInstall: lsphp83-dbg:amd64 (8.3.30-1+noble)\nEnd-Date: 2026-08-01  08:01:00\n' | gzip -c >"$PHP_APT_HISTORY.2.gz"
+assert_eq "the wildcard runs' packages are read from the history, rotated copies too" \
+  "gcc gdb libtool lsphp83-dbg lsphp83-dev lsphp83-igbinary lsphp83-ioncube lsphp83-sqlite3 php8.3-cli" \
+  "$(_php_wildcard_added lsphp83 | paste -sd' ' -)"
+assert_eq "another version's wildcard is not this one's" "" "$(_php_wildcard_added lsphp84)"
+# gdb was removed since; everything else is installed
+: >"$_pc/calls"; : >"$_pc/needs"; : >"$_pc/autogone"
+printf '%s\n' gcc libtool php8.3-cli >"$_pc/auto"
+eval 'lib_pkg_installed() { [[ "$1" != "gdb" ]]; }
+      apt-mark() { cat "$_pc/auto"; }
+      apt-get() {   # -s purge: the arguments and what "needs" says they drag along; the autoremove
+        local a="" sim=0 mode="" out=()   # simulation: "autogone"; --assume-no: the size line
+        for a in "$@"; do
+          case "$a" in
+            -s) sim=1 ;; purge|autoremove) [[ -n "$mode" ]] || mode="$a" ;;
+            --assume-no) printf "After this operation, 484 MB disk space will be freed.\n"; return 1 ;;
+            -*|APT::*) ;;
+            *) out+=("$a") ;;
+          esac
+        done
+        (( sim )) || return 0
+        if [[ " $* " == *" --autoremove "* || "$mode" == "autoremove" ]]; then sed "s/^/Purg /; s/\$/ [1]/" "$_pc/autogone"; return 0; fi
+        for a in "${out[@]}"; do printf "Purg %s [1]\n" "$a"; awk -F: -v p="$a" "\$1 == p { print \"Purg \" \$2 \" [1]\" }" "$_pc/needs"; done
+      }
+      lib_php_cli() { printf "%s/php" "$_pc"; }
+      lib_run() { printf "%s\n" "$*" >>"$_pc/calls"; }
+      lib_php_restart_workers() { printf "restart\n" >>"$_pc/calls"; }
+      lib_php_ensure_extensions() { :; }
+      lib_php_installed_versions() { printf "8.3\n"; }
+      lib_php_installed() { return 0; }
+      lib_require_tools() { :; }; lib_require_installed() { :; }'
+printf '#!/usr/bin/env bash\nprintf ok\n' >"$_pc/php"; chmod +x "$_pc/php"
+assert_eq "what lomp installs itself is no candidate, nor what is gone already" \
+  "gcc libtool lsphp83-dbg lsphp83-dev lsphp83-ioncube php8.3-cli" "$(lib_php_cleanup_candidates 8.3 | paste -sd' ' -)"
+assert_eq "doctor's count needs no simulation" "" "$(cat "$_pc/calls")"
+assert_has "and doctor reports them" 'lib_php_cleanup_candidates "$ver"' "$(declare -f _doc_check_domains)"
+lib_php_cleanup_plan 8.3
+assert_eq "all of it goes when nothing else comes along" \
+  "gcc libtool lsphp83-dbg lsphp83-dev lsphp83-ioncube php8.3-cli" "${PHP_CLEAN_REMOVE[*]}"
+assert_eq "the extension packages among them are named" "lsphp83-dbg lsphp83-dev lsphp83-ioncube" "${PHP_CLEAN_EXTS[*]}"
+assert_eq "nothing is held" "" "${PHP_CLEAN_HELD[*]-}${PHP_CLEAN_MANUAL[*]-}${PHP_CLEAN_EXTRA}"
+# gcc marked as manually installed since: it stays
+printf '%s\n' libtool php8.3-cli >"$_pc/auto"
+lib_php_cleanup_plan 8.3
+assert_eq    "a package marked manual since is kept" "gcc" "${PHP_CLEAN_MANUAL[*]}"
+assert_lacks "and not purged"                        " gcc " " ${PHP_CLEAN_REMOVE[*]} "
+printf '%s\n' gcc libtool php8.3-cli >"$_pc/auto"
+# something installed since needs libtool: apt says what nothing needs, and libtool stays
+printf 'libtool:autoconf-archive\n' >"$_pc/needs"
+printf '%s\n' gcc lsphp83-dbg lsphp83-dev lsphp83-ioncube php8.3-cli >"$_pc/autogone"
+lib_php_cleanup_plan 8.3
+assert_eq "what something that stays needs is held"  "libtool" "${PHP_CLEAN_HELD[*]}"
+assert_eq "the rest still goes" "gcc lsphp83-dbg lsphp83-dev lsphp83-ioncube php8.3-cli" "${PHP_CLEAN_REMOVE[*]}"
+assert_eq "with nothing dragged along"               "" "$PHP_CLEAN_EXTRA"
+# a list that would still take a foreign package with it: stop, change nothing
+printf 'libtool:autoconf-archive\ngcc:build-essential\n' >"$_pc/needs"
+_out="$(OPT_QUIET=0; OPT_YES=1; rc=0; lib_php_cleanup_main >"$_pc/out" 2>&1 || rc=$?; cat "$_pc/out"; printf 'rc=%s' "$rc")"
+assert_has "a purge that would take a foreign package along stops" "apt would also remove packages that 'lsphp83*' did not install: build-essential" "$_out"
+assert_has "with a failing status" "rc=1" "$_out"
+assert_eq  "and nothing purged"    "" "$(cat "$_pc/calls")"
+: >"$_pc/needs"; : >"$_pc/autogone"
+# a dry run and a "no" change nothing
+_out="$(OPT_QUIET=0; OPT_DRY_RUN=1; lib_php_cleanup_main 2>&1)"
+assert_has "a dry run lists the packages" "lsphp83-dev" "$_out"
+assert_has "the space they take"          "484 MB disk space will be freed" "$_out"
+assert_has "warns about the extensions"   "which every site stops loading: lsphp83-dbg lsphp83-dev lsphp83-ioncube" "$_out"
+assert_eq  "and purges nothing"           "" "$(cat "$_pc/calls")"
+_out="$(OPT_QUIET=0; OPT_YES=0; OPT_NON_INTERACTIVE=1; lib_php_cleanup_main 2>&1 </dev/null)"
+assert_has "unanswered, the default is no" "Nothing changed." "$_out"
+assert_eq  "and nothing is purged"         "" "$(cat "$_pc/calls")"
+_out="$(OPT_QUIET=0; OPT_YES=1; lib_php_cleanup_main 2>&1)"
+assert_has "with --yes the list is purged, exactly" \
+  "apt-get purge -y -q gcc libtool lsphp83-dbg lsphp83-dev lsphp83-ioncube php8.3-cli" "$(head -n 1 "$_pc/calls")"
+assert_has "PHP is started once to see that it still does" "PHP starts cleanly" "$_out"
+assert_has "the workers are restarted to drop the old set" "restart" "$(cat "$_pc/calls")"
+: >"$_pc/calls"
+eval 'lib_pkg_installed() { case "$1" in gdb|gcc|libtool|lsphp83-dbg|lsphp83-dev|lsphp83-ioncube|php8.3-cli) return 1 ;; esac; return 0; }'
+_out="$(OPT_QUIET=0; OPT_YES=1; lib_php_cleanup_main 2>&1)"
+assert_has "a second run finds nothing to remove" "nothing to remove" "$_out"
+assert_eq  "and runs nothing"                     "" "$(cat "$_pc/calls")"
+rm -f "$PHP_APT_HISTORY" "$PHP_APT_HISTORY.2.gz"
+_out="$(OPT_QUIET=0; OPT_YES=1; lib_php_cleanup_main 2>&1)"
+assert_has "a server that never ran the wildcard has nothing to undo" "nothing to undo" "$_out"
+assert_has "setup.sh has the command" 'php-cleanup)    lib_php_cleanup_main' "$(cat "$ROOT/setup.sh")"
+assert_has "the menu offers it"       '22) _menu_run php-cleanup' "$(cat "$ROOT/lib/menu.sh")"
+PHP_APT_HISTORY="$_pc_hist"; eval "$_pc_saved"; unset -f apt-get apt-mark
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 if (( FAIL > 0 )); then exit 1; fi
 exit 0
