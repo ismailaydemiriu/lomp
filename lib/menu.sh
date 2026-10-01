@@ -141,6 +141,9 @@ COMMANDS
                                 A domain with mail gets a second archive beside the site's,
                                 with a retention of its own: mail is measured in gigabytes
          --configure-remote     Configure rsync/rclone destination
+         --schedule "daily 03:00" [--encrypt] [--remote] [--keep N] [--no-mail]
+                                Back up every site automatically ("weekly sun 04:00", "hourly"
+                                or a cron expression work too); --schedule off stops it
   restore <domain> --file <archive>   [--no-db] [--no-files] [--no-mail] [--mail-file F]
                                 The mail comes from the newest mail archive next to it, with
                                 the same mailbox passwords and the same DKIM key
@@ -327,7 +330,7 @@ lib_menu_main() {
     _menu_item  9 "Health check"
     _menu_item 10 "Open WebAdmin panel"
     _menu_item 11 "Certificates (a new site's first one, renewals)"
-    _menu_item 12 "Back up sites"
+    _menu_item 12 "Back up sites (now, or automatically)"
     _menu_item 13 "Restore a site"
     _menu_group "MAINTENANCE"
     _menu_item 14 "Update packages"
@@ -840,11 +843,53 @@ _menu_runtimes() {
   done
 }
 
-_menu_backup() {
-  local what="" enc=""
+# Automatic backups: every site, each night or week, by cron. One archive per site holds its
+# files, its database, its vhost and its state.
+_menu_backup_schedule() {
+  local how="" at="" day="" keep="" enc="" rem="" spec="" keep_def="$BACKUP_KEEP"
   local -a args=()
-  printf '\n  1) Every site\n  2) One site\n'
+  printf '\n  Every site gets an archive of its own under %s/<domain>/:\n' "$BACKUP_ROOT"
+  printf '  files, database, vhost and state. Older archives are removed as new ones arrive.\n'
+  printf '\n  1) Every day\n  2) Once a week\n  3) Every hour\n  4) Turn automatic backups off\n  0) Back\n'
+  _menu_ask how "Choice" "1"
+  case "$how" in
+    1) _menu_ask at "At what time (HH:MM, the server's clock)" "03:00"; spec="daily ${at}" ;;
+    2) _menu_ask day "On which day (mon tue wed thu fri sat sun)" "sun"
+       _menu_ask at "At what time (HH:MM, the server's clock)" "03:00"
+       day="${day,,}"; spec="weekly ${day} ${at}" ;;
+    3) spec="hourly"; keep_def="24" ;;
+    4) _menu_run backup --schedule off; return 0 ;;
+    *) return 0 ;;
+  esac
+  if [[ "$how" != "3" ]] && ! [[ "$at" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]]; then
+    printf '%s"%s" is not a time like 03:00.%s\n' "$C_YEL" "$at" "$C_RST"; _menu_pause; return 0
+  fi
+  if [[ "$how" == "2" ]] && ! [[ "$day" =~ ^(mon|tue|wed|thu|fri|sat|sun)$ ]]; then
+    printf '%s"%s" is not one of mon tue wed thu fri sat sun.%s\n' "$C_YEL" "$day" "$C_RST"; _menu_pause; return 0
+  fi
+  _menu_ask keep "Archives to keep per site" "$keep_def"
+  if ! [[ "$keep" =~ ^[1-9][0-9]*$ ]]; then
+    printf '%s"%s" is not a number of archives.%s\n' "$C_YEL" "$keep" "$C_RST"; _menu_pause; return 0
+  fi
+  args=(--schedule "$spec" --keep "$keep")
+  _menu_ask enc "Encrypt the archives? (y/n)" "n"
+  [[ "${enc,,}" == y* ]] && args+=(--encrypt)
+  if lib_backup_remote_load; then
+    _menu_ask rem "Also upload each one to ${BKR_TYPE} ${BKR_TARGET}? (y/n)" "y"
+    [[ "${rem,,}" == y* ]] && args+=(--remote)
+  else
+    printf '%s  They stay on this server only: "%s backup --configure-remote" adds a second place.%s\n' "$C_DIM" "$MENU_CMD" "$C_RST"
+  fi
+  _menu_run backup "${args[@]}"
+}
+
+_menu_backup() {
+  local what="" enc="" sched=""
+  local -a args=()
+  sched="$(lib_manifest_get '.backup.schedule' 2>/dev/null || true)"
+  printf '\n  1) Every site, now\n  2) One site, now\n  3) Automatic backups (now: %s)\n' "${sched:-off}"
   _menu_ask what "Choice" "1"
+  if [[ "$what" == "3" ]]; then _menu_backup_schedule; return 0; fi
   if [[ "$what" == "2" ]]; then
     local domain=""
     domain="$(_menu_pick_domain)" || { _menu_pause; return 0; }

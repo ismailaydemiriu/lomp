@@ -463,7 +463,7 @@ _doc_check_cron() {
       local age=$(( ( $(date +%s) - $(date -d "$last" +%s 2>/dev/null || date +%s) ) / 86400 ))
       (( age > 2 )) && _doc_add WARN "last backup run" "${age} days ago" || _doc_add OK "last backup run" "${last:0:16}"
     else _doc_add WARN "last backup run" "never"; fi
-  else _doc_add WARN "backup schedule" "not configured (install --backup-schedule \"daily 03:00\")"; fi
+  else _doc_add WARN "backup schedule" "not configured (backup --schedule \"daily 03:00\", or menu 12)"; fi
 }
 
 # A directory only root can change: root's, and neither its group nor others may write to it

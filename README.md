@@ -740,7 +740,14 @@ sudo lomp backup example.com                   # one site
 sudo lomp backup --all --encrypt --keep 14     # everything, encrypted, keep 14
 sudo lomp backup --configure-remote            # set up an rsync or rclone target
 sudo lomp backup --all --remote                # and push them off the box
+sudo lomp backup --schedule "daily 03:00" --keep 14   # every site, every night, by cron
+sudo lomp backup --schedule off                # stop the automatic backups
 ```
+
+`--schedule` also takes `"weekly sun 04:00"`, `hourly` or a five-field cron expression, and
+keeps the `--encrypt`, `--remote`, `--keep` and `--no-mail` given with it for every run. The
+menu has the same under **12 → Automatic backups**, and `install --backup-schedule` sets it at
+installation time.
 
 An archive holds `public_html` and `private`, a consistent database dump
 (`--single-transaction`), the vhost configuration, the site state files, a manifest and

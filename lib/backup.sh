@@ -216,13 +216,14 @@ lib_backup_failed() {
 #  backup command
 # =============================================================================
 lib_backup_main() {
-  local domain="" all=0 remote=0 encrypt=0 keep="$BACKUP_KEEP" tag="" a=""
+  local domain="" all=0 remote=0 encrypt=0 keep="$BACKUP_KEEP" tag="" a="" sched="" want_sched=0
   local -a passthru=()
   [[ "${1:-}" == "--configure-remote" ]] && { shift; lib_require_tools; lib_backup_configure_remote "$@"; return 0; }
   while (($# > 0)); do
     a="$1"; shift
     case "$a" in
       --all)     all=1 ;;
+      --schedule) want_sched=1; sched="${1:-}"; (($# == 0)) || shift ;;
       --remote)  remote=1; passthru+=(--remote) ;;
       --encrypt) encrypt=1; passthru+=(--encrypt) ;;
       --keep)    keep="${1:-7}"; passthru+=(--keep "$keep"); shift ;;
@@ -235,6 +236,19 @@ lib_backup_main() {
   lib_require_tools
   lib_require_installed
   (( remote )) && ! lib_backup_remote_load && lib_die "Remote backup is not configured" "" "setup.sh backup --configure-remote"
+  if (( want_sched )); then
+    [[ -n "$sched" ]] || lib_die "--schedule needs a value" "" "backup --schedule \"daily 03:00\" [--encrypt] [--remote] [--keep N] [--no-mail]  |  backup --schedule off"
+    [[ -z "$domain" ]] || lib_die "A schedule backs up every site" "${domain} was named" "backup --schedule \"${sched}\""
+    # a tagged archive is one retention never removes: on a schedule the disk would only fill
+    [[ -z "$tag" ]] || lib_die "--tag cannot be scheduled" "tagged archives are never pruned" "leave --tag out"
+    if [[ "${sched,,}" == "off" ]]; then lib_backup_unschedule; return 0; fi
+    [[ "$keep" =~ ^[0-9]+$ ]] || lib_die "--keep must be a number" "" "--keep 7"
+    # now, while somebody is reading: made by the first night's run, the warning to copy the
+    # key off the server would reach nobody
+    if (( encrypt )); then lib_backup_key_ensure; fi
+    lib_backup_schedule "$sched" "${passthru[*]}"
+    return 0
+  fi
   if (( all )); then
     local d="" failed=() n=0
     while read -r d; do
@@ -275,11 +289,18 @@ lib_backup_schedule() {
     *)
       if [[ "$spec" =~ ^[0-9*/,-]+([[:space:]]+[0-9*/,a-zA-Z-]+){4}$ ]]; then cron="$spec"; fi ;;
   esac
-  [[ -n "$cron" ]] || lib_die "Invalid backup schedule '${spec}'" "expected e.g. \"daily 03:00\", \"hourly\", \"weekly sun 04:00\" or a cron expression" "--backup-schedule \"daily 03:00\""
+  [[ -n "$cron" ]] || lib_die "Invalid backup schedule '${spec}'" "expected e.g. \"daily 03:00\", \"hourly\", \"weekly sun 04:00\" or a cron expression" "backup --schedule \"daily 03:00\""
   lib_cron_set backup "${cron} root ${BIN_LINK} backup --all --yes --quiet ${flags}"
   lib_manifest_set '.backup.schedule' "$spec"
   lib_manifest_set '.backup.schedule_flags' "$flags"
   lib_ok "Scheduled backups: ${spec} (${cron}) -> ${BACKUP_ROOT}${flags:+ [$flags]}"
+}
+
+lib_backup_unschedule() {
+  lib_cron_remove backup
+  lib_manifest_set '.backup.schedule' ""
+  lib_manifest_set '.backup.schedule_flags' ""
+  lib_ok "Scheduled backups are off (the archives in ${BACKUP_ROOT} stay)"
 }
 
 # =============================================================================

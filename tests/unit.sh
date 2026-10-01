@@ -5052,6 +5052,26 @@ assert_has "the menu offers it"       '24) _menu_scan' "$(cat "$ROOT/lib/menu.sh
 assert_has "and the command reference" 'scan <domain>|--all [--wide]' "$(lib_usage)"
 STATE_DIR="$_sc_state"; unset -f _sc_file _sc_sum; eval "$_sc_saved"
 
+section "backup --schedule: automatic backups after the installation"
+lib_require_tools() { return 0; }; lib_require_installed() { return 0; }
+lib_cron_remove backup
+( lib_backup_main --schedule "daily 02:30" --keep 14 --no-mail ) >/dev/null 2>&1
+assert_has "the cron entry, with the options given" "30 2 * * * root $BIN_LINK backup --all --yes --quiet --keep 14 --no-mail # server-setup:backup" "$(cat "$CRON_FILE")"
+assert_eq  "the schedule is recorded"   "daily 02:30"         "$(lib_manifest_get '.backup.schedule')"
+assert_eq  "and its options"            "--keep 14 --no-mail" "$(lib_manifest_get '.backup.schedule_flags')"
+( lib_backup_main --schedule "weekly sat 04:05" ) >/dev/null 2>&1
+assert_eq  "a new schedule replaces the old one" 1 "$(grep -c 'server-setup:backup$' "$CRON_FILE")"
+assert_has "weekly"                     "5 4 * * 6 root $BIN_LINK backup --all --yes --quiet  # server-setup:backup" "$(cat "$CRON_FILE")"
+assert_false "a schedule for one site is refused" bash -c "$(declare -f lib_backup_main lib_require_tools lib_require_installed lib_die 2>/dev/null); BACKUP_KEEP=7; lib_backup_main example.com --schedule hourly >/dev/null 2>&1"
+assert_false "a tag is refused"         bash -c "$(declare -f lib_backup_main lib_require_tools lib_require_installed lib_die 2>/dev/null); BACKUP_KEEP=7; lib_backup_main --schedule hourly --tag x >/dev/null 2>&1"
+assert_false "and --schedule with nothing after it" bash -c "$(declare -f lib_backup_main lib_require_tools lib_require_installed lib_die 2>/dev/null); BACKUP_KEEP=7; lib_backup_main --schedule >/dev/null 2>&1"
+assert_true  "none of which touched the entry" lib_cron_has backup
+( lib_backup_main --schedule off ) >/dev/null 2>&1
+assert_false "off removes the entry"    lib_cron_has backup
+assert_eq  "and the record of it"       "" "$(lib_manifest_get '.backup.schedule')$(lib_manifest_get '.backup.schedule_flags')"
+assert_has "the menu offers it"         '3) Automatic backups' "$(declare -f _menu_backup)"
+assert_has "and the command reference"  '--schedule "daily 03:00"' "$(lib_usage)"
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 if (( FAIL > 0 )); then exit 1; fi
 exit 0
