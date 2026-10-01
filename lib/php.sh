@@ -280,6 +280,7 @@ lib_php_summary_line() {   # for status: "8.3 (8.3.12), 8.2 (8.2.24)"
 PHP_APT_HISTORY="/var/log/apt/history.log"   # and its rotated copies
 declare -ga PHP_CLEAN_REMOVE=() PHP_CLEAN_EXTS=() PHP_CLEAN_MANUAL=() PHP_CLEAN_HELD=()
 PHP_CLEAN_EXTRA=""    # what a purge would take along that the wildcard did not install
+PHP_CLEAN_BLOCKERS="" # what purging every candidate would take along: why some are held
 PHP_CLEAN_PURGED=0
 
 # Every package a "... install <tag>*" run added, one per line, from apt's history.
@@ -305,8 +306,7 @@ _php_keep() {   # version
   printf '%s %s-igbinary' "$(_php_packages "$1")" "$(lib_php_tag "$1")"
 }
 
-# What is left of a wildcard install that lomp did not ask for, one per line. Cheap enough for
-# doctor: it reads the history and asks dpkg, and simulates nothing.
+# What is left of a wildcard install that lomp did not ask for, one per line.
 lib_php_cleanup_candidates() {   # version
   local tag="" keep="" p=""
   tag="$(lib_php_tag "$1")"; keep=" $(_php_keep "$1") "
@@ -334,7 +334,7 @@ _php_purge_collateral() {
 lib_php_cleanup_plan() {   # version
   local tag="" auto="" gone="" p="" cand=() ext=() sim=()
   tag="$(lib_php_tag "$1")"
-  PHP_CLEAN_REMOVE=(); PHP_CLEAN_EXTS=(); PHP_CLEAN_MANUAL=(); PHP_CLEAN_HELD=(); PHP_CLEAN_EXTRA=""
+  PHP_CLEAN_REMOVE=(); PHP_CLEAN_EXTS=(); PHP_CLEAN_MANUAL=(); PHP_CLEAN_HELD=(); PHP_CLEAN_EXTRA=""; PHP_CLEAN_BLOCKERS=""
   auto=" $(apt-mark showauto 2>/dev/null | tr '\n' ' ') "
   for p in $(lib_php_cleanup_candidates "$1"); do
     if [[ "$p" == "$tag"-* ]]; then ext+=("$p")
@@ -343,7 +343,8 @@ lib_php_cleanup_plan() {   # version
     cand+=("$p")
   done
   ((${#cand[@]})) || return 0
-  if [[ -z "$(_php_purge_collateral "${cand[@]}")" ]]; then
+  PHP_CLEAN_BLOCKERS="$(_php_purge_collateral "${cand[@]}" | paste -sd' ' -)"
+  if [[ -z "$PHP_CLEAN_BLOCKERS" ]]; then
     PHP_CLEAN_REMOVE=("${cand[@]}")
   else
     if ((${#ext[@]})); then sim=(purge --autoremove "${ext[@]}"); else sim=(autoremove --purge); fi
@@ -370,7 +371,7 @@ _php_cleanup_one() {   # version -> 1 when it had to stop
   fi
   lib_php_cleanup_plan "$ver"
   ((${#PHP_CLEAN_MANUAL[@]} == 0)) || lib_info "Kept, marked as manually installed since: ${PHP_CLEAN_MANUAL[*]}"
-  ((${#PHP_CLEAN_HELD[@]} == 0))   || lib_info "Kept, still needed by packages that stay: ${PHP_CLEAN_HELD[*]}"
+  ((${#PHP_CLEAN_HELD[@]} == 0))   || lib_info "Kept, still needed by packages that stay: ${PHP_CLEAN_HELD[*]} (purging them would also remove: ${PHP_CLEAN_BLOCKERS})"
   if [[ -n "$PHP_CLEAN_EXTRA" ]]; then
     lib_error "LSPHP ${ver}: stopped, nothing was changed. apt would also remove packages that '${tag}*' did not install: ${PHP_CLEAN_EXTRA}"
     return 1

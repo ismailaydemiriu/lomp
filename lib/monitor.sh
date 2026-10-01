@@ -551,7 +551,9 @@ _doc_check_domains() {
   done
   for ver in $(lib_php_installed_versions); do
     lib_ols_conf_block_exists extprocessor "lsphp${ver//./}" || _doc_add WARN "php ${ver}" "no server-level extprocessor (run optimize)"
-    extra="$(lib_php_cleanup_candidates "$ver" | wc -l)"
+    # only what php-cleanup would in fact purge: what it keeps for a package that stays is no finding
+    extra=0
+    if [[ -n "$(lib_php_cleanup_candidates "$ver")" ]]; then lib_php_cleanup_plan "$ver"; extra="${#PHP_CLEAN_REMOVE[@]}"; fi
     if (( extra > 0 )); then _doc_add WARN "php ${ver}: packages" "${extra} packages an 'lsphp${ver//./}*' install added are still here, beyond what lomp installs (lomp php-cleanup lists them and asks)"; fi
   done
 }

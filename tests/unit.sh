@@ -4629,8 +4629,7 @@ eval 'lib_pkg_installed() { [[ "$1" != "gdb" ]]; }
 printf '#!/usr/bin/env bash\nprintf ok\n' >"$_pc/php"; chmod +x "$_pc/php"
 assert_eq "what lomp installs itself is no candidate, nor what is gone already" \
   "gcc libtool lsphp83-dbg lsphp83-dev lsphp83-ioncube php8.3-cli" "$(lib_php_cleanup_candidates 8.3 | paste -sd' ' -)"
-assert_eq "doctor's count needs no simulation" "" "$(cat "$_pc/calls")"
-assert_has "and doctor reports them" 'lib_php_cleanup_candidates "$ver"' "$(declare -f _doc_check_domains)"
+assert_has "doctor counts what php-cleanup would purge, not what it keeps" 'extra="${#PHP_CLEAN_REMOVE[@]}"' "$(declare -f _doc_check_domains)"
 lib_php_cleanup_plan 8.3
 assert_eq "all of it goes when nothing else comes along" \
   "gcc libtool lsphp83-dbg lsphp83-dev lsphp83-ioncube php8.3-cli" "${PHP_CLEAN_REMOVE[*]}"
@@ -4647,6 +4646,7 @@ printf 'libtool:autoconf-archive\n' >"$_pc/needs"
 printf '%s\n' gcc lsphp83-dbg lsphp83-dev lsphp83-ioncube php8.3-cli >"$_pc/autogone"
 lib_php_cleanup_plan 8.3
 assert_eq "what something that stays needs is held"  "libtool" "${PHP_CLEAN_HELD[*]}"
+assert_eq "and what it is that needs it is named"     "autoconf-archive" "$PHP_CLEAN_BLOCKERS"
 assert_eq "the rest still goes" "gcc lsphp83-dbg lsphp83-dev lsphp83-ioncube php8.3-cli" "${PHP_CLEAN_REMOVE[*]}"
 assert_eq "with nothing dragged along"               "" "$PHP_CLEAN_EXTRA"
 # a list that would still take a foreign package with it: stop, change nothing
