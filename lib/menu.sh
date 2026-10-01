@@ -130,6 +130,10 @@ COMMANDS
                                 only DNS, web, MariaDB, Redis and its own application reachable
                                 on this machine (--allow-exec, --allow-upload-php per site;
                                 "harden status"; --firewall on|off)
+  scan <domain>|--all [--wide]  Look through a site's PHP files for what web shells are made of
+                                (eval of decoded or request data, commands made of the request,
+                                packed code) and list the files to open. Changes nothing;
+                                --wide also lists every use of eval, base64_decode and exec
   php-cleanup [--php 8.3]       Undo an "apt-get install lsphp83*": purge what it added beyond
                                 lomp's own PHP packages (compiler, debug symbols, sources,
                                 the distribution's PHP). Shows the list and asks first
@@ -317,6 +321,7 @@ lib_menu_main() {
     _menu_item 20 "Mail: domains, mailboxes, DNS"
     _menu_item 21 "Fix file ownership (after uploading as root)"
     _menu_item 23 "Harden sites against PHP shells"
+    _menu_item 24 "Scan sites for PHP shells (eval, base64, exec)"
     _menu_group "SERVER"
     _menu_item  8 "Status"
     _menu_item  9 "Health check"
@@ -347,6 +352,7 @@ lib_menu_main() {
       20) _menu_mail ;;
       21) _menu_fix_owner ;;
       23) _menu_harden ;;
+      24) _menu_scan ;;
       8) _menu_run status ;;
       9) _menu_run doctor ;;
       10) _menu_run panel ;;
@@ -712,6 +718,25 @@ _menu_harden() {
        if [[ "${keep,,}" == y* ]]; then _menu_run harden "$domain" --allow-exec; else _menu_run harden "$domain"; fi ;;
     *) _menu_run harden --all ;;
   esac
+}
+
+# Every site at once, or one - and whether to list every use of the functions shells are made
+# of, which on a WordPress site is a long list of honest plugins.
+_menu_scan() {
+  local what="" domain="" wide=""
+  local -a args=()
+  printf '\n  %s\n' "Reads the PHP files for what web shells are made of and lists the files to open. It changes nothing."
+  printf '  1) Every site\n  2) One site\n'
+  _menu_ask what "Choice" "1"
+  if [[ "$what" == "2" ]]; then
+    domain="$(_menu_pick_domain)" || { _menu_pause; return 0; }
+    args=("$domain")
+  else
+    args=(--all)
+  fi
+  _menu_ask wide "Also list every use of eval, base64_decode and exec? Plugins use them too (y/N)" "n"
+  if [[ "${wide,,}" == y* ]]; then args+=(--wide); fi
+  _menu_run scan "${args[@]}"
 }
 
 _menu_mail() {

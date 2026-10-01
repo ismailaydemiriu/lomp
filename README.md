@@ -217,6 +217,7 @@ sudo lomp self-update                               # pull the latest code and a
                                                     # changes on the server (no packages)
 sudo lomp optimize                                  # re-measure hardware, show a diff, re-tune
 sudo lomp harden --all                              # limit what a PHP shell in a site can do
+sudo lomp scan --all                                # look through every site's PHP for a shell
 sudo lomp php-cleanup                               # undo an "apt-get install lsphp83*": purge the
                                                     # compiler, debug symbols and the rest it added
                                                     # beyond lomp's own PHP packages (asks first)
@@ -442,6 +443,25 @@ into a site can do from there. New sites start with it; for the sites an older r
 `harden` checks each site before and after, and names one that answered before and no longer
 does. `sudo lomp harden status` shows what is set. It narrows what a shell can do; it does not
 find or remove one.
+
+### Looking for a shell
+
+`sudo lomp scan example.com` (or `--all`; item 24 in the menu) reads a site's scripts - `.php`,
+`.phtml`, `.phar`, `.inc`, and `.htaccess`, `.user.ini` and icons beside them - and lists the
+files to open, with the line and the text found there. It changes nothing.
+
+- **STRONG**: `eval` of decoded data (`eval(base64_decode(...))`) or of what the request sent, a
+  command or an `include` made of what the request sent, a function named by the request, PHP
+  code in an icon, the name of a known shell.
+- **LOOK**: packed or hidden code (decoding inside decoding, a long encoded string, `\x`
+  escapes, `chr()` chains), a script in an upload directory, request data written to a file,
+  `auto_prepend_file` in `.htaccess` or `.user.ini`.
+
+`--wide` also lists every file that uses `eval`, `base64_decode`, `exec`, `system`,
+`shell_exec`, `passthru`, `popen`, `proc_open`, `assert` or `create_function`; plugins use them
+too, so on a WordPress site that is a long list. A match is a reason to open the file, not a
+verdict, and a file without one is not proven clean: the scan knows the common shapes, not
+every way to hide code.
 
 The logs themselves are in `/var/log/lomp-sites/<domain>/` (0750 root:`<user>`, rotated daily
 by logrotate, 14 days kept), and `logs` in the home is a link there. OpenLiteSpeed opens a
@@ -816,6 +836,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
 | `lib/db.sh` | MariaDB install, hardening, tuning, per-site databases, Redis |
 | `lib/ssl.sh` | certbot, DNS checks, certificate deployment, renewal hook |
 | `lib/domain.sh` | Site lifecycle, users and directories, WordPress, logrotate and jail regeneration |
+| `lib/harden.sh` | `harden`: per-site PHP limits, the site firewall |
+| `lib/scan.sh` | `scan`: looks through a site's PHP files for what web shells are made of |
 | `lib/proxy.sh` | Path proxies: an application under a path of any site |
 | `lib/app.sh` | Node.js applications: one PM2 daemon per site as the site user, systemd units, deploy, environment, workers and scheduled jobs |
 | `lib/mail.sh` | Mail: Postfix, Dovecot, Rspamd and their configuration, the mail host's certificate, relay, deliverability checks |

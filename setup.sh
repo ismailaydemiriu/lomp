@@ -100,7 +100,7 @@ _ss_load_module() {
   # shellcheck source=/dev/null
   source "$file"
 }
-for _m in common system ols php db ssl domain harden proxy app mail webmail cloudflare backup monitor install menu; do
+for _m in common system ols php db ssl domain harden scan proxy app mail webmail cloudflare backup monitor install menu; do
   _ss_load_module "$_m"
 done
 unset _m
@@ -177,7 +177,7 @@ main() {
 
   # read-only commands (and "notify --send", used by hooks/PAM) do not take the lock
   case "$cmd" in
-    list|status|doctor|credentials|logs|menu) ;;
+    list|status|doctor|credentials|logs|menu|scan) ;;
     # cron runs it every minute: it takes the lock itself, without waiting for it
     htaccess-check) ;;
     panel) if [[ "${rest[0]:-open}" != "status" ]]; then lib_lock; fi ;;
@@ -233,6 +233,7 @@ main() {
     optimize)       lib_optimize_main "${rest[@]}" ;;
     php-cleanup)    lib_php_cleanup_main "${rest[@]}" || exit 1 ;;
     harden)         lib_harden_main "${rest[@]}" || exit 1 ;;
+    scan)           lib_scan_main "${rest[@]}" || exit 1 ;;
     backup)         lib_backup_main "${rest[@]}" ;;
     restore)        lib_restore_main "${rest[@]}" ;;
     renew-ssl)      lib_ssl_renew_main "${rest[@]}" ;;
