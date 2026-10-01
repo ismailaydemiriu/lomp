@@ -18,9 +18,10 @@ lib_scan_awk() {
   cat <<'SCAN_AWK'
 function clean(s) { gsub(/\t/, " ", s); gsub(/[^ -~]/, "?", s); return s }
 function name(s)  { gsub(/[\001-\037\177]/, "?", s); gsub(/\302[\200-\237]/, "?", s); return s }
-function hit(sev, label, text) {
-  if (label in seen) return
-  seen[label] = 1
+function hit(sev, label, text,   k) {
+  k = label; sub(/ \(.*/, "", k)   # once per file, whatever the count in the label says
+  if (k in seen) return
+  seen[k] = 1
   if (sev == "H") strong = 1
   found[++nf] = sev "\t" fnr "\t" label "\t" clean(substr(text, 1, 100))
 }
@@ -69,10 +70,12 @@ function check(line,   l, t, n, i, parts) {
   }
   if (match(l, /(^|[^a-z0-9_>:$])(include|require)(_once)?[ \t(@]*['"](https?|ftp|data|php):/))
     hit("H", "include from an address or a stream", substr(line, RSTART))
+  # Letters and digits written as escapes: that is text being hidden. Byte tables - control
+  # characters, UTF-8 sequences, keys - are what libraries write this way, and are not counted.
   if (index(l, "\\x")) {
     t = l
-    n = gsub(/\\x[0-9a-f][0-9a-f]/, "", t)
-    if (n >= 20) hit("L", "text hidden as \\x escapes (" n " on one line)", substr(line, index(l, "\\x")))
+    n = gsub(/\\x(3[0-9]|[46][1-9a-f]|[57][0-9a])/, "", t)
+    if (n >= 20) hit("L", "text hidden as \\x escapes (" n " letters on one line)", substr(line, index(l, "\\x")))
   }
   # an embedded picture (data:...;base64,) is long and encoded too, and is nothing to look at
   if (length(l) >= 1000) {
