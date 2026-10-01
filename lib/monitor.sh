@@ -484,6 +484,12 @@ _doc_check_domains() {
     [[ -d "${D_HOME}/public_html" ]] || _doc_add FAIL "site ${d}: files" "${D_HOME}/public_html missing"
     id -u "$D_USER" >/dev/null 2>&1 || _doc_add FAIL "site ${d}: user" "system user ${D_USER} missing"
     [[ -f "${LSWS_VHOSTS_DIR}/${d}/vhconf.conf" ]] || _doc_add FAIL "site ${d}: vhconf" "${LSWS_VHOSTS_DIR}/${d}/vhconf.conf missing"
+    if [[ "$D_MODE" == "php" || "$D_MODE" == "wordpress" ]]; then
+      if [[ -z "$D_SEC_EXEC" ]]; then _doc_add WARN "site ${d}: hardening" "its PHP may start processes and read outside the site, as a shell dropped into it would (lomp harden ${d}, or --all)"
+      elif [[ "$D_SEC_EXEC" == "blocked" && ! -s "$(lib_harden_php_ini_dir "$d")/${HARDEN_PHP_INI_NAME}" ]]; then _doc_add FAIL "site ${d}: hardening" "process execution is meant to be blocked, but $(lib_harden_php_ini_dir "$d")/${HARDEN_PHP_INI_NAME} is missing (lomp harden ${d})"
+      elif [[ "$D_SEC_EXEC" == "blocked" ]]; then _doc_add OK "site ${d}: hardening" "PHP starts no process and reads only the site's own files"
+      else _doc_add OK "site ${d}: hardening" "process execution left on for this site (--allow-exec)"; fi
+    fi
     # the other sites' users are "others" to this home
     if lib_domain_home_closed "$D_HOME"; then _doc_add OK "site ${d}: isolation" "${D_HOME} is closed to the other sites' users"
     else _doc_add WARN "site ${d}: isolation" "${D_HOME} lets other accounts in, so another site's PHP can read this one's files (lomp update closes it)"; fi
@@ -556,6 +562,13 @@ _doc_check_domains() {
     if [[ -n "$(lib_php_cleanup_candidates "$ver")" ]]; then lib_php_cleanup_plan "$ver"; extra="${#PHP_CLEAN_REMOVE[@]}"; fi
     if (( extra > 0 )); then _doc_add WARN "php ${ver}: packages" "${extra} packages an 'lsphp${ver//./}*' install added are still here, beyond what lomp installs (lomp php-cleanup lists them and asks)"; fi
   done
+}
+
+_doc_check_sitefw() {
+  [[ -n "$(lib_domains_list)" ]] || return 0
+  if ! lib_sitefw_enabled; then _doc_add WARN "site firewall" "off: a site's user can reach every port that listens on this machine - the WebAdmin panel, SSH (lomp harden --all)"
+  elif ! lib_sitefw_loaded; then _doc_add FAIL "site firewall" "on, but its rules are not loaded (systemctl start lomp-site-firewall, or lomp harden --firewall on)"
+  else _doc_add OK "site firewall" "a site's user reaches only ports ${SITEFW_TCP_PORTS} and its own application on this machine"; fi
 }
 
 _doc_check_log_leaks() {
@@ -899,6 +912,7 @@ lib_doctor_run() {
   _doc_check_ssl_infra
   _doc_check_cron
   _doc_check_domains
+  _doc_check_sitefw
   _doc_check_apps
   _doc_check_mail
   _doc_check_webmail

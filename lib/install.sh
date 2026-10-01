@@ -717,6 +717,8 @@ lib_install_migrate() {
   if [[ -z "$INS_CRON_ADDED" ]]; then lib_ok "Scheduled tasks in ${CRON_FILE} are all in place"
   elif (( OPT_DRY_RUN )); then lib_info "[dry-run] would add to ${CRON_FILE}, which this server is missing: ${INS_CRON_ADDED}"
   else lib_ok "Added to ${CRON_FILE}, which this server was missing: ${INS_CRON_ADDED}"; fi
+  # the site firewall, where it is on: its loader and unit as this release writes them
+  if lib_sitefw_enabled; then lib_sitefw_enable || true; fi
   lib_domain_isolation_repair
   if [[ -z "$DOMAIN_ISOLATED" ]]; then lib_ok "Every site's home is closed to the other sites' users"
   elif (( OPT_DRY_RUN )); then lib_info "[dry-run] would close these sites' homes to the other sites' users: ${DOMAIN_ISOLATED}"

@@ -124,6 +124,11 @@ COMMANDS
                                 root (WinSCP, scp). Only what is someone else's changes;
                                 logs/ and the file modes stay as they are
   optimize                      Re-measure the system and re-tune (shows a diff)
+  harden <domain>|--all         Limit what a PHP shell in a site can do: no process execution
+                                from PHP, open_basedir, no scripts in upload directories, and
+                                only DNS, web, MariaDB, Redis and its own application reachable
+                                on this machine (--allow-exec, --allow-upload-php per site;
+                                "harden status"; --firewall on|off)
   php-cleanup [--php 8.3]       Undo an "apt-get install lsphp83*": purge what it added beyond
                                 lomp's own PHP packages (compiler, debug symbols, sources,
                                 the distribution's PHP). Shows the list and asks first
@@ -310,6 +315,7 @@ lib_menu_main() {
     _menu_item  7 "Remove a site"
     _menu_item 20 "Mail: domains, mailboxes, DNS"
     _menu_item 21 "Fix file ownership (after uploading as root)"
+    _menu_item 23 "Harden sites against PHP shells"
     _menu_group "SERVER"
     _menu_item  8 "Status"
     _menu_item  9 "Health check"
@@ -339,6 +345,7 @@ lib_menu_main() {
       7) _menu_remove_site ;;
       20) _menu_mail ;;
       21) _menu_fix_owner ;;
+      23) _menu_harden ;;
       8) _menu_run status ;;
       9) _menu_run doctor ;;
       10) _menu_run panel ;;
@@ -687,6 +694,21 @@ _menu_fix_owner() {
   else
     _menu_run fix-owner --all
   fi
+}
+
+# Every site at once, or one - and for one, whether it keeps process execution.
+_menu_harden() {
+  local what="" domain="" keep=""
+  printf '\n  %s\n  %s\n' "PHP in a site can then start no process, read only its own files and run no script in an upload directory;" "its user reaches only DNS, the web server, MariaDB and Redis on this machine."
+  printf '  1) Every site\n  2) One site\n  3) Show what is set\n'
+  _menu_ask what "Choice" "1"
+  case "$what" in
+    3) _menu_run harden status ;;
+    2) domain="$(_menu_pick_domain)" || { _menu_pause; return 0; }
+       _menu_ask keep "Does this site need exec/proc_open (y/N)" "n"
+       if [[ "${keep,,}" == y* ]]; then _menu_run harden "$domain" --allow-exec; else _menu_run harden "$domain"; fi ;;
+    *) _menu_run harden --all ;;
+  esac
 }
 
 _menu_mail() {

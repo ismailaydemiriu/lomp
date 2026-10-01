@@ -9,6 +9,8 @@ D_DOMAIN="" D_IDENT="" D_USER="" D_GROUP="" D_HOME="" D_MODE="php" D_PHP="" D_PH
 D_MEMORY="" D_UPLOAD="" D_PROXY="" D_STATIC_PATHS="/static/,/assets/,/uploads/" D_WS_PATH=""
 D_WWW=0 D_WWW_PRIMARY=0 D_SSL=0 D_SSL_WANTED=1 D_SSL_WILDCARD=0 D_HSTS_PRELOAD=0 D_CLOUDFLARE=0
 D_EMAIL="" D_CREATED="" D_STATUS="" D_DB_NAME="" D_DB_USER="" D_WP=0 D_BACKUP_LAST="" D_STAGING=0
+# hardening (lib/harden.sh): "blocked", "allowed", or empty for a site nobody decided about yet
+D_SEC_EXEC="" D_SEC_UPLOAD=""
 # ---- add-only options ---------------------------------------------------------
 # Every new site gets a database and its own MariaDB user by default; --no-db opts out.
 DOM_OPT_WP_TITLE="" DOM_OPT_WP_ADMIN="admin" DOM_OPT_WP_EMAIL="" DOM_OPT_WP_LOCALE="en_US" DOM_OPT_WITH_DB=1
@@ -32,6 +34,7 @@ lib_domain_state_reset() {
   D_MEMORY="" D_UPLOAD="" D_PROXY="" D_STATIC_PATHS="/static/,/assets/,/uploads/" D_WS_PATH=""
   D_WWW=0 D_WWW_PRIMARY=0 D_SSL=0 D_SSL_WANTED=1 D_SSL_WILDCARD=0 D_HSTS_PRELOAD=0 D_CLOUDFLARE=0
   D_EMAIL="" D_CREATED="" D_STATUS="" D_DB_NAME="" D_DB_USER="" D_WP=0 D_BACKUP_LAST="" D_STAGING=0
+  D_SEC_EXEC="" D_SEC_UPLOAD=""
 }
 
 _d_bool() { [[ "$1" == "true" ]] && printf '1' || printf '0'; }
@@ -75,6 +78,8 @@ lib_domain_state_load_file() {   # file domain  (returns 1 when the file is not 
   D_DB_USER="$(lib_json_get "$f" '.db.user')"
   D_WP="$(_d_bool "$(lib_json_get "$f" '.wordpress')")"
   D_BACKUP_LAST="$(lib_json_get "$f" '.backup.last')"
+  D_SEC_EXEC="$(lib_json_get "$f" '.security.php_exec')"
+  D_SEC_UPLOAD="$(lib_json_get "$f" '.security.upload_php')"
   [[ -z "$D_MODE" ]] && D_MODE="php"
   [[ -z "$D_HOME" ]] && D_HOME="$(lib_domain_home "$domain")"
   # "none" is how "--static-paths ''" survives a round trip. An empty string here cannot be
@@ -97,6 +102,7 @@ lib_domain_state_json() {
     --argjson cf "$(_d_json_bool "$D_CLOUDFLARE")" --arg email "$D_EMAIL" --arg created "$D_CREATED" \
     --arg status "$D_STATUS" --arg dbn "$D_DB_NAME" --arg dbu "$D_DB_USER" --argjson wp "$(_d_json_bool "$D_WP")" \
     --arg blast "$D_BACKUP_LAST" --arg ts "$(lib_iso_now)" --arg ver "$SCRIPT_VERSION" \
+    --arg sexec "$D_SEC_EXEC" --arg supl "$D_SEC_UPLOAD" \
     '{domain:$domain, ident:$ident, user:$user, group:$group, home:$home, mode:$mode,
       php:{version:$php, children:$children, memory_limit:$mem, upload_max:$up},
       proxy:{target:$proxy, static_paths:$spaths, websocket_path:$ws},
@@ -105,6 +111,8 @@ lib_domain_state_json() {
       cloudflare:$cf, email:$email, created_at:$created, status:$status,
       db:(if $dbn == "" then null else {name:$dbn, user:$dbu} end),
       wordpress:$wp, backup:{last:$blast}, updated_at:$ts, script_version:$ver}
+     | if $sexec != "" then .security.php_exec = $sexec else . end
+     | if $supl != "" then .security.upload_php = $supl else . end
      | del(.. | nulls)'
 }
 
@@ -177,6 +185,8 @@ lib_domain_parse_add_args() {
   D_DOMAIN="${1,,}"; shift
   D_EMAIL="$DEFAULT_EMAIL"
   D_PHP="$PHP_VERSION"
+  # a new site starts hardened; "lomp harden <domain> --allow-exec" relaxes one that needs it
+  D_SEC_EXEC="blocked"; D_SEC_UPLOAD="blocked"
   while (($# > 0)); do
     a="$1"; shift
     case "$a" in
@@ -590,6 +600,8 @@ lib_domain_apply_config() {   # [description]
   lib_ols_tx_vhost_add "$D_DOMAIN" "$D_WWW" "$script"
   lib_ols_tx_commit
   lib_ols_change_commit "$desc"
+  # the ports a site may reach on this machine follow its proxy targets
+  lib_sitefw_regen
 }
 
 # Drop a tiny PHP probe into the docroot, fetch it, remove it.
@@ -1417,7 +1429,7 @@ lib_domain_remove_main() {
   if (( keep_files )); then
     lib_info "files, logs and user kept (--keep-files)"
   else
-    lib_rm "$D_HOME" "$(lib_domain_log_dir "$domain")"
+    lib_rm "$D_HOME" "$(lib_domain_log_dir "$domain")" "$(lib_harden_php_ini_dir "$domain")"
     lib_rm "${OLS_CACHE_DIR}/${domain}"
     if (( ! OPT_DRY_RUN )) && id -u "$D_USER" >/dev/null 2>&1; then
       pkill -u "$D_USER" >/dev/null 2>&1 || true
@@ -1434,6 +1446,7 @@ lib_domain_remove_main() {
   fi
   lib_domain_logrotate_regen
   lib_domain_fail2ban_regen
+  lib_sitefw_regen
   lib_manifest_set '.updated_at' "$(lib_iso_now)"
   printf '\n%s%sRemoved %s%s  (state archived in %s/archive/domains/, backup in %s/%s/)\n\n' "$C_BLD" "$C_GRN" "$domain" "$C_RST" "$STATE_DIR" "$BACKUP_ROOT" "$domain"
 }

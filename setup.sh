@@ -100,7 +100,7 @@ _ss_load_module() {
   # shellcheck source=/dev/null
   source "$file"
 }
-for _m in common system ols php db ssl domain proxy app mail webmail cloudflare backup monitor install menu; do
+for _m in common system ols php db ssl domain harden proxy app mail webmail cloudflare backup monitor install menu; do
   _ss_load_module "$_m"
 done
 unset _m
@@ -181,6 +181,7 @@ main() {
     # cron runs it every minute: it takes the lock itself, without waiting for it
     htaccess-check) ;;
     panel) if [[ "${rest[0]:-open}" != "status" ]]; then lib_lock; fi ;;
+    harden) case "${rest[0]:-help}" in status|help|-h|--help) ;; *) lib_lock ;; esac ;;
     notify) [[ " ${rest[*]:-} " == *" --send "* ]] || lib_lock ;;
     proxy)  if [[ "${rest[0]:-list}" != "list" && "${rest[0]:-list}" != "help" ]]; then lib_lock; fi ;;
     # reading the mail stack's state changes nothing; everything else writes a table or
@@ -231,6 +232,7 @@ main() {
     fix-owner)      lib_domain_fix_owner_main "${rest[@]}" || exit 1 ;;
     optimize)       lib_optimize_main "${rest[@]}" ;;
     php-cleanup)    lib_php_cleanup_main "${rest[@]}" || exit 1 ;;
+    harden)         lib_harden_main "${rest[@]}" || exit 1 ;;
     backup)         lib_backup_main "${rest[@]}" ;;
     restore)        lib_restore_main "${rest[@]}" ;;
     renew-ssl)      lib_ssl_renew_main "${rest[@]}" ;;

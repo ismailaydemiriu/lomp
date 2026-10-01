@@ -23,7 +23,7 @@ INSTALL_DIR="$TMP/install"; BIN_LINK="$TMP/lompstack"; BIN_SHORT="$TMP/lomp"; LO
 OPT_YES=1 OPT_DRY_RUN=0 OPT_QUIET=1 OPT_VERBOSE=0 OPT_NO_COLOR=1 OPT_JSON=0 OPT_NON_INTERACTIVE=1
 SCRIPT_PATH="$ROOT/setup.sh"; SCRIPT_DIR="$ROOT"
 export TMPDIR="$TMP"
-for m in common system ols php db ssl domain proxy app mail webmail cloudflare backup monitor install menu; do
+for m in common system ols php db ssl domain harden proxy app mail webmail cloudflare backup monitor install menu; do
   # shellcheck source=/dev/null
   source "$ROOT/lib/$m.sh"
 done
@@ -617,7 +617,7 @@ assert_true "wp vhconf balanced" _ols_braces_balanced "$TMP/wp.vhconf"
 assert_has "wp cache module" "module cache {" "$out"
 assert_has "wp htaccess" "autoLoadHtaccess        1" "$out"
 # OpenLiteSpeed ignores the "Deny from all" security plugins put into wp-content/uploads
-assert_has "wp: no PHP runs from the uploads" 'RewriteRule (?i)^/?wp-content/uploads/.*\.(php[0-9]?|phtml|phar)$ - [F,L]' "$out"
+assert_has "wp: no PHP runs from the uploads" 'RewriteRule (?i)^/?wp-content/uploads/.*\.(php[0-9]?|phtml|phar)(/|$) - [F,L]' "$out"
 assert_lacks "php sites get no WordPress paths" "wp-content/uploads" "$(cat "$TMP/php.vhconf")"
 lib_ols_render_default_vhconf >"$TMP/default.vhconf"
 assert_true "default vhconf balanced" _ols_braces_balanced "$TMP/default.vhconf"
@@ -4681,6 +4681,206 @@ assert_has "a server that never ran the wildcard has nothing to undo" "nothing t
 assert_has "setup.sh has the command" 'php-cleanup)    lib_php_cleanup_main' "$(cat "$ROOT/setup.sh")"
 assert_has "the menu offers it"       '22) _menu_run php-cleanup' "$(cat "$ROOT/lib/menu.sh")"
 PHP_APT_HISTORY="$_pc_hist"; eval "$_pc_saved"; unset -f apt-get apt-mark
+
+# =============================================================================
+section "harden: what a PHP shell in one site can do"
+# A shell dropped into a site runs as that site's PHP. It should start no process, read nothing
+# outside the site, not run from an upload directory, and reach no local port it has no use for.
+_hd_fns="lib_domains_list lib_mail_installed _sitefw_uid lib_sitefw_loaded lib_ols_is_installed lib_ols_change_begin lib_ols_change_commit lib_harden_php_restart _harden_code lib_require_tools lib_require_installed lib_system_profile lib_domain_registered"
+_hd_saved="$(for _f in $_hd_fns; do declare -f "$_f" || true; done)"
+_hd_state="$STATE_DIR"; STATE_DIR="$TMP/hd-state"; mkdir -p "$STATE_DIR"; printf '{}\n' >"$STATE_DIR/manifest.json"
+_hd_ini="$HARDEN_PHP_INI_ROOT"; HARDEN_PHP_INI_ROOT="$TMP/hd-ini"
+_hd_fw="$SITEFW_DIR"; SITEFW_DIR="$TMP/hd-fw"; _hd_sc="$SITEFW_SCRIPT"; SITEFW_SCRIPT="$TMP/hd-fw-script"; _hd_un="$SITEFW_UNIT"; SITEFW_UNIT="$TMP/hd-fw.service"
+eval "$(sed -n '/^lib_domains_list() {/,/^}/p' "$ROOT/lib/common.sh")"
+_hd_site() {   # domain mode [proxy-target]
+  local d="$1" i="${1//./_}"
+  mkdir -p "$STATE_DIR/domains/$d"
+  jq -n --arg d "$d" --arg i "$i" --arg h "$SITES_ROOT/$d" --arg m "$2" --arg p "${3:-}" \
+    '{domain:$d, ident:$i, user:$i, group:$i, home:$h, mode:$m, proxy:{target:$p},
+      php:{version:"8.3", children:4, memory_limit:"256M", upload_max:"64M"}}' >"$STATE_DIR/domains/$d/domain.json"
+}
+_hd_site hd1.example.com php; _hd_site hd2.example.com wordpress; _hd_site hd3.example.com proxy "127.0.0.1:3000"
+jq '.proxies = [{path:"/api/", target:"http://127.0.0.1:8081"}, {path:"/far/", target:"http://10.0.0.5:9000"}]' \
+  "$STATE_DIR/domains/hd1.example.com/domain.json" >"$TMP/hd.json" && cat "$TMP/hd.json" >"$STATE_DIR/domains/hd1.example.com/domain.json"
+
+# a site an older release made has no decision recorded, and renders as it always did
+lib_domain_state_load hd1.example.com
+assert_eq "an older site has no decision recorded" "" "${D_SEC_EXEC}${D_SEC_UPLOAD}"
+_vh="$(lib_ols_render_vhconf)"
+assert_lacks "its PHP is pointed at no ini directory" "PHP_INI_SCAN_DIR" "$_vh"
+assert_lacks "and its upload directories run scripts as before" "(uploads?|files|media|cache|te?mp)" "$_vh"
+# a new site starts hardened
+( lib_domain_parse_add_args new.example.com >/dev/null 2>&1; printf '%s %s' "$D_SEC_EXEC" "$D_SEC_UPLOAD" ) >"$TMP/hd-new" 2>/dev/null || true
+assert_eq "a new site starts with both blocked" "blocked blocked" "$(cat "$TMP/hd-new")"
+
+D_SEC_EXEC="blocked"; D_SEC_UPLOAD="blocked"
+_vh="$(lib_ols_render_vhconf)"; printf '%s\n' "$_vh" >"$TMP/hd.vhconf"
+assert_true "the hardened vhost is balanced" _ols_braces_balanced "$TMP/hd.vhconf"
+assert_has "its PHP reads the site's ini directory after the version's own" \
+  "  env                     PHP_INI_SCAN_DIR=:${HARDEN_PHP_INI_ROOT}/hd1.example.com" "$_vh"
+assert_has "inside the site's own processor" "PHP_INI_SCAN_DIR" "$(awk '/^extprocessor hd1_example_com \{/,/^\}/' "$TMP/hd.vhconf")"
+assert_lacks "disable_functions is not left to phpIniOverride, which cannot set it" "php_admin_value disable_functions" "$_vh"
+_rule="$(grep -F '(uploads?|files|media|cache|te?mp)' "$TMP/hd.vhconf" || true)"
+assert_has "scripts in upload directories are refused" '\.(php[0-9]?|phtml|phar)(/|$) - [F,L]' "$_rule"
+# the rule as PCRE would read it, against the requests that matter
+_hd_re='^/?(.*/)?(uploads?|files|media|cache|te?mp)/.*\.(php[0-9]?|phtml|phar)(/|$)'
+_hd_m() { grep -qiP -- "$_hd_re" <<<"$1"; }
+if grep -qP 'a' <<<a 2>/dev/null; then
+  for _u in /uploads/shell.php /upload/a/b.PHP /app/files/x.phtml /media/2026/x.php7 /cache/x.phar /tmp/x.php /temp/x.php /uploads/x.php/extra/path; do
+    assert_true "refused: ${_u}" _hd_m "$_u"
+  done
+  for _u in /index.php /uploads/photo.jpg /uploads/readme.php.txt /admin/upload.php /filesystem/x.php /mediator.php /uploads.php; do
+    assert_false "served: ${_u}" _hd_m "$_u"
+  done
+fi
+D_MODE="wordpress"
+assert_lacks "WordPress keeps its own rule, for wp-content/uploads alone" "(uploads?|files|media|cache|te?mp)" "$(lib_ols_render_vhconf)"
+D_MODE="php"
+_ini="$(lib_harden_render_php_ini)"
+for _f in exec passthru shell_exec system proc_open popen pcntl_exec putenv dl; do
+  assert_has "disabled: ${_f}" ",${_f}," ",$(sed -n 's/^disable_functions = //p' <<<"$_ini"),"
+done
+assert_lacks "mail() stays: sites send mail" ",mail," ",$(sed -n 's/^disable_functions = //p' <<<"$_ini"),"
+assert_has "PHP reads the site's home, its logs, PHP's own share and /tmp - nothing else" \
+  "open_basedir = ${D_HOME}/:${SITES_LOG_ROOT}/hd1.example.com/:${LSWS_HOME}/lsphp83/share/:/tmp/" "$_ini"
+
+# the ini directory follows the state: written when blocked, removed when allowed
+HARDEN_PHP_CHANGED=""
+lib_harden_php_ini_write
+_hf="$HARDEN_PHP_INI_ROOT/hd1.example.com/$HARDEN_PHP_INI_NAME"
+assert_true "blocked: the ini is written" test -s "$_hf"
+assert_eq   "and the site is named as changed" "hd1.example.com" "$HARDEN_PHP_CHANGED"
+if (( CAN_CHMOD )); then
+  assert_eq "the site's group may read it, nobody may change it" "640 750" "$(stat -c %a "$_hf") $(stat -c %a "$(dirname "$_hf")")"
+fi
+HARDEN_PHP_CHANGED=""; lib_harden_php_ini_write
+assert_eq   "a second write changes nothing" "" "$HARDEN_PHP_CHANGED"
+assert_has  "writing a vhost puts its ini directory in place" 'lib_harden_php_ini_write' "$(declare -f lib_ols_vhconf_write)"
+D_SEC_EXEC="allowed"; HARDEN_PHP_CHANGED=""; lib_harden_php_ini_write
+assert_false "allowed: the directory goes" test -e "$(dirname "$_hf")"
+assert_eq    "which is a change too" "hd1.example.com" "$HARDEN_PHP_CHANGED"
+assert_lacks "and the vhost points PHP at nothing" "PHP_INI_SCAN_DIR" "$(lib_ols_render_vhconf)"
+D_SEC_EXEC="blocked"; D_MODE="proxy"; lib_harden_php_ini_write
+assert_false "a site with no PHP gets no ini" test -e "$(dirname "$_hf")"
+OPT_DRY_RUN=1; D_MODE="php"; lib_harden_php_ini_write >/dev/null 2>&1; OPT_DRY_RUN=0
+assert_false "a dry run writes none" test -e "$_hf"
+assert_has "remove takes the ini directory with the files" '"$(lib_harden_php_ini_dir "$domain")"' "$(declare -f lib_domain_remove_main)"
+
+# the decision survives a save and a load, and an older site's absence of one does too
+lib_domain_state_load hd1.example.com; D_SEC_EXEC="allowed"; D_SEC_UPLOAD="blocked"; lib_domain_state_save
+lib_domain_state_load hd1.example.com
+assert_eq "the decision is kept in the site's state" "allowed blocked" "$D_SEC_EXEC $D_SEC_UPLOAD"
+assert_eq "with the path proxies another module wrote" 2 "$(jq '.proxies | length' "$STATE_DIR/domains/hd1.example.com/domain.json")"
+lib_domain_state_load hd2.example.com; lib_domain_state_save; lib_domain_state_load hd2.example.com
+assert_eq "saving an undecided site decides nothing" "" "${D_SEC_EXEC}${D_SEC_UPLOAD}"
+assert_eq "and writes no key" "null" "$(jq -c '.security' "$STATE_DIR/domains/hd2.example.com/domain.json")"
+
+# ---- the site firewall
+assert_eq "a local target gives its port"    "3000" "$(_sitefw_local_port 127.0.0.1:3000)"
+assert_eq "with a scheme and a path too"     "8081" "$(_sitefw_local_port http://127.0.0.1:8081/x)"
+assert_eq "localhost and ::1 are local"      "90 91" "$(_sitefw_local_port localhost:90 | tr '\n' ' '; _sitefw_local_port 'http://[::1]:91')"
+assert_eq "another machine's port is not this site's" "" "$(_sitefw_local_port http://10.0.0.5:9000)"
+eval '_sitefw_uid() { case "$1" in hd1_example_com) echo 2001 ;; hd2_example_com) echo 2002 ;; hd3_example_com) echo 2003 ;; root0) echo 0 ;; esac; }
+      lib_mail_installed() { return 1; }'
+assert_eq "each site: its uid and its own local ports" "2001 8081|2002 |2003 3000" "$(lib_sitefw_sites | paste -sd'|' -)"
+_r4="$(lib_sitefw_render 4)"; _r6="$(lib_sitefw_render 6)"
+assert_eq  "the chains are named, which empties them when the file loads" ":LOMP-SITES - [0:0]|:LOMP-SITES-LOCAL - [0:0]" "$(grep '^:' <<<"$_r4" | paste -sd'|' -)"
+assert_eq  "answers pass first: an application still answers the web server" \
+  "-A LOMP-SITES -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN" "$(grep '^-A' <<<"$_r4" | head -n 1)"
+assert_has "a site reaches its own application" "-A LOMP-SITES -m owner --uid-owner 2003 -p tcp -m multiport --dports 3000 -j RETURN" "$_r4"
+assert_has "and its own path proxy"             "-A LOMP-SITES -m owner --uid-owner 2001 -p tcp -m multiport --dports 8081 -j RETURN" "$_r4"
+assert_lacks "but not another site's"           "--uid-owner 2001 -p tcp -m multiport --dports 3000" "$_r4"
+assert_eq  "every site's user is sent to the local rules" 3 "$(grep -c -- '-m owner --uid-owner [0-9]* -j LOMP-SITES-LOCAL' <<<"$_r4")"
+assert_has "which allow DNS, the web server, MariaDB and Redis" "-A LOMP-SITES-LOCAL -p tcp -m multiport --dports 53,80,443,3306,6379 -j RETURN" "$_r4"
+assert_lacks "not the WebAdmin panel" "7080" "$_r4"
+assert_lacks "nor SSH"                ",22," ",$(sed -n 's/.*LOCAL -p tcp -m multiport --dports \([0-9,]*\).*/\1/p' <<<"$_r4"),"
+assert_eq  "and refuse the rest, at once" "-A LOMP-SITES-LOCAL -p tcp -j REJECT --reject-with tcp-reset|-A LOMP-SITES-LOCAL -j REJECT|COMMIT" "$(tail -n 3 <<<"$_r4" | paste -sd'|' -)"
+assert_has "IPv4 lets ICMP through" "-p icmp -j RETURN" "$_r4"
+assert_has "IPv6 its own"           "-p ipv6-icmp -j RETURN" "$_r6"
+eval 'lib_mail_installed() { return 0; }'
+assert_has "a server with mail lets sites submit it" "--dports 53,80,443,3306,6379,25,465,587 -j RETURN" "$(lib_sitefw_render 4)"
+eval 'lib_mail_installed() { return 1; }'
+_sc="$(lib_sitefw_render_script)"
+assert_has "the loader replaces only its own chains" 'restore" --noflush <"$d/rules.v$v"' "$_sc"
+assert_has "hooks them to connections to this machine" '-I OUTPUT 1 -o lo -j "$c"' "$_sc"
+assert_true "and is a valid script" sh -n <<<"$_sc"
+assert_has "loaded at boot, after UFW" "After=ufw.service" "$(lib_sitefw_render_unit)"
+# off until switched on: nothing is written and nothing loaded
+lib_sitefw_regen
+assert_false "while it is off, regen writes nothing" test -e "$SITEFW_DIR"
+lib_manifest_set_json '.params.site_firewall' 'true'
+printf '#!/bin/sh\necho "$@" >>"%s"\n' "$TMP/hd-fw-calls" >"$SITEFW_SCRIPT"; chmod +x "$SITEFW_SCRIPT"; : >"$TMP/hd-fw-calls"
+eval 'lib_sitefw_loaded() { return 0; }'
+lib_sitefw_regen
+assert_true "switched on, the rules are written" test -s "$SITEFW_DIR/rules.v4" -a -s "$SITEFW_DIR/rules.v6"
+assert_eq   "and loaded" "start" "$(cat "$TMP/hd-fw-calls")"
+: >"$TMP/hd-fw-calls"; lib_sitefw_regen
+assert_eq   "unchanged rules are not loaded again" "" "$(cat "$TMP/hd-fw-calls")"
+eval 'lib_sitefw_loaded() { return 1; }'
+lib_sitefw_regen >/dev/null 2>&1
+assert_eq   "unless the kernel lost them" "start" "$(cat "$TMP/hd-fw-calls")"
+eval 'lib_sitefw_loaded() { return 0; }'
+_hd_site hd4.example.com php; eval '_sitefw_uid() { case "$1" in hd4_example_com) echo 2004 ;; *) echo 2001 ;; esac; }'
+: >"$TMP/hd-fw-calls"; OPT_DRY_RUN=1; lib_sitefw_regen >/dev/null 2>&1; OPT_DRY_RUN=0
+assert_lacks "a dry run writes no rule for a new site" "2004" "$(cat "$SITEFW_DIR/rules.v4")"
+assert_eq    "and loads nothing" "" "$(cat "$TMP/hd-fw-calls")"
+lib_sitefw_regen
+assert_has  "a new site is in the rules once they are regenerated" "--uid-owner 2004 -j LOMP-SITES-LOCAL" "$(cat "$SITEFW_DIR/rules.v4")"
+assert_has  "applying a vhost regenerates them" 'lib_sitefw_regen' "$(declare -f lib_domain_apply_config)"
+assert_has  "and so does removing a site"       'lib_sitefw_regen' "$(declare -f lib_domain_remove_main)"
+
+# ---- the command
+: >"$TMP/hd-calls"
+eval 'lib_require_tools() { :; }; lib_require_installed() { :; }; lib_system_profile() { :; }
+      lib_ols_is_installed() { return 0; }
+      lib_ols_change_begin() { OLS_PENDING_RELOAD=0; }
+      lib_ols_change_commit() { printf "commit %s\n" "$*" >>"$TMP/hd-calls"; }
+      lib_harden_php_restart() { printf "restart %s\n" "$1" >>"$TMP/hd-calls"; }
+      lib_domain_registered() { [[ -s "$STATE_DIR/domains/$1/domain.json" ]]; }
+      _harden_code() { cat "$TMP/hd-code" 2>/dev/null || printf 200; }'
+_out="$(OPT_QUIET=0; lib_harden_main --all 2>&1; printf 'rc=%s' "$?")"
+assert_has "harden --all exits 0" "rc=0" "$_out"
+for _d in hd1 hd2 hd4; do
+  assert_eq "${_d}: process execution blocked in its state" "blocked" "$(jq -r '.security.php_exec' "$STATE_DIR/domains/${_d}.example.com/domain.json")"
+  assert_true "${_d}: its ini is in place" test -s "$HARDEN_PHP_INI_ROOT/${_d}.example.com/$HARDEN_PHP_INI_NAME"
+  assert_has  "${_d}: its PHP is started again to read it" "restart ${_d}_example_com" "$(cat "$TMP/hd-calls")"
+done
+assert_has "the proxy site is told only the firewall applies" "hd3.example.com: no PHP runs here (proxy)" "$_out"
+assert_eq  "and gets no decision" "null" "$(jq -c '.security' "$STATE_DIR/domains/hd3.example.com/domain.json")"
+assert_eq  "one change set for all of them" 1 "$(grep -c '^commit site hardening' "$TMP/hd-calls")"
+# one site that needs exec keeps it, and only it
+: >"$TMP/hd-calls"
+_out="$(OPT_QUIET=0; lib_harden_main hd4.example.com --allow-exec 2>&1)"
+assert_eq    "--allow-exec is recorded" "allowed" "$(jq -r '.security.php_exec' "$STATE_DIR/domains/hd4.example.com/domain.json")"
+assert_eq    "its upload directories stay closed" "blocked" "$(jq -r '.security.upload_php' "$STATE_DIR/domains/hd4.example.com/domain.json")"
+assert_false "its ini directory goes" test -e "$HARDEN_PHP_INI_ROOT/hd4.example.com"
+assert_true  "the others keep theirs" test -s "$HARDEN_PHP_INI_ROOT/hd1.example.com/$HARDEN_PHP_INI_NAME"
+assert_lacks "and are not restarted" "restart hd1_example_com" "$(cat "$TMP/hd-calls")"
+# a site that answered before and not after is named, and the command fails
+printf '200' >"$TMP/hd-code"
+eval 'lib_harden_php_restart() { printf 500 >"$TMP/hd-code"; }'
+_out="$(OPT_QUIET=0; rc=0; lib_harden_main hd1.example.com >"$TMP/hd-out" 2>&1 || rc=$?; cat "$TMP/hd-out"; printf 'rc=%s' "$rc")"
+assert_has "a site that stops answering is named" "hd1.example.com (HTTP 200 -> 500)" "$_out"
+assert_has "with the way back" "lomp harden <domain> --allow-exec" "$_out"
+assert_has "and a failing status" "rc=1" "$_out"
+rm -f "$TMP/hd-code"
+_out="$(OPT_QUIET=0; OPT_DRY_RUN=1; lib_harden_main hd4.example.com 2>&1)"
+assert_eq  "a dry run changes no state" "allowed" "$(jq -r '.security.php_exec' "$STATE_DIR/domains/hd4.example.com/domain.json")"
+assert_has "and says what it would do"  "hd4.example.com: process execution would be blocked" "$_out"
+assert_false "a site that is not registered is refused" bash -c "$(declare -f lib_harden_main lib_require_tools lib_require_installed lib_domain_registered lib_die 2>/dev/null); STATE_DIR='$STATE_DIR'; lib_harden_main nosuch.example.com >/dev/null 2>&1"
+_st="$(lib_harden_status)"
+assert_has "status shows the firewall" "Site firewall: on" "$_st"
+assert_has "and each site's decision"  "allowed" "$(grep '^hd4.example.com' <<<"$_st")"
+assert_has "doctor names a site nobody decided about" 'site ${d}: hardening' "$(declare -f _doc_check_domains)"
+assert_has "and a firewall that is off or not loaded" 'lib_sitefw_loaded' "$(declare -f _doc_check_sitefw)"
+assert_has "setup.sh has the command" 'harden)         lib_harden_main' "$(cat "$ROOT/setup.sh")"
+assert_has "status takes no lock"     'harden) case "${rest[0]:-help}" in status|help' "$(cat "$ROOT/setup.sh")"
+assert_has "the menu offers it"       '23) _menu_harden' "$(cat "$ROOT/lib/menu.sh")"
+assert_has "update keeps the firewall's loader current" 'lib_sitefw_enable ||' "$(declare -f lib_install_migrate)"
+STATE_DIR="$_hd_state"; HARDEN_PHP_INI_ROOT="$_hd_ini"; SITEFW_DIR="$_hd_fw"; SITEFW_SCRIPT="$_hd_sc"; SITEFW_UNIT="$_hd_un"
+# shellcheck disable=SC2086
+unset -f $_hd_fns _hd_site _hd_m; eval "$_hd_saved"
+lib_domain_state_reset
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 if (( FAIL > 0 )); then exit 1; fi

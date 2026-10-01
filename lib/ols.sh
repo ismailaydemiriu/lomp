@@ -1053,6 +1053,13 @@ extprocessor ${D_IDENT} {
   env                     PHP_LSAPI_CHILDREN=${children}
   env                     LSAPI_AVOID_FORK=200M
   env                     PHP_LSAPI_MAX_REQUESTS=1000
+EOF
+    # A site's own ini directory, read after the version's: disable_functions is only ever read
+    # when PHP starts, so phpIniOverride cannot set it - the value shows, the functions stay.
+    if [[ "$D_SEC_EXEC" == "blocked" ]]; then
+      printf '  env                     PHP_INI_SCAN_DIR=:%s\n' "$(lib_harden_php_ini_dir "$D_DOMAIN")"
+    fi
+    cat <<EOF
   initTimeout             60
   retryTimeout            0
   persistConn             1
@@ -1125,7 +1132,11 @@ EOF
   if [[ "$D_MODE" == "wordpress" ]]; then
     # uploads are user files, never code. Security plugins keep PHP from running there with a
     # "Deny from all" in wp-content/uploads/.htaccess, which OpenLiteSpeed ignores.
-    rules+=$'RewriteRule (?i)^/?wp-content/uploads/.*\\.(php[0-9]?|phtml|phar)$ - [F,L]\n'
+    rules+=$'RewriteRule (?i)^/?wp-content/uploads/.*\\.(php[0-9]?|phtml|phar)(/|$) - [F,L]\n'
+  elif [[ "$D_MODE" == "php" && "$D_SEC_UPLOAD" == "blocked" ]]; then
+    # the same for any PHP site: where uploads and caches land is where a shell is dropped, and
+    # nothing there is meant to be requested as a script (with or without a path after it)
+    rules+=$'RewriteRule (?i)^/?(.*/)?(uploads?|files|media|cache|te?mp)/.*\\.(php[0-9]?|phtml|phar)(/|$) - [F,L]\n'
   fi
   if (( D_WWW )); then
     if (( D_WWW_PRIMARY )); then
@@ -1565,6 +1576,8 @@ lib_ols_vhconf_write() {   # domain  (uses D_* state)
   # the vhost names the site's log directory, which has to be there, and root's, before
   # OpenLiteSpeed loads it - whichever command renders it: add, update, renew-ssl, proxy, app
   lib_domain_logs_dir_ensure
+  # and the ini directory its PHP is pointed at
+  lib_harden_php_ini_write
   lib_ols_render_vhconf | lib_write_file "${dir}/vhconf.conf" 0640 lsadm:lsadm
   (( LIB_FILE_CHANGED )) && OLS_PENDING_RELOAD=1
   return 0

@@ -215,6 +215,7 @@ sudo lomp panel                                     # open the WebAdmin panel fo
 sudo lomp self-update                               # pull the latest code and apply what it
                                                     # changes on the server (no packages)
 sudo lomp optimize                                  # re-measure hardware, show a diff, re-tune
+sudo lomp harden --all                              # limit what a PHP shell in a site can do
 sudo lomp php-cleanup                               # undo an "apt-get install lsphp83*": purge the
                                                     # compiler, debug symbols and the rest it added
                                                     # beyond lomp's own PHP packages (asks first)
@@ -412,6 +413,34 @@ world-readable ones, such as a `config.php` with a database password in it. Serv
 an older release had homes at 0711, which let another site's PHP in; `self-update` or `update`
 closes them, and `doctor` names a home that is open. Directory listing is off, and requests for dotfiles,
 `.git`, `.env`, `*.sql`, `*.bak` and `wp-config.php` are refused.
+
+### What a PHP shell in a site can do
+
+Separate users keep one site out of another's files. `lomp harden` limits what code that got
+into a site can do from there. New sites start with it; for the sites an older release made, run
+`sudo lomp harden --all` once (`doctor` says which are left).
+
+- **No process execution from PHP.** `exec`, `shell_exec`, `system`, `passthru`, `proc_open`,
+  `popen`, `pcntl_exec`, `putenv` and `dl` are disabled for the site's web PHP, and
+  `open_basedir` keeps it to the site's home, its logs and `/tmp`. The site's `lsphp` reads this
+  from its own ini directory (`/etc/lompstack/php/<domain>/`, root's, set through
+  `PHP_INI_SCAN_DIR`): `disable_functions` is only read when PHP starts, so a
+  `phpIniOverride` line would show the value and disable nothing. WP-CLI and cron jobs use the
+  command-line PHP and are not affected. An application that needs these functions gets them
+  back with `sudo lomp harden <domain> --allow-exec`.
+- **No scripts in upload directories.** A request for a `.php`, `.phtml` or `.phar` below
+  `uploads/`, `upload/`, `files/`, `media/`, `cache/`, `tmp/` or `temp/` is answered 403, so an
+  uploaded script never runs (`--allow-upload-php` turns it off for a site; a WordPress site
+  always has it for `wp-content/uploads`).
+- **Site firewall.** A site's user reaches only DNS, the web server, MariaDB, Redis and the
+  site's own application on this machine - not the WebAdmin panel, SSH, another site's
+  application or anything else that listens locally. It is two iptables chains of lomp's own
+  beside UFW's, loaded at boot by `lomp-site-firewall.service`; `lomp harden --firewall off`
+  removes it. Connections to the internet are not restricted.
+
+`harden` checks each site before and after, and names one that answered before and no longer
+does. `sudo lomp harden status` shows what is set. It narrows what a shell can do; it does not
+find or remove one.
 
 The logs themselves are in `/var/log/lomp-sites/<domain>/` (0750 root:`<user>`, rotated daily
 by logrotate, 14 days kept), and `logs` in the home is a link there. OpenLiteSpeed opens a
