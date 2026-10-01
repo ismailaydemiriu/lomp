@@ -57,6 +57,7 @@ COMMANDS
                                 unless --no-db is given.
   db <domain>                   Create (or show) the MariaDB database for a site
   db list                       Every site's database, user and size (no passwords)
+  db passwd <domain>            A new random password for the site's database user
   proxy list [<domain>]         Path proxies of every site and whether their app answers
   proxy add <domain> <path> <host:port>
                                 Publish an app under a path of an existing site, in any
@@ -438,12 +439,14 @@ _menu_databases() {
     _menu_rule
     _menu_item 1 "List databases (sizes, no passwords)"
     _menu_item 2 "Create or show the database of a site"
+    _menu_item 3 "Give a site's database a new random password"
     _menu_item 0 "Back"
     printf '\n%sChoice: %s' "$C_BLD" "$C_RST"
     read -r choice </dev/tty || return 0
     case "$choice" in
       1) _menu_run db list ;;
       2) domain="$(_menu_pick_domain)" && _menu_run db "$domain" || _menu_pause ;;
+      3) domain="$(_menu_pick_domain)" && _menu_run db passwd "$domain" || _menu_pause ;;
       0|q|Q|"") return 0 ;;
       *) printf '%sPick a number from the list.%s\n' "$C_YEL" "$C_RST" ;;
     esac

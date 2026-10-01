@@ -204,6 +204,7 @@ sudo lomp app worker node.example.com add queue --start "node worker.js"   # a w
 sudo lomp add cdn.example.com --static              # static site, no PHP
 sudo lomp db shop.example.com                       # create or show the database
 sudo lomp db list                                   # every site's database, user and size
+sudo lomp db passwd shop.example.com                # a new random password for its database user
 sudo lomp credentials shop.example.com              # database / WordPress / SSL details
 sudo lomp list                                      # all sites in a table
 sudo lomp logs shop.example.com                     # tail access and error logs

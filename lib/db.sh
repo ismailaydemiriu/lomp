@@ -375,12 +375,89 @@ lib_db_list() {
   return 0
 }
 
+# Put a new password into the site's db.info. It travels in the environment: awk's -v would
+# interpret backslashes, and a command line can be read by every user on the machine.
+_db_info_set_pass() {   # domain password
+  local f=""
+  f="$(lib_db_info_file "$1")"
+  LOMP_DB_NEW_PASS="$2" awk -F= '$1 == "DB_PASS" { print "DB_PASS=" ENVIRON["LOMP_DB_NEW_PASS"]; done = 1; next }
+    { print }
+    END { if (!done) print "DB_PASS=" ENVIRON["LOMP_DB_NEW_PASS"] }' "$f" | lib_write_file "$f" 0600 "" secret
+}
+
+# The Node.js application of a site reads the database login from its environment
+# ("app env import-db" puts it there, as DB_PASSWORD and inside DATABASE_URL). Wherever the old
+# password stands in a value, the new one takes its place. Status 1 when nothing held it.
+_db_passwd_app_env() {   # domain old new
+  local f=""
+  f="$(lib_app_env_file "$1")"
+  [[ -s "$f" && -n "$2" ]] || return 1
+  LOMP_DB_OLD_PASS="$2" jq -e 'type == "object" and any(.[]; type == "string" and contains($ENV.LOMP_DB_OLD_PASS))' "$f" >/dev/null 2>&1 || return 1
+  export LOMP_DB_OLD_PASS="$2" LOMP_DB_NEW_PASS="$3"
+  lib_json_set "$f" 'map_values(if type == "string" then split($ENV.LOMP_DB_OLD_PASS) | join($ENV.LOMP_DB_NEW_PASS) else . end)'
+  unset LOMP_DB_OLD_PASS LOMP_DB_NEW_PASS
+}
+
+# "db passwd <domain>": a new random password for the site's database user. MariaDB, db.info
+# and the two places lompstack itself wrote the old one into (the environment of a Node.js
+# application, the wp-config.php of a WordPress) all get it. A configuration file somebody
+# wrote by hand is not ours to edit, so the command ends by printing the new login.
+lib_db_passwd() {   # domain
+  local domain="$1" old="" new=""
+  lib_db_info_load "$domain" || lib_die "${domain} has no database" "no db.info for this site" "create one with: setup.sh db ${domain}"
+  lib_db_installed || lib_die "MariaDB is not installed" "run install first" "sudo ./setup.sh install"
+  if (( OPT_DRY_RUN )); then lib_info "[dry-run] would give ${DBI_USER} (database ${DBI_NAME}) a new random password"; return 0; fi
+  lib_confirm "Give ${DBI_USER} a new random password? A site that keeps the old one in its own config file cannot connect until it has the new one." n \
+    || lib_die "Password of ${DBI_USER} left as it was" "not confirmed" "answer y, or add --yes"
+  lib_db_wait_ready 10 || lib_die "MariaDB not reachable" "service down" "systemctl status mariadb"
+  old="$DBI_PASS"
+  new="$(lib_random_password 32)"
+  # the 127.0.0.1 account exists only where a Node.js application asked for it
+  lib_db_sql_secret "new password for ${DBI_USER}" \
+    "ALTER USER '${DBI_USER}'@'localhost' IDENTIFIED BY '${new}';
+ALTER USER IF EXISTS '${DBI_USER}'@'127.0.0.1' IDENTIFIED BY '${new}';
+FLUSH PRIVILEGES;" \
+    || lib_die "Could not change the password of ${DBI_USER}" "SQL error (see log)" "check MariaDB state; the old password still works"
+  _db_info_set_pass "$domain" "$new"
+  lib_log_write INFO "database user ${DBI_USER} of ${domain} got a new password (value not logged)"
+  lib_ok "${DBI_USER} has a new password"
+
+  lib_domain_state_load "$domain" || true
+  if _db_passwd_app_env "$domain" "$old" "$new"; then
+    lib_ok "the application's environment variables carry the new password"
+    if lib_app_state_load "$domain"; then
+      _app_site_lock "$domain"
+      lib_app_apply restart
+      _app_report soft
+    fi
+  fi
+  if (( D_WP )); then
+    # --quiet: wp-cli's "Success" line repeats the value, and that output goes to the log
+    if [[ -x "$WPCLI_BIN" ]] && lib_run_secret "wp config set DB_PASSWORD (${domain})" _wp config set DB_PASSWORD "$new" --type=constant --quiet; then
+      lib_ok "wp-config.php carries the new password"
+    else
+      lib_warn "could not write the new password into ${D_HOME}/public_html/wp-config.php; set DB_PASSWORD there by hand"
+    fi
+  fi
+  lib_db_show "$domain"
+  lib_note "a site with its own config file (config.php, .env ...) needs this password put into it"
+}
+
 lib_db_main() {
   local domain="${1:-}"
   if [[ "$domain" == "list" || "$domain" == "--list" ]]; then
     lib_require_tools; lib_require_installed; lib_db_list; return 0
   fi
-  [[ -n "$domain" ]] || lib_die "Usage: setup.sh db <domain>|list" "domain missing" "setup.sh db example.com"
+  if [[ "$domain" == "passwd" ]]; then
+    domain="${2:-}"; domain="${domain,,}"
+    [[ -n "$domain" ]] || lib_die "Usage: setup.sh db passwd <domain>" "domain missing" "setup.sh db passwd example.com"
+    lib_domain_valid "$domain" || lib_die "Invalid domain name '${domain}'" "not a valid FQDN" "use e.g. example.com"
+    lib_require_tools
+    lib_domain_registered "$domain" || lib_die "Site ${domain} does not exist" "not registered in ${STATE_DIR}/domains" "setup.sh list"
+    lib_db_passwd "$domain"
+    return 0
+  fi
+  [[ -n "$domain" ]] || lib_die "Usage: setup.sh db <domain>|list|passwd <domain>" "domain missing" "setup.sh db example.com"
   domain="${domain,,}"
   lib_domain_valid "$domain" || lib_die "Invalid domain name '${domain}'" "not a valid FQDN" "use e.g. example.com"
   lib_require_tools

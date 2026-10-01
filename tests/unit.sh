@@ -1424,6 +1424,56 @@ assert_has   "it names the columns" "DATABASE" "$(lib_db_list 2>&1)"
 assert_has   "and points at credentials for passwords" "credentials" "$(lib_db_list 2>&1)"
 assert_lacks "it never prints a password field" "DB password" "$(lib_db_list 2>&1)"
 OPT_QUIET=1
+
+# "db passwd": MariaDB, db.info and the application's environment must end up with the SAME
+# new password - one of them left behind is a site that cannot reach its database.
+_orig_dbsec="$(declare -f lib_db_sql_secret)"; _orig_dbwait="$(declare -f lib_db_wait_ready)"
+_pw_old="OldPassOldPassOldPass12345678901"
+_pw_dir="$(lib_domain_state_dir pw.example.com)"; mkdir -p "$_pw_dir"
+printf '{"domain":"pw.example.com","ident":"pw_example_com","user":"pw_example_com","group":"pw_example_com","mode":"php"}\n' >"$_pw_dir/domain.json"
+_pw_reset() {
+  printf '# MariaDB credentials for pw.example.com\nDB_NAME=pw_db\nDB_USER=pw_user\nDB_PASS=%s\nDB_HOST=localhost\nDB_CHARSET=utf8mb4\n' "$_pw_old" >"$_pw_dir/db.info"
+  printf '{"DB_PASSWORD":"%s","DATABASE_URL":"mysql://pw_user:%s@127.0.0.1:3306/pw_db","API_KEY":"untouched","N":3}\n' "$_pw_old" "$_pw_old" >"$_pw_dir/app-env.json"
+  rm -f "$TMP/pw.sql"
+}
+_pw_pass() { awk -F= '$1=="DB_PASS"{sub(/^[^=]*=/,""); print; exit}' "$_pw_dir/db.info"; }
+lib_db_wait_ready() { return 0; }
+lib_db_sql_secret() { printf '%s\n' "$2" >"$TMP/pw.sql"; }
+_pw_reset
+assert_eq    "db passwd succeeds"                   0 "$(run_isolated lib_db_main passwd PW.example.com)"
+_pw_new="$(_pw_pass)"
+assert_eq    "db.info holds a 32 character password" 32 "${#_pw_new}"
+assert_true  "and it is not the old one"            test "$_pw_new" != "$_pw_old"
+assert_has   "MariaDB got that very password"       "ALTER USER 'pw_user'@'localhost' IDENTIFIED BY '${_pw_new}';" "$(cat "$TMP/pw.sql")"
+assert_has   "the TCP account too, where it exists" "ALTER USER IF EXISTS 'pw_user'@'127.0.0.1' IDENTIFIED BY '${_pw_new}';" "$(cat "$TMP/pw.sql")"
+assert_has   "the rest of db.info is kept"          "DB_NAME=pw_db" "$(cat "$_pw_dir/db.info")"
+assert_eq    "with one DB_PASS line"                1 "$(grep -c '^DB_PASS=' "$_pw_dir/db.info")"
+if (( CAN_CHMOD )); then assert_eq "db.info stays private" "600" "$(stat -c %a "$_pw_dir/db.info")"; fi
+assert_eq    "the app's DB_PASSWORD follows"        "$_pw_new" "$(jq -r '.DB_PASSWORD' "$_pw_dir/app-env.json")"
+assert_eq    "and so does DATABASE_URL"             "mysql://pw_user:${_pw_new}@127.0.0.1:3306/pw_db" "$(jq -r '.DATABASE_URL' "$_pw_dir/app-env.json")"
+assert_eq    "other variables are left alone"       "untouched 3" "$(jq -r '"\(.API_KEY) \(.N)"' "$_pw_dir/app-env.json")"
+assert_lacks "the log never sees the password"      "$_pw_new" "$(cat "$LOG_FILE")"
+OPT_QUIET=0
+out="$(lib_db_passwd pw.example.com 2>&1)"
+assert_has   "the new login is printed for hand-written configs" "$(_pw_pass)" "$out"
+assert_has   "and it says who needs it"             "own config file" "$out"
+OPT_QUIET=1
+_pw_reset
+assert_eq    "unconfirmed, it refuses"              1 "$(OPT_YES=0 run_isolated lib_db_passwd pw.example.com)"
+assert_eq    "and changes nothing"                  "$_pw_old" "$(_pw_pass)"
+assert_false "nor talks to MariaDB"                 test -e "$TMP/pw.sql"
+assert_eq    "a dry run succeeds"                   0 "$(OPT_DRY_RUN=1 run_isolated lib_db_passwd pw.example.com)"
+assert_eq    "and changes nothing either"           "$_pw_old" "$(_pw_pass)"
+lib_db_sql_secret() { return 1; }
+assert_eq    "an SQL error fails the command"       1 "$(run_isolated lib_db_passwd pw.example.com)"
+assert_eq    "db.info keeps the password that still works" "$_pw_old" "$(_pw_pass)"
+assert_eq    "the app keeps it too"                 "$_pw_old" "$(jq -r '.DB_PASSWORD' "$_pw_dir/app-env.json")"
+rm -f "$_pw_dir/db.info"
+assert_eq    "a site without a database is refused" 1 "$(run_isolated lib_db_main passwd pw.example.com)"
+assert_eq    "so is a missing domain"               1 "$(run_isolated lib_db_main passwd)"
+assert_eq    "and an unknown site"                  1 "$(run_isolated lib_db_main passwd nosuch.example.com)"
+rm -rf "$_pw_dir"
+eval "$_orig_dbsec"; eval "$_orig_dbwait"
 eval "$_orig_dbinst"; eval "$_orig_dbsql"
 
 # =============================================================================
