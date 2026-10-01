@@ -133,9 +133,10 @@ COMMANDS
                                 the same mailbox passwords and the same DKIM key
   renew-ssl [domain] [opts]     --force --all --staging --wildcard
   update                        Safe package update + ordered service restarts; also applies
-                                what a newer lompstack changes (scheduled tasks, site logs)
+                                what a newer lompstack changes (scheduled tasks, site homes, logs)
   self-update [--from DIR]      Pull the latest lompstack and refresh the installed
-                                copy. Changes nothing on the server itself (update does).
+                                copy, which then applies what it changes on the server.
+                                No package is touched (update does that).
   update-cf-ips                 Refresh Cloudflare IP ranges
   firewall [status]             Whether the web ports answer everyone or Cloudflare only
   firewall --web-cloudflare-only   Close 80/443 to everything but Cloudflare's ranges, so

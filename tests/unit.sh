@@ -1065,13 +1065,31 @@ if lib_have git; then
   vgit clone -q "$VREPO" "$TMP/vclone"
   vgit -C "$VREPO" commit -q --allow-empty -m sixth
   V_OLD="$(git -C "$TMP/vclone" rev-parse --short HEAD)"; V_NEW="$(git -C "$VREPO" rev-parse --short HEAD)"
-  V_OUT="$(OPT_QUIET=0; eval 'lib_require_tools() { :; }; lib_require_installed() { :; }'
+  V_OUT="$(OPT_QUIET=0; eval 'lib_require_tools() { :; }; lib_require_installed() { :; }; lib_selfupdate_migrate() { echo MIGRATE-RUN; }'
            lib_selfupdate_main --from "$TMP/vclone" 2>&1)"
   assert_has "self-update names both versions" "Checkout updated: 2.5.4 (${V_OLD}) -> 2.5.5 (${V_NEW})" "$V_OUT"
   assert_has "and the one it installed" "Now running lompstack 2.5.5 (${V_NEW})" "$V_OUT"
-  V_OUT="$(OPT_QUIET=0; eval 'lib_require_tools() { :; }; lib_require_installed() { :; }'
+  assert_eq  "then applies what that release changes, last" "MIGRATE-RUN" "$(tail -n 1 <<<"$V_OUT")"
+  V_OUT="$(OPT_QUIET=0; eval 'lib_require_tools() { :; }; lib_require_installed() { :; }; lib_selfupdate_migrate() { echo MIGRATE-RUN; }'
            lib_selfupdate_main --from "$TMP/vclone" 2>&1)"
   assert_has "a second run finds nothing new" "Already at the latest revision: 2.5.5 (${V_NEW})" "$V_OUT"
+  assert_has "and still applies them: an older release's self-update could not" "MIGRATE-RUN" "$V_OUT"
+  V_OUT="$(OPT_QUIET=0; OPT_DRY_RUN=1; eval 'lib_require_tools() { :; }; lib_require_installed() { :; }; lib_selfupdate_migrate() { echo MIGRATE-RUN; }'
+           lib_selfupdate_main --from "$TMP/vclone" 2>&1)"
+  assert_lacks "a dry run applies nothing" "MIGRATE-RUN" "$V_OUT"
+  # the copy it installed does the work, in this process's place; one from before "migrate"
+  # existed is left to update
+  _mg_inst="$INSTALL_DIR"; INSTALL_DIR="$TMP/mg-inst"; mkdir -p "$INSTALL_DIR/lib"
+  printf '#!/bin/bash\necho "ran: $*"\n' >"$INSTALL_DIR/setup.sh"; chmod +x "$INSTALL_DIR/setup.sh"
+  : >"$INSTALL_DIR/lib/install.sh"
+  V_OUT="$(OPT_QUIET=0; lib_selfupdate_migrate 2>&1; echo still-here)"
+  assert_has   "an older copy is told to run update" "'sudo lomp update' applies" "$V_OUT"
+  assert_lacks "and is not run"                      "ran:" "$V_OUT"
+  printf 'lib_install_migrate() {\n' >"$INSTALL_DIR/lib/install.sh"
+  V_OUT="$(OPT_QUIET=0; lib_selfupdate_migrate 2>&1; echo still-here)"
+  assert_has   "the installed copy runs migrate" "ran: migrate" "$V_OUT"
+  assert_lacks "in place of the release that installed it" "still-here" "$V_OUT"
+  INSTALL_DIR="$_mg_inst"
 
   # a directory that is no checkout installs as "x", with no revision left over from before
   lib_install_self "$SRC_GOOD" >/dev/null 2>&1
@@ -2360,7 +2378,8 @@ section "update adds the scheduled tasks an older release did not write"
 # self-update reconfigures nothing, so a server installed before the log cleanup existed gets
 # it from update, which writes the same base tasks install does
 assert_has "install writes the base tasks" 'lib_install_cron_base' "$(declare -f lib_install_cron)"
-assert_has "and so does update"            'lib_install_cron_base' "$(declare -f lib_update_main)"
+assert_has "and so does update"            'lib_install_migrate' "$(declare -f lib_update_main)"
+assert_has "through what self-update runs too" 'lib_install_cron_base' "$(declare -f lib_install_migrate)"
 cp "$CRON_FILE" "$TMP/cron.keep"
 rm -f "$CRON_FILE"
 lib_install_cron_base
@@ -2665,14 +2684,94 @@ unset -f _lr_old_vhconf _lr1_old _mk_old lib_ols_is_installed stat
 unset FAKE_OWNER_UID
 lib_domain_state_reset
 _up="$(declare -f lib_update_main)"
-assert_has  "update runs it" 'lib_domain_logs_repair' "$_up"
+assert_has  "update runs it" 'lib_domain_logs_repair' "$(declare -f lib_install_migrate)"
 _n_rec="$(grep -n "'.last_update'" <<<"$_up" | head -1 | cut -d: -f1 || true)"
-_n_rep="$(grep -n 'lib_domain_logs_repair' <<<"$_up" | head -1 | cut -d: -f1 || true)"
+_n_rep="$(grep -n 'lib_install_migrate' <<<"$_up" | head -1 | cut -d: -f1 || true)"
 assert_true "after the update itself is recorded" test "${_n_rep:-0}" -gt "${_n_rec:-0}"
 _dc="$(declare -f _doc_check_domains)"
 assert_has  "doctor checks every site's logs"              'lib_ols_logdir_open "$logs"' "$_dc"
 assert_has  "and fails a vhost that still writes into the home" 'lib_domain_logs_in_home "$d"' "$_dc"
 assert_has  "and a log directory another user could change"    '_doc_root_only "$logs"' "$_dc"
+
+# =============================================================================
+section "site homes: closed to the other sites' users"
+# Every site runs as its own user, and to that user the next site's home belongs to "others". A
+# home others could pass through let one site's PHP read every world-readable file of the next.
+lib_domain_state_reset
+D_DOMAIN="iso.example.com"; D_IDENT="iso_example_com"; D_USER="iso_example_com"; D_GROUP="iso_example_com"
+D_HOME="$SITES_ROOT/iso.example.com"; D_MODE="php"; D_PHP="8.3"
+: >"$SETFACL_LOG"
+assert_eq  "the directory setup exits 0" 0 "$(run_isolated lib_domain_dirs_create)"
+assert_has "OpenLiteSpeed's user is let into the home by name" "-m u:nobody:x ${D_HOME}" "$(cat "$SETFACL_LOG")"
+if (( CAN_CHMOD )); then
+  assert_eq "a new home is the site's and its group's only" 710 "$(stat -c %a "$D_HOME")"
+  assert_eq "public_html stays readable to the server inside it" 755 "$(stat -c %a "$D_HOME/public_html")"
+  chmod 0711 "$D_HOME"
+  run_isolated lib_domain_dirs_create >/dev/null
+  assert_eq "setting a site up again closes an open home" 710 "$(stat -c %a "$D_HOME")"
+fi
+lib_rollback_clear; rm -rf "$D_HOME" "$SITES_LOG_ROOT/iso.example.com"
+# update, for the homes an older release left open
+_state_save="$STATE_DIR"; STATE_DIR="$TMP/iso-state"
+_orig_dl="$(declare -f lib_domains_list)"
+eval "$(sed -n '/^lib_domains_list() {/,/^}/p' "$ROOT/lib/common.sh")"
+for _d in is1.example.com is2.example.com is3.example.com is4.example.com; do
+  _i="${_d//./_}"
+  mkdir -p "$STATE_DIR/domains/$_d"
+  jq -n --arg d "$_d" --arg i "$_i" --arg h "$SITES_ROOT/$_d" \
+    '{domain:$d, ident:$i, user:$i, group:$i, home:$h, mode:"php",
+      php:{version:"8.3", children:4, memory_limit:"256M", upload_max:"64M"}}' >"$STATE_DIR/domains/$_d/domain.json"
+done
+mkdir -p "$SITES_ROOT/is1.example.com/public_html" "$SITES_ROOT/is2.example.com" "$TMP/iso-victim"
+printf 'x\n' >"$SITES_ROOT/is1.example.com/public_html/config.php"
+assert_true "a home that is missing has nothing to close" lib_domain_home_closed "$SITES_ROOT/is4.example.com"
+if (( CAN_CHMOD )); then
+  chmod 0711 "$SITES_ROOT/is1.example.com"; chmod 0755 "$SITES_ROOT/is1.example.com/public_html"
+  chmod 0644 "$SITES_ROOT/is1.example.com/public_html/config.php"
+  chmod 0710 "$SITES_ROOT/is2.example.com"; chmod 0755 "$TMP/iso-victim"
+  if (( CAN_SYMLINK )); then ln -s "$TMP/iso-victim" "$SITES_ROOT/is3.example.com"; fi
+  assert_false "0711 lets other accounts in" lib_domain_home_closed "$SITES_ROOT/is1.example.com"
+  assert_true  "0710 does not"               lib_domain_home_closed "$SITES_ROOT/is2.example.com"
+  : >"$SETFACL_LOG"
+  OPT_DRY_RUN=1; lib_domain_isolation_repair >/dev/null 2>&1; OPT_DRY_RUN=0
+  assert_eq "a dry run names the open home"  "is1.example.com" "$DOMAIN_ISOLATED"
+  assert_eq "and leaves it as it is"         711 "$(stat -c %a "$SITES_ROOT/is1.example.com")"
+  assert_eq "with no ACL set"                "" "$(cat "$SETFACL_LOG")"
+  lib_domain_isolation_repair >/dev/null 2>&1
+  assert_eq "update names the home it closed" "is1.example.com" "$DOMAIN_ISOLATED"
+  assert_eq "and closes it"                   710 "$(stat -c %a "$SITES_ROOT/is1.example.com")"
+  # (the home comes out of domain.json, which the native jq of Git Bash writes as a C:/ path)
+  assert_eq "OpenLiteSpeed's user is let in, and only there" 1 "$(grep -c -- '-m u:nobody:x .*is1\.example\.com$' "$SETFACL_LOG")"
+  assert_eq "no other home is touched"        1 "$(grep -c . "$SETFACL_LOG")"
+  assert_eq "nothing below it changes: the docroot" 755 "$(stat -c %a "$SITES_ROOT/is1.example.com/public_html")"
+  assert_eq "nor a file"                      644 "$(stat -c %a "$SITES_ROOT/is1.example.com/public_html/config.php")"
+  assert_eq "a link in place of a home is not followed" 755 "$(stat -c %a "$TMP/iso-victim")"
+  : >"$SETFACL_LOG"
+  lib_domain_isolation_repair >/dev/null 2>&1
+  assert_eq "a second run finds nothing open" "" "$DOMAIN_ISOLATED"
+  assert_eq "and sets nothing"                "" "$(cat "$SETFACL_LOG")"
+  # a home the server could not be let into stays open: closed without the ACL it serves nothing
+  chmod 0711 "$SITES_ROOT/is1.example.com"
+  _orig_sf="$(declare -f setfacl)"; eval 'setfacl() { return 1; }'
+  _out="$(OPT_QUIET=0; lib_domain_isolation_repair 2>&1; printf 'named=%s' "$DOMAIN_ISOLATED")"
+  eval "$_orig_sf"
+  assert_eq  "without the ACL the home is left open" 711 "$(stat -c %a "$SITES_ROOT/is1.example.com")"
+  assert_has "and is not reported closed"            "named=" "$(tail -n 1 <<<"$_out")"
+  assert_lacks "by name"                             "named=is1" "$_out"
+  assert_has "but warned about"                      "the home was left open to other accounts" "$_out"
+fi
+[[ -L "$SITES_ROOT/is3.example.com" ]] && rm -f "$SITES_ROOT/is3.example.com"
+rm -rf "$SITES_ROOT/is1.example.com" "$SITES_ROOT/is2.example.com" "$TMP/iso-victim"
+STATE_DIR="$_state_save"; eval "$_orig_dl"
+lib_domain_state_reset
+_mg="$(declare -f lib_install_migrate)"
+assert_has "update and self-update close the homes" 'lib_domain_isolation_repair' "$_mg"
+_n_iso="$(grep -n 'lib_domain_isolation_repair' <<<"$_mg" | head -1 | cut -d: -f1 || true)"
+_n_rep="$(grep -n 'lib_domain_logs_repair' <<<"$_mg" | head -1 | cut -d: -f1 || true)"
+assert_true "before the step a refused vhost can end the run at" test "${_n_iso:-99}" -lt "${_n_rep:-0}"
+assert_has "doctor names a home that is open" 'lib_domain_home_closed "$D_HOME"' "$(declare -f _doc_check_domains)"
+assert_has "setup.sh has the command self-update runs" 'migrate)        lib_migrate_main' "$(cat "$ROOT/setup.sh")"
+
 mkdir -p "$LSWS_VHOSTS_DIR/ih.example.com"
 printf 'errorlog $VH_ROOT/logs/error.log {\n}\n' >"$LSWS_VHOSTS_DIR/ih.example.com/vhconf.conf"
 assert_true  "a vhost an older release rendered writes into the home" lib_domain_logs_in_home ih.example.com

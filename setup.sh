@@ -239,6 +239,7 @@ main() {
     panel)          lib_panel_main "${rest[@]}" ;;
     menu)           lib_menu_main "${rest[@]}" ;;
     self-update)    lib_selfupdate_main "${rest[@]}" ;;
+    migrate)        lib_migrate_main ;;   # internal (self-update runs it from the copy it installed)
     logs)           lib_domain_logs_main "${rest[@]}" ;;
     healthcheck)    lib_healthcheck_main "${rest[@]}" ;;   # internal (cron)
     htaccess-check) lib_ols_htaccess_check_main || exit 1 ;;   # internal (cron)

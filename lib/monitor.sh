@@ -484,6 +484,9 @@ _doc_check_domains() {
     [[ -d "${D_HOME}/public_html" ]] || _doc_add FAIL "site ${d}: files" "${D_HOME}/public_html missing"
     id -u "$D_USER" >/dev/null 2>&1 || _doc_add FAIL "site ${d}: user" "system user ${D_USER} missing"
     [[ -f "${LSWS_VHOSTS_DIR}/${d}/vhconf.conf" ]] || _doc_add FAIL "site ${d}: vhconf" "${LSWS_VHOSTS_DIR}/${d}/vhconf.conf missing"
+    # the other sites' users are "others" to this home
+    if lib_domain_home_closed "$D_HOME"; then _doc_add OK "site ${d}: isolation" "${D_HOME} is closed to the other sites' users"
+    else _doc_add WARN "site ${d}: isolation" "${D_HOME} lets other accounts in, so another site's PHP can read this one's files (lomp update closes it)"; fi
     # OpenLiteSpeed opens the logs as root, so every directory on the way must be root's (see
     # lib_domain_logs_dir_ensure); and the fail2ban web jails read them, so logs nobody writes
     # also mean no bans

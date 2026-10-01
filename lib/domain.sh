@@ -17,6 +17,8 @@ DOMAIN_CREATED_HOME=0
 DOMAIN_CREATED_USER=0
 DOMAIN_LOGS_MOVED=""    # sites whose logs lib_domain_logs_repair moved out of their homes
 DOMAIN_F2B_FILTERS_CHANGED=0   # set by lib_domain_fail2ban_filters_write
+DOMAIN_ISOLATED=""      # sites whose homes lib_domain_isolation_repair closed to other accounts
+SITE_HOME_MODE="0710"   # /home/<domain>: the site's user and group, and nobody else
 
 WPCLI_PHAR="${INSTALL_DIR}/wp-cli.phar"
 WPCLI_BIN="/usr/local/bin/wp"
@@ -472,7 +474,10 @@ lib_domain_dirs_create() {
     DOMAIN_CREATED_HOME=1; new_home=1
     (( OPT_DRY_RUN )) || lib_rollback_push "rm -rf '${D_HOME}'"
   fi
-  lib_mkdir "$D_HOME" 0711 "${D_USER}:${D_GROUP}"
+  # closed to every other account: the other sites' users are "others" here, and a home they
+  # could pass through let one site's PHP read every world-readable file of the next - its
+  # database password included. OpenLiteSpeed's user gets in by the ACL below.
+  lib_mkdir "$D_HOME" "$SITE_HOME_MODE" "${D_USER}:${D_GROUP}"
   lib_mkdir "${D_HOME}/public_html" 0755 "${D_USER}:${D_GROUP}"
   lib_mkdir "${D_HOME}/private" 0700 "${D_USER}:${D_GROUP}"
   lib_mkdir "${D_HOME}/private/sessions" 0700 "${D_USER}:${D_GROUP}"
@@ -517,6 +522,40 @@ lib_domain_dirs_create() {
 EOF
     fi
   fi
+  return 0
+}
+
+# May accounts other than the site's own pass into this home? (true for a home that is missing
+# or not a directory of its own: there is nothing to say about it here)
+lib_domain_home_closed() {   # home
+  local mode=""
+  [[ -d "$1" && ! -L "$1" ]] || return 0
+  mode="$(stat -c %a "$1" 2>/dev/null)" || return 0
+  [[ "${mode: -1}" == "0" ]]
+}
+
+# "update" closes the homes an older release made 0711, the way lib_domain_dirs_create makes
+# them now. Only the home's own mode changes - nothing below it, and no owner - and the ACL
+# that lets OpenLiteSpeed's user through is set again, since without it a closed home serves
+# nothing. As root on a name in SITES_ROOT, which is root's: not a path the site user can
+# re-point. DOMAIN_ISOLATED names the sites whose homes were open.
+lib_domain_isolation_repair() {
+  local d="" ols_user="" closed=()
+  DOMAIN_ISOLATED=""
+  ols_user="$(lib_ols_user)"
+  while read -r d; do
+    [[ -n "$d" ]] || continue
+    lib_domain_state_load "$d" || continue
+    lib_domain_home_closed "$D_HOME" && continue
+    closed+=("$d")
+    (( OPT_DRY_RUN )) && continue
+    # the ACL first: between the two the home is as open as it was, never shut to the server
+    setfacl -m "u:${ols_user}:x" "$D_HOME" 2>/dev/null \
+      || { lib_warn "setfacl could not let OpenLiteSpeed into ${D_HOME}; the home was left open to other accounts"; unset 'closed[-1]'; continue; }
+    chmod "$SITE_HOME_MODE" "$D_HOME" \
+      || { lib_warn "could not close ${D_HOME} to other accounts"; unset 'closed[-1]'; }
+  done < <(lib_domains_list)
+  DOMAIN_ISOLATED="${closed[*]-}"
   return 0
 }
 

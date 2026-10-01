@@ -212,11 +212,12 @@ sudo lomp backup --all --encrypt                    # back up every site
 sudo lomp restore shop.example.com --file /var/backups/server-setup/shop.example.com/....tar.gz
 sudo lomp renew-ssl --all                           # renew every certificate
 sudo lomp panel                                     # open the WebAdmin panel for your address
-sudo lomp self-update                               # pull the latest code, server untouched
+sudo lomp self-update                               # pull the latest code and apply what it
+                                                    # changes on the server (no packages)
 sudo lomp optimize                                  # re-measure hardware, show a diff, re-tune
 sudo lomp update                                    # safe package update, ordered restarts, and
                                                     # what a newer release changes (scheduled
-                                                    # tasks, site logs)
+                                                    # tasks, site homes and logs)
 sudo lomp remove old.example.com --keep-db          # remove a site, keep its database
 ```
 
@@ -228,9 +229,14 @@ Global flags work everywhere: `--yes`, `--dry-run`, `--quiet`, `--verbose`, `--n
 ### Updating lomp
 
 ```bash
-sudo lomp self-update     # pull main into /opt/lomp and install it; the server is not touched
-sudo lomp update          # then let the new release bring the server up to date
+sudo lomp self-update     # pull main into /opt/lomp, install it, and apply what it changes
+sudo lomp update          # upgrade the packages too (and apply the same changes)
 ```
+
+`self-update` hands over to the copy it just installed, which applies what the new release
+changes on a server an older one set up: scheduled tasks, site homes closed to the other sites'
+users, site logs. No package is touched; that is `update`. A release older than 1.0.68 does not
+do this last step by itself: on such a server run `sudo lomp update` once after `self-update`.
 
 The version is `1.0.<n>`, where `n` counts the commits on `main` since 1.0.0. Every change that
 reaches `main` raises it, and nobody edits it by hand. `self-update` shows the step, e.g.
@@ -387,7 +393,7 @@ you are already in.
 ## How a site is laid out
 
 ```
-/home/<domain>/               0711  <user>:<user>     one Linux user per site, nologin shell
+/home/<domain>/               0710  <user>:<user>     one Linux user per site, nologin shell
 ├── public_html/              0755  document root
 ├── private/                  0700  sessions, temp uploads, secrets - never served
 ├── logs -> /var/log/lomp-sites/<domain>/   access.log, error.log with PHP's errors
@@ -396,8 +402,12 @@ you are already in.
 └── .pm2/                     0700  Node.js sites: PM2 state, ecosystem file, logs, job scripts
 ```
 
-PHP runs as the site's own user through a per-vhost LSAPI processor, so one compromised
-site cannot read another site's files. Directory listing is off, and requests for dotfiles,
+PHP runs as the site's own user through a per-vhost LSAPI processor, and the home is closed to
+every other account (0710; an ACL lets OpenLiteSpeed's `nobody` pass through to serve
+`public_html`), so one compromised site cannot read another site's files - not even the
+world-readable ones, such as a `config.php` with a database password in it. Servers set up by
+an older release had homes at 0711, which let another site's PHP in; `self-update` or `update`
+closes them, and `doctor` names a home that is open. Directory listing is off, and requests for dotfiles,
 `.git`, `.env`, `*.sql`, `*.bak` and `wp-config.php` are refused.
 
 The logs themselves are in `/var/log/lomp-sites/<domain>/` (0750 root:`<user>`, rotated daily

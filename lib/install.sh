@@ -687,7 +687,59 @@ lib_selfupdate_main() {
   lib_manifest_set '.install.updated_at' "$(lib_iso_now)"
   # the version just installed, not SCRIPT_VERSION: that is the release doing the update
   lib_ok "Now running lompstack $(lib_version_detect "$INSTALL_DIR")$( [[ -n "$(lib_manifest_get '.install.revision')" ]] && printf ' (%s)' "$(lib_manifest_get '.install.revision')")"
-  lib_note "Nothing on the server was reconfigured. 'sudo lomp update' applies what a newer release changes (scheduled tasks, site logs); 'sudo lomp doctor' checks its state."
+  if (( OPT_DRY_RUN )); then return 0; fi
+  lib_selfupdate_migrate
+}
+
+# What the release just installed changes on a server is applied by that release, not by the one
+# doing the update, which may not know of it: the installed copy's "migrate" runs in this
+# one's place (exec, which also lets go of the lock that copy takes again). A copy from before
+# "migrate" existed is left to "update", as it always was.
+lib_selfupdate_migrate() {
+  if ! grep -q '^lib_install_migrate()' "${INSTALL_DIR}/lib/install.sh" 2>/dev/null; then
+    lib_note "Nothing on the server was reconfigured. 'sudo lomp update' applies what a newer release changes (scheduled tasks, site logs); 'sudo lomp doctor' checks its state."
+    return 0
+  fi
+  lib_info "Applying what this release changes on the server (no packages are touched; 'sudo lomp update' upgrades those)"
+  local args=(migrate)
+  (( OPT_NO_COLOR )) && args+=(--no-color)
+  lib_cleanup_on_exit   # exec runs no EXIT trap
+  exec "${INSTALL_DIR}/setup.sh" "${args[@]}"
+}
+
+# =============================================================================
+#  migrate - what a newer release changes on a server an older one set up
+# =============================================================================
+# Run by "update" after the packages, and by "self-update" through the copy it installed. No
+# package is touched here. Every step finds its own work and is silent work when there is none.
+lib_install_migrate() {
+  lib_install_cron_base
+  if [[ -z "$INS_CRON_ADDED" ]]; then lib_ok "Scheduled tasks in ${CRON_FILE} are all in place"
+  elif (( OPT_DRY_RUN )); then lib_info "[dry-run] would add to ${CRON_FILE}, which this server is missing: ${INS_CRON_ADDED}"
+  else lib_ok "Added to ${CRON_FILE}, which this server was missing: ${INS_CRON_ADDED}"; fi
+  lib_domain_isolation_repair
+  if [[ -z "$DOMAIN_ISOLATED" ]]; then lib_ok "Every site's home is closed to the other sites' users"
+  elif (( OPT_DRY_RUN )); then lib_info "[dry-run] would close these sites' homes to the other sites' users: ${DOMAIN_ISOLATED}"
+  else lib_ok "These sites' homes are now closed to the other sites' users: ${DOMAIN_ISOLATED}"; fi
+  # last: a vhost OpenLiteSpeed refuses ends the run here
+  lib_domain_logs_repair
+  if [[ -n "$DOMAIN_LOGS_MOVED" ]]; then
+    if (( OPT_DRY_RUN )); then lib_info "[dry-run] would move the logs of these sites out of their homes into ${SITES_LOG_ROOT}: ${DOMAIN_LOGS_MOVED}"
+    else lib_ok "These sites now write their logs in ${SITES_LOG_ROOT}/<domain>, no longer in their homes: ${DOMAIN_LOGS_MOVED}"; fi
+  fi
+  if (( DOMAIN_F2B_FILTERS_CHANGED )); then
+    if (( OPT_DRY_RUN )); then lib_info "[dry-run] would rewrite the fail2ban web filters, which match no access log line as they are"
+    else lib_ok "The fail2ban web filters now match OpenLiteSpeed's access log lines"; fi
+  fi
+  return 0
+}
+
+lib_migrate_main() {
+  lib_require_tools
+  lib_require_installed
+  lib_system_analyze --no-net
+  lib_install_migrate
+  lib_ok "This server is set up the way lompstack ${SCRIPT_VERSION} sets one up"
 }
 
 lib_install_manifest() {
@@ -1090,24 +1142,12 @@ lib_update_main() {
   lib_step "Housekeeping"
   lib_cf_enabled && { lib_cf_update_ips || true; }
   lib_install_self
-  lib_install_cron_base
-  if [[ -z "$INS_CRON_ADDED" ]]; then lib_ok "Scheduled tasks in ${CRON_FILE} are all in place"
-  elif (( OPT_DRY_RUN )); then lib_info "[dry-run] would add to ${CRON_FILE}, which this server is missing: ${INS_CRON_ADDED}"
-  else lib_ok "Added to ${CRON_FILE}, which this server was missing: ${INS_CRON_ADDED}"; fi
   lib_manifest_set '.components.openlitespeed' "$after_ols"
   lib_manifest_set '.components.mariadb' "$after_db"
   lib_manifest_set '.components.redis' "$after_redis"
   lib_manifest_set '.last_update' "$(lib_iso_now)"
   # last: a vhost OpenLiteSpeed refuses ends the run here, with the update itself recorded
-  lib_domain_logs_repair
-  if [[ -n "$DOMAIN_LOGS_MOVED" ]]; then
-    if (( OPT_DRY_RUN )); then lib_info "[dry-run] would move the logs of these sites out of their homes into ${SITES_LOG_ROOT}: ${DOMAIN_LOGS_MOVED}"
-    else lib_ok "These sites now write their logs in ${SITES_LOG_ROOT}/<domain>, no longer in their homes: ${DOMAIN_LOGS_MOVED}"; fi
-  fi
-  if (( DOMAIN_F2B_FILTERS_CHANGED )); then
-    if (( OPT_DRY_RUN )); then lib_info "[dry-run] would rewrite the fail2ban web filters, which match no access log line as they are"
-    else lib_ok "The fail2ban web filters now match OpenLiteSpeed's access log lines"; fi
-  fi
+  lib_install_migrate
   lib_system_reboot_required && lib_warn "Reboot required to activate the new kernel/libraries."
   lib_ok "Update finished"
 }
