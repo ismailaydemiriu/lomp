@@ -1139,11 +1139,16 @@ EOF
     rules+=$'RewriteRule (?i)^/?(.*/)?(uploads?|files|media|cache|te?mp)/.*\\.(php[0-9]?|phtml|phar)(/|$) - [F,L]\n'
   fi
   if (( D_WWW )); then
+    # /.well-known/ is answered on both names: Android App Links and iOS universal links fetch
+    # assetlinks.json / apple-app-site-association from every host the app claims and do not
+    # follow a redirect.
     if (( D_WWW_PRIMARY )); then
       rules+="RewriteCond %{HTTP_HOST} ^${esc}\$ [NC]"$'\n'
+      rules+=$'RewriteCond %{REQUEST_URI} !^/\\.well-known/\n'
       rules+="RewriteRule ^(.*)\$ ${scheme}://www.${D_DOMAIN}\$1 [R=301,L]"$'\n'
     else
       rules+="RewriteCond %{HTTP_HOST} ^www\\.${esc}\$ [NC]"$'\n'
+      rules+=$'RewriteCond %{REQUEST_URI} !^/\\.well-known/\n'
       rules+="RewriteRule ^(.*)\$ ${scheme}://${D_DOMAIN}\$1 [R=301,L]"$'\n'
     fi
   fi

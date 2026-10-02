@@ -582,6 +582,9 @@ assert_has "php post size" "post_max_size 72M" "$out"
 assert_has "php sessions path" "session.save_path $SITES_ROOT/example.com/private/sessions" "$out"
 assert_has "www alias" "vhAliases                 www.example.com" "$out"
 assert_has "www redirect" 'RewriteCond %{HTTP_HOST} ^www\.example\.com$ [NC]' "$out"
+assert_has "www redirect spares .well-known" 'RewriteCond %{HTTP_HOST} ^www\.example\.com$ [NC]
+RewriteCond %{REQUEST_URI} !^/\.well-known/
+RewriteRule ^(.*)$ https://example.com$1 [R=301,L]' "$out"
 assert_has "https redirect" 'RewriteRule ^(.*)$ https://%{HTTP_HOST}$1 [R=301,L]' "$out"
 assert_has "hsts" "Strict-Transport-Security: max-age=31536000; includeSubDomains" "$out"
 assert_lacks "no preload" "preload" "$out"
