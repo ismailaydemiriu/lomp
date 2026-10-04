@@ -55,6 +55,10 @@ COMMANDS
                                 with --git the application is deployed right away
                                 Every site gets its own database and MariaDB user
                                 unless --no-db is given.
+  wordpress <domain>            Put the files of the latest WordPress (wordpress.org/latest.zip)
+                                into the public_html of a PHP site that exists, as the site's
+                                own user; the installation is finished in the browser
+                                ("add --wordpress" installs it whole instead)
   db <domain>                   Create (or show) the MariaDB database for a site
   db list                       Every site's database, user and size (no passwords)
   db passwd <domain>            A new random password for the site's database user
@@ -223,18 +227,29 @@ _menu_run() {
   _menu_pause
 }
 
-# Ask for a domain, offering the registered ones by number. Prints the choice.
-# "apps" offers only the sites that run a Node.js application.
-_menu_pick_domain() {   # [apps]
-  local -a doms=()
-  local d="" i=1 choice="" only="${1:-}"
+# The registered sites a menu entry offers, one per line: all of them, with "apps" those that
+# run a Node.js application, with "php" those PHP runs in.
+_menu_domains() {   # [apps|php]
+  local d="" only="${1:-}"
   while read -r d; do
     [[ -n "$d" ]] || continue
     if [[ "$only" == "apps" ]] && ! lib_app_state_load "$d"; then continue; fi
-    doms+=("$d")
+    if [[ "$only" == "php" ]]; then
+      case "$(lib_json_get "$(lib_domain_json "$d")" '.mode')" in php|wordpress|"") ;; *) continue ;; esac
+    fi
+    printf '%s\n' "$d"
   done < <(lib_domains_list)
+  return 0
+}
+
+# Ask for a domain, offering those by number. Prints the choice.
+_menu_pick_domain() {   # [apps|php]
+  local -a doms=()
+  local d="" i=1 choice="" only="${1:-}"
+  mapfile -t doms < <(_menu_domains "$only")
   if ((${#doms[@]} == 0)); then
     if [[ "$only" == "apps" ]]; then printf '%sNo Node.js applications yet: add a site and choose "Node.js app".%s\n' "$C_YEL" "$C_RST" >&2
+    elif [[ "$only" == "php" ]]; then printf '%sNo PHP sites yet: add a site and choose "PHP site".%s\n' "$C_YEL" "$C_RST" >&2
     else printf '%sNo sites have been added yet.%s\n' "$C_YEL" "$C_RST" >&2; fi
     return 1
   fi
@@ -325,6 +340,7 @@ lib_menu_main() {
     _menu_item 21 "Fix file ownership (after uploading as root)"
     _menu_item 23 "Harden sites against PHP shells"
     _menu_item 24 "Scan sites for PHP shells (eval, base64, exec)"
+    _menu_item 25 "Download WordPress into a site (you finish the setup in the browser)"
     _menu_group "SERVER"
     _menu_item  8 "Status"
     _menu_item  9 "Health check"
@@ -356,6 +372,7 @@ lib_menu_main() {
       21) _menu_fix_owner ;;
       23) _menu_harden ;;
       24) _menu_scan ;;
+      25) _menu_wordpress ;;
       8) _menu_run status ;;
       9) _menu_run doctor ;;
       10) _menu_run panel ;;
@@ -740,6 +757,16 @@ _menu_scan() {
   _menu_ask wide "Also list every use of eval, base64_decode and exec? Plugins use them too (y/N)" "n"
   if [[ "${wide,,}" == y* ]]; then args+=(--wide); fi
   _menu_run scan "${args[@]}"
+}
+
+# WordPress's files into a site that is already there; "Add a site" with kind 2 installs it
+# whole instead. The command asks before it puts them next to something.
+_menu_wordpress() {
+  local domain=""
+  printf '\n  %s\n  %s\n' "The latest WordPress (wordpress.org/latest.zip) goes straight into the site's public_html, as the" \
+    "site's own user. You finish the installation in the browser; the database login is printed for it."
+  domain="$(_menu_pick_domain php)" || { _menu_pause; return 0; }
+  _menu_run wordpress "$domain"
 }
 
 _menu_mail() {

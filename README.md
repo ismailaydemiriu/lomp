@@ -197,6 +197,8 @@ sudo lomp renew-ssl example.com
 
 ```bash
 sudo lomp add shop.example.com --wordpress          # WordPress with database and cache
+sudo lomp wordpress blog.example.com                # only WordPress's files, into a site that is
+                                                    # there; you finish the setup in the browser
 sudo lomp add api.example.com --proxy 127.0.0.1:3000 # Node/Python app behind OpenLiteSpeed
 sudo lomp proxy add example.com /api/ 127.0.0.1:3001 # an app under a path of an existing site
 sudo lomp add node.example.com --node                # Node.js app run by PM2 (see below)
@@ -263,6 +265,29 @@ not a git checkout) shows `1.0.x`.
 | `--no-db` | Skip the database. Every site otherwise gets its own MariaDB database and user — `example.com` becomes `example_db` / `example_user` with a 32-character random password, printed once when the site is created and available afterwards from `credentials` |
 | `--wildcard` | Also request `*.<domain>` over DNS-01 (needs a stored Cloudflare API token) |
 | `--staging` | Use the Let's Encrypt staging CA while you are testing |
+
+### WordPress into a site that is already there
+
+`add --wordpress` installs WordPress whole. To do the installation yourself in the browser, add
+the site as a PHP site and let lomp fetch the files:
+
+```bash
+sudo lomp wordpress example.com     # item 25 in the menu does the same
+```
+
+It downloads `https://wordpress.org/latest.zip`, checks it against the checksum wordpress.org
+publishes, and unpacks it straight into `/home/example.com/public_html` as the site's own user:
+every file is `example_com`'s, directories 0755 and files 0644, so WordPress can write its
+`wp-config.php` and update itself. Then it prints the address to open and the site's database
+login, which the installer asks for.
+
+A document root that already holds something is asked about first: WordPress's files replace the
+ones with the same name, the rest stays, and what root uploaded there is handed to the site's
+user first (as `fix-owner` does). A site that already has a `wp-config.php` is left alone.
+
+WordPress's installer ends by giving its new `wp-config.php` the mode 0666. Once the
+installation is done, close it: `chmod 640 /home/example.com/public_html/wp-config.php` (the
+command prints this line with the site's own path).
 
 ### .htaccess
 

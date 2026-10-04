@@ -218,6 +218,7 @@ main() {
   case "$cmd" in
     install)        lib_install_main "${rest[@]}" ;;
     add)            lib_domain_add_main "${rest[@]}" ;;
+    wordpress)      lib_domain_wordpress_main "${rest[@]}" ;;
     db)             lib_db_main "${rest[@]}" ;;
     proxy)          lib_proxy_main "${rest[@]}" ;;
     app)            lib_app_main "${rest[@]}" ;;

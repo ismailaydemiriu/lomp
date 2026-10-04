@@ -5072,6 +5072,245 @@ assert_eq  "and the record of it"       "" "$(lib_manifest_get '.backup.schedule
 assert_has "the menu offers it"         '3) Automatic backups' "$(declare -f _menu_backup)"
 assert_has "and the command reference"  '--schedule "daily 03:00"' "$(lib_usage)"
 
+# =============================================================================
+section "wordpress: the files of the latest release, into a site that is there"
+# Root downloads wordpress.org/latest.zip and checks it; the site's user unpacks it and copies
+# it into the document root. Here curl is a function that hands out a small stand-in archive -
+# built by hand, with modes no site should end up with - and its checksum. unzip, find and cp
+# are the real ones, run through the suite's runuser.
+_wp_saved="$(declare -p STATE_DIR DOM_FIX_OWNER_PATH DOM_HARDLINKS_SYSCTL DOM_MOUNTINFO OPT_YES)"
+_wp_orig_ids="$(declare -f _domain_fix_owner_ids)"; _wp_orig_list="$(declare -f lib_domains_list)"
+_wp_orig_apt="$(declare -f lib_apt_install)"
+STATE_DIR="$TMP/wp-state"; mkdir -p "$STATE_DIR"
+_wp_zip="$TMP/wp-fixture.zip"; _wp_out="$TMP/wp-out"; _wp_curl="$TMP/wp-curl.log"; _wp_chown="$TMP/wp-chown.log"
+base64 -d >"$_wp_zip" <<'EOF'
+UEsDBBQAAAAAAAAAIVwAAAAAAAAAAAAAAAAKAAAAd29yZHByZXNzL1BLAwQUAAAAAAAAACFc9fY8Dh4AAAAeAAAAEwAAAHdvcmRw
+cmVzcy9pbmRleC5waHA8P3BocCAvLyB0aGUgZnJvbnQgY29udHJvbGxlcgpQSwMEFAAAAAAAAAAhXD94IvcEAAAABAAAABUAAAB3
+b3JkcHJlc3MvbGljZW5zZS50eHRHUEwKUEsDBBQAAAAAAAAAIVwAAAAAAAAAAAAAAAATAAAAd29yZHByZXNzL3dwLWFkbWluL1BL
+AwQUAAAAAAAAACFcH0JckQ8AAAAPAAAAIwAAAHdvcmRwcmVzcy93cC1hZG1pbi9zZXR1cC1jb25maWcucGhwPD9waHAgLy8gc2V0
+dXAKUEsDBBQAAAAAAAAAIVwAAAAAAAAAAAAAAAAWAAAAd29yZHByZXNzL3dwLWluY2x1ZGVzL1BLAwQUAAAAAAAAACFcdwHOeh0A
+AAAdAAAAIQAAAHdvcmRwcmVzcy93cC1pbmNsdWRlcy92ZXJzaW9uLnBocDw/cGhwCiR3cF92ZXJzaW9uID0gJzkuOC43JzsKUEsD
+BBQAAAAAAAAAIVwDN2ZCCAAAAAgAAAAnAAAAd29yZHByZXNzL3dwLWNvbnRlbnQvdGhlbWVzL3Qvc3R5bGUuY3NzLyogdCAqLwpQ
+SwECFAMUAAAAAAAAACFcAAAAAAAAAAAAAAAACgAAAAAAAAAAABAAwEEAAAAAd29yZHByZXNzL1BLAQIUAxQAAAAAAAAAIVz19jwO
+HgAAAB4AAAATAAAAAAAAAAAAAACAgSgAAAB3b3JkcHJlc3MvaW5kZXgucGhwUEsBAhQDFAAAAAAAAAAhXD94IvcEAAAABAAAABUA
+AAAAAAAAAAAAAP+BdwAAAHdvcmRwcmVzcy9saWNlbnNlLnR4dFBLAQIUAxQAAAAAAAAAIVwAAAAAAAAAAAAAAAATAAAAAAAAAAAA
+EAD/Qa4AAAB3b3JkcHJlc3Mvd3AtYWRtaW4vUEsBAhQDFAAAAAAAAAAhXB9CXJEPAAAADwAAACMAAAAAAAAAAAAAAO2B3wAAAHdv
+cmRwcmVzcy93cC1hZG1pbi9zZXR1cC1jb25maWcucGhwUEsBAhQDFAAAAAAAAAAhXAAAAAAAAAAAAAAAABYAAAAAAAAAAAAQAO1B
+LwEAAHdvcmRwcmVzcy93cC1pbmNsdWRlcy9QSwECFAMUAAAAAAAAACFcdwHOeh0AAAAdAAAAIQAAAAAAAAAAAAAApIFjAQAAd29y
+ZHByZXNzL3dwLWluY2x1ZGVzL3ZlcnNpb24ucGhwUEsBAhQDFAAAAAAAAAAhXAM3ZkIIAAAACAAAACcAAAAAAAAAAAAAAKCBvwEA
+AHdvcmRwcmVzcy93cC1jb250ZW50L3RoZW1lcy90L3N0eWxlLmNzc1BLBQYAAAAACAAIADYCAAAMAgAAAAA=
+EOF
+_wp_sha="$(sha1sum "$_wp_zip" | cut -d' ' -f1)"
+_wp_sha_served="$_wp_sha"; _wp_net_down=0
+# curl the way the command calls it: "-o FILE" somewhere, the address last
+eval 'lib_require_tools() { return 0; }
+      lib_apt_install() { return 1; }
+      _domain_fix_owner_ids() { printf "%s" "$_wp_ids"; }
+      curl() {
+        local out="" url="" a=""
+        while (($# > 0)); do a="$1"; shift; if [[ "$a" == "-o" ]]; then out="$1"; shift; else url="$a"; fi; done
+        printf "%s\n" "$url" >>"$_wp_curl"
+        if (( _wp_net_down )); then return 6; fi
+        case "$url" in
+          https://wordpress.org/latest.zip)      cp "$_wp_zip" "$out" ;;
+          https://wordpress.org/latest.zip.sha1) printf "%s" "$_wp_sha_served" >"$out" ;;
+          *) return 22 ;;
+        esac
+      }'
+eval "$(sed -n '/^lib_domains_list() {/,/^}/p' "$ROOT/lib/common.sh")"
+# the command run the way setup.sh runs it (errexit armed); prints the exit status, and the
+# output goes to $_wp_out
+_wpf() {
+  local rc=0 prev=""
+  prev="$(trap -p ERR || true)"
+  trap - ERR
+  set +e
+  ( set -Eeuo pipefail; shopt -s lastpipe; OPT_QUIET=0; lib_domain_wordpress_main "$@" ) >"$_wp_out" 2>&1
+  rc=$?
+  set -e
+  [[ -z "$prev" ]] || eval "$prev"
+  printf '%s' "$rc"
+}
+_wp_site() {   # domain mode
+  lib_domain_state_reset
+  D_DOMAIN="$1"; D_IDENT="$(lib_domain_ident "$1")"; D_USER="$D_IDENT"; D_GROUP="$D_IDENT"
+  D_HOME="$SITES_ROOT/$1"; D_MODE="$2"; D_PHP="8.3"; D_STATUS="active"
+  lib_domain_state_save
+  mkdir -p "$D_HOME/public_html" "$D_HOME/private/tmp"
+}
+_wp_site wp1.example.com php
+_wp_site wps.example.com static
+_wp_h="$SITES_ROOT/wp1.example.com"; _wp_d="$_wp_h/public_html"
+read -r _wp_u _wp_g < <(stat -c '%u %g' "$_wp_d")
+_wp_ids="${_wp_u} ${_wp_g}"   # everything there is the site's own
+# the page a new site starts with
+assert_has "a new site's page carries the sentence the command knows it by" '${DOMAIN_PLACEHOLDER_MARK}' "$(declare -f lib_domain_dirs_create)"
+printf '<body><p>This site was %s.</p></body>\n' "$DOMAIN_PLACEHOLDER_MARK" >"$_wp_d/index.html"
+: >"$_wp_curl"
+
+assert_eq  "no domain is an error"               1 "$(_wpf)"
+assert_has "which says so"                       "Domain missing" "$(cat "$_wp_out")"
+assert_eq  "an unknown option is refused"        1 "$(_wpf wp1.example.com --force)"
+assert_eq  "and a second site"                   1 "$(_wpf wp1.example.com wps.example.com)"
+assert_eq  "a name that is no domain too"        1 "$(_wpf ../etc)"
+assert_eq  "a site that is not registered too"   1 "$(_wpf nosuch.example.com)"
+assert_has "with the command that adds it"       "setup.sh add nosuch.example.com" "$(cat "$_wp_out")"
+assert_eq  "a static site cannot run WordPress"  1 "$(_wpf wps.example.com)"
+assert_has "and is told why"                     "it is a static site: no PHP runs there" "$(cat "$_wp_out")"
+assert_eq  "help exits 0"                        0 "$(_wpf --help)"
+OPT_DRY_RUN=1
+assert_eq  "a dry run exits 0"                   0 "$(_wpf wp1.example.com)"
+assert_has "and says what a real run would do"   "[dry-run] would download https://wordpress.org/latest.zip and unpack it into" "$(cat "$_wp_out")"
+OPT_DRY_RUN=0
+assert_eq  "none of this went to the network"    "" "$(cat "$_wp_curl")"
+assert_eq  "or touched the site"                 "index.html" "$(ls -A "$_wp_d")"
+
+if command -v unzip >/dev/null 2>&1; then
+  _wp_sha_served="0000000000000000000000000000000000000000"
+  assert_eq  "an archive that does not match its checksum is refused" 1 "$(_wpf wp1.example.com)"
+  assert_has "by name"                             "WordPress checksum mismatch" "$(cat "$_wp_out")"
+  _wp_sha_served="<html>not a checksum</html>"
+  assert_eq  "so is one whose checksum is no checksum" 1 "$(_wpf wp1.example.com)"
+  _wp_sha_served="$_wp_sha"; _wp_net_down=1
+  assert_eq  "a download that fails is an error"   1 "$(_wpf wp1.example.com)"
+  assert_has "and the end of the run"              "FAILED: WordPress download failed" "$(cat "$_wp_out")"
+  _wp_net_down=0
+  # checked, but not what wordpress.org publishes: it gets as far as the working directory
+  printf 'this is not an archive\n' >"$TMP/wp-not-a-zip"
+  _wp_good_zip="$_wp_zip"; _wp_zip="$TMP/wp-not-a-zip"; _wp_sha_served="$(sha1sum "$_wp_zip" | cut -d' ' -f1)"
+  assert_eq  "an archive that cannot be unpacked is an error" 1 "$(_wpf wp1.example.com)"
+  assert_has "named as such"                       "The WordPress archive could not be unpacked" "$(cat "$_wp_out")"
+  # ... and a sound archive of something else
+  base64 -d >"$TMP/wp-other.zip" <<'EOF'
+UEsDBBQAAAAAAAAAIVxNHSRmDgAAAA4AAAAQAAAAb3RoZXIvcmVhZG1lLnR4dG5vdCBXb3JkUHJlc3MKUEsBAhQDFAAAAAAAAAAh
+XE0dJGYOAAAADgAAABAAAAAAAAAAAAAAAKSBAAAAAG90aGVyL3JlYWRtZS50eHRQSwUGAAAAAAEAAQA+AAAAPAAAAAAA
+EOF
+  _wp_zip="$TMP/wp-other.zip"; _wp_sha_served="$(sha1sum "$_wp_zip" | cut -d' ' -f1)"
+  assert_eq  "so is an archive that holds something else" 1 "$(_wpf wp1.example.com)"
+  assert_has "said the same way"                   "The WordPress archive could not be unpacked" "$(cat "$_wp_out")"
+  _wp_zip="$_wp_good_zip"; _wp_sha_served="$_wp_sha"
+  assert_eq  "after all of which the site is as it was" "index.html" "$(ls -A "$_wp_d")"
+  assert_eq  "and its private/tmp empty: the working directory is taken away again" "" "$(ls -A "$_wp_h/private/tmp")"
+
+  printf 'DB_NAME=wp1_db\nDB_USER=wp1_user\nDB_PASS=Wp1DbPassw0rdForTheTest\n' >"$STATE_DIR/domains/wp1.example.com/db.info"
+  mkdir -p "$_wp_h/private/tmp/.lomp-wordpress.abcdef"; printf 'x' >"$_wp_h/private/tmp/.lomp-wordpress.abcdef/left-behind"
+  printf 'upload' >"$_wp_h/private/tmp/phpA1b2C3"
+  : >"$RUNUSER_LOG"; : >"$_wp_curl"
+  assert_eq  "a new site gets WordPress"           0 "$(_wpf wp1.example.com)"
+  _wp_o="$(cat "$_wp_out")"; _wp_ru="$(cat "$RUNUSER_LOG")"
+  assert_eq  "the archive is fetched, then its checksum" $'https://wordpress.org/latest.zip\nhttps://wordpress.org/latest.zip.sha1' "$(cat "$_wp_curl")"
+  assert_true  "its front controller is in the document root itself" test -f "$_wp_d/index.php"
+  assert_true  "with what lies deeper"             test -f "$_wp_d/wp-content/themes/t/style.css"
+  assert_false "and not inside a wordpress/ there" test -e "$_wp_d/wordpress"
+  assert_false "the page the site started with is gone" test -e "$_wp_d/index.html"
+  assert_eq  "the working directory is gone, with the one an interrupted run left" "phpA1b2C3" "$(ls -A "$_wp_h/private/tmp")"
+  if (( CAN_CHMOD )); then
+    assert_eq "every directory is 0755, whatever the archive said" "" "$(find "$_wp_d" -type d ! -perm 0755)"
+    assert_eq "and every file 0644"                "" "$(find "$_wp_d" -type f ! -perm 0644)"
+  fi
+  assert_has "it is unpacked as the site's user"   "-u wp1_example_com -- env -C / unzip -q -o " "$_wp_ru"
+  assert_has "and copied as the site's user"       "-u wp1_example_com -- env -C / cp -a --remove-destination -- " "$_wp_ru"
+  assert_lacks "lomp's own page is nothing to ask about" "already holds" "$_wp_o"
+  assert_has "the version is named"                "WordPress 9.8.7 is in place" "$_wp_o"
+  assert_has "and where to finish the installation" "http://wp1.example.com/" "$_wp_o"
+  assert_has "with the database the installer asks for" "wp1_db" "$_wp_o"
+  assert_has "its user"                            "wp1_user" "$_wp_o"
+  assert_has "and the password"                    "Wp1DbPassw0rdForTheTest" "$_wp_o"
+  assert_eq  "which stays out of the log"          0 "$(grep -c 'Wp1DbPassw0rdForTheTest' "$LOG_FILE" || true)"
+  assert_has "and what to close once WordPress is installed" "public_html/wp-config.php  (WordPress leaves it 0666)" "$_wp_o"
+
+  # a document root that holds something: asked about first, and only the same names replaced
+  printf 'mine\n' >"$_wp_d/own.txt"; printf 'old\n' >"$_wp_d/index.php"; printf '<h1>my own page</h1>\n' >"$_wp_d/index.html"
+  rm -f "$STATE_DIR/domains/wp1.example.com/db.info"
+  lib_json_set "$(lib_domain_json wp1.example.com)" '.ssl.enabled = true | .www = true | .www_primary = true'
+  OPT_YES=0; : >"$_wp_curl"
+  assert_eq  "a document root that holds something is asked about, and no answer is a no" 1 "$(_wpf wp1.example.com)"
+  assert_has "it says how much is there"           "already holds 7 files and directories" "$(cat "$_wp_out")"
+  assert_has "and that it was not confirmed"       "not confirmed" "$(cat "$_wp_out")"
+  assert_eq  "before anything is downloaded"       "" "$(cat "$_wp_curl")"
+  assert_eq  "or replaced"                         "old" "$(cat "$_wp_d/index.php")"
+  OPT_YES=1
+  assert_eq  "with --yes it goes ahead"            0 "$(_wpf wp1.example.com)"
+  _wp_o="$(cat "$_wp_out")"
+  assert_eq  "a file of the same name is replaced" "<?php // the front controller" "$(cat "$_wp_d/index.php")"
+  assert_eq  "one with another name stays"         "mine" "$(cat "$_wp_d/own.txt")"
+  assert_eq  "an index.html of somebody's own too" "<h1>my own page</h1>" "$(cat "$_wp_d/index.html")"
+  assert_has "https and www where the site answers there" "https://www.wp1.example.com/" "$_wp_o"
+  assert_has "a site without a database is told how to get one" "setup.sh db wp1.example.com" "$_wp_o"
+
+  # an installed WordPress is not this command's to touch
+  printf '<?php // config\n' >"$_wp_d/wp-config.php"; : >"$_wp_curl"
+  assert_eq  "a site that has a wp-config.php is left alone" 1 "$(_wpf wp1.example.com)"
+  assert_has "and told why"                        "WordPress is already installed" "$(cat "$_wp_out")"
+  assert_eq  "nothing is downloaded for it"        "" "$(cat "$_wp_curl")"
+  rm -f "$_wp_d/wp-config.php"
+
+  # what root uploaded: the numbers now say none of it is the site's. fix-owner runs first, and
+  # the chown here changes nothing, so the hand-over cannot finish and the run stops there.
+  _wp_bin="$TMP/wp-bin"; mkdir -p "$_wp_bin"
+  cat >"$_wp_bin/chown" <<EOF
+#!/bin/sh
+printf 'chown %s\n' "\$1 \$2 \$3" >>"${_wp_chown}"
+EOF
+  chmod 0755 "$_wp_bin/chown"
+  DOM_FIX_OWNER_PATH="${_wp_bin}:/usr/bin:/bin"
+  DOM_HARDLINKS_SYSCTL="$TMP/wp-hardlinks"; printf '1\n' >"$DOM_HARDLINKS_SYSCTL"
+  DOM_MOUNTINFO="$TMP/wp-mountinfo"; : >"$DOM_MOUNTINFO"
+  _wp_ids="$(( _wp_u + 1 )) ${_wp_g}"; : >"$_wp_curl"; : >"$_wp_chown"
+  assert_eq  "files that are someone else's are handed over first, and a hand-over that fails stops the run" 1 "$(_wpf wp1.example.com)"
+  _wp_o="$(cat "$_wp_out")"
+  assert_has "it says that fix-owner runs"         "'fix-owner wp1.example.com' runs first" "$_wp_o"
+  assert_has "chown ran, for the site's user"      "chown -h -- wp1_example_com:wp1_example_com" "$(cat "$_wp_chown")"
+  assert_has "and why the run stopped"             "could not all be handed to wp1_example_com" "$_wp_o"
+  assert_eq  "before anything is downloaded"       "" "$(cat "$_wp_curl")"
+  printf '0\n' >"$DOM_HARDLINKS_SYSCTL"; : >"$_wp_chown"
+  assert_eq  "without protected hard links nothing is handed over" 1 "$(_wpf wp1.example.com)"
+  assert_has "which is said"                       "fs.protected_hardlinks is off" "$(cat "$_wp_out")"
+  assert_eq  "and chown never runs"                "" "$(cat "$_wp_chown")"
+  # asked about even where nothing would be replaced: a site that holds lomp's page alone
+  _wp_site wp2.example.com php
+  printf '<body><p>This site was %s.</p></body>\n' "$DOMAIN_PLACEHOLDER_MARK" >"$SITES_ROOT/wp2.example.com/public_html/index.html"
+  OPT_YES=0; printf '1\n' >"$DOM_HARDLINKS_SYSCTL"
+  assert_eq  "the hand-over is asked about as well" 1 "$(_wpf wp2.example.com)"
+  assert_has "and no answer is a no"               "not confirmed" "$(cat "$_wp_out")"
+  assert_eq  "so nothing is handed over"           "" "$(cat "$_wp_chown")"
+  OPT_YES=1
+else
+  printf '   (unzip is not installed here: the runs that unpack the archive were skipped)\n'
+fi
+
+# the menu: item 25, for a site PHP runs in
+_mwp() {   # -> the command the menu runs
+  (
+    eval '_menu_run() { printf "%s\n" "$*"; }
+          _menu_pick_domain() { printf "picked.example.com"; }
+          _menu_pause() { :; }'
+    _menu_wordpress 2>/dev/null | tail -n 1
+  )
+}
+assert_eq  "the menu runs it for the site that was picked" "wordpress picked.example.com" "$(_mwp)"
+assert_has "and offers only the sites PHP runs in"  '_menu_pick_domain php' "$(declare -f _menu_wordpress)"
+for _c in "php|php" "wp|wordpress" "static|static" "node|proxy"; do
+  mkdir -p "$TMP/wp-state2/domains/${_c%%|*}.example.com"
+  printf '{"mode":"%s"}\n' "${_c##*|}" >"$TMP/wp-state2/domains/${_c%%|*}.example.com/domain.json"
+done
+mkdir -p "$TMP/wp-state2/domains/plain.example.com"; printf '{}\n' >"$TMP/wp-state2/domains/plain.example.com/domain.json"
+assert_eq  "which leaves static and proxy sites out" "php.example.com plain.example.com wp.example.com " \
+  "$(STATE_DIR="$TMP/wp-state2"; _menu_domains php | tr '\n' ' ')"
+assert_eq  "every other entry still offers every site" "node.example.com php.example.com plain.example.com static.example.com wp.example.com " \
+  "$(STATE_DIR="$TMP/wp-state2"; _menu_domains | tr '\n' ' ')"
+assert_has "the question lists what that gives"  '_menu_domains "$only"' "$(declare -f _menu_pick_domain)"
+_menu_block="$(awk '/_menu_group "SITES"/{f=1} f{print} f && /^[[:space:]]*esac/{exit}' "$ROOT/lib/menu.sh")"
+assert_has "it is item 25 of the main menu"      '_menu_item 25 "Download WordPress into a site (you finish the setup in the browser)"' "$_menu_block"
+assert_has "which opens it"                      '25) _menu_wordpress ;;' "$_menu_block"
+assert_has "the command is dispatched"           'wordpress)      lib_domain_wordpress_main "${rest[@]}" ;;' "$(cat "$ROOT/setup.sh")"
+assert_has "and in the command reference"        "wordpress <domain>" "$(lib_usage)"
+
+eval "$_wp_saved"; eval "$_wp_orig_ids"; eval "$_wp_orig_list"; eval "$_wp_orig_apt"
+unset -f curl _wpf _wp_site _mwp
+rm -rf "$_wp_h" "$SITES_ROOT/wps.example.com" "$SITES_ROOT/wp2.example.com"
+lib_domain_state_reset
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 if (( FAIL > 0 )); then exit 1; fi
 exit 0

@@ -21,6 +21,9 @@ DOMAIN_LOGS_MOVED=""    # sites whose logs lib_domain_logs_repair moved out of t
 DOMAIN_F2B_FILTERS_CHANGED=0   # set by lib_domain_fail2ban_filters_write
 DOMAIN_ISOLATED=""      # sites whose homes lib_domain_isolation_repair closed to other accounts
 SITE_HOME_MODE="0710"   # /home/<domain>: the site's user and group, and nobody else
+# the sentence in the page a new site's document root starts with (lib_domain_dirs_create);
+# "wordpress" tells that page from somebody's own index.html by it
+DOMAIN_PLACEHOLDER_MARK="provisioned by server-setup and is waiting for content"
 
 WPCLI_PHAR="${INSTALL_DIR}/wp-cli.phar"
 WPCLI_BIN="/usr/local/bin/wp"
@@ -527,7 +530,7 @@ lib_domain_dirs_create() {
       lib_domain_as_user tee "${D_HOME}/public_html/index.html" >/dev/null <<EOF
 <!doctype html><html lang="en"><head><meta charset="utf-8"><title>${D_DOMAIN}</title>
 <style>body{font-family:system-ui,sans-serif;margin:10% auto;max-width:40em;color:#333}</style></head>
-<body><h1>${D_DOMAIN}</h1><p>This site was provisioned by server-setup and is waiting for content.</p>
+<body><h1>${D_DOMAIN}</h1><p>This site was ${DOMAIN_PLACEHOLDER_MARK}.</p>
 <p>Upload files to <code>${D_HOME}/public_html/</code>.</p></body></html>
 EOF
     fi
@@ -987,6 +990,168 @@ define('FS_METHOD', 'direct');" || lib_die "wp config create failed" "database c
 }
 
 # =============================================================================
+#  wordpress: the files only, into a site that is already there
+# =============================================================================
+# "add --wordpress" installs WordPress whole - database, admin account, cache plugin. This puts
+# the release wordpress.org publishes into the document root of a site that exists and stops
+# there: whoever opens the site next finishes the installation in the browser. Root downloads
+# the archive and checks it. Unpacking and copying run as the site's user, so every file is
+# that user's from the start - PHP runs as it, and WordPress has to write its wp-config.php
+# and update itself - and nothing root does follows a name inside the site.
+WP_ARCHIVE_URL="https://wordpress.org/latest.zip"
+
+lib_domain_wordpress_usage() {
+  cat <<'EOF'
+Usage: setup.sh wordpress <domain>
+  Put the files of the latest WordPress (https://wordpress.org/latest.zip) straight into the
+  document root of a PHP site that exists, as the site's own user: directories 0755, files
+  0644. The installation itself - language, database login, admin account - is finished in
+  the browser, and the site's database login is printed at the end.
+  A document root that already holds something is asked about first (--yes answers it):
+  WordPress's files replace the ones with the same name, the rest stays. What root uploaded
+  there is handed to the site's user first, as fix-owner does. A site that has a
+  wp-config.php is left alone. With --dry-run nothing is downloaded or written.
+EOF
+}
+
+# Is index.html the page a new site starts with?
+_domain_wp_placeholder() {   # docroot
+  [[ -f "${1}/index.html" && ! -L "${1}/index.html" ]] && grep -qsF -- "$DOMAIN_PLACEHOLDER_MARK" "${1}/index.html"
+}
+
+# How many names the document root holds, that page left out.
+_domain_wp_docroot_count() {   # docroot
+  local n=0
+  n="$( { find -P "$1" -mindepth 1 -maxdepth 1 -printf . 2>/dev/null || true; } | wc -c)"
+  n=$(( n ))
+  if (( n > 0 )) && _domain_wp_placeholder "$1"; then n=$(( n - 1 )); fi
+  printf '%d' "$n"
+}
+
+# How many in the document root, itself included, belong to someone else.
+_domain_wp_foreign_count() {   # docroot uid gid
+  local n=0
+  n="$( { find -P "$1" -xdev \( ! -uid "$2" -o ! -gid "$3" \) -printf . 2>/dev/null || true; } | wc -c)"
+  printf '%d' "$(( n ))"
+}
+
+lib_domain_wordpress_main() {
+  local a="" domain="" docroot="" ids="" uid="" gid="" n=0 foreign=0 tmp="" zip="" want="" stage="" ver="" scheme="http" host=""
+  while (($# > 0)); do
+    a="$1"; shift
+    case "$a" in
+      -h|--help|help) lib_domain_wordpress_usage; return 0 ;;
+      -*) lib_domain_wordpress_usage >&2; lib_die "Unknown option for wordpress: ${a}" "" "see the usage above" ;;
+      *)  [[ -z "$domain" ]] || lib_die "wordpress takes one site at a time" "" "setup.sh wordpress ${domain}"
+          domain="${a,,}" ;;
+    esac
+  done
+  if [[ -z "$domain" ]]; then
+    lib_domain_wordpress_usage >&2
+    lib_die "Domain missing" "" "setup.sh wordpress example.com"
+  fi
+  lib_require_tools
+  lib_rollback_clear
+  lib_domain_valid "$domain" || lib_die "Invalid domain name '${domain}'" "" "setup.sh list"
+  lib_domain_registered "$domain" \
+    || lib_die "Site ${domain} is not registered" "WordPress goes into a site that exists" "setup.sh add ${domain}, then run this again"
+  lib_domain_state_load "$domain"
+  docroot="${D_HOME}/public_html"
+  [[ "$D_MODE" == "php" || "$D_MODE" == "wordpress" ]] \
+    || lib_die "${domain} cannot run WordPress" "it is a ${D_MODE} site: no PHP runs there" "choose a PHP site, or add one: setup.sh add <domain>"
+  [[ -d "$docroot" && ! -L "$docroot" ]] \
+    || lib_die "${docroot} is not a directory" "the document root of ${domain} is missing, or a link" "setup.sh doctor"
+  if [[ -e "${docroot}/wp-config.php" || -L "${docroot}/wp-config.php" ]]; then
+    lib_die "WordPress is already installed in ${docroot}" "wp-config.php is there, so the installation screen would not come up" \
+      "nothing was changed; WordPress updates itself from its own dashboard"
+  fi
+  if ! ids="$(_domain_fix_owner_ids "$D_HOME")"; then lib_die "WordPress was not put into ${docroot}" "$ids" "setup.sh doctor"; fi
+  read -r uid gid <<<"$ids"
+
+  n="$(_domain_wp_docroot_count "$docroot")"
+  foreign="$(_domain_wp_foreign_count "$docroot" "$uid" "$gid")"
+  if (( n > 0 )); then
+    lib_warn "${docroot} already holds $(_domain_n_entries "$n"): WordPress's files replace the ones that have the same name, the rest stays"
+  fi
+  if (( foreign > 0 )); then
+    lib_warn "${docroot} is not all ${D_USER}'s (uploaded as root?): 'fix-owner ${domain}' runs first"
+  fi
+  if (( OPT_DRY_RUN )); then
+    lib_info "[dry-run] would download ${WP_ARCHIVE_URL} and unpack it into ${docroot} as ${D_USER}"
+    return 0
+  fi
+  if (( n > 0 || foreign > 0 )); then
+    lib_confirm "Put WordPress into ${docroot}?" n \
+      || lib_die "WordPress was not put into ${docroot}" "not confirmed" "answer y, or add --yes"
+  fi
+  # a directory root uploaded is one the site's user cannot unpack into, and a file root
+  # uploaded one WordPress could never update
+  if (( foreign > 0 )); then
+    lib_domain_fix_owner_guard
+    lib_domain_fix_owner "$domain" \
+      || lib_die "WordPress was not put into ${docroot}" "the files of ${domain} could not all be handed to ${D_USER} (see above)" "clear that up, then run this again"
+  fi
+  lib_have unzip || lib_apt_install unzip || lib_die "unzip is not installed" "apt could not install it" "apt-get install unzip"
+
+  tmp="$(lib_mktemp -d)"; zip="${tmp}/wordpress.zip"
+  lib_info "Downloading ${WP_ARCHIVE_URL} ..."
+  curl -fsSL --retry 3 --max-time 300 -o "$zip" "$WP_ARCHIVE_URL" \
+    && curl -fsSL --retry 3 --max-time 60 -o "${zip}.sha1" "${WP_ARCHIVE_URL}.sha1" \
+    || lib_die "WordPress download failed" "network problem, or wordpress.org did not answer" "retry later; ${docroot} was not touched"
+  read -r want _ <"${zip}.sha1" || true
+  [[ "$(sha1sum "$zip" | cut -d' ' -f1)" == "$want" ]] \
+    || lib_die "WordPress checksum mismatch" "corrupted download" "retry later; ${docroot} was not touched"
+
+  # A working directory in private/tmp, which is the site user's and in no backup - after
+  # taking away what a run that was interrupted left there. Its name goes into a rollback
+  # step, so it has to be the one asked for.
+  lib_domain_as_user find "${D_HOME}/private/tmp" -mindepth 1 -maxdepth 1 -type d -name '.lomp-wordpress.??????' \
+    -exec rm -rf -- {} + 2>/dev/null || true
+  stage="$(lib_domain_as_user mktemp -d "${D_HOME}/private/tmp/.lomp-wordpress.XXXXXX" 2>/dev/null || true)"
+  [[ "$stage" == "${D_HOME}/private/tmp/.lomp-wordpress."?????? ]] \
+    || lib_die "Could not make a working directory in ${D_HOME}/private/tmp" "it is missing, or ${D_USER} cannot write there" "setup.sh fix-owner ${domain}; ${docroot} was not touched"
+  lib_rollback_push "runuser -u '${D_USER}' -- env -C / rm -rf -- '${stage}'"
+
+  lib_info "Unpacking it into ${docroot} as ${D_USER} ..."
+  lib_domain_as_user tee "${stage}/wordpress.zip" <"$zip" >/dev/null \
+    && lib_run lib_domain_as_user unzip -q -o "${stage}/wordpress.zip" -d "$stage" \
+    && lib_domain_as_user test -f "${stage}/wordpress/wp-includes/version.php" \
+    || lib_die "The WordPress archive could not be unpacked" "the disk is full, or it is not the archive wordpress.org publishes" "see the log; ${docroot} was not touched"
+  ver="$(lib_domain_as_user awk -F\' '/^\$wp_version[[:space:]]*=/ { print $2; exit }' "${stage}/wordpress/wp-includes/version.php" 2>/dev/null || true)"
+  [[ "$ver" =~ ^[0-9][0-9A-Za-z.+-]*$ ]] || ver=""
+  # whatever modes the archive carries: directories 0755, files 0644
+  lib_domain_as_user find "${stage}/wordpress" -type d -exec chmod 0755 {} + \
+    && lib_domain_as_user find "${stage}/wordpress" -type f -exec chmod 0644 {} + \
+    || lib_die "The modes of the WordPress files could not be set" "" "see the log; ${docroot} was not touched"
+  if _domain_wp_placeholder "$docroot"; then lib_domain_as_user rm -f -- "${docroot}/index.html" || true; fi
+  lib_run lib_domain_as_user cp -a --remove-destination -- "${stage}/wordpress/." "${docroot}/" \
+    || lib_die "WordPress could not be copied into ${docroot}" "the disk is full, or something there cannot be replaced by ${D_USER}" \
+         "see the log; what was copied stays, and running this again once the cause is gone completes it"
+  lib_domain_as_user rm -rf -- "$stage" || lib_warn "could not remove ${stage}"
+  lib_rollback_clear
+  lib_log_write INFO "WordPress ${ver:-of an unknown version} put into ${docroot} as ${D_USER}"
+
+  if (( D_SSL )); then scheme="https"; fi
+  host="$D_DOMAIN"
+  if (( D_WWW && D_WWW_PRIMARY )); then host="www.${D_DOMAIN}"; fi
+  printf '\n%s%sWordPress%s is in place and waits for its installation%s\n' "$C_BLD" "$C_GRN" "${ver:+ ${ver}}" "$C_RST"
+  lib_print_kv "Open in a browser" "${scheme}://${host}/  (language, database login, admin account)"
+  lib_print_kv "Files"             "${docroot}, owned by ${D_USER}:${D_GROUP} (directories 0755, files 0644)"
+  # shown for the same reason the summary of "add" shows it: the installer asks for it next
+  if lib_db_info_load "$domain"; then
+    lib_print_kv "Database name"     "$DBI_NAME"
+    lib_print_kv "Database user"     "$DBI_USER"
+    lib_print_kv "Database password" "$DBI_PASS"
+    lib_print_kv "Database host"     "localhost"
+  else
+    lib_print_kv "Database"          "none yet; this makes one and prints its login: setup.sh db ${domain}"
+  fi
+  # the installer ends by making its wp-config.php 0666, whatever the umask
+  lib_print_kv "After the installation" "chmod 640 ${docroot}/wp-config.php  (WordPress leaves it 0666)"
+  printf '\n'
+}
+
+# =============================================================================
 #  summary / credentials / list / logs
 # =============================================================================
 lib_domain_summary() {
@@ -1300,6 +1465,18 @@ lib_domain_fix_owner() {   # domain
   lib_ok "${domain}: $(_domain_n_entries "$n") handed to ${D_USER}:${D_GROUP}"
 }
 
+# What has to hold before lib_domain_fix_owner runs at all, for whoever calls it.
+lib_domain_fix_owner_guard() {
+  lib_domain_hardlinks_protected && return 0
+  if (( OPT_DRY_RUN )); then
+    lib_warn "fs.protected_hardlinks is off; a real run refuses to start until it is on (sysctl -w fs.protected_hardlinks=1)"
+    return 0
+  fi
+  lib_die "fs.protected_hardlinks is off" \
+    "without it a site user can hard-link a file it does not own - /etc/shadow, say - into its site, and this command would hand that file over" \
+    "sysctl -w fs.protected_hardlinks=1 (Ubuntu's default; setup.sh optimize writes it for good), then run it again"
+}
+
 lib_domain_fix_owner_main() {
   local a="" all=0 d="" failed=0
   local -a domains=()
@@ -1322,15 +1499,7 @@ lib_domain_fix_owner_main() {
     lib_domain_valid "$d" || lib_die "Invalid domain name '${d}'" "" "setup.sh list"
     lib_domain_registered "$d" || lib_die "Site ${d} is not registered" "" "setup.sh list"
   done
-  if ! lib_domain_hardlinks_protected; then
-    if (( OPT_DRY_RUN )); then
-      lib_warn "fs.protected_hardlinks is off; a real run refuses to start until it is on (sysctl -w fs.protected_hardlinks=1)"
-    else
-      lib_die "fs.protected_hardlinks is off" \
-        "without it a site user can hard-link a file it does not own - /etc/shadow, say - into its site, and this command would hand that file over" \
-        "sysctl -w fs.protected_hardlinks=1 (Ubuntu's default; setup.sh optimize writes it for good), then run it again"
-    fi
-  fi
+  lib_domain_fix_owner_guard
   if (( all )); then
     mapfile -t domains < <(lib_domains_list)
     if ((${#domains[@]} == 0)); then lib_info "No sites have been added yet."; return 0; fi
