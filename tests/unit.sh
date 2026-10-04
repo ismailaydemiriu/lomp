@@ -2838,6 +2838,57 @@ if (( CAN_CHMOD )); then
 fi
 assert_has  "and the webmail's"                            'lib_ols_logdir_open "$WM_LOG_DIR"' "$(declare -f _doc_check_webmail)"
 
+# WordPress's installer, run in the browser, leaves the wp-config.php it wrote 0666. doctor
+# names such a file with the command that closes it, and does no more than look at it.
+lib_domain_state_reset
+D_DOMAIN="wpc.example.com"; D_USER="wpc_example_com"; D_GROUP="wpc_example_com"
+D_HOME="$SITES_ROOT/wpc.example.com"; D_MODE="php"
+_wc_f="$D_HOME/public_html/wp-config.php"
+_wc_doc() { DOC_RESULTS=(); DOC_FAIL=0; DOC_WARN=0; DOC_OK=0; _doc_site_wp_config wpc.example.com; printf '%s' "${DOC_RESULTS[*]-}"; }
+DOC_RESULTS=(); DOC_FAIL=0; DOC_WARN=0; DOC_OK=0
+assert_eq "doctor: a site whose document root is missing has no wp-config.php to name" "" "$(_wc_doc)"
+mkdir -p "$D_HOME/public_html"
+assert_eq "nor has a site without WordPress"   "" "$(_wc_doc)"
+assert_eq "and the check exits 0"              0 "$(run_isolated _doc_site_wp_config wpc.example.com)"
+if (( CAN_CHMOD )); then
+  printf '<?php // config\n' >"$_wc_f"; chmod 0666 "$_wc_f"
+  _wc_o="$(_wc_doc)"
+  assert_has "doctor: the 0666 WordPress's installer leaves is a warning" "WARN|site wpc.example.com: wp-config.php|${_wc_f} is 0666: " "$_wc_o"
+  assert_has "which names the command that closes it" "(chmod 640 ${_wc_f})" "$_wc_o"
+  assert_eq  "the check exits 0 with a finding too"   0 "$(run_isolated _doc_site_wp_config wpc.example.com)"
+  assert_eq  "and leaves the file as it found it"     666 "$(stat -c %a "$_wc_f")"
+  D_MODE="wordpress"
+  assert_has "a site added with --wordpress is looked at the same way" "WARN|site wpc.example.com: wp-config.php|" "$(_wc_doc)"
+  chmod 0660 "$_wc_f"
+  assert_has "a file only its group may write to is named" "${_wc_f} is 0660: " "$(_wc_doc)"
+  chmod 0602 "$_wc_f"
+  assert_has "and one only others may write to"       "${_wc_f} is 0602: " "$(_wc_doc)"
+  chmod 0640 "$_wc_f"
+  assert_eq  "0640, which lomp sets itself, is no finding" "" "$(_wc_doc)"
+  chmod 0644 "$_wc_f"
+  assert_eq  "nor is a file others can only read"     "" "$(_wc_doc)"
+  chmod 0666 "$_wc_f"
+  for _m in static proxy; do
+    D_MODE="$_m"
+    assert_eq "no PHP runs in a ${_m} site: a wp-config.php there is not looked at" "" "$(_wc_doc)"
+  done
+  D_MODE="php"
+  if (( CAN_SYMLINK )); then
+    # a link is the site user's to point anywhere, and the chmod doctor names would follow it
+    mv "$_wc_f" "$TMP/wpc-victim.php"; ln -s "$TMP/wpc-victim.php" "$_wc_f"
+    assert_eq "a link in place of wp-config.php is not named" "" "$(_wc_doc)"
+    rm -f "$_wc_f"; mv "$D_HOME/public_html" "$TMP/wpc-docroot"; mv "$TMP/wpc-victim.php" "$TMP/wpc-docroot/wp-config.php"
+    ln -s "$TMP/wpc-docroot" "$D_HOME/public_html"
+    assert_true "(the file behind the linked document root is there, and 0666)" test "$(stat -c %a "$D_HOME/public_html/wp-config.php")" = 666
+    assert_eq "nor is a file behind a link in place of the document root" "" "$(_wc_doc)"
+    rm -f "$D_HOME/public_html"
+  fi
+fi
+rm -rf "$D_HOME" "$TMP/wpc-docroot" "$TMP/wpc-victim.php"
+unset -f _wc_doc; unset DOC_RESULTS DOC_FAIL DOC_WARN DOC_OK
+lib_domain_state_reset
+assert_has  "doctor looks at the wp-config.php of every site" '_doc_site_wp_config "$d"' "$(declare -f _doc_check_domains)"
+
 # ...and the fail2ban web jails have to match what is written there. fail2ban cuts the date
 # out before it applies a failregex - "[28/Sep/2026:19:56:50 +0300]" becomes "[]" - and both
 # filters wanted a character between the brackets, so they matched no line. These are

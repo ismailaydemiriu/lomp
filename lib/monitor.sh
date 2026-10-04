@@ -475,6 +475,24 @@ _doc_root_only() {   # dir
   [[ "$owner" == 0 ]] && (( (8#$mode & 8#022) == 0 ))
 }
 
+# WordPress's installer, run in the browser, ends by making the wp-config.php it wrote 0666,
+# whatever the umask. "add --wordpress" closes its own to 0640; a WordPress somebody uploaded
+# and installed in the browser keeps the 0666, on the file that holds the database password.
+# It is named here with the command that closes it, and no more than that: doctor changes
+# nothing. Only a regular file in a document root that is a directory counts: a link in either
+# place is the site user's to point anywhere, and the chmod named here would follow it.
+_doc_site_wp_config() {   # domain  (its D_* are loaded)
+  local docroot="${D_HOME}/public_html" f="" mode=""
+  f="${docroot}/wp-config.php"
+  [[ "$D_MODE" == "php" || "$D_MODE" == "wordpress" ]] || return 0
+  [[ -d "$docroot" && ! -L "$docroot" && -f "$f" && ! -L "$f" ]] || return 0
+  mode="$(stat -c %a "$f" 2>/dev/null)" || return 0
+  [[ "$mode" =~ ^[0-7]+$ ]] || return 0
+  if (( (8#$mode & 8#022) != 0 )); then
+    _doc_add WARN "site ${1}: wp-config.php" "${f} is $(printf '%04o' "$(( 8#$mode ))"): accounts other than ${D_USER} may write to the file that holds the database password; WordPress's own installer leaves it 0666 (chmod 640 ${f})"
+  fi
+}
+
 _doc_check_domains() {
   local d="" code="" days="" maps="" ver="" logs="" extra=0
   local -a cfg_vhosts=()
@@ -490,6 +508,7 @@ _doc_check_domains() {
       elif [[ "$D_SEC_EXEC" == "blocked" ]]; then _doc_add OK "site ${d}: hardening" "PHP starts no process and reads only the site's own files"
       else _doc_add OK "site ${d}: hardening" "process execution left on for this site (--allow-exec)"; fi
     fi
+    _doc_site_wp_config "$d"
     # the other sites' users are "others" to this home
     if lib_domain_home_closed "$D_HOME"; then _doc_add OK "site ${d}: isolation" "${D_HOME} is closed to the other sites' users"
     else _doc_add WARN "site ${d}: isolation" "${D_HOME} lets other accounts in, so another site's PHP can read this one's files (lomp update closes it)"; fi

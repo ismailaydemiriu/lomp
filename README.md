@@ -439,7 +439,9 @@ every other account (0710; an ACL lets OpenLiteSpeed's `nobody` pass through to 
 world-readable ones, such as a `config.php` with a database password in it. Servers set up by
 an older release had homes at 0711, which let another site's PHP in; `self-update` or `update`
 closes them, and `doctor` names a home that is open. Directory listing is off, and requests for dotfiles,
-`.git`, `.env`, `*.sql`, `*.bak` and `wp-config.php` are refused.
+`.git`, `.env`, `*.sql`, `*.bak` and `wp-config.php` are refused. A WordPress installed in the
+browser leaves its `wp-config.php` at 0666: `doctor`, and the daily health check with it, warns
+about one that its group or others may write to, and names the `chmod 640` that closes it.
 
 ### What a PHP shell in a site can do
 
