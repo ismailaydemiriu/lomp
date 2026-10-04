@@ -173,15 +173,29 @@ sudo lomp add example.com --www
 This creates the system user, the directory tree, the vhost, requests a certificate and
 runs a smoke test. Upload your files to `/home/example.com/public_html/`.
 
-Files uploaded as root (WinSCP or scp logged in as root, an archive root unpacked) stay root's.
-PHP runs as the site's own user (`example_com`), so until the files are handed over it cannot
-change them: WordPress cannot update itself or store an upload. This hands them over:
+Files uploaded as root (WinSCP or scp logged in as root, an archive root unpacked) arrive as
+root's. PHP runs as the site's own user (`example_com`), so until the files are handed over it
+cannot change them: WordPress cannot update itself or store an upload. lomp hands them over by
+itself: every minute it looks through each site's home for what is not the site's own and
+gives it to the site's user. To have it done right now, or to see why a site's files were not
+handed over:
 
 ```bash
 sudo lomp fix-owner example.com     # or --all for every site; item 21 in the menu does the same
 ```
 
-Only what belongs to someone else changes; `logs` stays root's and the file modes stay as they are.
+Only what belongs to someone else changes; `logs` stays root's and the file modes stay as they
+are. A device node and a file that has a second name somewhere are never handed over, by
+hand or by itself: the command lists them, and `doctor` names a site the automatic hand-over
+stopped at.
+
+If root keeps files of its own in a site on purpose - a `wp-config.php` that PHP may read but
+not change, say - the automatic hand-over would give them to the site within a minute. Switch
+it off on such a server, and files change hands only when you run the command:
+
+```bash
+sudo lomp fix-owner --auto off      # --auto on starts it again
+```
 
 If DNS is not ready yet, add the site without TLS and issue the certificate later:
 
@@ -210,7 +224,8 @@ sudo lomp db passwd shop.example.com                # a new random password for 
 sudo lomp credentials shop.example.com              # database / WordPress / SSL details
 sudo lomp list                                      # all sites in a table
 sudo lomp logs shop.example.com                     # tail access and error logs
-sudo lomp fix-owner --all                           # files uploaded as root back to each site's user
+sudo lomp fix-owner --all                           # files uploaded as root to each site's user, now
+                                                    # (it happens by itself within a minute)
 sudo lomp backup --all --encrypt                    # back up every site
 sudo lomp restore shop.example.com --file /var/backups/server-setup/shop.example.com/....tar.gz
 sudo lomp renew-ssl --all                           # renew every certificate
@@ -289,10 +304,10 @@ WordPress's installer ends by giving its new `wp-config.php` the mode 0666. lomp
 0640 - what `add --wordpress` gives it - within a minute: the check cron runs every minute
 looks at the `wp-config.php` in the document root of every PHP and WordPress site, whichever
 way WordPress got there, and closes one that carries more than 0640, as the site's user. One
-that root uploaded (WinSCP logged in as root) is handed to the site's user first - closed as
-root's, PHP could no longer read it. Only that one file changes hands; the rest of an upload
-is still `fix-owner`'s. A file you closed further yourself is left as it is: 0600, or root's
-and readable by the site's group only, which keeps PHP from changing it.
+that root uploaded (WinSCP logged in as root) has become the site's a moment earlier, with the
+rest of the upload (see `fix-owner` above); with that switched off it stays root's and open,
+because closed as root's, PHP could no longer read it. A file you closed further yourself
+(0600) is left as it is.
 
 ### .htaccess
 
@@ -446,8 +461,9 @@ an older release had homes at 0711, which let another site's PHP in; `self-updat
 closes them, and `doctor` names a home that is open. Directory listing is off, and requests for dotfiles,
 `.git`, `.env`, `*.sql`, `*.bak` and `wp-config.php` are refused. A WordPress installed in the
 browser leaves its `wp-config.php` at 0666: within a minute lomp closes it to 0640, in every PHP
-and WordPress site, handing over first one that root uploaded. `doctor`, and the daily health
-check with it, warns about one that its group or others may still write to.
+and WordPress site, once it is the site's own - which what root uploads becomes within the
+same minute. `doctor`, and the daily health check with it, warns about one that its group or
+others may still write to, and about a site whose uploads could not be handed over.
 
 ### What a PHP shell in a site can do
 

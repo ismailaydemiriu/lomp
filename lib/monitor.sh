@@ -477,13 +477,13 @@ _doc_root_only() {   # dir
 
 # WordPress's installer, run in the browser, ends by making the wp-config.php it wrote 0666,
 # whatever the umask, on the file that holds the database password. The check cron runs every
-# minute closes it to 0640, handing over first one that root uploaded
-# (lib_domain_wp_config_close), so what is found open here is a file that check has not got to
-# yet, or one it leaves alone: a third account's, a second name of a file. One that is not the
-# site's is named with fix-owner, not with chmod - closed as somebody else's, PHP could no
-# longer read it. doctor changes nothing. Only a regular file in a document root that is a
-# directory counts: a link in either place is the site user's to point anywhere, and what it
-# leads to need not be this site's file at all.
+# minute closes it to 0640 (lib_domain_wp_config_close) once it is the site's own, which a file
+# root uploaded becomes in the same pass (lib_domain_fix_owner_auto). So what is found open
+# here is a file that check has not got to yet, or one that could not be handed over. One that
+# is not the site's is named with fix-owner, not with chmod - closed as somebody else's, PHP
+# could no longer read it. doctor changes nothing. Only a regular file in a document root that
+# is a directory counts: a link in either place is the site user's to point anywhere, and what
+# it leads to need not be this site's file at all.
 _doc_site_wp_config() {   # domain  (its D_* are loaded)
   local docroot="${D_HOME}/public_html" f="" st="" mode="" owner="" ids="" what=""
   f="${docroot}/wp-config.php"
@@ -500,7 +500,31 @@ _doc_site_wp_config() {   # domain  (its D_* are loaded)
     # by root it would follow a link put in the file's place after doctor looked
     _doc_add WARN "site ${1}: wp-config.php" "${what}; WordPress's own installer leaves it 0666, and the check cron runs every minute closes it - if it stays open: runuser -u ${D_USER} -- chmod 640 ${f}"
   else
-    _doc_add WARN "site ${1}: wp-config.php" "${what}; it is not ${D_USER}'s own file, and the check cron runs every minute hands over and closes only one that root uploaded - if it stays as it is: setup.sh fix-owner ${1} (after a chmod 640 alone PHP could not read it)"
+    _doc_add WARN "site ${1}: wp-config.php" "${what}; it is not ${D_USER}'s own file, which the check cron runs every minute makes it before closing it - if it stays as it is: setup.sh fix-owner ${1} (after a chmod 640 alone PHP could not read it)"
+  fi
+}
+
+# What the minute check could not hand to a site's user (lib_domain_fix_owner_auto): it says so
+# once in the log and keeps the reason in the site's state directory, for here.
+_doc_site_fix_owner() {   # domain  (its D_* are loaded)
+  local why=""
+  why="$(cat "$(_domain_fix_owner_stamp "$1")" 2>/dev/null || true)"
+  [[ -n "$why" ]] || return 0
+  _doc_add WARN "site ${1}: ownership" "what is not ${D_USER}'s in ${D_HOME} is not handed over by itself: ${why//|/ } (setup.sh fix-owner ${1} shows it)"
+}
+
+# The hand-over itself: on unless somebody switched it off, and idle without the kernel setting
+# that keeps a site user from giving a file of root's a second name inside its site.
+_doc_check_fix_owner_auto() {
+  [[ -n "$(lib_domains_list)" ]] || return 0
+  if ! lib_domain_fix_owner_auto_enabled; then
+    _doc_add OK "ownership" "files root uploads into a site stay root's until fix-owner is run (switched off; lomp fix-owner --auto on)"
+  elif ! lib_domain_hardlinks_protected; then
+    _doc_add WARN "ownership" "files root uploads into a site are not handed over: fs.protected_hardlinks is off (sysctl -w fs.protected_hardlinks=1; lomp optimize writes it for good)"
+  elif ! lib_cron_has htaccess; then
+    _doc_add WARN "ownership" "files root uploads into a site are not handed over: the minute check is not scheduled (lomp update adds it)"
+  else
+    _doc_add OK "ownership" "what root uploads into a site is the site user's within a minute"
   fi
 }
 
@@ -520,6 +544,7 @@ _doc_check_domains() {
       else _doc_add OK "site ${d}: hardening" "process execution left on for this site (--allow-exec)"; fi
     fi
     _doc_site_wp_config "$d"
+    _doc_site_fix_owner "$d"
     # the other sites' users are "others" to this home
     if lib_domain_home_closed "$D_HOME"; then _doc_add OK "site ${d}: isolation" "${D_HOME} is closed to the other sites' users"
     else _doc_add WARN "site ${d}: isolation" "${D_HOME} lets other accounts in, so another site's PHP can read this one's files (lomp update closes it)"; fi
@@ -943,6 +968,7 @@ lib_doctor_run() {
   _doc_check_cron
   _doc_check_domains
   _doc_check_sitefw
+  _doc_check_fix_owner_auto
   _doc_check_apps
   _doc_check_mail
   _doc_check_webmail

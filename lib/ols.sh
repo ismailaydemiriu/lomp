@@ -714,12 +714,15 @@ lib_ols_htaccess_watch_ensure() {
 # lock it does nothing, so a reload never lands in the middle of a configuration change, and a
 # server that (re)started less than a minute ago is left alone: a plugin that keeps rewriting
 # its .htaccess costs at most one reload a minute.
-# The same pass closes a wp-config.php that WordPress's installer left 0666
-# (lib_domain_wp_config_close): that waits for somebody's browser too.
+# The same pass does the two other things that wait for somebody outside: it hands what root
+# uploaded into a site to the site's user (lib_domain_fix_owner_auto), and then closes a
+# wp-config.php that WordPress's installer left 0666 (lib_domain_wp_config_close) - in that
+# order, so that an uploaded wp-config.php is the site's by the time it is closed.
 lib_ols_htaccess_check_main() {
   local changed="" started="" since=0
   exec 200>"$LOCK_FILE"
   flock -n 200 || return 0
+  lib_domain_fix_owner_auto
   lib_domain_wp_config_close
   changed="$(lib_ols_htaccess_pending)"
   [[ -n "$changed" ]] || return 0

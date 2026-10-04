@@ -723,6 +723,9 @@ lib_install_migrate() {
   if [[ -z "$DOMAIN_ISOLATED" ]]; then lib_ok "Every site's home is closed to the other sites' users"
   elif (( OPT_DRY_RUN )); then lib_info "[dry-run] would close these sites' homes to the other sites' users: ${DOMAIN_ISOLATED}"
   else lib_ok "These sites' homes are now closed to the other sites' users: ${DOMAIN_ISOLATED}"; fi
+  # the minute check hands uploads over: said here, because it changes whose files are whose
+  if lib_domain_fix_owner_auto_enabled; then lib_ok "What root uploads into a site is handed to the site's user within a minute (lomp fix-owner --auto off stops that)"
+  else lib_ok "What root uploads into a site stays root's until fix-owner is run (lomp fix-owner --auto on)"; fi
   # last: a vhost OpenLiteSpeed refuses ends the run here
   lib_domain_logs_repair
   if [[ -n "$DOMAIN_LOGS_MOVED" ]]; then

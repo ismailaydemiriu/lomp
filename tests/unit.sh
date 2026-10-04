@@ -4607,6 +4607,116 @@ assert_eq  "--all without a site exits 0" 0 "$(_fo --all)"
 assert_has "and says there is none" "No sites have been added yet." "$(cat "$_fo_out")"
 STATE_DIR="$TMP/fo-state"
 
+# The same, by itself: the pass the minute check runs over every site. It walks a home once to
+# see whether anything there is somebody else's, and only then runs fix-owner's checks and its
+# chown - quietly, saying once what it could not hand over and keeping the reason for doctor.
+_fa() {   # -> the exit status; the output goes to $_fo_out
+  local rc=0 prev=""
+  prev="$(trap -p ERR || true)"
+  trap - ERR
+  set +e
+  # no site's state is loaded when cron starts it: whose files they become has to come from the pass
+  ( set -Eeuo pipefail; shopt -s lastpipe; OPT_QUIET=0; lib_domain_state_reset; lib_domain_fix_owner_auto ) >"$_fo_out" 2>&1
+  rc=$?
+  set -e
+  [[ -z "$prev" ]] || eval "$prev"
+  printf '%s' "$rc"
+}
+_fa_doc() { lib_domain_state_load own.example.com; DOC_RESULTS=(); DOC_FAIL=0; DOC_WARN=0; DOC_OK=0; "$@"; printf '%s' "${DOC_RESULTS[*]-}"; }
+_fa_stamp="$STATE_DIR/domains/own.example.com/fix-owner.auto"
+_fa_orig_ri="$(declare -f lib_require_installed)"
+eval 'lib_require_installed() { return 0; }'
+assert_eq  "its reason for a refusal is kept in the site's state directory" "$_fa_stamp" "$(_domain_fix_owner_stamp own.example.com)"
+assert_true "it is on unless somebody switched it off" lib_domain_fix_owner_auto_enabled
+_fo_ids="$_fo_mine"; : >"$_fo_calls"
+assert_eq  "a pass over a site whose files are all its own exits 0" 0 "$(_fa)"
+assert_eq  "says nothing, starts no chown and keeps no reason" "" "$(cat "$_fo_out")$(cat "$_fo_calls")$(cat "$_fa_stamp" 2>/dev/null || true)"
+_fo_ids="$_fo_other"; : >"$_fo_calls"
+assert_eq  "a pass over a site that holds somebody else's files exits 0" 0 "$(_fa)"
+assert_has "it starts the chown fix-owner starts" "call -h -- own_example_com:own_example_com" "$(cat "$_fo_calls")"
+assert_lacks "and leaves logs/ out as fix-owner does" "${_fo_hp}/logs" "$(cat "$_fo_calls")"
+# the fake chown changes nothing, so nothing changed hands
+assert_has "what could not be handed over is said" "own.example.com: what is not own_example_com's in ${_fo_h} is not handed over by itself: ${_fo_all} files and directories did not change hands" "$(cat "$_fo_out")"
+assert_has "with the command that shows it" "(setup.sh fix-owner own.example.com shows it)" "$(cat "$_fo_out")"
+assert_has "and the reason is kept" "${_fo_all} files and directories did not change hands" "$(cat "$_fa_stamp" 2>/dev/null || true)"
+: >"$_fo_calls"
+assert_eq  "the next pass tries again" 0 "$(_fa)"
+assert_has "(the chown is started again)" "call -h -- own_example_com:own_example_com" "$(cat "$_fo_calls")"
+assert_eq  "and does not say the same thing a second time" "" "$(cat "$_fo_out")"
+assert_has "doctor reads the reason" "WARN|site own.example.com: ownership|what is not own_example_com's in " "$(_fa_doc _doc_site_fix_owner own.example.com)"
+assert_has "all of it" "is not handed over by itself: ${_fo_all} files and directories did not change hands" "$(_fa_doc _doc_site_fix_owner own.example.com)"
+if (( CAN_HARDLINK )); then
+  ln "$_fo_h/public_html/index.php" "$_fo_h/public_html/index-copy.php"; : >"$_fo_calls"
+  assert_eq  "a file with a second name: the pass exits 0" 0 "$(_fa)"
+  assert_has "it stops the whole site, as it stops fix-owner" "a device node or a file with more than one name is never handed over, and the site has 2 of them" "$(cat "$_fo_out")"
+  assert_eq  "before chown ever runs" "" "$(cat "$_fo_calls")"
+  assert_has "the new reason takes the place of the old one" "a file with more than one name is never handed over" "$(cat "$_fa_stamp")"
+  rm -f "$_fo_h/public_html/index-copy.php"
+fi
+printf '36 25 8:1 / %s rw,relatime shared:1 - ext4 /dev/sdb1 rw\n' "$_fo_h/public_html/shared" >"$DOM_MOUNTINFO"; : >"$_fo_calls"
+assert_eq  "a mount inside the home: the pass exits 0" 0 "$(_fa)"
+assert_has "it stops the site too" "a filesystem is mounted inside the home" "$(cat "$_fo_out")"
+assert_eq  "before chown ever runs" "" "$(cat "$_fo_calls")"
+: >"$DOM_MOUNTINFO"
+_fo_ids="$_fo_mine"
+assert_eq  "once nothing is somebody else's any more" 0 "$(_fa)"
+assert_false "the reason goes" test -e "$_fa_stamp"
+assert_eq  "and doctor has nothing to say" "" "$(_fa_doc _doc_site_fix_owner own.example.com)"
+# what keeps it from running at all
+_fo_ids="$_fo_other"; : >"$_fo_calls"
+OPT_DRY_RUN=1
+assert_eq  "a dry run hands nothing over" "0" "$(_fa)$(cat "$_fo_calls")"
+OPT_DRY_RUN=0
+printf '0\n' >"$DOM_HARDLINKS_SYSCTL"
+assert_eq  "nor does a pass on a server without protected hard links" "0" "$(_fa)$(cat "$_fo_calls")"
+assert_has "which doctor names" "WARN|ownership|files root uploads into a site are not handed over: fs.protected_hardlinks is off" "$(_fa_doc _doc_check_fix_owner_auto)"
+printf '1\n' >"$DOM_HARDLINKS_SYSCTL"
+if (( CAN_SYMLINK )); then
+  mv "$_fo_h" "$TMP/fo-home-aside"; ln -s "$TMP/fo-home-aside" "$_fo_h"
+  assert_eq  "a home that is a link is passed over" "0" "$(_fa)$(cat "$_fo_calls")"
+  rm -f "$_fo_h"; mv "$TMP/fo-home-aside" "$_fo_h"
+fi
+# the switch
+assert_eq  "--auto wants on or off"              1 "$(_fo --auto)"
+assert_eq  "and nothing else"                    1 "$(_fo --auto maybe)"
+assert_eq  "and no site: it is for all of them" 1 "$(_fo --auto off own.example.com)"
+assert_true "none of which switched anything"    lib_domain_fix_owner_auto_enabled
+assert_eq  "fix-owner --auto off exits 0"        0 "$(_fo --auto off)"
+assert_false "and switches it off"               lib_domain_fix_owner_auto_enabled
+: >"$_fo_calls"
+assert_eq  "a pass then hands nothing over"      "0" "$(_fa)$(cat "$_fo_calls")"
+assert_has "doctor says that it is off, without a warning" "OK|ownership|files root uploads into a site stay root's until fix-owner is run" "$(_fa_doc _doc_check_fix_owner_auto)"
+assert_eq  "fix-owner itself still runs"         1 "$(_fo own.example.com)"
+assert_has "(its chown is started)"              "call -h -- own_example_com:own_example_com" "$(cat "$_fo_calls")"
+OPT_DRY_RUN=1
+assert_eq  "a dry run of the switch exits 0"     0 "$(_fo --auto on)"
+OPT_DRY_RUN=0
+assert_has "says what it would do"               "[dry-run] would switch the automatic hand-over on" "$(cat "$_fo_out")"
+assert_lacks "and not that it did"               "is handed to its user by itself" "$(cat "$_fo_out")"
+assert_false "and switches nothing"              lib_domain_fix_owner_auto_enabled
+lib_cron_remove htaccess
+assert_eq  "--auto on exits 0"                   0 "$(_fo --auto on)"
+assert_true "and switches it on again"           lib_domain_fix_owner_auto_enabled
+assert_has "making sure the minute check is scheduled" "htaccess-check --quiet # server-setup:htaccess" "$(cat "$CRON_FILE")"
+assert_has "doctor says what happens then"       "OK|ownership|what root uploads into a site is the site user's within a minute" "$(_fa_doc _doc_check_fix_owner_auto)"
+# the minute check runs it, before it closes a wp-config.php, and not while another command
+# holds the lock
+assert_true "the minute check hands over before it closes a wp-config.php" \
+  bash -c '[[ "$1" == *lib_domain_fix_owner_auto*lib_domain_wp_config_close* ]]' _ "$(declare -f lib_ols_htaccess_check_main)"
+: >"$_fo_calls"
+( eval 'flock() { return 1; }; lib_ols_htaccess_pending() { return 0; }'; lib_ols_htaccess_check_main ) >/dev/null 2>&1 || true
+assert_eq  "it hands nothing over while another command holds the lock" "" "$(cat "$_fo_calls")"
+( eval 'flock() { return 0; }; lib_ols_htaccess_pending() { return 0; }'; lib_ols_htaccess_check_main ) >/dev/null 2>&1 || true
+assert_has "and does otherwise"                  "call -h -- own_example_com:own_example_com" "$(cat "$_fo_calls")"
+assert_has "the usage names the switch"          "setup.sh fix-owner --auto on|off" "$(lib_domain_fix_owner_usage)"
+assert_has "and so does the command reference"   "fix-owner --auto on|off" "$(lib_usage)"
+assert_has "update says what the minute check does to uploads" 'lib_domain_fix_owner_auto_enabled' "$(declare -f lib_install_migrate)"
+assert_has "doctor looks for a kept reason in every site" '_doc_site_fix_owner "$d"' "$(declare -f _doc_check_domains)"
+assert_has "and says once whether uploads are handed over at all" '_doc_check_fix_owner_auto' "$(declare -f lib_doctor_run)"
+_fo_ids="$_fo_mine"; _fa >/dev/null
+eval "$_fa_orig_ri"
+_fo_ids="$_fo_other"
+
 # the account behind the numbers: it has to be this site's, and never root
 eval "$_fo_orig_ids"
 if command -v getent >/dev/null 2>&1 && getent passwd root >/dev/null 2>&1; then
@@ -4653,6 +4763,15 @@ if (( EUID == 0 )) && [[ "${OSTYPE:-}" != msys* && "${OSTYPE:-}" != cygwin* ]] &
   assert_eq  "a directory a link led to too"     "0 0 0" "$(stat -c '%u %g' "$_fo_v/dir") $(stat -c %u "$_fo_v/dir/inner")"
   assert_eq  "a second run has nothing to do" 0 "$(_fo real.example.com)"
   assert_has "and says so" "real.example.com: everything already belongs to nobody" "$(cat "$_fo_out")"
+  # ... and by itself: a new upload as root, its wp-config.php with it
+  mkdir -p "$_fo_r/public_html/up"; printf 'u' >"$_fo_r/public_html/up/new.php"
+  assert_eq  "by itself: a pass exits 0" 0 "$(_fa)"
+  assert_has "and says what it handed over" "real.example.com: 2 files and directories handed to nobody:" "$(cat "$_fo_out")"
+  assert_eq  "nothing in the home but logs/ is root's after it" "" "$(find "$_fo_r" -path "$_fo_r/logs" -prune -o -uid 0 -print)"
+  assert_eq  "logs/ still is" "0 0" "$(stat -c '%u %g' "$_fo_r/logs")"
+  printf '<?php // uploaded as root\n' >"$_fo_r/public_html/wp-config.php"; chmod 0644 "$_fo_r/public_html/wp-config.php"
+  ( eval 'flock() { return 0; }; lib_ols_htaccess_pending() { return 0; }'; lib_ols_htaccess_check_main ) >/dev/null 2>&1 || true
+  assert_eq  "one pass of the minute check hands an uploaded wp-config.php over and closes it" "640 nobody" "$(stat -c '%a %U' "$_fo_r/public_html/wp-config.php")"
   rm -rf "$_fo_r" "$_fo_v" "${STATE_DIR}/domains/real.example.com"
 fi
 
@@ -4669,6 +4788,10 @@ _mfo() {   # [answer] -> the command the menu runs
 }
 assert_eq  "the menu hands over every site by default" "fix-owner --all" "$(_mfo)"
 assert_eq  "or the one picked"                         "fix-owner picked.example.com" "$(_mfo 2)"
+assert_eq  "the third choice stops the automatic hand-over" "fix-owner --auto off" "$(_mfo 3)"
+lib_manifest_set '.fix_owner_auto' off
+assert_eq  "or starts it again when it is off"         "fix-owner --auto on" "$(_mfo 3)"
+lib_manifest_set '.fix_owner_auto' on
 _menu_block="$(awk '/_menu_group "SITES"/{f=1} f{print} f && /^[[:space:]]*esac/{exit}' "$ROOT/lib/menu.sh")"
 assert_has "it is item 21 of the main menu"   '_menu_item 21 "Fix file ownership (after uploading as root)"' "$_menu_block"
 assert_has "which opens it"                   '21) _menu_fix_owner ;;' "$_menu_block"
@@ -4681,6 +4804,7 @@ if [[ -e /proc/sys/fs/protected_hardlinks ]]; then
 fi
 
 eval "$_fo_saved"; eval "$_fo_orig_ids"; eval "$_fo_orig_rt"
+unset -f _fa _fa_doc
 rm -rf "$_fo_h" "$_fo_ld"
 lib_domain_state_reset
 
@@ -5377,74 +5501,15 @@ if (( CAN_CHMOD )); then
     assert_eq "a file closed further (0${_m}) is not opened up" "0 ${_m}" "$(_wp_pass) $(_wp_mode)"
   done
   assert_eq  "nothing is run for those"            "" "$(cat "$RUNUSER_LOG")"
-  # A file root uploaded: closed as root's, PHP could no longer read it, so it is handed to the
-  # site first, the way fix-owner hands a file over. The suite cannot own a file as root:
-  # "root" is whoever runs it here and the site somebody else, and the chown on find's PATH
-  # only records how it was called - so the file stays "root's", and is not closed as such.
-  _wp_saved2="$(declare -p DOM_FIX_OWNER_PATH DOM_HARDLINKS_SYSCTL DOM_UPLOADER_UID)"
-  _wp_bin2="$TMP/wp-bin2"; mkdir -p "$_wp_bin2"
-  cat >"$_wp_bin2/chown" <<EOF
-#!/bin/sh
-printf 'chown %s in %s\n' "\$*" "\$(pwd -P)" >>"${_wp_chown}"
-EOF
-  chmod 0755 "$_wp_bin2/chown"
-  DOM_FIX_OWNER_PATH="${_wp_bin2}:/usr/bin:/bin"; DOM_UPLOADER_UID="$_wp_u"
-  DOM_HARDLINKS_SYSCTL="$TMP/wp-hardlinks2"; printf '1\n' >"$DOM_HARDLINKS_SYSCTL"
-  _wp_ids="$(( _wp_u + 1 )) ${_wp_g}"; _wp_dr="$(cd "$SITES_ROOT/wp3.example.com/public_html" && pwd -P)"
-  chmod 0666 "$_wp_c"; : >"$_wp_chown"; : >"$RUNUSER_LOG"
-  assert_eq  "a pass over a wp-config.php root uploaded exits 0" 0 "$(_wp_pass)"
-  assert_eq  "it goes to the site by a chown that follows no link, run inside the document root on the bare name" \
-    "chown -h -- wp3_example_com:wp3_example_com ./wp-config.php in ${_wp_dr}" "$(cat "$_wp_chown")"
-  assert_eq  "and while it is still root's it is not closed" "666 " "$(_wp_mode) $(cat "$RUNUSER_LOG")"
-  : >"$_wp_chown"; chmod 0640 "$_wp_c"
-  assert_eq  "a file of root's that is closed already stays root's" "0 " "$(_wp_pass) $(cat "$_wp_chown")"
-  chmod 0644 "$_wp_c"; printf '0\n' >"$DOM_HARDLINKS_SYSCTL"
-  assert_eq  "without protected hard links nothing changes hands" "0 " "$(_wp_pass) $(cat "$_wp_chown")"
-  printf '1\n' >"$DOM_HARDLINKS_SYSCTL"
-  if ln "$_wp_c" "$TMP/wp-second-name" 2>/dev/null && [[ "$(stat -c %h "$_wp_c")" == 2 ]]; then
-    assert_eq "a file that has a second name is not taken for an upload" "0 " "$(_wp_pass) $(cat "$_wp_chown")"
-  fi
-  rm -f "$TMP/wp-second-name"
-  if (( CAN_SYMLINK )); then
-    # the document root replaced by a link to a directory that holds a file of root's
-    mkdir -p "$TMP/wp-rootdir"; mv "$_wp_c" "$TMP/wp-rootdir/wp-config.php"
-    mv "$SITES_ROOT/wp3.example.com/public_html" "$TMP/wp3-docroot"; ln -s "$TMP/wp-rootdir" "$SITES_ROOT/wp3.example.com/public_html"
-    assert_eq "a link in place of the document root is not entered" "0 644 " "$(_wp_pass) $(stat -c %a "$TMP/wp-rootdir/wp-config.php") $(cat "$_wp_chown")"
-    rm -f "$SITES_ROOT/wp3.example.com/public_html"; mv "$TMP/wp3-docroot" "$SITES_ROOT/wp3.example.com/public_html"
-    mv "$TMP/wp-rootdir/wp-config.php" "$_wp_c"
-  fi
-  DOM_UPLOADER_UID="$(( _wp_u + 2 ))"
-  assert_eq  "the file of a third account is nobody's to hand over" "0 644 " "$(_wp_pass) $(_wp_mode) $(cat "$_wp_chown")"
-  eval "$_wp_saved2"
+  # a file that is not the site's own: closed as somebody else's, PHP could no longer read it.
+  # What root uploaded has become the site's by then (the fix-owner section has that pass)
+  chmod 0666 "$_wp_c"; _wp_ids="$(( _wp_u + 1 )) ${_wp_g}"; : >"$RUNUSER_LOG"
+  assert_eq  "a file that is not the site user's is left as it is" "0 666" "$(_wp_pass) $(_wp_mode)"
   _wp_ids="its user wp3_example_com does not exist"
   eval '_domain_fix_owner_ids() { printf "%s" "$_wp_ids"; [[ "$_wp_ids" == [0-9]* ]]; }'
-  chmod 0666 "$_wp_c"; : >"$RUNUSER_LOG"
-  assert_eq  "the file of a site whose account is not a site's is left as it is" "0 666" "$(_wp_pass) $(_wp_mode)"
-  assert_eq  "with nothing run for it"             "" "$(cat "$RUNUSER_LOG")"
+  assert_eq  "so is the file of a site whose account is not a site's" "0 666" "$(_wp_pass) $(_wp_mode)"
+  assert_eq  "with nothing run for either"         "" "$(cat "$RUNUSER_LOG")"
   _wp_ids="${_wp_u} ${_wp_g}"
-  # as root, for real: the upload changes hands and is closed, and a file root keeps elsewhere -
-  # behind a link, or under a second name - stays root's
-  if (( EUID == 0 )) && [[ "${OSTYPE:-}" != msys* && "${OSTYPE:-}" != cygwin* ]] && id -u nobody >/dev/null 2>&1 \
-     && [[ "$(cat /proc/sys/fs/protected_hardlinks 2>/dev/null || true)" == 1 ]]; then
-    lib_domain_state_reset
-    D_DOMAIN="wp4.example.com"; D_IDENT="wp4_example_com"; D_USER="nobody"; D_GROUP="$(id -gn nobody)"
-    D_HOME="$SITES_ROOT/wp4.example.com"; D_MODE="php"; D_STATUS="active"
-    lib_domain_state_save
-    mkdir -p "$D_HOME/public_html"; _wp_r="$D_HOME/public_html/wp-config.php"; _wp_v="$TMP/wp-victim"
-    printf '<?php // uploaded as root\n' >"$_wp_r"; chmod 0644 "$_wp_r"
-    printf 'a file root keeps\n' >"$_wp_v"; chmod 0644 "$_wp_v"
-    _wp_ids="$(id -u nobody) $(id -g nobody)"
-    DOM_FIX_OWNER_PATH="/usr/sbin:/usr/bin:/sbin:/bin"; DOM_HARDLINKS_SYSCTL="/proc/sys/fs/protected_hardlinks"
-    assert_eq  "as root: a wp-config.php root uploaded is the site's and 0640 after one pass" "0 640 nobody:${D_GROUP}" "$(_wp_pass) $(stat -c '%a %U:%G' "$_wp_r")"
-    assert_has "and the log says whose it was" "wp-config.php of wp4.example.com handed to nobody:${D_GROUP} (root had uploaded it)" "$(cat "$LOG_FILE")"
-    rm -f "$_wp_r"; ln -s "$_wp_v" "$_wp_r"
-    assert_eq  "a link to a file root keeps elsewhere changes nothing there" "0 644 root" "$(_wp_pass) $(stat -c '%a %U' "$_wp_v")"
-    rm -f "$_wp_r"; ln "$_wp_v" "$_wp_r"
-    assert_eq  "nor does a second name of it" "0 644 root" "$(_wp_pass) $(stat -c '%a %U' "$_wp_v")"
-    rm -rf "$D_HOME" "$_wp_v" "$STATE_DIR/domains/wp4.example.com"
-    eval "$_wp_saved2"; _wp_ids="${_wp_u} ${_wp_g}"
-    lib_domain_state_reset
-  fi
   # only where PHP runs
   for _m in static proxy; do
     lib_json_set "$(lib_domain_json wp3.example.com)" '.mode = $m' --arg m "$_m"

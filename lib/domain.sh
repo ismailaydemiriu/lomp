@@ -1005,28 +1005,12 @@ WP_ARCHIVE_URL="https://wordpress.org/latest.zip"
 # the browser. The check cron runs every minute (lib_ols_htaccess_check_main) therefore looks
 # at the wp-config.php in the document root of every PHP and WordPress site and closes one
 # that carries more than 0640, the mode "add --wordpress" gives it: as the site's user, whose
-# file it has to be. One root uploaded - WinSCP logged in as root - is handed to the site
-# first: closed as root's it would be a file PHP could no longer read. Anybody else's is left
-# alone, and so are a file closed further (0600, or root's and readable by the site's group
-# only, which keeps PHP from changing it) and a link. A site costs a pass one stat; the state
-# is read only for a file that has to change.
-DOM_UPLOADER_UID="0"   # (a variable for the tests, which cannot own a file as root)
-
-# A wp-config.php root uploaded goes to the site the way fix-owner hands a file over: chown -h,
-# started by find from inside the directory it holds open, on a regular file with one name
-# that is root's. A link in the file's place is then changed itself and never followed, a link
-# in the document root's place is not entered, and a second name of a file root keeps
-# elsewhere is not taken for an upload - nothing is, unless the kernel keeps users from making
-# such names (lib_domain_hardlinks_protected).
-_domain_wp_config_hand_over() {   # home
-  lib_domain_hardlinks_protected || return 1
-  [[ -d "$1" && ! -L "$1" ]] || return 1
-  PATH="$DOM_FIX_OWNER_PATH" find -P "$1" -xdev -mindepth 2 -maxdepth 2 -path "$1/public_html/wp-config.php" \
-    -type f -links 1 -uid "$DOM_UPLOADER_UID" -execdir chown -h -- "${D_USER}:${D_GROUP}" {} + 2>/dev/null
-}
-
+# file it has to be - closed as root's it would be a file PHP could no longer read. One root
+# uploaded has become the site's a moment earlier in the same pass (lib_domain_fix_owner_auto),
+# unless that is switched off. A file closed further (0600) is left as it is, and so is a
+# link. A site costs a pass one stat; the state is read only for a file that has to change.
 lib_domain_wp_config_close() {
-  local j="" d="" home="" f="" st="" mode="" owner="" ids="" uid=""
+  local j="" d="" home="" f="" st="" mode="" owner="" ids=""
   (( OPT_DRY_RUN )) && return 0
   for j in "$STATE_DIR"/domains/*/domain.json; do
     [[ -s "$j" ]] || continue
@@ -1039,16 +1023,9 @@ lib_domain_wp_config_close() {
     (( (8#$mode & ~8#640) != 0 )) || continue
     lib_domain_state_load "$d" || continue
     [[ "$D_MODE" == "php" || "$D_MODE" == "wordpress" ]] || continue
-    # the site's own account, as fix-owner wants it
+    # the site's own account, as fix-owner wants it, and the file that account's
     ids="$(_domain_fix_owner_ids "$home")" || continue
-    uid="${ids%% *}"
-    if [[ "$owner" != "$uid" ]]; then
-      [[ "$owner" == "$DOM_UPLOADER_UID" ]] || continue
-      _domain_wp_config_hand_over "$home" || continue
-      # whatever is there now: only the site's own file goes on to be closed
-      [[ "$(stat -c %u "$f" 2>/dev/null || true)" == "$uid" ]] || continue
-      lib_ok "wp-config.php of ${d} handed to ${D_USER}:${D_GROUP} (root had uploaded it)"
-    fi
+    [[ "$owner" == "${ids%% *}" ]] || continue
     # a failure is not reported: this runs again in a minute, and would say so every time
     if lib_domain_as_user chmod 0640 "$f" 2>/dev/null; then
       lib_ok "wp-config.php of ${d} closed to 0640 (it was ${mode})"
@@ -1394,9 +1371,14 @@ DOM_MOUNTINFO="/proc/self/mountinfo"
 lib_domain_fix_owner_usage() {
   cat <<'EOF'
 Usage: setup.sh fix-owner <domain>... | --all
+       setup.sh fix-owner --auto on|off
   Hand a site's files back to its own user and group after uploading as root (WinSCP, scp,
   an archive unpacked by root). Only what belongs to someone else changes; logs/ stays
   root's and the file modes stay as they are. With --dry-run it only counts.
+  The same happens by itself, in every site, within a minute of an upload: the command is
+  for now rather than in a minute, and for seeing why a site's files were not handed over.
+  --auto off stops that, on a server where root keeps files of its own in a site on purpose
+  (handed over, they are files the site's PHP may change); --auto on starts it again.
 EOF
 }
 
@@ -1536,18 +1518,115 @@ lib_domain_fix_owner_guard() {
     "sysctl -w fs.protected_hardlinks=1 (Ubuntu's default; setup.sh optimize writes it for good), then run it again"
 }
 
+# ---- the same, by itself -----------------------------------------------------------------
+# Whoever uploads as root does so again and again, and a site whose files are root's is one
+# WordPress cannot update or store an upload in. So the check cron runs every minute
+# (lib_ols_htaccess_check_main) hands over what is not a site's own as well, in every site:
+# one walk of a home finds out whether there is anything (it stops at the first, and after 30
+# seconds), and only then do the checks and the chown of fix-owner run - the same ones, in the
+# same order, with what they find kept in two variables instead of printed.
+# "fix-owner --auto off" stops it, for a server where root keeps files of its own in a site on
+# purpose: handed over, such a file is one the site's PHP may change.
+# What cannot be handed over is said once, not every minute: the reason is kept in the site's
+# state directory, where doctor reads it, and goes when the site has nothing left that is
+# somebody else's.
+DOM_AUTO_N=0 DOM_AUTO_WHY=""
+
+lib_domain_fix_owner_auto_enabled() { [[ "$(lib_manifest_get '.fix_owner_auto')" != "off" ]]; }
+_domain_fix_owner_stamp() { printf '%s/fix-owner.auto' "$(lib_domain_state_dir "$1")"; }
+
+# 0 = DOM_AUTO_N entries changed hands (0 when there was nothing); 1 = none could, and
+# DOM_AUTO_WHY says why. An upload still under way leaves some for the next pass: that is
+# progress, not a failure.
+_domain_fix_owner_quiet() {   # domain  (its D_* are loaded)
+  local home="" ids="" uid="" gid="" mounts="" n=0 left=0
+  local -a hazards=()
+  DOM_AUTO_N=0; DOM_AUTO_WHY=""
+  home="$(lib_domain_home "$1")"
+  if ! ids="$(_domain_fix_owner_ids "$home")"; then DOM_AUTO_WHY="$ids"; return 1; fi
+  read -r uid gid <<<"$ids"
+  mounts="$(_domain_mounts_below "$home")"
+  if [[ -n "$mounts" ]]; then DOM_AUTO_WHY="a filesystem is mounted inside the home"; return 1; fi
+  mapfile -d '' hazards < <(_domain_fix_owner_hazards "$home" "$uid" "$gid")
+  if ((${#hazards[@]} > 0)); then
+    DOM_AUTO_WHY="a device node or a file with more than one name is never handed over, and the site has ${#hazards[@]} of them"
+    return 1
+  fi
+  n="$(_domain_fix_owner_count "$home" "$uid" "$gid")"
+  (( n > 0 )) || return 0
+  _domain_fix_owner_apply "$home" "$uid" "$gid" >/dev/null 2>&1 || true
+  left="$(_domain_fix_owner_count "$home" "$uid" "$gid")"
+  if (( left >= n )); then
+    DOM_AUTO_WHY="$(_domain_n_entries "$left") did not change hands (made immutable? lsattr)"
+    return 1
+  fi
+  DOM_AUTO_N=$(( n - left ))
+  return 0
+}
+
+lib_domain_fix_owner_auto() {
+  local j="" d="" home="" ug="" ids="" first="" stamp=""
+  (( OPT_DRY_RUN )) && return 0
+  lib_domain_fix_owner_auto_enabled || return 0
+  lib_domain_hardlinks_protected || return 0
+  for j in "$STATE_DIR"/domains/*/domain.json; do
+    [[ -s "$j" ]] || continue
+    d="${j%/domain.json}"; d="${d##*/}"
+    home="$(lib_domain_home "$d")"
+    [[ -d "$home" && ! -L "$home" ]] || continue
+    # the account from one jq call, not the thirty of a whole state load: this is every minute
+    ug="$(jq -r '"\(.user // "") \(.group // "")"' "$j" 2>/dev/null || true)"
+    [[ "$ug" == ?*" "?* ]] || continue
+    ids="$(D_USER="${ug%% *}"; D_GROUP="${ug##* }"; _domain_fix_owner_ids "$home")" || continue
+    first="$(timeout 30 find -P "$home" -xdev \( -path "${home}/logs" -prune \) -o \
+      \( ! -uid "${ids%% *}" -o ! -gid "${ids##* }" \) -print -quit 2>/dev/null || true)"
+    stamp="$(_domain_fix_owner_stamp "$d")"
+    if [[ -z "$first" ]]; then
+      if [[ -e "$stamp" ]]; then rm -f -- "$stamp"; fi
+      continue
+    fi
+    lib_domain_state_load "$d" || continue
+    if _domain_fix_owner_quiet "$d"; then
+      if [[ -e "$stamp" ]]; then rm -f -- "$stamp"; fi
+      if (( DOM_AUTO_N > 0 )); then
+        lib_ok "${d}: $(_domain_n_entries "$DOM_AUTO_N") handed to ${D_USER}:${D_GROUP} (somebody else's until now: uploaded as root?)"
+      fi
+    elif [[ "$(cat "$stamp" 2>/dev/null || true)" != "$DOM_AUTO_WHY" ]]; then
+      printf '%s\n' "$DOM_AUTO_WHY" >"$stamp"
+      lib_warn "${d}: what is not ${D_USER}'s in ${home} is not handed over by itself: ${DOM_AUTO_WHY} (setup.sh fix-owner ${d} shows it)"
+    fi
+  done
+  return 0
+}
+
 lib_domain_fix_owner_main() {
-  local a="" all=0 d="" failed=0
+  local a="" all=0 d="" failed=0 auto=""
   local -a domains=()
   while (($# > 0)); do
     a="$1"; shift
     case "$a" in
       --all)     all=1 ;;
+      --auto)    auto="${1:-}"; shift || true
+                 [[ "$auto" == "on" || "$auto" == "off" ]] || lib_die "--auto takes on or off" "" "setup.sh fix-owner --auto off" ;;
       -h|--help) lib_domain_fix_owner_usage; return 0 ;;
       -*)        lib_domain_fix_owner_usage >&2; lib_die "Unknown option for fix-owner: ${a}" "" "see the usage above" ;;
       *)         domains+=("${a,,}") ;;
     esac
   done
+  if [[ -n "$auto" ]]; then
+    if (( all )) || ((${#domains[@]} > 0)); then lib_die "--auto switches it for every site" "" "setup.sh fix-owner --auto ${auto}"; fi
+    lib_require_tools
+    lib_require_installed
+    if (( OPT_DRY_RUN )); then lib_info "[dry-run] would switch the automatic hand-over ${auto}"; return 0; fi
+    lib_manifest_set '.fix_owner_auto' "$auto"
+    if [[ "$auto" == "on" ]]; then
+      lib_ols_htaccess_watch_ensure
+      lib_ok "What is not a site's own in its home is handed to its user by itself, within a minute"
+    else
+      lib_ok "Files change hands only when fix-owner is run (a wp-config.php root uploaded is then not closed by itself either)"
+    fi
+    return 0
+  fi
   if (( all )) && ((${#domains[@]} > 0)); then lib_die "--all and a domain cannot be combined" "" "setup.sh fix-owner --all"; fi
   if (( ! all )) && ((${#domains[@]} == 0)); then
     lib_domain_fix_owner_usage >&2

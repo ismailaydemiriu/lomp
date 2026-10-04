@@ -128,7 +128,9 @@ COMMANDS
   credentials <domain>|--all    Show stored credentials (never logged)
   fix-owner <domain>|--all      Hand a site's files back to its own user after uploading as
                                 root (WinSCP, scp). Only what is someone else's changes;
-                                logs/ and the file modes stay as they are
+                                logs/ and the file modes stay as they are. It happens by itself
+                                within a minute of an upload; the command is for right now
+  fix-owner --auto on|off       Stop that (root keeps files of its own in a site), or start it
   optimize                      Re-measure the system and re-tune (shows a diff)
   harden <domain>|--all         Limit what a PHP shell in a site can do: no process execution
                                 from PHP, open_basedir, no scripts in upload directories, and
@@ -166,7 +168,8 @@ COMMANDS
   firewall --web-open           Open them again
   htaccess-check                Reload OpenLiteSpeed when a site's .htaccess has changed
                                 (cron runs it every minute; OpenLiteSpeed reads it only on load),
-                                and close to 0640 a wp-config.php WordPress left more open
+                                hand what root uploaded into a site to the site's user, and
+                                close to 0640 a wp-config.php WordPress left more open
   notify [opts]                 --email a@b.c [--smtp-host H --smtp-port P
                                 --smtp-user U --smtp-pass P --smtp-from F]
                                 --telegram-token T --telegram-chat ID
@@ -715,11 +718,17 @@ _menu_remove_site() {
 # Files uploaded as root (WinSCP, scp) stay root's, and PHP, which runs as the site's own
 # user, cannot change them. This hands them over, every site at once unless one is picked.
 _menu_fix_owner() {
-  local what="" domain=""
+  local what="" domain="" auto="on"
+  lib_domain_fix_owner_auto_enabled || auto="off"
   printf '\n  %s\n' "Files uploaded as root go to their site's own user; what already is the site's stays as it is."
+  if [[ "$auto" == "on" ]]; then printf '  %s\n' "It happens by itself within a minute of an upload; this does it right now."; fi
   printf '  1) Every site\n  2) One site\n'
+  if [[ "$auto" == "on" ]]; then printf '  3) Stop doing it automatically (root keeps files of its own in a site)\n'
+  else printf '  3) Do it automatically again, within a minute of an upload (now: off)\n'; fi
   _menu_ask what "Choice" "1"
-  if [[ "$what" == "2" ]]; then
+  if [[ "$what" == "3" ]]; then
+    if [[ "$auto" == "on" ]]; then _menu_run fix-owner --auto off; else _menu_run fix-owner --auto on; fi
+  elif [[ "$what" == "2" ]]; then
     domain="$(_menu_pick_domain)" || { _menu_pause; return 0; }
     _menu_run fix-owner "$domain"
   else
