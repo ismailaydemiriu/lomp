@@ -57,7 +57,8 @@ COMMANDS
                                 unless --no-db is given.
   wordpress <domain>            Put the files of the latest WordPress (wordpress.org/latest.zip)
                                 into the public_html of a PHP site that exists, as the site's
-                                own user; the installation is finished in the browser
+                                own user; the installation is finished in the browser, and
+                                the wp-config.php it writes is closed to 0640 within a minute
                                 ("add --wordpress" installs it whole instead)
   db <domain>                   Create (or show) the MariaDB database for a site
   db list                       Every site's database, user and size (no passwords)
@@ -164,7 +165,8 @@ COMMANDS
                                 Needs a Cloudflare token: certificates then come over DNS-01
   firewall --web-open           Open them again
   htaccess-check                Reload OpenLiteSpeed when a site's .htaccess has changed
-                                (cron runs it every minute; OpenLiteSpeed reads it only on load)
+                                (cron runs it every minute; OpenLiteSpeed reads it only on load),
+                                and close the wp-config.php a site of "wordpress" got since
   notify [opts]                 --email a@b.c [--smtp-host H --smtp-port P
                                 --smtp-user U --smtp-pass P --smtp-from F]
                                 --telegram-token T --telegram-chat ID

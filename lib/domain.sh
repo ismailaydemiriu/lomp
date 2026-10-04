@@ -1000,6 +1000,38 @@ define('FS_METHOD', 'direct');" || lib_die "wp config create failed" "database c
 # and update itself - and nothing root does follows a name inside the site.
 WP_ARCHIVE_URL="https://wordpress.org/latest.zip"
 
+# The installer ends by making the wp-config.php it wrote 0666, whatever the umask. A site this
+# command put the files into therefore gets a marker in its state directory, and the check
+# cron runs every minute (lib_ols_htaccess_check_main) closes the file to 0640 - what
+# "add --wordpress" gives it - once it is there: as the site's user, who owns it. The marker
+# goes on a later pass, one that finds the file closed, so that a pass landing between the
+# installer's write and its chmod is not the last one. A file closed further (0600) is left
+# as it is, and so is a link.
+_domain_wp_pending_file() { printf '%s/wp-config.pending' "$(lib_domain_state_dir "$1")"; }
+
+lib_domain_wp_config_close_pending() {
+  local m="" d="" f="" mode=""
+  (( OPT_DRY_RUN )) && return 0
+  for m in "$STATE_DIR"/domains/*/wp-config.pending; do
+    [[ -e "$m" ]] || continue
+    d="$(basename "$(dirname "$m")")"
+    if ! lib_domain_state_load "$d"; then rm -f -- "$m"; continue; fi
+    f="${D_HOME}/public_html/wp-config.php"
+    [[ -f "$f" && ! -L "$f" ]] || continue
+    mode="$(stat -c %a "$f" 2>/dev/null || true)"
+    [[ "$mode" =~ ^[0-7]{3,4}$ ]] || continue
+    if (( (8#$mode & ~8#640) == 0 )); then rm -f -- "$m"; continue; fi
+    if lib_domain_as_user chmod 0640 "$f" 2>/dev/null; then
+      lib_ok "wp-config.php of ${d} closed to 0640 (WordPress's installer left it ${mode})"
+    else
+      # not the site user's to change, then: said once, and left to doctor
+      lib_warn "wp-config.php of ${d} is ${mode} and ${D_USER} could not close it: chmod 640 ${f}"
+      rm -f -- "$m"
+    fi
+  done
+  return 0
+}
+
 lib_domain_wordpress_usage() {
   cat <<'EOF'
 Usage: setup.sh wordpress <domain>
@@ -1011,6 +1043,7 @@ Usage: setup.sh wordpress <domain>
   WordPress's files replace the ones with the same name, the rest stays. What root uploaded
   there is handed to the site's user first, as fix-owner does. A site that has a
   wp-config.php is left alone. With --dry-run nothing is downloaded or written.
+  WordPress's installer leaves its wp-config.php 0666; within a minute it is 0640.
 EOF
 }
 
@@ -1130,6 +1163,9 @@ lib_domain_wordpress_main() {
   lib_domain_as_user rm -rf -- "$stage" || lib_warn "could not remove ${stage}"
   lib_rollback_clear
   lib_log_write INFO "WordPress ${ver:-of an unknown version} put into ${docroot} as ${D_USER}"
+  # for the wp-config.php the installer is going to write (see above)
+  : >"$(_domain_wp_pending_file "$domain")"
+  lib_ols_htaccess_watch_ensure
 
   if (( D_SSL )); then scheme="https"; fi
   host="$D_DOMAIN"
@@ -1146,8 +1182,7 @@ lib_domain_wordpress_main() {
   else
     lib_print_kv "Database"          "none yet; this makes one and prints its login: setup.sh db ${domain}"
   fi
-  # the installer ends by making its wp-config.php 0666, whatever the umask
-  lib_print_kv "After the installation" "chmod 640 ${docroot}/wp-config.php  (WordPress leaves it 0666)"
+  lib_print_kv "wp-config.php"     "goes to 0640 by itself within a minute of the installation (WordPress writes it 0666)"
   printf '\n'
 }
 

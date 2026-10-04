@@ -285,9 +285,11 @@ A document root that already holds something is asked about first: WordPress's f
 ones with the same name, the rest stays, and what root uploaded there is handed to the site's
 user first (as `fix-owner` does). A site that already has a `wp-config.php` is left alone.
 
-WordPress's installer ends by giving its new `wp-config.php` the mode 0666. Once the
-installation is done, close it: `chmod 640 /home/example.com/public_html/wp-config.php` (the
-command prints this line with the site's own path).
+WordPress's installer ends by giving its new `wp-config.php` the mode 0666. For a site this
+command set up, lomp closes it to 0640 - what `add --wordpress` gives it - within a minute of
+the installation: the check cron runs every minute does it, as the site's user. A file you
+closed further yourself (0600) is left as it is. A WordPress you uploaded and installed without
+this command is not watched: `chmod 640 /home/example.com/public_html/wp-config.php` there.
 
 ### .htaccess
 
@@ -442,6 +444,7 @@ closes them, and `doctor` names a home that is open. Directory listing is off, a
 `.git`, `.env`, `*.sql`, `*.bak` and `wp-config.php` are refused. A WordPress installed in the
 browser leaves its `wp-config.php` at 0666: `doctor`, and the daily health check with it, warns
 about one that its group or others may write to, and names the `chmod 640` that closes it.
+(For a site `lomp wordpress` set up, lomp closes it by itself within a minute.)
 
 ### What a PHP shell in a site can do
 
