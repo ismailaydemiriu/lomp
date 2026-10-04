@@ -4945,7 +4945,7 @@ PHP_APT_HISTORY="$_pc_hist"; eval "$_pc_saved"; unset -f apt-get apt-mark
 section "harden: what a PHP shell in one site can do"
 # A shell dropped into a site runs as that site's PHP. It should start no process, read nothing
 # outside the site, not run from an upload directory, and reach no local port it has no use for.
-_hd_fns="lib_domains_list lib_mail_installed _sitefw_uid lib_sitefw_loaded lib_ols_is_installed lib_ols_change_begin lib_ols_change_commit lib_harden_php_restart _harden_code lib_require_tools lib_require_installed lib_system_profile lib_domain_registered"
+_hd_fns="lib_domains_list lib_mail_installed _sitefw_uid lib_sitefw_loaded lib_service_enabled lib_ols_is_installed lib_ols_change_begin lib_ols_change_commit lib_harden_php_restart _harden_code lib_require_tools lib_require_installed lib_system_profile lib_domain_registered"
 _hd_saved="$(for _f in $_hd_fns; do declare -f "$_f" || true; done)"
 _hd_state="$STATE_DIR"; STATE_DIR="$TMP/hd-state"; mkdir -p "$STATE_DIR"; printf '{}\n' >"$STATE_DIR/manifest.json"
 _hd_ini="$HARDEN_PHP_INI_ROOT"; HARDEN_PHP_INI_ROOT="$TMP/hd-ini"
@@ -5135,10 +5135,61 @@ assert_has "and a firewall that is off or not loaded" 'lib_sitefw_loaded' "$(dec
 assert_has "setup.sh has the command" 'harden)         lib_harden_main' "$(cat "$ROOT/setup.sh")"
 assert_has "status takes no lock"     'harden) case "${rest[0]:-help}" in status|help' "$(cat "$ROOT/setup.sh")"
 assert_has "the menu offers it"       '23) _menu_harden' "$(cat "$ROOT/lib/menu.sh")"
-assert_has "update keeps the firewall's loader current" 'lib_sitefw_enable ||' "$(declare -f lib_install_migrate)"
+assert_has "update keeps the firewall's loader current" 'lib_sitefw_migrate' "$(declare -f lib_install_migrate)"
+assert_has "where the firewall is on"                   'lib_sitefw_enable ||' "$(declare -f lib_sitefw_migrate)"
+
+# ---- a setting an install re-run dropped
+# lib_install_manifest wrote .params anew, so the firewall read as off while its rules stayed
+# loaded and its unit enabled: a site added then got no rules of its own. migrate knows a server
+# in that state by the enabled unit beside no setting at all, and puts the setting back.
+eval 'lib_service_enabled() { [[ -e "$TMP/hd-unit-enabled" ]]; }'
+# Nothing of this machine's is in reach of it here: no systemctl, no iptables, and the loader it
+# writes is the recording one from above, not the real script.
+cp "$SITEFW_SCRIPT" "$TMP/hd-fw-stub"
+_hd_migrate() {
+  ( eval 'systemctl() { :; }
+          lib_have() { [[ "$1" == "iptables-restore" ]] || command -v "$1" >/dev/null 2>&1; }
+          lib_sitefw_render_script() { cat "$TMP/hd-fw-stub"; }'
+    OPT_QUIET=0; lib_sitefw_migrate 2>&1 )
+}
+_hd_setting() { lib_json_get_raw "$STATE_DIR/manifest.json" '.params.site_firewall'; }
+: >"$TMP/hd-unit-enabled"
+assert_false "a setting that says on is not lost" lib_sitefw_setting_lost
+lib_manifest_set_json '.params.site_firewall' 'false'
+assert_false "nor is one that says off, whatever the unit" lib_sitefw_setting_lost
+_out="$(_hd_migrate)"
+assert_eq    "migrate leaves a firewall that was switched off alone" "false|" "$(_hd_setting)|${_out}"
+lib_json_set "$STATE_DIR/manifest.json" 'del(.params.site_firewall)'
+assert_true  "no setting at all beside an enabled unit is" lib_sitefw_setting_lost
+rm -f "$TMP/hd-unit-enabled"
+assert_false "without the unit the firewall was never on" lib_sitefw_setting_lost
+: >"$TMP/hd-fw-calls"; _out="$(_hd_migrate)"
+assert_eq    "and migrate leaves it off, silently" "||" "$(_hd_setting)|$(cat "$TMP/hd-fw-calls")|${_out}"
+# the lost one: a site added while the firewall read as off comes into the rules
+: >"$TMP/hd-unit-enabled"
+_hd_site hd5.example.com php; eval '_sitefw_uid() { case "$1" in hd5_example_com) echo 2005 ;; hd4_example_com) echo 2004 ;; *) echo 2001 ;; esac; }'
+lib_sitefw_regen
+assert_lacks "while it reads as off, a new site gets no rules" "2005" "$(cat "$SITEFW_DIR/rules.v4")"
+_out="$(OPT_DRY_RUN=1; _hd_migrate)"
+assert_has   "a dry run says what migrate would do" "[dry-run] would record the site firewall as on again" "$_out"
+assert_eq    "and records nothing" "" "$(_hd_setting)"
+_out="$(_hd_migrate)"
+assert_eq    "migrate puts the lost setting back" "true" "$(_hd_setting)"
+assert_has   "the site added meanwhile has its rules" "--uid-owner 2005 -j LOMP-SITES-LOCAL" "$(cat "$SITEFW_DIR/rules.v4")"
+assert_eq    "and they are loaded" "start" "$(cat "$TMP/hd-fw-calls")"
+assert_has   "it says so" "The site firewall is recorded as on again" "$_out"
+assert_eq    "once: the next run finds nothing lost" "" "$(_hd_migrate)"
+# rules the kernel refuses switch it off again, as "harden" would: nothing is called on then
+lib_json_set "$STATE_DIR/manifest.json" 'del(.params.site_firewall)'
+eval 'lib_sitefw_loaded() { return 1; }'
+_out="$(_hd_migrate)"
+eval 'lib_sitefw_loaded() { return 0; }'
+assert_eq    "a firewall the kernel does not take is recorded as off" "false" "$(_hd_setting)"
+assert_lacks "and not reported as on again" "recorded as on again" "$_out"
+rm -f "$TMP/hd-unit-enabled"
 STATE_DIR="$_hd_state"; HARDEN_PHP_INI_ROOT="$_hd_ini"; SITEFW_DIR="$_hd_fw"; SITEFW_SCRIPT="$_hd_sc"; SITEFW_UNIT="$_hd_un"
 # shellcheck disable=SC2086
-unset -f $_hd_fns _hd_site _hd_m; eval "$_hd_saved"
+unset -f $_hd_fns _hd_site _hd_m _hd_migrate _hd_setting; eval "$_hd_saved"
 lib_domain_state_reset
 
 # =============================================================================

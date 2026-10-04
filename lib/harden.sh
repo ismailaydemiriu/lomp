@@ -213,6 +213,32 @@ lib_sitefw_disable() {
   return 0
 }
 
+# An install re-run used to write .params anew and took the setting with it (lib_install_manifest
+# merges now). On a server that happened to, the rules are still loaded, and loaded again at
+# every boot, but the firewall reads as off: a site added since has no rules of its own. Only
+# that loss leaves the unit enabled beside no setting at all - switching the firewall off
+# disables the unit and writes "false" - so it is known by that.
+lib_sitefw_setting_lost() {
+  [[ -z "$(lib_json_get_raw "$STATE_DIR/manifest.json" '.params.site_firewall')" ]] || return 1
+  lib_service_enabled lomp-site-firewall.service
+}
+
+# What migrate does for the firewall: a lost setting is put back, and where the firewall is on,
+# its loader, its unit and its rules are the ones this release writes.
+lib_sitefw_migrate() {
+  local lost=0
+  if lib_sitefw_setting_lost; then
+    lost=1
+    if (( OPT_DRY_RUN )); then lib_info "[dry-run] would record the site firewall as on again: an install re-run dropped the setting, and a site added since has no rules of its own"
+    else lib_manifest_set_json '.params.site_firewall' 'true'; fi
+  fi
+  if lib_sitefw_enabled; then lib_sitefw_enable || true; fi
+  if (( lost && ! OPT_DRY_RUN )) && lib_sitefw_enabled; then
+    lib_ok "The site firewall is recorded as on again: an install re-run had dropped the setting, and every site has its rules now"
+  fi
+  return 0
+}
+
 # =============================================================================
 #  harden
 # =============================================================================
