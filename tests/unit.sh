@@ -2860,7 +2860,7 @@ if (( CAN_CHMOD )); then
   _wc_ids="${_wc_u} ${_wc_g}"
   _wc_o="$(_wc_doc)"
   assert_has "doctor: the 0666 WordPress's installer leaves is a warning" "WARN|site wpc.example.com: wp-config.php|${_wc_f} is 0666: " "$_wc_o"
-  assert_has "the site's own file is one the minute check closes, and the command is named in case it does not" "if it stays open: chmod 640 ${_wc_f}" "$_wc_o"
+  assert_has "the site's own file is one the minute check closes, and the command is named in case it does not: as the site's user, never a chmod for root to run" "if it stays open: runuser -u wpc_example_com -- chmod 640 ${_wc_f}" "$_wc_o"
   _wc_ids="$(( _wc_u + 1 )) ${_wc_g}"; _wc_o="$(_wc_doc)"
   assert_has "a file root uploaded is named with fix-owner" "setup.sh fix-owner wpc.example.com" "$_wc_o"
   assert_lacks "and not with a chmod that would leave PHP unable to read it" "if it stays open" "$_wc_o"

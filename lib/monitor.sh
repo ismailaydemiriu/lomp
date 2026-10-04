@@ -495,7 +495,9 @@ _doc_site_wp_config() {   # domain  (its D_* are loaded)
   what="${f} is $(printf '%04o' "$(( 8#$mode ))"): accounts other than ${D_USER} may write to the file that holds the database password"
   ids="$(_domain_fix_owner_ids "$D_HOME" 2>/dev/null)" || ids=""
   if [[ -n "$ids" && "$owner" == "${ids%% *}" ]]; then
-    _doc_add WARN "site ${1}: wp-config.php" "${what}; WordPress's own installer leaves it 0666, and the check cron runs every minute closes it - if it stays open: chmod 640 ${f}"
+    # the chmod is named as the site user's, the way lomp runs its own (lib_domain_as_user): run
+    # by root it would follow a link put in the file's place after doctor looked
+    _doc_add WARN "site ${1}: wp-config.php" "${what}; WordPress's own installer leaves it 0666, and the check cron runs every minute closes it - if it stays open: runuser -u ${D_USER} -- chmod 640 ${f}"
   else
     _doc_add WARN "site ${1}: wp-config.php" "${what}; it is not ${D_USER}'s own file, so it is not closed by itself, and after a chmod 640 PHP could not read it: setup.sh fix-owner ${1}"
   fi
