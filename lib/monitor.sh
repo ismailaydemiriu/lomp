@@ -477,12 +477,13 @@ _doc_root_only() {   # dir
 
 # WordPress's installer, run in the browser, ends by making the wp-config.php it wrote 0666,
 # whatever the umask, on the file that holds the database password. The check cron runs every
-# minute closes it to 0640 where the file is the site user's (lib_domain_wp_config_close), so
-# what is found open here is a file that check has not got to yet, or one it leaves alone: a
-# file root uploaded. That one is named with fix-owner, not with chmod - closed by root, PHP
-# could no longer read it. doctor changes nothing. Only a regular file in a document root that
-# is a directory counts: a link in either place is the site user's to point anywhere, and the
-# chmod named here would follow it.
+# minute closes it to 0640, handing over first one that root uploaded
+# (lib_domain_wp_config_close), so what is found open here is a file that check has not got to
+# yet, or one it leaves alone: a third account's, a second name of a file. One that is not the
+# site's is named with fix-owner, not with chmod - closed as somebody else's, PHP could no
+# longer read it. doctor changes nothing. Only a regular file in a document root that is a
+# directory counts: a link in either place is the site user's to point anywhere, and what it
+# leads to need not be this site's file at all.
 _doc_site_wp_config() {   # domain  (its D_* are loaded)
   local docroot="${D_HOME}/public_html" f="" st="" mode="" owner="" ids="" what=""
   f="${docroot}/wp-config.php"
@@ -499,7 +500,7 @@ _doc_site_wp_config() {   # domain  (its D_* are loaded)
     # by root it would follow a link put in the file's place after doctor looked
     _doc_add WARN "site ${1}: wp-config.php" "${what}; WordPress's own installer leaves it 0666, and the check cron runs every minute closes it - if it stays open: runuser -u ${D_USER} -- chmod 640 ${f}"
   else
-    _doc_add WARN "site ${1}: wp-config.php" "${what}; it is not ${D_USER}'s own file, so it is not closed by itself, and after a chmod 640 PHP could not read it: setup.sh fix-owner ${1}"
+    _doc_add WARN "site ${1}: wp-config.php" "${what}; it is not ${D_USER}'s own file, and the check cron runs every minute hands over and closes only one that root uploaded - if it stays as it is: setup.sh fix-owner ${1} (after a chmod 640 alone PHP could not read it)"
   fi
 }
 

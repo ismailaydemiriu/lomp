@@ -288,10 +288,11 @@ user first (as `fix-owner` does). A site that already has a `wp-config.php` is l
 WordPress's installer ends by giving its new `wp-config.php` the mode 0666. lomp closes it to
 0640 - what `add --wordpress` gives it - within a minute: the check cron runs every minute
 looks at the `wp-config.php` in the document root of every PHP and WordPress site, whichever
-way WordPress got there, and closes one that carries more than 0640, as the site's user. A file
-you closed further yourself (0600) is left as it is. One that root uploaded and still owns is
-not touched - closed by root, PHP could no longer read it - until `fix-owner` has handed it to
-the site.
+way WordPress got there, and closes one that carries more than 0640, as the site's user. One
+that root uploaded (WinSCP logged in as root) is handed to the site's user first - closed as
+root's, PHP could no longer read it. Only that one file changes hands; the rest of an upload
+is still `fix-owner`'s. A file you closed further yourself is left as it is: 0600, or root's
+and readable by the site's group only, which keeps PHP from changing it.
 
 ### .htaccess
 
@@ -445,9 +446,8 @@ an older release had homes at 0711, which let another site's PHP in; `self-updat
 closes them, and `doctor` names a home that is open. Directory listing is off, and requests for dotfiles,
 `.git`, `.env`, `*.sql`, `*.bak` and `wp-config.php` are refused. A WordPress installed in the
 browser leaves its `wp-config.php` at 0666: within a minute lomp closes it to 0640, in every PHP
-and WordPress site, where the file is the site user's own. `doctor`, and the daily health check
-with it, warns about one that its group or others may still write to - a file root uploaded,
-which `fix-owner` hands to the site first.
+and WordPress site, handing over first one that root uploaded. `doctor`, and the daily health
+check with it, warns about one that its group or others may still write to.
 
 ### What a PHP shell in a site can do
 

@@ -1004,14 +1004,29 @@ WP_ARCHIVE_URL="https://wordpress.org/latest.zip"
 # this command put the files into, and just the same in one somebody uploaded and installed in
 # the browser. The check cron runs every minute (lib_ols_htaccess_check_main) therefore looks
 # at the wp-config.php in the document root of every PHP and WordPress site and closes one
-# that carries more than 0640, the mode "add --wordpress" gives it: as the site's user, and
-# only where the file is that user's. One root uploaded is not the site user's to change, and
-# closed by root it would be a file PHP could no longer read: that one waits for fix-owner
-# (doctor names it while others may write to it). A file closed further (0600) is left as it
-# is, and so is a link. A site costs a pass one stat; the state is read only for a file that
-# has to change.
+# that carries more than 0640, the mode "add --wordpress" gives it: as the site's user, whose
+# file it has to be. One root uploaded - WinSCP logged in as root - is handed to the site
+# first: closed as root's it would be a file PHP could no longer read. Anybody else's is left
+# alone, and so are a file closed further (0600, or root's and readable by the site's group
+# only, which keeps PHP from changing it) and a link. A site costs a pass one stat; the state
+# is read only for a file that has to change.
+DOM_UPLOADER_UID="0"   # (a variable for the tests, which cannot own a file as root)
+
+# A wp-config.php root uploaded goes to the site the way fix-owner hands a file over: chown -h,
+# started by find from inside the directory it holds open, on a regular file with one name
+# that is root's. A link in the file's place is then changed itself and never followed, a link
+# in the document root's place is not entered, and a second name of a file root keeps
+# elsewhere is not taken for an upload - nothing is, unless the kernel keeps users from making
+# such names (lib_domain_hardlinks_protected).
+_domain_wp_config_hand_over() {   # home
+  lib_domain_hardlinks_protected || return 1
+  [[ -d "$1" && ! -L "$1" ]] || return 1
+  PATH="$DOM_FIX_OWNER_PATH" find -P "$1" -xdev -mindepth 2 -maxdepth 2 -path "$1/public_html/wp-config.php" \
+    -type f -links 1 -uid "$DOM_UPLOADER_UID" -execdir chown -h -- "${D_USER}:${D_GROUP}" {} + 2>/dev/null
+}
+
 lib_domain_wp_config_close() {
-  local j="" d="" home="" f="" st="" mode="" owner="" ids=""
+  local j="" d="" home="" f="" st="" mode="" owner="" ids="" uid=""
   (( OPT_DRY_RUN )) && return 0
   for j in "$STATE_DIR"/domains/*/domain.json; do
     [[ -s "$j" ]] || continue
@@ -1024,9 +1039,16 @@ lib_domain_wp_config_close() {
     (( (8#$mode & ~8#640) != 0 )) || continue
     lib_domain_state_load "$d" || continue
     [[ "$D_MODE" == "php" || "$D_MODE" == "wordpress" ]] || continue
-    # the site's own account, as fix-owner wants it, and the file that account's
+    # the site's own account, as fix-owner wants it
     ids="$(_domain_fix_owner_ids "$home")" || continue
-    [[ "$owner" == "${ids%% *}" ]] || continue
+    uid="${ids%% *}"
+    if [[ "$owner" != "$uid" ]]; then
+      [[ "$owner" == "$DOM_UPLOADER_UID" ]] || continue
+      _domain_wp_config_hand_over "$home" || continue
+      # whatever is there now: only the site's own file goes on to be closed
+      [[ "$(stat -c %u "$f" 2>/dev/null || true)" == "$uid" ]] || continue
+      lib_ok "wp-config.php of ${d} handed to ${D_USER}:${D_GROUP} (root had uploaded it)"
+    fi
     # a failure is not reported: this runs again in a minute, and would say so every time
     if lib_domain_as_user chmod 0640 "$f" 2>/dev/null; then
       lib_ok "wp-config.php of ${d} closed to 0640 (it was ${mode})"

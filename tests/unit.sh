@@ -2862,7 +2862,7 @@ if (( CAN_CHMOD )); then
   assert_has "doctor: the 0666 WordPress's installer leaves is a warning" "WARN|site wpc.example.com: wp-config.php|${_wc_f} is 0666: " "$_wc_o"
   assert_has "the site's own file is one the minute check closes, and the command is named in case it does not: as the site's user, never a chmod for root to run" "if it stays open: runuser -u wpc_example_com -- chmod 640 ${_wc_f}" "$_wc_o"
   _wc_ids="$(( _wc_u + 1 )) ${_wc_g}"; _wc_o="$(_wc_doc)"
-  assert_has "a file root uploaded is named with fix-owner" "setup.sh fix-owner wpc.example.com" "$_wc_o"
+  assert_has "a file that is not the site's own is named with fix-owner" "setup.sh fix-owner wpc.example.com" "$_wc_o"
   assert_lacks "and not with a chmod that would leave PHP unable to read it" "if it stays open" "$_wc_o"
   _wc_ids="its user wpc_example_com does not exist"
   assert_has "so is the file of a site whose account is not there" "setup.sh fix-owner wpc.example.com" "$(_wc_doc)"
@@ -5377,14 +5377,74 @@ if (( CAN_CHMOD )); then
     assert_eq "a file closed further (0${_m}) is not opened up" "0 ${_m}" "$(_wp_pass) $(_wp_mode)"
   done
   assert_eq  "nothing is run for those"            "" "$(cat "$RUNUSER_LOG")"
-  # a file root uploaded: closed by root, PHP could no longer read it
-  chmod 0666 "$_wp_c"; _wp_ids="$(( _wp_u + 1 )) ${_wp_g}"
-  assert_eq  "a file that is not the site user's is left as it is" "0 666" "$(_wp_pass) $(_wp_mode)"
+  # A file root uploaded: closed as root's, PHP could no longer read it, so it is handed to the
+  # site first, the way fix-owner hands a file over. The suite cannot own a file as root:
+  # "root" is whoever runs it here and the site somebody else, and the chown on find's PATH
+  # only records how it was called - so the file stays "root's", and is not closed as such.
+  _wp_saved2="$(declare -p DOM_FIX_OWNER_PATH DOM_HARDLINKS_SYSCTL DOM_UPLOADER_UID)"
+  _wp_bin2="$TMP/wp-bin2"; mkdir -p "$_wp_bin2"
+  cat >"$_wp_bin2/chown" <<EOF
+#!/bin/sh
+printf 'chown %s in %s\n' "\$*" "\$(pwd -P)" >>"${_wp_chown}"
+EOF
+  chmod 0755 "$_wp_bin2/chown"
+  DOM_FIX_OWNER_PATH="${_wp_bin2}:/usr/bin:/bin"; DOM_UPLOADER_UID="$_wp_u"
+  DOM_HARDLINKS_SYSCTL="$TMP/wp-hardlinks2"; printf '1\n' >"$DOM_HARDLINKS_SYSCTL"
+  _wp_ids="$(( _wp_u + 1 )) ${_wp_g}"; _wp_dr="$(cd "$SITES_ROOT/wp3.example.com/public_html" && pwd -P)"
+  chmod 0666 "$_wp_c"; : >"$_wp_chown"; : >"$RUNUSER_LOG"
+  assert_eq  "a pass over a wp-config.php root uploaded exits 0" 0 "$(_wp_pass)"
+  assert_eq  "it goes to the site by a chown that follows no link, run inside the document root on the bare name" \
+    "chown -h -- wp3_example_com:wp3_example_com ./wp-config.php in ${_wp_dr}" "$(cat "$_wp_chown")"
+  assert_eq  "and while it is still root's it is not closed" "666 " "$(_wp_mode) $(cat "$RUNUSER_LOG")"
+  : >"$_wp_chown"; chmod 0640 "$_wp_c"
+  assert_eq  "a file of root's that is closed already stays root's" "0 " "$(_wp_pass) $(cat "$_wp_chown")"
+  chmod 0644 "$_wp_c"; printf '0\n' >"$DOM_HARDLINKS_SYSCTL"
+  assert_eq  "without protected hard links nothing changes hands" "0 " "$(_wp_pass) $(cat "$_wp_chown")"
+  printf '1\n' >"$DOM_HARDLINKS_SYSCTL"
+  if ln "$_wp_c" "$TMP/wp-second-name" 2>/dev/null && [[ "$(stat -c %h "$_wp_c")" == 2 ]]; then
+    assert_eq "a file that has a second name is not taken for an upload" "0 " "$(_wp_pass) $(cat "$_wp_chown")"
+  fi
+  rm -f "$TMP/wp-second-name"
+  if (( CAN_SYMLINK )); then
+    # the document root replaced by a link to a directory that holds a file of root's
+    mkdir -p "$TMP/wp-rootdir"; mv "$_wp_c" "$TMP/wp-rootdir/wp-config.php"
+    mv "$SITES_ROOT/wp3.example.com/public_html" "$TMP/wp3-docroot"; ln -s "$TMP/wp-rootdir" "$SITES_ROOT/wp3.example.com/public_html"
+    assert_eq "a link in place of the document root is not entered" "0 644 " "$(_wp_pass) $(stat -c %a "$TMP/wp-rootdir/wp-config.php") $(cat "$_wp_chown")"
+    rm -f "$SITES_ROOT/wp3.example.com/public_html"; mv "$TMP/wp3-docroot" "$SITES_ROOT/wp3.example.com/public_html"
+    mv "$TMP/wp-rootdir/wp-config.php" "$_wp_c"
+  fi
+  DOM_UPLOADER_UID="$(( _wp_u + 2 ))"
+  assert_eq  "the file of a third account is nobody's to hand over" "0 644 " "$(_wp_pass) $(_wp_mode) $(cat "$_wp_chown")"
+  eval "$_wp_saved2"
   _wp_ids="its user wp3_example_com does not exist"
   eval '_domain_fix_owner_ids() { printf "%s" "$_wp_ids"; [[ "$_wp_ids" == [0-9]* ]]; }'
-  assert_eq  "so is the file of a site whose account is not a site's" "0 666" "$(_wp_pass) $(_wp_mode)"
-  assert_eq  "with nothing run for either"         "" "$(cat "$RUNUSER_LOG")"
+  chmod 0666 "$_wp_c"; : >"$RUNUSER_LOG"
+  assert_eq  "the file of a site whose account is not a site's is left as it is" "0 666" "$(_wp_pass) $(_wp_mode)"
+  assert_eq  "with nothing run for it"             "" "$(cat "$RUNUSER_LOG")"
   _wp_ids="${_wp_u} ${_wp_g}"
+  # as root, for real: the upload changes hands and is closed, and a file root keeps elsewhere -
+  # behind a link, or under a second name - stays root's
+  if (( EUID == 0 )) && [[ "${OSTYPE:-}" != msys* && "${OSTYPE:-}" != cygwin* ]] && id -u nobody >/dev/null 2>&1 \
+     && [[ "$(cat /proc/sys/fs/protected_hardlinks 2>/dev/null || true)" == 1 ]]; then
+    lib_domain_state_reset
+    D_DOMAIN="wp4.example.com"; D_IDENT="wp4_example_com"; D_USER="nobody"; D_GROUP="$(id -gn nobody)"
+    D_HOME="$SITES_ROOT/wp4.example.com"; D_MODE="php"; D_STATUS="active"
+    lib_domain_state_save
+    mkdir -p "$D_HOME/public_html"; _wp_r="$D_HOME/public_html/wp-config.php"; _wp_v="$TMP/wp-victim"
+    printf '<?php // uploaded as root\n' >"$_wp_r"; chmod 0644 "$_wp_r"
+    printf 'a file root keeps\n' >"$_wp_v"; chmod 0644 "$_wp_v"
+    _wp_ids="$(id -u nobody) $(id -g nobody)"
+    DOM_FIX_OWNER_PATH="/usr/sbin:/usr/bin:/sbin:/bin"; DOM_HARDLINKS_SYSCTL="/proc/sys/fs/protected_hardlinks"
+    assert_eq  "as root: a wp-config.php root uploaded is the site's and 0640 after one pass" "0 640 nobody:${D_GROUP}" "$(_wp_pass) $(stat -c '%a %U:%G' "$_wp_r")"
+    assert_has "and the log says whose it was" "wp-config.php of wp4.example.com handed to nobody:${D_GROUP} (root had uploaded it)" "$(cat "$LOG_FILE")"
+    rm -f "$_wp_r"; ln -s "$_wp_v" "$_wp_r"
+    assert_eq  "a link to a file root keeps elsewhere changes nothing there" "0 644 root" "$(_wp_pass) $(stat -c '%a %U' "$_wp_v")"
+    rm -f "$_wp_r"; ln "$_wp_v" "$_wp_r"
+    assert_eq  "nor does a second name of it" "0 644 root" "$(_wp_pass) $(stat -c '%a %U' "$_wp_v")"
+    rm -rf "$D_HOME" "$_wp_v" "$STATE_DIR/domains/wp4.example.com"
+    eval "$_wp_saved2"; _wp_ids="${_wp_u} ${_wp_g}"
+    lib_domain_state_reset
+  fi
   # only where PHP runs
   for _m in static proxy; do
     lib_json_set "$(lib_domain_json wp3.example.com)" '.mode = $m' --arg m "$_m"
