@@ -35,6 +35,8 @@ WM_KEY_FPR="F3E4C04BB3DB5D4215C45F7F5AB2BAA141C4F7D5"
 # webmail is not installed rather than installed broken.
 WM_PHP_MIN="8.1"
 WM_PHP_MAX="8.5"
+WM_IDENT_PLUGIN="lomp_identities"                      # adds the addresses a mailbox may send as
+WM_IDENT_MAP="${WM_IDENT_MAP:-${WM_ETC}/identities.map}"
 WM_LAST_ERROR=""
 
 lib_webmail_installed() { [[ -L "$WM_CURRENT" && -s "${WM_CURRENT}/public_html/index.php" ]]; }
@@ -159,6 +161,7 @@ _wm_fetch_release() {   # version -> path of the unpacked release on stdout
   # served, and upstream's own updater keeps it deleted once it is gone.
   rm -rf "${dest}.part/installer"
   lib_webmail_pw_driver_install "${dest}.part"
+  lib_webmail_identities_plugin_install "${dest}.part" || true
   rm -rf "$dest"
   mv "${dest}.part" "$dest"
   # Not root, and not the user that runs it. OpenLiteSpeed refuses a document root whose
@@ -247,7 +250,7 @@ lib_webmail_domains() {
   local d=""
   while read -r d; do
     [[ -n "$d" ]] || continue
-    [[ "$(lib_json_get "$(lib_domain_json "$d")" '.mail.webmail')" == "true" ]] && printf '%s\n' "$d"
+    [[ "$(lib_json_get "$(lib_mail_json "$d")" '.mail.webmail')" == "true" ]] && printf '%s\n' "$d"
   done < <(lib_mail_domains)
   return 0
 }
@@ -258,8 +261,11 @@ lib_webmail_domains() {
 # Rendered whole from state on every change, like the mail tables: the host names it trusts
 # and the proxies it believes follow the domains that exist, and nothing is patched in place.
 lib_webmail_render_config() {
-  local d="" hosts="" proxies="" r="" esc=""
+  local d="" hosts="" proxies="" r="" esc="" ident=""
   _wm_info_load || return 1
+  # named only where the running release really has it: a plugin Roundcube is told to load and
+  # cannot find is an error on every request
+  if [[ -s "${WM_CURRENT}/plugins/${WM_IDENT_PLUGIN}/${WM_IDENT_PLUGIN}.php" ]]; then ident=", '${WM_IDENT_PLUGIN}'"; fi
   while read -r d; do
     [[ -n "$d" ]] || continue
     # the pattern is a PCRE, so every dot is escaped: an unescaped one would also match
@@ -328,7 +334,12 @@ ${hosts}];
 \$config['proxy_whitelist'] = [
 ${proxies}];
 
-\$config['plugins'] = ['archive', 'zipdownload', 'managesieve', 'password'];
+\$config['plugins'] = ['archive', 'zipdownload', 'managesieve', 'password'${ident}];
+
+// The addresses a mailbox may send as besides its own - an alias of another domain that is
+// delivered into it, say. The list is written by lompstack from the aliases; the plugin adds
+// the identity for each when its owner signs in, and never removes one.
+\$config['lomp_identities_map'] = '${WM_IDENT_MAP}';
 
 // Changing one's own password. The plugin checks the current one against the session before
 // it calls anything, and the helper behind the driver checks it again against the stored
@@ -377,6 +388,9 @@ lib_webmail_config_apply() {
   # nothing to write before there is a database and a key. The renderer fails in that case,
   # and a failure on the left of a pipe would put an EMPTY configuration in place.
   _wm_info_load || return 0
+  # before the configuration is rendered: it names the plugin only where the running release
+  # has it, and a release installed before this version of lomp has none
+  if (( ! OPT_DRY_RUN )); then lib_webmail_identities_plugin_install "$WM_CURRENT" || true; fi
   lib_webmail_render_config | lib_write_file "$WM_CONF" 0640 "root:${WM_USER}" secret || return 1
   if (( OPT_DRY_RUN )); then return 0; fi
   # The password UI is advertised by this very configuration, so what it needs goes in with
@@ -454,6 +468,9 @@ lib_webmail_install() {   # [version]
   _wm_db_schema_ensure "$rel" || lib_die "The webmail database could not be prepared" "${WM_LAST_ERROR}" "lomp doctor"
   _wm_smoke_test "$rel" || lib_die "Roundcube ${ver} does not start" "${WM_LAST_ERROR}" "lomp doctor"
   _wm_current_set "$rel" || lib_die "The webmail could not be switched on" "${WM_LAST_ERROR}" "ls -l ${WM_CURRENT}"
+  # once more, now that "current" is this release: the configuration names what the running
+  # release has, and until a moment ago there was no running release to look at
+  lib_webmail_config_apply || lib_warn "the webmail configuration could not be rewritten after the release was switched on"
   lib_manifest_set '.components.webmail.version' "$ver"
   lib_manifest_set '.components.webmail.php' "$php"
   lib_webmail_cron_ensure
@@ -831,14 +848,17 @@ lib_webmail_domain_enable() {   # domain
   # virtual host OpenLiteSpeed refuses does not leave a domain that says it has a webmail
   # while nothing serves one.
   if (( ! OPT_DRY_RUN )); then
-    lib_json_set "$(lib_domain_json "$d")" '.mail.webmail = true | .mail.webmail_host = $h' --arg h "$(lib_webmail_host "$d")"
-    lib_rollback_push "lib_json_set '$(lib_domain_json "$d")' 'del(.mail.webmail) | del(.mail.webmail_host)'"
+    lib_json_set "$(lib_mail_json "$d")" '.mail.webmail = true | .mail.webmail_host = $h' --arg h "$(lib_webmail_host "$d")"
+    lib_rollback_push "lib_json_set '$(lib_mail_json "$d")' 'del(.mail.webmail) | del(.mail.webmail_host)'"
   fi
   lib_webmail_config_apply || { WM_LAST_ERROR="the webmail configuration could not be written"; return 1; }
   lib_webmail_cert_ensure "$d"
   lib_webmail_vhost_apply "$d"
+  # the addresses each mailbox may send as: the list is otherwise written when the mail tables
+  # change, and a webmail switched on after the last alias was made would start without one
+  lib_webmail_identities_apply || lib_warn "the webmail's list of sender addresses was not written: ${WM_LAST_ERROR}"
   # it is served: the state may stand on its own now
-  (( OPT_DRY_RUN )) || lib_rollback_drop "lib_json_set '$(lib_domain_json "$d")' 'del(.mail.webmail) | del(.mail.webmail_host)'"
+  (( OPT_DRY_RUN )) || lib_rollback_drop "lib_json_set '$(lib_mail_json "$d")' 'del(.mail.webmail) | del(.mail.webmail_host)'"
   lib_ok "Webmail for ${d}: https://$(lib_webmail_host "$d")"
   return 0
 }
@@ -873,7 +893,7 @@ lib_webmail_domain_disable() {   # domain
   # a domain that never had one, or a machine with no webmail at all, is not a failure. The
   # virtual host counts as much as the flag: whichever is there has to go, or a removal would
   # leave one of them behind for the next domain of that name to inherit.
-  if [[ "$(lib_json_get "$(lib_domain_json "$d")" '.mail.webmail')" != "true" \
+  if [[ "$(lib_json_get "$(lib_mail_json "$d")" '.mail.webmail')" != "true" \
         && ! -d "${LSWS_VHOSTS_DIR}/$(lib_webmail_vhost_name "$d")" ]]; then
     return 0
   fi
@@ -884,7 +904,7 @@ lib_webmail_domain_disable() {   # domain
   # server for good.
   _wm_dns_record_remove "$d"
   lib_webmail_vhost_remove "$d"
-  (( OPT_DRY_RUN )) || lib_json_set "$(lib_domain_json "$d")" 'del(.mail.webmail) | del(.mail.webmail_host)'
+  (( OPT_DRY_RUN )) || lib_json_set "$(lib_mail_json "$d")" 'del(.mail.webmail) | del(.mail.webmail_host)'
   lib_webmail_config_apply || true
   # nothing is left that could ask root to change a password
   if [[ -z "$(lib_webmail_domains)" ]]; then
@@ -1079,5 +1099,146 @@ lib_webmail_pw_driver_install() {   # release-dir
   dir="${rel}/plugins/password/drivers"
   [[ -d "$dir" ]] || return 0
   lib_webmail_render_pw_driver | lib_write_file "${dir}/lomp.php" 0644 root:root
+  return 0
+}
+
+# =============================================================================
+#  The addresses a mailbox may send as
+# =============================================================================
+# One mailbox can be where the addresses of several domains arrive - info@ of five domains in
+# a single inbox - and Postfix lets it send as each of them. Roundcube calls such an address
+# an identity and, when a message is answered, picks the one it was written to; but somebody
+# has to create them, once per address. This is the list they are created from: one line per
+# mailbox, "login<TAB>address,address", rendered from the aliases like every other table.
+# postmaster, abuse and dmarc are left out: they exist so that such mail arrives somewhere,
+# and nobody answers as them.
+lib_webmail_render_identities() {
+  local d="" alias="" targets="" t=""
+  printf '# Managed by lompstack - the addresses each mailbox may send as, besides its own\n'
+  {
+    while read -r d; do
+      [[ -n "$d" ]] || continue
+      while IFS=$'\t' read -r alias targets; do
+        [[ -n "$alias" && -n "$targets" ]] || continue
+        case "${alias%%@*}" in postmaster|abuse|dmarc) continue ;; esac
+        for t in ${targets//,/ }; do
+          if lib_mail_box_exists "$t"; then printf '%s\t%s\n' "${t,,}" "$alias"; fi
+        done
+      done < <(lib_mail_aliases "$d")
+    done < <(lib_mail_domains)
+    true
+  } | sort -u | awk -F'\t' -v OFS='\t' '
+      NF == 2 {
+        if (!($1 in seen)) { order[++n] = $1; seen[$1] = $2; next }
+        seen[$1] = seen[$1] "," $2
+      }
+      END { for (i = 1; i <= n; i++) print order[i], seen[order[i]] }'
+  return 0
+}
+
+# The plugin that reads that list. It adds an identity for each address when its owner signs
+# in and never removes one: an identity may carry a signature somebody wrote, and an address
+# that is no longer the mailbox's is refused by Postfix whatever the webmail believes.
+# It declares neither a task nor a return type of its own on purpose: both are places where a
+# later Roundcube could change the parent class and turn a redeclaration into a fatal error.
+lib_webmail_render_identities_plugin() {
+  cat <<'EOF'
+<?php
+// Managed by lompstack - rewritten whenever a release is installed; do not edit.
+class lomp_identities extends rcube_plugin
+{
+    public function init()
+    {
+        $this->add_hook('login_after', [$this, 'sync']);
+    }
+
+    public function sync($args)
+    {
+        $rcmail = rcmail::get_instance();
+        $file = $rcmail->config->get('lomp_identities_map');
+        if (empty($file) || !is_readable($file) || empty($rcmail->user) || !$rcmail->user->ID) {
+            return $args;
+        }
+        $login = strtolower((string) $rcmail->user->get_username());
+        $want = [];
+        foreach ((array) @file($file, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) as $line) {
+            if ($line === '' || $line[0] === '#') {
+                continue;
+            }
+            $parts = explode("\t", $line, 2);
+            if (count($parts) === 2 && strtolower($parts[0]) === $login) {
+                $want = array_merge($want, explode(',', $parts[1]));
+            }
+        }
+        if (!$want) {
+            return $args;
+        }
+        $have = [];
+        $name = '';
+        foreach ((array) $rcmail->user->list_identities() as $identity) {
+            $have[strtolower((string) $identity['email'])] = true;
+            if (!empty($identity['standard'])) {
+                $name = (string) $identity['name'];
+            }
+        }
+        foreach ($want as $address) {
+            $address = strtolower(trim($address));
+            // root wrote the list, but it is still only a list: a line that is not an address
+            // must not become an identity
+            if ($address === '' || isset($have[$address]) || !filter_var($address, FILTER_VALIDATE_EMAIL)) {
+                continue;
+            }
+            if ($rcmail->user->insert_identity(['email' => $address, 'name' => $name, 'standard' => 0])) {
+                $have[$address] = true;
+            }
+        }
+        return $args;
+    }
+}
+EOF
+}
+
+# Written into a release, and then loaded once by that release's own PHP before anything is
+# told to use it. A plugin Roundcube cannot load is a broken webmail for every domain, so one
+# that does not load here is taken out again: the webmail then works exactly as it did before
+# this plugin existed, and the configuration - which names it only where the file is there -
+# leaves it out. Nothing is printed on standard output: _wm_fetch_release prints a path there.
+lib_webmail_identities_plugin_install() {   # release-dir
+  local rel="${1:-$WM_CURRENT}" dir="" file="" php="" out=""
+  [[ -d "${rel}/plugins" ]] || return 0
+  dir="${rel}/plugins/${WM_IDENT_PLUGIN}"
+  file="${dir}/${WM_IDENT_PLUGIN}.php"
+  php="$(lib_php_cli "$(lib_webmail_php_version 2>/dev/null || true)" 2>/dev/null || true)"
+  if [[ ! -x "$php" ]]; then rm -rf "$dir"; return 1; fi
+  mkdir -p "$dir" && chmod 0755 "$dir" || return 1
+  lib_webmail_render_identities_plugin >"${file}.new" || { rm -f "${file}.new"; return 1; }
+  chmod 0644 "${file}.new"
+  out="$("$php" -r '
+    define("INSTALL_PATH", $argv[1]."/");
+    require INSTALL_PATH."program/include/iniset.php";
+    require $argv[2];
+    echo (class_exists("lomp_identities", false) && is_subclass_of("lomp_identities", "rcube_plugin")) ? "ok" : "no";
+  ' "$rel" "${file}.new" 2>&1 || true)"
+  if [[ "$out" != "ok" ]]; then
+    rm -rf "$dir"
+    lib_log_write WARN "the webmail plugin ${WM_IDENT_PLUGIN} does not load in ${rel##*/} and was left out: $(tr '\n' ' ' <<<"$out" | cut -c1-300)"
+    return 1
+  fi
+  mv -f "${file}.new" "$file"
+  return 0
+}
+
+# The list, and - on a webmail set up by a release that had no such list - the plugin and the
+# configuration line that reads it. Called whenever the mail tables are rebuilt.
+lib_webmail_identities_apply() {
+  lib_webmail_installed || return 0
+  lib_webmail_render_identities | lib_write_file "$WM_IDENT_MAP" 0640 "root:${WM_USER}" \
+    || { WM_LAST_ERROR="${WM_IDENT_MAP} could not be written"; return 1; }
+  (( OPT_DRY_RUN )) && return 0
+  # the plugin by name, not the path of the list: that line is written either way, and a
+  # configuration that has it may still be one that was rendered before the release had the plugin
+  if ! grep -q "'${WM_IDENT_PLUGIN}'" "$WM_CONF" 2>/dev/null; then
+    lib_webmail_config_apply || { WM_LAST_ERROR="the webmail configuration could not be rewritten"; return 1; }
+  fi
   return 0
 }

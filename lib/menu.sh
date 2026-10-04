@@ -33,6 +33,10 @@ COMMANDS
       --with-mail [--mail-hostname mail.example.com]
                                 Mail server (Postfix, Dovecot, Rspamd) for the sites of
                                 this server; needs its own name, an A record and a PTR
+      --mail-only [--mail-hostname mail.example.com]
+                                A server for mail alone: the same mail server, and the web
+                                stack only because the webmail needs one. Domains get mail
+                                ("mail domain add"), not sites. --role web undoes it
       --cloudflare              Trust Cloudflare proxies (real client IP)
       --cf-api-token TOKEN      Store Cloudflare API token (DNS-01 / fail2ban); "-" reads it
                                 from stdin so it stays out of the process list
@@ -85,14 +89,28 @@ COMMANDS
   app env <domain> list [--show] | set NAME | unset NAME... | import-db
                                 Values come from stdin or a hidden prompt, never from
                                 the command line; import-db adds DB_* and DATABASE_URL
+  mail domain add <domain> [--mailbox info] [--quota 2G]
+                                Mail for a domain that is no site of this server (its web
+                                site is elsewhere, or it has none): no Linux user, no vhost
+  mail domain add <domain> --to <you@example.com> [--address info,sales] [--catch-all]
+                                The same without a mailbox of its own: its addresses are
+                                delivered into a mailbox that exists - one inbox for several
+                                domains - and that mailbox may send as them
+  mail domain list              Every domain with mail: site or mail only, mailboxes, aliases
+  mail domain del <domain> [--dns-cleanup] [--no-backup]
+                                Remove a mail domain and all of its mail, after a last backup
   mail enable <domain> [--mailbox info] [--quota 2G]
                                 Give a site its own mail: DKIM key, certificate for
                                 mail.<domain>, and the DNS records to add
+                                (--to, --address and --catch-all work here as well)
   mail disable <domain> [--delete-data]
   mail box add|passwd|quota|list|del|kick <user@domain>
                                 Passwords come from stdin or a hidden prompt, never from
                                 the command line; "kick" ends the open sessions of a mailbox
   mail alias add|del|list <alias@domain> [target,...]
+                                An address that goes somewhere else; a mailbox here that it
+                                goes to may also send as it. "@<domain>" as the alias is a
+                                catch-all: every address of the domain with no line of its own
   mail dns <domain> [--check] [--json]   What to put in DNS, and whether it is there
   mail dns <domain> --apply [--replace-mx]
                                 Write those records into Cloudflare with the stored token.
@@ -304,6 +322,7 @@ _menu_not_installed() {
     _menu_item 1 "Install the server (OpenLiteSpeed, PHP, MariaDB, Redis, firewall)"
     _menu_item 2 "Show what the installation would do, changing nothing (dry run)"
     _menu_item 3 "Command reference"
+    _menu_item 4 "Install a mail-only server (mail and webmail for your domains, no web sites)"
     _menu_item 0 "Exit"
     printf '\n%sChoice: %s' "$C_BLD" "$C_RST"
     read -r choice </dev/tty || return 0
@@ -312,6 +331,7 @@ _menu_not_installed() {
          if [[ -n "$email" ]]; then _menu_run install --email "$email"; else _menu_run install; fi ;;
       2) _menu_run install --dry-run ;;
       3) lib_usage | ${PAGER:-less} 2>/dev/null || lib_usage; _menu_pause ;;
+      4) _menu_install_mail_only ;;
       0|q|Q|"") return 0 ;;
       *) printf '%sPick a number from the list.%s\n' "$C_YEL" "$C_RST" ;;
     esac
@@ -329,6 +349,8 @@ lib_menu_main() {
   fi
   lib_require_tools
   if ! lib_installed; then _menu_not_installed; return 0; fi
+  # a server installed for mail alone has no site to list: its menu is the mail menu
+  if lib_server_mail_only; then _menu_mail top; return 0; fi
 
   local choice="" domain="" answer=""
   while true; do
@@ -780,62 +802,277 @@ _menu_wordpress() {
   _menu_run wordpress "$domain"
 }
 
-_menu_mail() {
-  local choice="" domain="" box="" quota="" alias="" target=""
+# The domains a mail menu entry offers, one per line: those whose mail is on, or with "all"
+# every domain that has mail here at all - one whose mail was turned off included.
+_menu_mail_domains() {   # [all]
+  local d=""
+  if [[ "${1:-}" != "all" ]]; then lib_mail_domains; return 0; fi
+  while read -r d; do
+    [[ -n "$d" ]] || continue
+    if _mail_domain_listed "$d"; then printf '%s\n' "$d"; fi
+  done < <(lib_mail_domains_known)
+  return 0
+}
+
+# Ask for one of them, offered by number. Prints the choice.
+_menu_pick_mail_domain() {   # [all]
+  local -a doms=()
+  local d="" i=1 choice=""
+  mapfile -t doms < <(_menu_mail_domains "${1:-}")
+  if ((${#doms[@]} == 0)); then
+    printf '%sNo domain has mail yet: "Add a domain" gives one its mail.%s\n' "$C_YEL" "$C_RST" >&2
+    return 1
+  fi
+  printf '\n%sWhich domain?%s\n' "$C_BLD" "$C_RST" >&2
+  for d in "${doms[@]}"; do printf '  %2d) %s\n' "$i" "$d" >&2; i=$((i + 1)); done
+  printf '   0) cancel\n' >&2
+  printf '%sNumber: %s' "$C_BLD" "$C_RST" >&2
+  read -r choice </dev/tty || return 1
+  [[ "$choice" =~ ^[0-9]+$ ]] || return 1
+  (( choice >= 1 && choice <= ${#doms[@]} )) || return 1
+  printf '%s' "${doms[$((choice - 1))]}"
+}
+
+# Mail for a domain. A site of this server gets its mail switched on; any other domain is
+# added for its mail alone. Either way the mail goes into a mailbox of the domain's own, or
+# into one that exists already - which is how one inbox comes to hold several domains.
+_menu_mail_add_domain() {
+  local domain="" how="" box="" quota="" to="" addrs="" first=""
+  local -a args=()
+  _menu_ask domain "Domain (without www, e.g. example.com)"
+  [[ -n "$domain" ]] || return 0
+  domain="${domain,,}"
+  if ! lib_domain_valid "$domain"; then
+    printf '%s"%s" is not a valid domain name.%s\n' "$C_YEL" "$domain" "$C_RST"
+    _menu_pause; return 0
+  fi
+  if lib_domain_registered "$domain" && ! lib_mail_domain_standalone "$domain"; then
+    args=(mail enable "$domain")
+  else
+    args=(mail domain add "$domain")
+    if ! lib_server_mail_only; then
+      printf '\n  %s is not a site of this server: it is added for its mail alone (no site, no Linux user).\n' "$domain"
+    fi
+  fi
+  first="$(lib_mail_boxes | head -n 1 || true)"
+  printf '\n%sWhere does the mail of %s go?%s\n' "$C_BLD" "$domain" "$C_RST"
+  printf '  1) Into a mailbox of its own (info@%s, with a password of its own)\n' "$domain"
+  printf '  2) Into a mailbox that exists already - one inbox for several domains\n'
+  _menu_ask how "Choice" "1"
+  if [[ "$how" == "2" ]]; then
+    if [[ -z "$first" ]]; then
+      printf '%sThere is no mailbox on this server yet: the first domain needs one of its own.%s\n' "$C_YEL" "$C_RST"
+      _menu_pause; return 0
+    fi
+    _menu_ask to "Deliver into which mailbox" "$first"
+    [[ -n "$to" ]] || return 0
+    _menu_ask addrs "Which addresses of ${domain}? Names with commas (info,sales), or * for every address" "info"
+    args+=(--to "$to")
+    if [[ "$addrs" == "*" ]]; then args+=(--catch-all)
+    elif [[ -n "$addrs" ]]; then args+=(--address "$addrs"); fi
+  else
+    _menu_ask box 'Mailbox name (before the @), or a dash for none' "info"
+    _menu_ask quota "Mailbox size" "2G"
+    if [[ -n "$box" && "$box" != "-" ]]; then args+=(--mailbox "$box" --quota "$quota"); fi
+  fi
+  _menu_run "${args[@]}"
+}
+
+_menu_mail_webmail() {
+  local what="" domain=""
+  printf '\n  1) What runs, and for which domains\n  2) Switch it on for a domain (it answers at webmail.<domain>)\n  3) Switch it off for a domain\n'
+  _menu_ask what "Choice" "1"
+  if [[ "$what" == "2" ]]; then
+    domain="$(_menu_pick_mail_domain)" || { _menu_pause; return 0; }
+    _menu_run mail webmail on "$domain"
+  elif [[ "$what" == "3" ]]; then
+    domain="$(_menu_pick_mail_domain)" || { _menu_pause; return 0; }
+    _menu_run mail webmail off "$domain"
+  else
+    _menu_run webmail status
+  fi
+}
+
+# Turning mail off keeps every message and can be undone. Removing is for a mail domain only -
+# a site's mail goes with the site - and takes a last backup before it deletes anything.
+_menu_mail_off() {
+  local domain="" what=""
+  domain="$(_menu_pick_mail_domain all)" || { _menu_pause; return 0; }
+  if ! lib_mail_domain_standalone "$domain"; then _menu_run mail disable "$domain"; return 0; fi
+  printf '\n  1) Turn its mail off: no delivery and no login, every message stays, and it can be turned on again\n'
+  printf '  2) Remove the domain with all of its mail (a last backup is taken first)\n'
+  _menu_ask what "Choice" "1"
+  if [[ "$what" == "2" ]]; then _menu_run mail domain del "$domain"
+  else _menu_run mail disable "$domain"; fi
+}
+
+# Header of the mail menu when it is the server's own menu.
+_menu_mail_header() {
+  local n=0 d="" svc="" label=""
+  while read -r d; do [[ -n "$d" ]] && n=$((n + 1)); done < <(lib_mail_domains)
+  printf '\n %s%slompstack%s  %s  mail server, sends as %s  %s domain(s)\n ' "$C_BLD" "$C_CYN" "$C_RST" \
+    "$(hostname -s 2>/dev/null || hostname)" "$(lib_mail_host)" "$n"
+  for svc in postfix:smtp dovecot:imap rspamd:filter lsws:webmail mariadb:db fail2ban:f2b; do
+    label="${svc#*:}"; svc="${svc%%:*}"
+    if lib_service_active "$svc"; then printf ' %s%s:up%s' "$C_GRN" "$label" "$C_RST"
+    else printf ' %s%s:DOWN%s' "$C_RED" "$label" "$C_RST"; fi
+  done
+  printf '\n'
+  _menu_rule
+}
+
+# "top": this is the menu of a mail-only server, not a submenu of the sites' one.
+_menu_mail() {   # [top]
+  local top="${1:-}" choice="" domain="" box="" quota="" alias="" target=""
   while true; do
     if ! lib_mail_installed; then
       printf '\n  The mail server is not installed yet. Optional components (18) installs it.\n'
       _menu_pause
       return 0
     fi
-    printf '\n %sMAIL%s   (this server sends as %s)\n' "$C_BLD" "$C_RST" "$(lib_mail_host)"
-    _menu_rule
-    printf '  %s1%s) Which sites have mail, and their mailboxes\n' "$C_CYN" "$C_RST"
-    printf '  %s2%s) Turn mail on for a site\n' "$C_CYN" "$C_RST"
-    printf '  %s3%s) Add a mailbox\n' "$C_CYN" "$C_RST"
-    printf '  %s4%s) Change a mailbox password\n' "$C_CYN" "$C_RST"
-    printf '  %s5%s) Aliases and forwards\n' "$C_CYN" "$C_RST"
-    printf '  %s6%s) What to put in DNS (and whether it is there)\n' "$C_CYN" "$C_RST"
-    printf '  %s7%s) Can this server send? (reverse DNS, port 25)\n' "$C_CYN" "$C_RST"
-    printf '  %s8%s) Turn mail off for a site\n' "$C_CYN" "$C_RST"
-    printf '  %s9%s) Webmail for a site (on, off, or what runs)\n' "$C_CYN" "$C_RST"
-    printf '  %s0%s) Back\n' "$C_CYN" "$C_RST"
+    if [[ -n "$top" ]]; then _menu_mail_header
+    else
+      printf '\n %sMAIL%s   (this server sends as %s)\n' "$C_BLD" "$C_RST" "$(lib_mail_host)"
+      _menu_rule
+    fi
+    _menu_item  1 "Domains that have mail here"
+    _menu_item  2 "Add a domain (a mailbox of its own, or into one that exists)"
+    _menu_item  3 "Mailboxes: who has one, its size, how full it is"
+    _menu_item  4 "Add a mailbox"
+    _menu_item  5 "Change a mailbox password"
+    _menu_item  6 "Aliases: an address that is delivered into another mailbox"
+    _menu_item  7 "What to put in DNS (and whether it is there)"
+    _menu_item  8 "Can this server send? (reverse DNS, port 25)"
+    _menu_item  9 "Webmail (on or off for a domain, or what runs)"
+    _menu_item 10 "Turn mail off for a domain, or remove a mail domain"
+    if [[ -n "$top" ]]; then
+      _menu_item 11 "Server: status, health check, backups, updates"
+      _menu_item  0 "Exit"
+    else
+      _menu_item  0 "Back"
+    fi
     printf '\n%sChoice: %s' "$C_BLD" "$C_RST"
     read -r choice </dev/tty || return 0
     case "$choice" in
-      1) _menu_run mail box list ;;
-      2) domain="$(_menu_pick_domain)" || { _menu_pause; continue; }
-         _menu_ask box 'First mailbox name, or a dash for none' "info"
-         _menu_ask quota "Mailbox size" "2G"
-         if [[ -n "$box" && "$box" != "-" ]]; then _menu_run mail enable "$domain" --mailbox "$box" --quota "$quota"
-         else _menu_run mail enable "$domain"; fi ;;
-      3) domain="$(_menu_pick_domain)" || { _menu_pause; continue; }
+      1) _menu_run mail domain list ;;
+      2) _menu_mail_add_domain ;;
+      3) _menu_run mail box list ;;
+      4) domain="$(_menu_pick_mail_domain)" || { _menu_pause; continue; }
          _menu_ask box "Mailbox name (before the @)" "info"
          _menu_ask quota "Mailbox size" "2G"
          [[ -n "$box" ]] && _menu_run mail box add "${box}@${domain}" --quota "$quota" ;;
-      4) _menu_ask box "Which address?"
+      5) _menu_ask box "Which address?"
          [[ -n "$box" ]] && _menu_run mail box passwd "$box" ;;
-      5) _menu_ask alias "Alias address (empty to only list them)"
+      6) _menu_ask alias "Alias address, or @domain for every address of a domain (empty to only list them)"
          if [[ -z "$alias" ]]; then _menu_run mail alias list
          else
            _menu_ask target "Where should it go? (an address, or several with commas)"
            [[ -n "$target" ]] && _menu_run mail alias add "$alias" "$target"
          fi ;;
-      6) domain="$(_menu_pick_domain)" || { _menu_pause; continue; }
+      7) domain="$(_menu_pick_mail_domain)" || { _menu_pause; continue; }
          _menu_run mail dns "$domain" --check ;;
-      7) _menu_run mail test ;;
-      8) domain="$(_menu_pick_domain)" || { _menu_pause; continue; }
-         _menu_run mail disable "$domain" ;;
-      9) _menu_ask box 'Webmail: "on <domain>", "off <domain>", or empty to see what runs'
-         if [[ -z "$box" ]]; then _menu_run webmail status
-         else
-           # shellcheck disable=SC2086
-           _menu_run mail webmail $box
-         fi ;;
+      8) _menu_run mail test ;;
+      9) _menu_mail_webmail ;;
+      10) _menu_mail_off ;;
+      11) if [[ -n "$top" ]]; then _menu_mail_server
+          else printf '%sPick a number from the list.%s\n' "$C_YEL" "$C_RST"; fi ;;
+      0|q|Q|"") [[ -n "$top" ]] && printf '\n'; return 0 ;;
+      *) printf '%sPick a number from the list.%s\n' "$C_YEL" "$C_RST" ;;
+    esac
+  done
+}
+
+# What a mail-only server needs besides its mail: the same commands the sites' menu offers,
+# without the ones that are about sites.
+_menu_mail_server() {
+  local choice=""
+  while true; do
+    printf '\n %sSERVER%s\n' "$C_BLD" "$C_RST"
+    _menu_rule
+    _menu_item  1 "Status"
+    _menu_item  2 "Health check"
+    _menu_item  3 "Back up the mail (now, or automatically)"
+    _menu_item  4 "Restore a domain's mail from a backup"
+    _menu_item  5 "Update packages"
+    _menu_item  6 "Update lompstack"
+    _menu_item  7 "Re-tune to hardware"
+    _menu_item  8 "Notifications"
+    _menu_item  9 "Open WebAdmin panel"
+    _menu_item 10 "Command reference"
+    _menu_item  0 "Back"
+    printf '\n%sChoice: %s' "$C_BLD" "$C_RST"
+    read -r choice </dev/tty || return 0
+    case "$choice" in
+      1) _menu_run status ;;
+      2) _menu_run doctor ;;
+      3) _menu_mail_backup ;;
+      4) _menu_mail_restore ;;
+      5) _menu_run update ;;
+      6) _menu_run self-update ;;
+      7) _menu_run optimize ;;
+      8) _menu_run notify --show ;;
+      9) _menu_run panel ;;
+      10) lib_usage | ${PAGER:-less} 2>/dev/null || lib_usage; _menu_pause ;;
       0|q|Q|"") return 0 ;;
       *) printf '%sPick a number from the list.%s\n' "$C_YEL" "$C_RST" ;;
     esac
   done
+}
+
+# A mail domain's backup is its mail: mailboxes with their password hashes, aliases, the DKIM
+# key and every message, in one archive under BACKUP_ROOT/<domain>/.
+_menu_mail_backup() {
+  local what="" enc="" sched="" domain=""
+  local -a args=()
+  sched="$(lib_manifest_get '.backup.schedule' 2>/dev/null || true)"
+  printf '\n  1) Every domain, now\n  2) One domain, now\n  3) Automatic backups (now: %s)\n' "${sched:-off}"
+  _menu_ask what "Choice" "1"
+  if [[ "$what" == "3" ]]; then _menu_backup_schedule; return 0; fi
+  if [[ "$what" == "2" ]]; then
+    domain="$(_menu_pick_mail_domain all)" || { _menu_pause; return 0; }
+    args=("$domain")
+  else
+    args=(--all)
+  fi
+  _menu_ask enc "Encrypt the archive? (y/n)" "n"
+  [[ "${enc,,}" == y* ]] && args+=(--encrypt)
+  _menu_run backup "${args[@]}"
+}
+
+# The domain is typed, not picked: on a new server - the case a restore exists for - it is not
+# a domain of this server yet, and the restore is what makes it one.
+_menu_mail_restore() {
+  local domain="" file=""
+  _menu_ask domain "Domain whose mail to restore"
+  [[ -n "$domain" ]] || return 0
+  domain="${domain,,}"
+  if ! lib_domain_valid "$domain"; then
+    printf '%s"%s" is not a valid domain name.%s\n' "$C_YEL" "$domain" "$C_RST"
+    _menu_pause; return 0
+  fi
+  printf '\n%sMail archives of %s:%s\n' "$C_BLD" "$domain" "$C_RST"
+  if ! find "${BACKUP_ROOT}/${domain}" -maxdepth 1 -name "${domain}-mail-*.tar.gz*" ! -name '*.sha256' -printf '  %p\n' 2>/dev/null | sort | tail -20 | grep .; then
+    printf '  (none found under %s - copy the archive there, or give its path below)\n' "${BACKUP_ROOT}/${domain}"
+  fi
+  _menu_ask file "Full path of the archive (empty: the newest one above)"
+  if [[ -n "$file" ]]; then _menu_run mail restore "$domain" --file "$file"
+  else _menu_run mail restore "$domain"; fi
+}
+
+# A mail-only server from the menu: the two things it cannot be installed without are asked
+# for here, everything else has a default.
+_menu_install_mail_only() {
+  local email="" mh=""
+  local -a args=(install --mail-only)
+  printf '\n  A server for mail alone: Postfix, Dovecot, Rspamd and a webmail. Your domains get their\n'
+  printf '  mail here; their web sites stay where they are. It needs a name of its own, like\n'
+  printf '  mail.example.com, with an A record pointing here and a PTR record your provider sets.\n\n'
+  _menu_ask mh "Name this server sends mail as" "$(hostname -f 2>/dev/null || true)"
+  [[ -n "$mh" ]] || return 0
+  _menu_ask email "E-mail for Let's Encrypt and alerts" "$DEFAULT_EMAIL"
+  args+=(--mail-hostname "$mh")
+  [[ -n "$email" ]] && args+=(--email "$email")
+  _menu_run "${args[@]}"
 }
 
 # Optional components are never installed unless asked for, on the command line with

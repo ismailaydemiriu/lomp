@@ -819,6 +819,18 @@ lib_require_installed() {
   lib_installed || lib_die "Server is not provisioned yet" "manifest missing (${STATE_DIR}/manifest.json)" "Run: sudo ./setup.sh install"
 }
 
+# What this server is for. "mail" is one installed with "install --mail-only": it carries the
+# web stack because the webmail needs one, and hosts no site. Anything else - a server set up
+# before the question existed included - is a web server, with or without mail beside it.
+lib_server_role() {
+  # what "install" was asked for on this run comes first: a dry run writes no manifest, and
+  # would otherwise describe the server it is not going to be
+  local r="${INS_ROLE:-}"
+  [[ -n "$r" ]] || r="$(lib_manifest_get '.params.role')"
+  if [[ "$r" == "mail" ]]; then printf 'mail'; else printf 'web'; fi
+}
+lib_server_mail_only() { [[ "$(lib_server_role)" == "mail" ]]; }
+
 # =============================================================================
 #  Domain helpers shared by several modules
 # =============================================================================

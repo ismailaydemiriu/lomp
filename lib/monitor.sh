@@ -203,9 +203,10 @@ _status_mail_json() {
     # hand jq the number twice and --argjson would refuse the whole document
     one="$(jq -n --arg d "$d" \
         --argjson boxes "$(lib_mail_boxes "$d" | wc -l | tr -d ' ')" \
-        --argjson webmail "$( [[ "$(lib_json_get "$(lib_domain_json "$d")" '.mail.webmail')" == "true" ]] && printf 'true' || printf 'false')" \
+        --argjson webmail "$( [[ "$(lib_json_get "$(lib_mail_json "$d")" '.mail.webmail')" == "true" ]] && printf 'true' || printf 'false')" \
+        --argjson site "$( lib_mail_domain_standalone "$d" && printf 'false' || printf 'true')" \
         --arg cert "$(lib_ssl_days_left "$(lib_mail_cert_name "$d")")" \
-        '{domain:$d, mailboxes:$boxes, webmail:$webmail,
+        '{domain:$d, site:$site, mailboxes:$boxes, webmail:$webmail,
           cert_days_left:(if $cert=="" then null else ($cert|tonumber) end)}')"
     doms="$(jq -n --argjson a "$doms" --argjson b "$one" '$a + [$b]')"
   done
@@ -306,6 +307,20 @@ lib_status_main() {
     printf '    %-28s %-10s php:%-5s ssl:%-24s backup:%s\n' "$d" "$D_MODE" "${D_PHP:--}" "$( (( D_SSL )) && lib_ssl_status_line "$d" || printf 'none')" "${D_BACKUP_LAST:-never}"
   done
   (( n == 0 )) && printf '    (none)\n'
+  # the domains whose mail is on: a site's, and the ones that have their mail here and no site
+  if lib_mail_installed; then
+    local nmail=0 mcert=""
+    printf '  %sMail domains%s\n' "$C_BLD" "$C_RST"
+    for d in $(lib_mail_domains); do
+      nmail=$((nmail + 1))
+      mcert="$(lib_ssl_days_left "$(lib_mail_cert_name "$d")")"
+      printf '    %-28s %-10s mailboxes:%-3s aliases:%-3s certificate:%s\n' "$d" \
+        "$( lib_mail_domain_standalone "$d" && printf 'mail only' || printf 'site')" \
+        "$(lib_mail_boxes "$d" | wc -l | tr -d ' ')" "$(lib_mail_aliases "$d" | wc -l | tr -d ' ')" \
+        "$( [[ -n "$mcert" ]] && printf '%s days' "$mcert" || printf 'none yet')"
+    done
+    (( nmail == 0 )) && printf '    (none)\n'
+  fi
   local napps=0
   for d in $(lib_domains_list); do
     if lib_app_state_load "$d"; then napps=$((napps + 1)); fi

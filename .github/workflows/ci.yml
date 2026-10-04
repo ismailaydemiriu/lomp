@@ -106,3 +106,37 @@ jobs:
                } END { exit !found }' dryrun.out \
             || { echo "dry-run did not reach the last step"; exit 1; }
           ! grep -qE '\[fail\]|unbound variable|FAILED:|Probable cause' dryrun.out
+
+      - name: Dry run of a mail-only server
+        # The role is not in any manifest yet - a dry run writes none - so everything that
+        # depends on it has to take it from the run itself: the profile, the mail stack's own
+        # notes and the summary at the end.
+        shell: bash
+        run: |
+          sudo bash setup.sh install --dry-run --non-interactive --no-color \
+            --mail-only --mail-hostname mail.example.com --email ci@example.com 2>&1 | tee dryrun-mail.out
+          test ! -e /root/.server-setup || { echo "dry-run created state dir"; exit 1; }
+          test ! -e /etc/postfix/lomp   || { echo "dry-run wrote Postfix maps"; exit 1; }
+          grep -q "Mail-only server" dryrun-mail.out \
+            || { echo "the role was not announced"; exit 1; }
+          grep -q "Installing the mail stack for mail.example.com" dryrun-mail.out \
+            || { echo "--mail-only did not plan the mail stack"; exit 1; }
+          grep -q "(5% of RAM)" dryrun-mail.out \
+            || { echo "the profile is not a mail server's"; exit 1; }
+          grep -q "lomp mail domain add example.com --mailbox info" dryrun-mail.out \
+            || { echo "the summary is not a mail server's"; exit 1; }
+          awk 'match($0, /\[[0-9]+\/[0-9]+\]/) {
+                 s = substr($0, RSTART + 1, RLENGTH - 2); split(s, a, "/")
+                 if (a[1] == a[2]) found = 1
+               } END { exit !found }' dryrun-mail.out \
+            || { echo "dry-run did not reach the last step"; exit 1; }
+          ! grep -qE '\[fail\]|unbound variable|FAILED:|Probable cause' dryrun-mail.out
+          # a mail server with no name to send as is refused before the first step, not at step 17
+          if sudo bash setup.sh install --dry-run --non-interactive --no-color \
+               --mail-only --mail-hostname localhost >dryrun-noname.out 2>&1; then
+            echo "a mail-only install with no usable name was not refused"; exit 1
+          fi
+          grep -q "no name to send mail as" dryrun-noname.out \
+            || { echo "the refusal does not say why"; cat dryrun-noname.out; exit 1; }
+          ! grep -qE '\[[0-9]+/[0-9]+\]' dryrun-noname.out \
+            || { echo "a step ran before the refusal"; exit 1; }

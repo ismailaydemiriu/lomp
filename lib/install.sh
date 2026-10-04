@@ -5,6 +5,7 @@
 
 INS_WITH_NODE=0 INS_NODE_MAJOR="" INS_WITH_PYTHON=0 INS_WITH_NETDATA=0 INS_CLOUDFLARE=0 INS_CF_TOKEN=""
 INS_WITH_MAIL=0 INS_MAIL_HOSTNAME=""
+INS_ROLE=""              # "mail" (--mail-only) or "web" when given on THIS run; empty keeps what the server is
 # Node.js major for a server that has never had Node (Active LTS). A server that already runs
 # Node keeps its own major unless --node asks for another: see lib_install_node_major_resolve.
 INS_NODE_DEFAULT_MAJOR=24
@@ -34,6 +35,8 @@ lib_install_parse_args() {
       --with-python)     INS_WITH_PYTHON=1 ;;
       --with-mail)       INS_WITH_MAIL=1 ;;
       --mail-hostname)   INS_MAIL_HOSTNAME="${1:-}"; INS_WITH_MAIL=1; shift ;;
+      --mail-only)       INS_ROLE="mail" ;;
+      --role)            INS_ROLE="${1:-}"; shift ;;
       --with-netdata)    INS_WITH_NETDATA=1 ;;
       --cloudflare)      INS_CLOUDFLARE=1 ;;
       --cf-api-token)    INS_CF_TOKEN="${1:-}"; shift
@@ -78,6 +81,18 @@ lib_install_parse_args() {
       if [[ -n "$v" ]]; then TIMEZONE="$v"; fi
     fi
   fi
+  # What the server is for. Given once and then kept, like the settings above: a re-run - and
+  # every optional component the menu adds is one - must not turn a mail server back into a
+  # web server by saying nothing about it.
+  case "$INS_ROLE" in
+    ""|web|mail) ;;
+    *) lib_die "Invalid --role '${INS_ROLE}'" "a server is for web sites (with or without mail), or for mail alone" \
+         "--role web | --role mail   (--mail-only is the same as --role mail)" ;;
+  esac
+  if [[ -z "$INS_ROLE" && -s "$STATE_DIR/manifest.json" ]] && lib_have jq; then
+    INS_ROLE="$(lib_manifest_get '.params.role')"
+  fi
+  if [[ "$INS_ROLE" == "mail" ]]; then INS_WITH_MAIL=1; fi
   lib_php_valid_version "$PHP_VERSION" || lib_die "Invalid --php '${PHP_VERSION}'${php_kept}" "expected e.g. 8.3" "--php 8.3"
   if [[ -n "$DEFAULT_EMAIL" ]]; then
     lib_email_valid "$DEFAULT_EMAIL" || lib_die "Invalid --email '${DEFAULT_EMAIL}'" \
@@ -159,6 +174,25 @@ lib_install_main() {
   local rerun=0
   lib_installed && rerun=1
   (( rerun )) && lib_info "Server was provisioned on $(lib_manifest_get '.installed_at') - verifying and repairing the configuration (idempotent re-run)"
+  # A server that already hosts sites cannot be declared mail-only over their heads: "add" would
+  # refuse from then on, and the sites would sit on a machine tuned as if they were not there.
+  if [[ "$INS_ROLE" == "mail" && -n "$(lib_domains_list)" ]]; then
+    lib_die "This server hosts sites, so it cannot become a mail-only server" \
+      "--mail-only is for a server that carries mail and nothing else" \
+      "install mail beside the sites instead: lomp install --with-mail --mail-hostname mail.example.com"
+  fi
+  # Asked before the first package is touched. A mail server needs a name to send as, and
+  # finding out at step 17 that it has none leaves a half-provisioned machine behind - on a
+  # mail-only server, one that was set up for nothing.
+  if (( INS_WITH_MAIL )) && ! lib_mail_installed && ! lib_mail_host_resolve "$INS_MAIL_HOSTNAME" >/dev/null; then
+    lib_die "This server has no name to send mail as" "$MAIL_LAST_ERROR" \
+      "lomp install $( [[ "$INS_ROLE" == "mail" ]] && printf -- '--mail-only' || printf -- '--with-mail') --mail-hostname mail.example.com"
+  fi
+  # written before anything is sized or installed: the profile below reads it
+  if [[ -n "$INS_ROLE" ]] && (( ! OPT_DRY_RUN )); then lib_manifest_set '.params.role' "$INS_ROLE"; fi
+  if [[ "$INS_ROLE" == "mail" ]]; then
+    lib_info "Mail-only server: OpenLiteSpeed, PHP and MariaDB are installed for the webmail alone; domains get mail, not sites"
+  fi
   local total=21
   lib_steps_begin "$total"
 
@@ -790,8 +824,17 @@ lib_install_summary() {
     open) lib_print_kv "WebAdmin" "$(lib_ols_admin_url)  (reachable from anywhere)" ;;
   esac
   lib_print_kv "WebAdmin login"  "user admin, password: sudo lomp credentials --all"
-  lib_print_kv "Sites root"     "${SITES_ROOT}/<domain>/public_html"
-  lib_print_kv "Add a site"     "setup.sh add example.com [--www] [--wordpress] [--proxy 127.0.0.1:3000]"
+  if lib_server_mail_only; then
+    # a mail server's next steps are not a web server's: there is no site to add here
+    lib_print_kv "This server"   "mail only - domains get mail here, their sites live elsewhere"
+    lib_print_kv "Add a domain"  "lomp mail domain add example.com --mailbox info"
+    lib_print_kv "Into one inbox" "lomp mail domain add other.com --to info@example.com --address info,sales"
+    lib_print_kv "Webmail"       "lomp mail webmail on example.com   (https://webmail.example.com)"
+    lib_print_kv "Before it can send" "lomp mail test   (reverse DNS, outgoing port 25)"
+  else
+    lib_print_kv "Sites root"     "${SITES_ROOT}/<domain>/public_html"
+    lib_print_kv "Add a site"     "setup.sh add example.com [--www] [--wordpress] [--proxy 127.0.0.1:3000]"
+  fi
   lib_print_kv "Health"         "setup.sh status | setup.sh doctor"
   lib_print_kv "Notifications"  "$(lib_notify_channels)  (setup.sh notify --email you@example.com ...)"
   if lib_mail_installed; then

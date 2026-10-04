@@ -119,6 +119,10 @@ lib_system_profile() {
   if [[ -n "$DB_BUFFER_PERCENT" ]]; then
     [[ "$DB_BUFFER_PERCENT" =~ ^[0-9]+$ ]] || lib_die "DB_BUFFER_PERCENT must be a number" "got '${DB_BUFFER_PERCENT}'" "use 5..80"
     CALC_DB_BUFFER_PCT="$(_sys_clamp "$DB_BUFFER_PERCENT" 5 80)"
+  elif lib_server_mail_only; then
+    # a mail-only server: MariaDB holds the webmail's address books and settings and nothing
+    # else, and the memory a site's database would get belongs to the mail filter instead
+    CALC_DB_BUFFER_PCT=5
   else
     if   (( r <= 1024 )); then CALC_DB_BUFFER_PCT=25
     elif (( r <= 2048 )); then CALC_DB_BUFFER_PCT=35
@@ -146,6 +150,9 @@ lib_system_profile() {
   if [[ -n "$REDIS_MAX_PERCENT" ]]; then
     [[ "$REDIS_MAX_PERCENT" =~ ^[0-9]+$ ]] || lib_die "REDIS_MAX_PERCENT must be a number" "got '${REDIS_MAX_PERCENT}'" "use 2..30"
     CALC_REDIS_PCT="$(_sys_clamp "$REDIS_MAX_PERCENT" 2 30)"
+  elif lib_server_mail_only; then
+    # no site keeps an object cache here; Rspamd has a Redis of its own
+    CALC_REDIS_PCT=2
   else
     if   (( r <= 2048 )); then CALC_REDIS_PCT=5
     elif (( r <= 8192 )); then CALC_REDIS_PCT=8

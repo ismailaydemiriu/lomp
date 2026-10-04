@@ -42,6 +42,7 @@ after it is applied, and rolled back if the verification fails.
 | Security | UFW, Fail2ban (sshd + recidive + WordPress/scanner jails), sshd drop-in hardening, unattended security updates |
 | Operations | Backups with retention/encryption/remote upload, daily health check, e-mail / Telegram / webhook alerts, `status` and `doctor` |
 | Optional | Node.js + PM2, Python venv tooling, Netdata, Cloudflare real-client-IP mode, a mail server with webmail (Postfix + Dovecot + Rspamd + Roundcube). None of these is installed unless you ask for it, on the command line or from the menu. |
+| Mail only | `install --mail-only` makes a server that carries mail and nothing else: every domain's mailboxes on one machine, their web sites wherever they are. See [A server for mail alone](#a-server-for-mail-alone). |
 
 Everything is sized from the machine it runs on: CPU count, RAM, and whether the disk is
 NVMe, SSD or spinning rust all feed into the OpenLiteSpeed, PHP, MariaDB and Redis settings.
@@ -123,6 +124,9 @@ sudo ./setup.sh install --with-node --with-python --cloudflare --php 8.3
 
 # A mail server for the sites on this machine (see "Mail" below for what it needs first)
 sudo ./setup.sh install --with-mail --mail-hostname mail.example.com
+
+# Or a server for mail alone: no sites, the mail of all your domains (see "A server for mail alone")
+sudo ./setup.sh install --mail-only --mail-hostname mail.example.com --email you@example.com
 
 # Change the SSH port safely (UFW is opened first, sshd is tested before it is restarted)
 sudo ./setup.sh install --ssh-port 2222
@@ -600,8 +604,9 @@ There is no bundled WAF or ModSecurity: that job belongs to the edge.
 
 ## Mail
 
-A mail server for the sites on this machine: Postfix for SMTP, Dovecot for IMAP and delivery,
-Rspamd for spam filtering and DKIM. It is opt-in and changes nothing about the web stack.
+A mail server for the sites on this machine - or for domains whose sites are somewhere else, on
+a server that does nothing but mail: Postfix for SMTP, Dovecot for IMAP and delivery, Rspamd
+for spam filtering and DKIM. It is opt-in and changes nothing about the web stack.
 
 ```bash
 sudo lomp install --with-mail --mail-hostname mail.example.com
@@ -698,6 +703,89 @@ provider, or an SPF record of its own, is reported and left alone — two SPF re
 every receiver, and moving somebody's mail is not a thing a provisioning script should do by
 itself. `lomp mail enable` does the same automatically when a token is there.
 
+### A domain that has its mail here and no site here
+
+A mail domain does not have to be a site. One whose web site lives on another server — or that
+has no site at all — is added for its mail alone:
+
+```bash
+sudo lomp mail domain add example.com --mailbox info --quota 2G
+sudo lomp mail domain list                 # every domain with mail: site or mail only
+sudo lomp mail domain del example.com      # the domain and all of its mail, after a last backup
+```
+
+It gets what a site's mail gets — DKIM key, certificate for `mail.example.com`, the DNS records,
+mailboxes, aliases, webmail, backups — and nothing a site would bring: no Linux user, no home
+directory, no virtual host. Its record is kept apart from the sites' registry, so nothing that
+walks the sites (logs, fail2ban, the minute jobs) ever meets it. Every other `mail` command
+works on it as it does on a site: `mail box add`, `mail alias add`, `mail dns`, `mail webmail on`,
+`mail disable`, `mail backup`.
+
+A site that sends mail from another server — a WordPress contact form, say — does it the way
+any mail client does: SMTP to `mail.example.com` on 465 or 587, with a mailbox's address and
+password. The SPF record lomp publishes names this server alone, so that is also the only way
+such mail passes.
+
+### One inbox for several domains
+
+A domain does not need a mailbox of its own. Its addresses can be delivered into one that
+exists already, and that mailbox may send as them:
+
+```bash
+sudo lomp mail domain add first.com --mailbox me                       # the mailbox: me@first.com
+sudo lomp mail domain add second.com --to me@first.com --address info,sales
+sudo lomp mail domain add third.com  --to me@first.com --catch-all     # every address of third.com
+sudo lomp mail alias add orders@second.com me@first.com                # one more, later
+```
+
+`info@second.com` and `sales@second.com` now arrive in `me@first.com`, and so does anything at
+all sent to `third.com`. `--to` works with `mail enable` too, for a site. Three things make it
+one inbox rather than a pile of forwards:
+
+- **The mailbox may answer as each of those addresses.** Postfix's sender table is built from
+  the aliases: an address that is delivered into a mailbox on this server is one that mailbox
+  may send as, and no other login may.
+- **That mail leaves signed for the right domain.** The message is signed with the key of the
+  domain in `From:`, not the domain of the login — which is safe because Postfix has already
+  refused every sender address the login does not own, and `From:` has to be of the same domain
+  as that sender.
+- **The webmail knows the addresses.** Roundcube answers from the identity a message was written
+  to, so somebody has to create one per address. A small plugin does it when the mailbox's owner
+  signs in, from a list lomp renders out of the aliases. It adds and never removes; `postmaster`,
+  `abuse` and `dmarc` are left out, and a catch-all has no address to offer.
+
+A catch-all (`--catch-all`, or `lomp mail alias add @example.com you@first.com`) takes whatever
+anybody makes up before the `@`, spam included, which is why it has to be asked for by name. A
+mailbox in the same domain keeps its own mail: an address with a line of its own wins.
+
+### A server for mail alone
+
+```bash
+sudo ./setup.sh install --mail-only --mail-hostname mail.example.com --email you@example.com
+sudo lomp                         # the menu of such a server is the mail menu
+```
+
+`--mail-only` installs the same mail server on a machine that hosts no site: one VPS for the
+mail of all your domains, with their web sites wherever they already are. OpenLiteSpeed, one
+PHP and MariaDB are still installed — the webmail is a web application and keeps its settings
+in a database — but they are sized for that and nothing else, and the memory a site's database
+would get is left to the mail filter. On such a server:
+
+- a domain is added with `lomp mail domain add`; `lomp add` refuses, and says so;
+- `lomp backup --all`, and the schedule that runs it, back up every mail domain — its
+  mailboxes with their password hashes, aliases, DKIM key and mail, in one archive each;
+- `lomp status`, `doctor`, `update` and `self-update` work as on any server.
+
+Before buying the machine, ask the provider two things: whether **outgoing port 25** is open
+(many keep it closed on new servers), and whether you can set the **PTR record** of its
+address. Without the first, mail only leaves through a relay; without the second, the large
+receivers file it as spam. `lomp mail test` checks both. Give it at least 2 GB of RAM — the
+installer refuses mail below 1.8 GB — and Ubuntu 22.04 or 24.04.
+
+The role is kept across re-runs of `install`. `lomp install --role web` turns the machine back
+into an ordinary server that may host sites as well; a server that already hosts sites cannot be
+declared mail-only.
+
 ### Webmail
 
 ```bash
@@ -779,6 +867,13 @@ backup is deleted by it. A mailbox that still holds mail is therefore asked abou
 left alone if the answer is no; an empty one - the disaster case - is filled without a
 question. `--yes` answers it in a script. The archive also decides which mailboxes the domain
 has: an address added after the backup was taken does not survive the restore as a login.
+
+A mail domain that is no site has only this archive, and `lomp backup example.com` or
+`lomp backup --all` writes it. Moving a mail server to a new machine is therefore: install it
+there, copy the archives into `/var/backups/server-setup/<domain>/`, and run
+`lomp mail restore <domain>` for each — a domain the new server has never heard of is added
+as a mail domain by the restore itself. An archive made with `--encrypt` is restored the same
+way, with the key in `/root/.server-setup/backup.key`.
 
 ---
 

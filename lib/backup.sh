@@ -212,6 +212,43 @@ lib_backup_failed() {
   lib_notify_send "Backup FAILED for ${1} on $(hostname)" "Reason: ${BK_ERROR}. See ${LOG_FILE}." || true
 }
 
+# A mail domain that is no site: there are no files, no database and no vhost to archive, only
+# the mail - which is the archive "mail backup" writes, in the place a site's would be. It
+# keeps the mail's own retention: --keep counts site archives, and a mailbox is not one.
+# (never dies: returns 1 and sets BK_ERROR)
+lib_backup_mail_domain() {   # domain [--encrypt] [--remote] [--tag T] [--keep N] [--no-mail]
+  local domain="$1"; shift
+  local encrypt=0 remote=0 no_mail=0 tag="" a=""
+  BK_ERROR=""; BK_LAST_FILE=""
+  while (($# > 0)); do
+    a="$1"; shift
+    case "$a" in
+      --keep)    shift || true ;;
+      --encrypt) encrypt=1 ;;
+      --remote)  remote=1 ;;
+      --tag)     tag="${1:-}"; shift || true ;;
+      --no-mail) no_mail=1 ;;
+      *) BK_ERROR="unknown backup option ${a}"; return 1 ;;
+    esac
+  done
+  if (( no_mail )); then
+    lib_info "${domain} is a mail domain: with --no-mail there is nothing of it to back up"
+    return 0
+  fi
+  (( encrypt )) && lib_backup_key_ensure
+  MAIL_BACKUP_LAST_FILE=""
+  if ! lib_mail_backup_domain "$domain" ${tag:+--tag "$tag"} $( (( encrypt )) && printf -- '--encrypt'); then
+    BK_ERROR="${MAIL_LAST_ERROR:-the mail could not be archived}"
+    lib_backup_failed "$domain"
+    return 1
+  fi
+  BK_LAST_FILE="${MAIL_BACKUP_LAST_FILE:-}"
+  if (( remote )) && [[ -n "$BK_LAST_FILE" ]]; then
+    lib_backup_remote_send "$BK_LAST_FILE" "${BK_LAST_FILE}.sha256" || { lib_backup_failed "$domain"; return 1; }
+  fi
+  return 0
+}
+
 # =============================================================================
 #  backup command
 # =============================================================================
@@ -250,7 +287,7 @@ lib_backup_main() {
     return 0
   fi
   if (( all )); then
-    local d="" failed=() n=0
+    local d="" failed=() n=0 m=0
     while read -r d; do
       [[ -n "$d" ]] || continue
       n=$((n + 1))
@@ -258,15 +295,33 @@ lib_backup_main() {
         failed+=("$d")
       fi
     done < <(lib_domains_list)
+    # ...and the domains that have their mail here and no site: "every site" would pass them
+    # over, and on a server that carries nothing but mail the nightly run would back up nothing
+    # at all. One that is also a site was archived, mail included, by the loop above.
+    if lib_mail_installed; then
+      while read -r d; do
+        [[ -n "$d" ]] || continue
+        lib_domain_registered "$d" && continue
+        m=$((m + 1))
+        if ! SERVER_SETUP_LOCKED=1 "$SCRIPT_PATH" backup "$d" --yes "${passthru[@]}" $( (( OPT_QUIET )) && printf -- '--quiet') $( (( OPT_DRY_RUN )) && printf -- '--dry-run'); then
+          failed+=("$d")
+        fi
+      done < <(lib_mail_standalone_domains)
+    fi
     lib_manifest_set '.backup.last_run' "$(lib_iso_now)"
-    (( n == 0 )) && { lib_info "No sites to back up"; return 0; }
+    (( n + m == 0 )) && { lib_info "No sites to back up"; return 0; }
     if ((${#failed[@]} > 0)); then
       lib_die "Backup failed for: ${failed[*]}" "see the errors above" "fix and re-run 'setup.sh backup --all'"
     fi
-    lib_ok "All ${n} site(s) backed up"
+    if (( m > 0 )); then lib_ok "All ${n} site(s) and ${m} mail domain(s) backed up"
+    else lib_ok "All ${n} site(s) backed up"; fi
     return 0
   fi
   [[ -n "$domain" ]] || lib_die "Usage: setup.sh backup <domain>|--all [options]" "" "setup.sh backup example.com"
+  if ! lib_domain_registered "$domain" && lib_mail_installed && lib_mail_domain_standalone "$domain"; then
+    lib_backup_mail_domain "$domain" "${passthru[@]}" || lib_die "Backup failed for ${domain}" "$BK_ERROR" "check disk space and the log"
+    return 0
+  fi
   lib_domain_registered "$domain" || lib_die "Site ${domain} is not registered" "" "setup.sh list"
   lib_backup_domain "$domain" "${passthru[@]}" || lib_die "Backup failed for ${domain}" "$BK_ERROR" "check disk space, MariaDB and the log"
 }
@@ -338,6 +393,11 @@ lib_restore_main() {
   mkdir -p "${work}/x"
   tar -C "${work}/x" -xzf "$archive" || lib_die "Could not extract the archive" "corrupted archive" "verify the file"
   [[ -s "${work}/x/manifest.json" ]] || lib_die "Archive has no manifest.json" "not a server-setup backup" "use an archive created by 'setup.sh backup'"
+  # a mail archive - what a mail domain's backup is, and what sits beside every site's - has
+  # no site in it, and the checksum test below would only call it corrupted
+  if [[ "$(jq -r '.kind // empty' "${work}/x/manifest.json" 2>/dev/null || true)" == "mail" ]]; then
+    lib_die "This archive holds mail, not a site" "it was written by 'mail backup', or by the backup of a mail domain" "setup.sh mail restore ${domain} --file ${file}"
+  fi
   ( cd "${work}/x" && sha256sum -c --quiet SHA256SUMS >/dev/null 2>&1 ) || lib_die "Archive content checksum mismatch" "corrupted archive" "use another backup"
   adomain="$(jq -r '.domain' "${work}/x/manifest.json")"
   if [[ "$adomain" != "$domain" ]]; then
@@ -348,6 +408,12 @@ lib_restore_main() {
 
   # ---- register the site when it does not exist (disaster recovery) --------
   if ! lib_domain_registered "$domain"; then
+    # the same refusal "add" gives: this would create a site on a server that is set up for none
+    if lib_server_mail_only; then
+      lib_die "This server is set up for mail only, so the site ${domain} cannot be restored here" \
+        "the archive holds a site: files, a database and a virtual host" \
+        "restore it on a web server; its mail alone goes back with: setup.sh mail restore ${domain}"
+    fi
     [[ -s "${work}/x/state/domain.json" ]] || lib_die "Site ${domain} is not registered and the archive carries no state" "" "add the site first: setup.sh add ${domain}"
     lib_info "Site ${domain} is not registered; recreating it from the archived state"
     local recreated="${work}/domain-restored.json"

@@ -5645,6 +5645,412 @@ unset -f curl _wpf _wp_site _mwp _wp_pass _wp_mode
 rm -rf "$_wp_h" "$SITES_ROOT/wps.example.com" "$SITES_ROOT/wp2.example.com" "$SITES_ROOT/wp3.example.com"
 lib_domain_state_reset
 
+# =============================================================================
+section "mail domains: a domain that has its mail here and no site here"
+# The mail module was written for the sites of one server. A domain whose web site lives
+# somewhere else - or a server that carries nothing but mail - needs the same mailboxes,
+# aliases, keys and certificates without the Linux user, the home and the virtual host a site
+# brings. Such a domain has a record of its own, apart from the sites' registry, so that
+# nothing which walks the sites ever meets one.
+_md="$TMP/maildom"; rm -rf "$_md"; mkdir -p "$_md"
+_md_saved_fn="$(declare -f lib_domains_list)"
+eval "$(sed -n '/^lib_domains_list() {/,/^}/p' "$ROOT/lib/common.sh")"
+_md_saved_vars="$(declare -p STATE_DIR MAIL_STATE_DIR MAIL_DOMAINS_DIR MAIL_DOMAINS_GONE_DIR MAIL_ALIAS_DIR MAIL_DISABLED_DIR MAIL_PASSWD_FILE MAIL_DKIM_DIR MAIL_RSPAMD_DIR MAIL_VMAIL_HOME BACKUP_ROOT BACKUP_KEY_FILE WM_CURRENT WM_CONF WM_IDENT_MAP INS_ROLE DB_BUFFER_PERCENT REDIS_MAX_PERCENT)"
+STATE_DIR="$_md/state"; mkdir -p "$STATE_DIR/domains"
+lib_state_init
+MAIL_STATE_DIR="$_md/mailstate"; MAIL_DOMAINS_DIR="$MAIL_STATE_DIR/domains"; MAIL_DOMAINS_GONE_DIR="$_md/gone"
+MAIL_ALIAS_DIR="$MAIL_STATE_DIR/aliases"; MAIL_DISABLED_DIR="$MAIL_STATE_DIR/disabled"
+MAIL_PASSWD_FILE="$_md/passwd"; MAIL_DKIM_DIR="$_md/dkim"; MAIL_VMAIL_HOME="$_md/vmail"
+BACKUP_ROOT="$_md/backups"; BACKUP_KEY_FILE="$_md/backup.key"; INS_ROLE=""
+mkdir -p "$MAIL_ALIAS_DIR" "$MAIL_DKIM_DIR" "$MAIL_VMAIL_HOME" "$BACKUP_ROOT"
+_md_hash='{BLF-CRYPT}$2y$05$abcdefghijklmnopqrstuv'
+# What needs a mail server to be there is stood in for. Everything that decides what the state
+# and the tables say is the real code.
+_md_stubs='lib_mail_installed() { return 0; }
+  lib_mail_dkim_ensure() { return 0; }
+  lib_mail_tables_apply() { return 0; }
+  lib_mail_domain_cert_ensure() { return 0; }
+  lib_mail_dns_print() { return 0; }
+  lib_cf_token() { printf ""; }
+  lib_require_tools() { return 0; }
+  sleep() { return 0; }
+  _mail_sendas_current() { printf "x\n" >>"$_md/sendas.log"; return 0; }
+  lib_mail_backup_domain() { printf "%s\n" "$*" >>"$_md/backup.log"; MAIL_LAST_ERROR="no room"; return "${_md_backup_rc:-0}"; }'
+_md_do()  { eval "$_md_stubs"; "$@"; }                    # under run_isolated: the status is the answer
+_md_run() { ( _md_do "$@" ) >/dev/null 2>&1 || true; }    # where it is expected to work
+
+mkdir -p "$STATE_DIR/domains/site.example"
+printf '{"domain":"site.example","mail":{"enabled":true,"selector":"lomp202601"}}\n' >"$(lib_domain_json site.example)"
+lib_mail_domain_register own.example
+assert_true  "a mail domain has a record of its own"   lib_mail_domain_standalone own.example
+assert_false "and is no site"                           lib_domain_registered own.example
+assert_eq    "so nothing that walks the sites meets it" "site.example" "$(lib_domains_list | tr '\n' ' ' | sed 's/ $//')"
+assert_eq    "the record says what it is"               "mail" "$(jq -r '.kind' "$(lib_mail_domain_file own.example)")"
+if (( CAN_CHMOD )); then assert_eq "and only root reads it" "600" "$(stat -c %a "$(lib_mail_domain_file own.example)")"; fi
+assert_eq    "its mail state is kept in that record"    "$(lib_mail_domain_file own.example)" "$(lib_mail_json own.example)"
+assert_eq    "a site's stays in the site's"             "$(lib_domain_json site.example)" "$(lib_mail_json site.example)"
+assert_true  "a site is a domain mail can be on for"    lib_mail_domain_known site.example
+assert_true  "and so is a mail domain"                  lib_mail_domain_known own.example
+assert_false "anything else is not"                     lib_mail_domain_known nobody.example
+assert_eq    "registering it again changes nothing"     0 "$(run_isolated lib_mail_domain_register own.example)"
+lib_json_set "$(lib_mail_json own.example)" '.mail.enabled = true | .mail.selector = "lomp202602"'
+assert_eq    "both kinds are domains with mail"         "own.example site.example" "$(lib_mail_domains | tr '\n' ' ' | sed 's/ $//')"
+assert_true  "the flag is read from the right record"   lib_mail_domain_enabled own.example
+# A record of its own wins over a site of the same name: the mail was there first, or was
+# added on purpose beside the site, and removing the site must not take it away.
+mkdir -p "$STATE_DIR/domains/own.example"; printf '{"domain":"own.example"}\n' >"$(lib_domain_json own.example)"
+assert_eq    "its own record wins over a site of that name" "$(lib_mail_domain_file own.example)" "$(lib_mail_json own.example)"
+assert_eq    "and the domain is listed once, not twice"     1 "$(lib_mail_domains | grep -c '^own[.]example$' || true)"
+_rm_body="$(declare -f lib_domain_remove_main)"
+_rm_own_ln="$(grep -n 'lib_mail_domain_standalone' <<<"$_rm_body" | tail -1 | cut -d: -f1 || true)"
+_rm_purge_ln="$(grep -n 'lib_mail_domain_purge' <<<"$_rm_body" | head -1 | cut -d: -f1 || true)"
+assert_true  "removing the site asks first whether the mail is its own" test "${_rm_own_ln:-0}" -gt 0
+assert_true  "before anything of it is deleted"                         test "${_rm_own_ln:-0}" -lt "${_rm_purge_ln:-0}"
+rm -rf "$STATE_DIR/domains/own.example"
+
+# ---- one inbox for several domains ------------------------------------------
+# "--to" gives a domain no mailbox of its own: its addresses are delivered into one that
+# exists, and that mailbox may send as them.
+lib_mail_passwd_set "me@site.example" "$_md_hash" "2G"
+lib_mail_domain_register col.example
+_md_run lib_mail_enable_main col.example --to Me@Site.Example --address info,Sales
+_al="$(cat "$(lib_mail_alias_file col.example)" 2>/dev/null || true)"
+assert_true  "mail is on for it"                         lib_mail_domain_enabled col.example
+assert_has   "each address named goes into the mailbox"  $'info@col.example\tme@site.example' "$_al"
+assert_has   "in lower case, whatever was typed"         $'sales@col.example\tme@site.example' "$_al"
+assert_has   "postmaster arrives there too"              $'postmaster@col.example\tme@site.example' "$_al"
+assert_eq    "no catch-all unless it is asked for"       0 "$(grep -c '^@' <<<"$_al" || true)"
+assert_eq    "and the domain has no mailbox of its own"  "" "$(lib_mail_boxes col.example)"
+assert_true  "the filter is told to sign for the other domain" test -s "$_md/sendas.log"
+lib_mail_domain_register def.example
+_md_run lib_mail_enable_main def.example --to me@site.example
+assert_has   "one address by default, as --mailbox suggests one" $'info@def.example\tme@site.example' "$(cat "$(lib_mail_alias_file def.example)" 2>/dev/null || true)"
+lib_mail_domain_register all.example
+_md_run lib_mail_enable_main all.example --to me@site.example --catch-all
+_al="$(cat "$(lib_mail_alias_file all.example)" 2>/dev/null || true)"
+assert_eq    "a catch-all is one line that starts at the @" $'@all.example\tme@site.example' "$(grep '^@' <<<"$_al" || true)"
+assert_lacks "and it brings no address of its own with it"  "info@all.example" "$_al"
+assert_eq    "where every other address goes"               "me@site.example" "$(lib_mail_catchall all.example)"
+assert_eq    "a domain without one answers nothing"         "" "$(lib_mail_catchall col.example)"
+# an address is a mailbox or an alias, never both: Postfix resolves the alias first
+lib_mail_domain_register keep.example
+lib_json_set "$(lib_mail_json keep.example)" '.mail.enabled = true'
+lib_mail_passwd_set "info@keep.example" "$_md_hash" "1G"
+_md_run lib_mail_enable_main keep.example --to me@site.example --address info,sales
+assert_lacks "a mailbox is never turned into an alias"   $'info@keep.example\t' "$(lib_mail_aliases keep.example)"
+assert_has   "the address beside it still is"            $'sales@keep.example\tme@site.example' "$(lib_mail_aliases keep.example)"
+assert_eq "--to a mailbox that is not on this server is refused" 1 "$(run_isolated _md_do lib_mail_enable_main col.example --to nobody@site.example)"
+assert_eq "--mailbox and --to do not go together"                1 "$(run_isolated _md_do lib_mail_enable_main col.example --mailbox info --to me@site.example)"
+assert_eq "--address means nothing without --to"                 1 "$(run_isolated _md_do lib_mail_enable_main col.example --address info)"
+assert_eq "nor does --catch-all"                                 1 "$(run_isolated _md_do lib_mail_enable_main col.example --catch-all)"
+assert_eq "an address name is checked like a mailbox name"       1 "$(run_isolated _md_do lib_mail_enable_main col.example --to me@site.example --address 'a/b')"
+_md_out="$( ( _md_do lib_mail_enable_main stranger.example --mailbox info ) 2>&1 || true )"
+assert_has "a domain this server does not know is refused"       "is not a domain of this server" "$_md_out"
+assert_has "and the way to add one for its mail is named"        "lomp mail domain add stranger.example" "$_md_out"
+assert_false "nothing was written for it"                        lib_mail_domain_known stranger.example
+
+# ---- what Postfix reads -----------------------------------------------------
+lib_mail_passwd_set "box@all.example" "$_md_hash" "1G"
+_va="$(lib_mail_render_valias)"
+# "@domain" takes every address with no line of its own, and a mailbox has none: without this
+# its mail would follow the catch-all and never reach it
+assert_eq    "a mailbox in a catch-all domain is pointed at itself" 1 "$(grep -c $'^box@all.example\tbox@all.example$' <<<"$_va" || true)"
+assert_eq    "one in a domain without a catch-all is not"           0 "$(grep -c $'^me@site.example\tme@site.example$' <<<"$_va" || true)"
+assert_eq    "the catch-all itself is in the table"                 1 "$(grep -c $'^@all.example\tme@site.example$' <<<"$_va" || true)"
+_sn="$(lib_mail_render_senders)"
+assert_eq    "the mailbox may send as an alias of another domain"   1 "$(grep -c $'^info@col.example\tme@site.example$' <<<"$_sn" || true)"
+assert_eq    "and as any address of a domain it catches all of"     1 "$(grep -c $'^@all.example\tme@site.example$' <<<"$_sn" || true)"
+assert_eq    "but a mailbox there keeps its own address to itself"  1 "$(grep -c $'^box@all.example\tbox@all.example$' <<<"$_sn" || true)"
+assert_eq    "the renderers still exit 0" "0 0" "$(run_isolated lib_mail_render_valias) $(run_isolated lib_mail_render_senders)"
+
+# ---- the alias commands -----------------------------------------------------
+assert_true  "@domain is a name an alias can have"  lib_mail_alias_key_valid "@col.example"
+assert_true  "so is an address, in any case"        lib_mail_alias_key_valid "Info@Col.Example"
+assert_false "a bare @ is not"                      lib_mail_alias_key_valid "@"
+assert_false "nor @ followed by something else"     lib_mail_alias_key_valid "@not a domain"
+assert_false "nor a word with no @ at all"          lib_mail_alias_key_valid "info"
+: >"$_md/sendas.log"
+_md_run lib_mail_alias_add_main "@col.example" "Me@Site.Example"
+assert_eq    "a catch-all can be added afterwards"   "me@site.example" "$(lib_mail_catchall col.example)"
+assert_true  "and that, too, reaches the filter"     test -s "$_md/sendas.log"
+_md_run lib_mail_alias_del_main "@col.example"
+assert_eq    "and taken away again"                  "" "$(lib_mail_catchall col.example)"
+# stored in lower case: the sender table is built from the targets, and Postfix compares them
+# with a login Dovecot has already lowered
+_md_run lib_mail_alias_add_main "news@col.example" "ME@Site.Example,Far@Outside.Example"
+assert_has   "targets are stored in lower case"      $'news@col.example\tme@site.example,far@outside.example' "$(lib_mail_aliases col.example)"
+: >"$_md/sendas.log"
+_md_run lib_mail_alias_add_main "out@site.example" "far@outside.example"
+assert_false "an alias that only leaves the server touches nothing else" test -s "$_md/sendas.log"
+assert_eq    "an alias named like a mailbox is still refused" 1 "$(run_isolated _md_do lib_mail_alias_add_main "me@site.example" "info@col.example")"
+assert_eq    "the aliases that name one address each"         6 "$(lib_mail_aliases col.example | wc -l | tr -d ' ')"
+
+# ---- signing for the address a mailbox answers as ---------------------------
+# Rspamd refused to sign when the login was not of the domain in From:. Postfix has already
+# refused every sender the login does not own, and From: has to be of the sender's domain, so
+# the login's own domain adds nothing - and without this, mail sent as an alias of another
+# domain left the server unsigned.
+_dk="$(lib_mail_render_rspamd_dkim dkim_signing)"
+assert_has   "a mailbox is signed for an alias of another domain" "allow_username_mismatch = true;" "$_dk"
+assert_has   "From: still has to match the sender Postfix checked" "allow_hdrfrom_mismatch = false;" "$_dk"
+assert_has   "and only somebody who logged in is signed for"       "sign_authenticated = true;" "$_dk"
+assert_has   "ARC follows the same rules"                          "allow_username_mismatch = true;" "$(lib_mail_render_rspamd_dkim arc)"
+MAIL_RSPAMD_DIR="$_md/rspamd"; mkdir -p "$MAIL_RSPAMD_DIR"
+printf 'allow_username_mismatch = false;\n' >"$MAIL_RSPAMD_DIR/dkim_signing.conf"
+_md_sendas() { ( eval 'lib_mail_installed() { return 0; }
+                       lib_mail_host() { printf "mail.site.example"; }
+                       lib_mail_apply() { printf "%s\n" "$1" >"$_md/apply.log"; return 0; }'
+                 _mail_sendas_current ) >/dev/null 2>&1 || true; }
+rm -f "$_md/apply.log"; _md_sendas
+assert_eq    "a server an older release set up is brought up to date" "mail.site.example" "$(cat "$_md/apply.log" 2>/dev/null || true)"
+lib_mail_render_rspamd_dkim dkim_signing >"$MAIL_RSPAMD_DIR/dkim_signing.conf"
+rm -f "$_md/apply.log"; _md_sendas
+assert_false "one that is current is left alone" test -e "$_md/apply.log"
+
+# ---- the webmail's identities -----------------------------------------------
+# Roundcube answers from the identity a message was written to, but somebody has to create it.
+# The list is rendered from the aliases; a plugin adds what is missing when the owner signs in.
+_im="$(lib_webmail_render_identities)"
+_im_me="$(grep $'^me@site.example\t' <<<"$_im" || true)"
+assert_eq    "one line per mailbox"                              1 "$(grep -c $'^me@site.example\t' <<<"$_im" || true)"
+assert_has   "with the addresses that are delivered into it"     "info@col.example" "$_im_me"
+assert_has   "of every domain"                                   "info@def.example" "$_im_me"
+assert_has   "and the ones added later"                          "news@col.example" "$_im_me"
+assert_lacks "postmaster is not an address anybody answers as"   "postmaster@" "$_im"
+assert_lacks "a catch-all names no address to offer"             $'\t@' "$_im"
+assert_lacks "nor does it appear further along the line"         ",@" "$_im"
+assert_lacks "an address outside this server is no mailbox"      $'far@outside.example\t' "$_im"
+assert_eq    "the renderer exits 0"                              0 "$(run_isolated lib_webmail_render_identities)"
+_ip="$(lib_webmail_render_identities_plugin)"
+assert_has   "the plugin is a Roundcube plugin"                  "class lomp_identities extends rcube_plugin" "$_ip"
+assert_has   "that acts when somebody signs in"                  "login_after" "$_ip"
+assert_has   "adds what is missing"                              "insert_identity" "$_ip"
+assert_lacks "and never removes an identity"                     "delete_identity" "$_ip"
+# a redeclared property or return type is where a later Roundcube could turn this into a fatal
+# error, which is every webmail down at once
+assert_lacks "it redeclares nothing of the parent class"         'public $task' "$_ip"
+assert_has   "a plugin that does not load is taken out again"    'rm -rf "$dir"' "$(declare -f lib_webmail_identities_plugin_install)"
+assert_has   "the mail tables carry the list with them"          "lib_webmail_identities_apply" "$(declare -f lib_mail_tables_apply)"
+WM_CURRENT="$_md/wm/current"; mkdir -p "$WM_CURRENT/plugins"
+_wmc="$(lib_webmail_render_config 2>/dev/null || true)"
+assert_true  "the webmail configuration renders here"            test -n "$_wmc"
+assert_lacks "a release without the plugin is not told to load it" "'lomp_identities'" "$_wmc"
+mkdir -p "$WM_CURRENT/plugins/lomp_identities"; printf '<?php\n' >"$WM_CURRENT/plugins/lomp_identities/lomp_identities.php"
+_wmc="$(lib_webmail_render_config 2>/dev/null || true)"
+assert_has   "one that has it is"                                "'password', 'lomp_identities']" "$_wmc"
+assert_has   "and is told where the list is"                     "lomp_identities_map'] = '${WM_IDENT_MAP}'" "$_wmc"
+# A webmail an older release installed has neither the plugin nor the line that names it. The
+# line that says where the list is does not count: it is written either way, so a configuration
+# rendered before the release had the plugin carries it too.
+if (( CAN_SYMLINK )); then
+  rm -rf "$_md/wm"; mkdir -p "$_md/wm/releases/1.7.4/public_html" "$_md/wm/releases/1.7.4/plugins"
+  printf '<?php\n' >"$_md/wm/releases/1.7.4/public_html/index.php"
+  ln -sfn "$_md/wm/releases/1.7.4" "$_md/wm/current"
+  WM_CURRENT="$_md/wm/current"; WM_IDENT_MAP="$_md/wm/identities.map"; WM_CONF="$_md/wm/config.inc.php"
+  _md_ident() { ( eval 'lib_webmail_config_apply() { printf "applied\n" >>"$_md/wm/apply.log"; return 0; }'
+                  lib_webmail_identities_apply ) >/dev/null 2>&1 || true; }
+  printf "<?php\n\$config['plugins'] = ['password'];\n\$config['lomp_identities_map'] = 'x';\n" >"$WM_CONF"
+  rm -f "$_md/wm/apply.log"; _md_ident
+  assert_has  "the list is written where the webmail reads it"            "info@col.example" "$(cat "$WM_IDENT_MAP" 2>/dev/null || true)"
+  assert_true "a webmail that does not name the plugin yet is brought up to date" test -s "$_md/wm/apply.log"
+  printf "<?php\n\$config['plugins'] = ['password', 'lomp_identities'];\n" >"$WM_CONF"
+  rm -f "$_md/wm/apply.log"; _md_ident
+  assert_false "one that does is left alone"                              test -e "$_md/wm/apply.log"
+  unset -f _md_ident
+fi
+assert_has   "switching a webmail on writes the list as well"    "lib_webmail_identities_apply" "$(declare -f lib_webmail_domain_enable)"
+_wi="$(declare -f lib_webmail_install)"
+_wi_cur_ln="$(grep -n '_wm_current_set' <<<"$_wi" | head -1 | cut -d: -f1 || true)"
+_wi_cfg_ln="$(grep -n 'lib_webmail_config_apply' <<<"$_wi" | tail -1 | cut -d: -f1 || true)"
+assert_true  "a new webmail is configured again once its release is the running one" test "${_wi_cur_ln:-0}" -gt 0 -a "${_wi_cur_ln:-0}" -lt "${_wi_cfg_ln:-0}"
+
+# ---- mail domain add / list / del -------------------------------------------
+assert_eq "a site is not added a second time as a mail domain" 1 "$(run_isolated _md_do lib_mail_domain_add_main site.example --mailbox info)"
+assert_false "and gets no record of its own that way"          lib_mail_domain_standalone site.example
+_md_run lib_mail_domain_add_main Hub.Example --to me@site.example --address info
+assert_true  "a domain is added and its mail turned on in one go" lib_mail_domain_enabled hub.example
+assert_true  "as a mail domain"                                   lib_mail_domain_standalone hub.example
+assert_has   "with its address delivered where it was told"       $'info@hub.example\tme@site.example' "$(lib_mail_aliases hub.example)"
+assert_eq    "adding it again is not an error"                    0 "$(run_isolated _md_do lib_mail_domain_add_main hub.example --to me@site.example --address info)"
+_ml="$( ( OPT_JSON=1; lib_mail_domain_list_main ) 2>/dev/null || true )"
+assert_eq    "the list knows a site from a mail domain" "true false" \
+  "$(jq -r '[.[] | select(.domain == "site.example" or .domain == "col.example")] | sort_by(.domain) | reverse | map(.site | tostring) | join(" ")' <<<"$_ml")"
+assert_eq    "its mailboxes, aliases and catch-all"     "1 3 me@site.example" \
+  "$(jq -r '.[] | select(.domain == "all.example") | "\(.mailboxes) \(.aliases) \(.catch_all)"' <<<"$_ml")"
+assert_eq    "and a domain with none says so"           "null" "$(jq -r '.[] | select(.domain == "col.example") | .catch_all | tostring' <<<"$_ml")"
+# "credentials" answers for a mail domain too: what a mail client needs, and where the addresses
+# of a domain without a mailbox of its own are delivered
+_md_cred() { ( eval "$_md_stubs"; eval 'lib_mail_host() { printf "mail.site.example"; }'; lib_domain_credentials_main "$1" ) 2>&1 || true; }
+_cr="$(_md_cred col.example)"
+assert_has   "credentials knows a mail domain"                 "mail domain (its mail is here; no site on this server)" "$_cr"
+assert_has   "and what a mail client needs for it"             "mail.site.example:993" "$_cr"
+assert_has   "a domain with no mailbox says where its addresses go" "info@col.example -> me@site.example" "$_cr"
+assert_has   "and that it has no login of its own"             "none of its own" "$_cr"
+assert_lacks "postmaster is not listed with them"              "postmaster@col.example" "$_cr"
+assert_has   "a catch-all is said in words"                    "Every other address" "$(_md_cred all.example)"
+assert_has   "a mailbox is still named with its size"          "box@all.example (1G)" "$(_md_cred all.example)"
+assert_has   "a name that is neither is still refused"         "is not registered" "$(_md_cred nobody.example)"
+unset -f _md_cred
+_mt="$(lib_mail_domain_list_main 2>/dev/null || true)"
+assert_has   "the table names the kind"                 "mail " "$(grep '^all[.]example' <<<"$_mt" || true)"
+assert_has   "and marks a catch-all"                    "+all" "$(grep '^all[.]example' <<<"$_mt" || true)"
+# removing one: a last backup first, the mail and the lines gone, the record archived
+lib_mail_passwd_set "inbox@hub.example" "$_md_hash" "1G"
+lib_mail_alias_set col.example "x@col.example" "inbox@hub.example,me@site.example"
+rm -f "$_md/backup.log"
+_md_run lib_mail_domain_del_main hub.example
+assert_false "a removed mail domain has no record"          lib_mail_domain_standalone hub.example
+assert_has   "a last backup was taken first"                "hub.example --tag pre-remove" "$(cat "$_md/backup.log" 2>/dev/null || true)"
+assert_false "its mailbox is gone"                          lib_mail_box_exists "inbox@hub.example"
+assert_false "and nothing of it is left"                    lib_mail_domain_has_traces hub.example
+assert_true  "the record is archived, not deleted"          bash -c "compgen -G '${MAIL_DOMAINS_GONE_DIR}/hub.example.[0-9]*' >/dev/null"
+# an alias in another domain that was delivered into it would accept mail and bounce it
+assert_has   "what pointed at its mailbox goes with it"     $'x@col.example\tme@site.example' "$(lib_mail_aliases col.example)"
+assert_lacks "in every domain"                              "inbox@hub.example" "$(cat "$MAIL_ALIAS_DIR"/* 2>/dev/null || true)"
+# there is no site archive beside a mail domain: the backup that fails is a reason to stop
+assert_eq    "a backup that fails stops the removal"        1 "$(_md_backup_rc=1 run_isolated _md_do lib_mail_domain_del_main col.example)"
+assert_true  "and the domain is as it was"                  lib_mail_domain_enabled col.example
+assert_has   "aliases included"                             $'info@col.example\tme@site.example' "$(lib_mail_aliases col.example)"
+assert_eq    "a site is not removed with this command"      1 "$(run_isolated _md_do lib_mail_domain_del_main site.example)"
+assert_eq    "nor a domain nobody added"                    1 "$(run_isolated _md_do lib_mail_domain_del_main nobody.example)"
+# A selector that has been in DNS must never be handed to a second key. A domain removed and
+# added again in the same month would get exactly that name, so the archived record gives the
+# list back - and only to the domain it belongs to: example.com.tr starts with example.com.
+mkdir -p "$MAIL_DOMAINS_GONE_DIR/back.example.20260101-000000" "$MAIL_DOMAINS_GONE_DIR/back.example.tr.20260301-000000"
+printf '{"domain":"back.example","mail":{"selectors_used":["lomp202601","lomp202601b"]}}\n' >"$MAIL_DOMAINS_GONE_DIR/back.example.20260101-000000/domain.json"
+printf '{"domain":"back.example.tr","mail":{"selectors_used":["lomp209912"]}}\n' >"$MAIL_DOMAINS_GONE_DIR/back.example.tr.20260301-000000/domain.json"
+# the other domain's archive is the newer one, which is what "the newest that matches" would
+# pick: two directories made in the same instant tie, and a tie is broken by name
+touch -d '2026-01-01 00:00:00' "$MAIL_DOMAINS_GONE_DIR/back.example.20260101-000000"
+touch -d '2026-03-01 00:00:00' "$MAIL_DOMAINS_GONE_DIR/back.example.tr.20260301-000000"
+lib_mail_domain_register back.example
+assert_eq    "a domain that comes back remembers its selectors" '["lomp202601","lomp202601b"]' "$(jq -c '.mail.selectors_used' "$(lib_mail_domain_file back.example)")"
+lib_mail_domain_register fresh.example
+assert_eq    "a new one starts with none"                       "null" "$(jq -c '.mail' "$(lib_mail_domain_file fresh.example)")"
+assert_has   "enabling it then avoids the names it has used"    "selectors_used" "$(declare -f lib_mail_enable_main)"
+
+# ---- backups ----------------------------------------------------------------
+# "backup --all" walks the sites, and a server that carries only mail has none: its nightly run
+# backed up nothing. A mail domain's backup is its mail archive.
+_bm="$(declare -f lib_backup_main)"
+assert_has   "backup --all takes the mail domains too"       "lib_mail_standalone_domains" "$_bm"
+assert_has   "and one of them can be named"                  "lib_backup_mail_domain" "$_bm"
+rm -f "$_md/backup.log"
+( eval "$_md_stubs"; eval 'lib_mail_backup_domain() { printf "%s\n" "$*" >>"$_md/backup.log"; MAIL_BACKUP_LAST_FILE="$_md/x.tar.gz"; return 0; }'
+  lib_backup_mail_domain col.example --keep 7 --tag nightly; printf '%s' "$BK_LAST_FILE" >"$_md/bk.last" ) >/dev/null 2>&1 || true
+assert_eq    "the mail keeps its own retention, not the sites'" "col.example --tag nightly" "$(cat "$_md/backup.log" 2>/dev/null || true)"
+assert_eq    "and the archive is the one reported"              "$_md/x.tar.gz" "$(cat "$_md/bk.last" 2>/dev/null || true)"
+rm -f "$_md/backup.log"
+_md_run lib_backup_mail_domain col.example --no-mail
+assert_false "--no-mail leaves nothing to do for a mail domain" test -e "$_md/backup.log"
+assert_eq    "a mail backup that fails is a failed backup"      1 "$(_md_backup_rc=1 run_isolated _md_do lib_backup_mail_domain col.example)"
+# A restore onto a server that has never heard of the domain - the disaster recovery of a mail
+# server. It used to write the state into the SITES' registry, which made a "site" with no
+# user, no home and no virtual host.
+_ar="$_md/ar"; mkdir -p "$_ar/mail" "$BACKUP_ROOT/dr.example"
+printf '{"format":1,"kind":"mail","domain":"dr.example","created_at":"2026-01-01T00:00:00Z","maildirs":"doveadm"}\n' >"$_ar/manifest.json"
+printf '{"enabled":true,"selector":"lomp202603","selectors_used":["lomp202603"]}\n' >"$_ar/mail/state.json"
+printf 'info@dr.example\tme@site.example\n' >"$_ar/mail/aliases"
+tar -C "$_ar" -czf "$BACKUP_ROOT/dr.example/dr.example-mail-20260101-000000.tar.gz" .
+_md_run lib_mail_restore_domain dr.example "$BACKUP_ROOT/dr.example/dr.example-mail-20260101-000000.tar.gz"
+assert_true  "a restored domain nobody knew becomes a mail domain" lib_mail_domain_standalone dr.example
+assert_false "and not a site that has no site"                     lib_domain_registered dr.example
+assert_true  "with the state the archive carried"                  lib_mail_domain_enabled dr.example
+assert_eq    "its selector"                                        "lomp202603" "$(lib_mail_selector dr.example)"
+assert_has   "and its aliases"                                     $'info@dr.example\tme@site.example' "$(lib_mail_aliases dr.example)"
+_rsd="$(declare -f lib_mail_restore_domain)"
+_rs_reg_ln="$(grep -n 'lib_mail_domain_register' <<<"$_rsd" | head -1 | cut -d: -f1 || true)"
+_rs_state_ln="$(grep -n 'state.json' <<<"$_rsd" | head -1 | cut -d: -f1 || true)"
+assert_true  "the record is made before the state is written into it" test "${_rs_reg_ln:-0}" -gt 0 -a "${_rs_reg_ln:-0}" -lt "${_rs_state_ln:-0}"
+# an archive made with --encrypt is an archive too: a restore neither found one nor could read it
+printf 'k3y-for-the-unit-test\n' >"$BACKUP_KEY_FILE"
+mkdir -p "$BACKUP_ROOT/enc.example"
+sed -i 's/dr[.]example/enc.example/g' "$_ar/manifest.json" "$_ar/mail/aliases"
+tar -C "$_ar" -czf "$_md/enc-plain.tar.gz" .
+if openssl enc -aes-256-cbc -md sha256 -pbkdf2 -iter 200000 -salt -in "$_md/enc-plain.tar.gz" \
+     -out "$BACKUP_ROOT/enc.example/enc.example-mail-20260102-000000.tar.gz.enc" -pass "file:${BACKUP_KEY_FILE}" 2>/dev/null \
+   && openssl enc -d -aes-256-cbc -md sha256 -pbkdf2 -iter 200000 -in "$BACKUP_ROOT/enc.example/enc.example-mail-20260102-000000.tar.gz.enc" \
+     -pass "file:${BACKUP_KEY_FILE}" 2>/dev/null | cmp -s - "$_md/enc-plain.tar.gz"; then
+  assert_eq   "an encrypted mail archive is one a restore finds" "$BACKUP_ROOT/enc.example/enc.example-mail-20260102-000000.tar.gz.enc" "$(lib_mail_backup_latest enc.example)"
+  _md_run lib_mail_restore_domain enc.example ""
+  assert_true "and one it can read"                              lib_mail_domain_enabled enc.example
+  assert_has  "all of it"                                        $'info@enc.example\tme@site.example' "$(lib_mail_aliases enc.example)"
+  printf 'another key\n' >"$BACKUP_KEY_FILE"
+  assert_eq   "with the wrong key it stops and says so"          1 "$(run_isolated _md_do lib_mail_restore_domain enc.example "")"
+fi
+assert_has   "a mail archive handed to 'restore' is sent to the right command" "This archive holds mail, not a site" "$(declare -f lib_restore_main)"
+
+# ---- a server for mail alone ------------------------------------------------
+# install --mail-only: the same mail server, with the web stack only because the webmail needs
+# one. The role is recorded, kept across re-runs, and decides what "add" and the menu do.
+assert_eq    "a server is a web server unless it was told otherwise" "web" "$(lib_server_role)"
+assert_eq    "--mail-only makes it a mail server, with mail"  "mail 1" "$( ( lib_install_parse_args --mail-only --mail-hostname mail.site.example --skip-upgrade >/dev/null 2>&1; printf '%s %s' "$INS_ROLE" "$INS_WITH_MAIL" ) )"
+assert_eq    "--role mail is the same thing"                  "mail 1" "$( ( lib_install_parse_args --role mail --skip-upgrade >/dev/null 2>&1; printf '%s %s' "$INS_ROLE" "$INS_WITH_MAIL" ) )"
+assert_eq    "a role nobody knows is refused"                 1 "$(run_isolated lib_install_parse_args --role database --skip-upgrade)"
+assert_eq    "an install that names no role sets none"        "" "$( ( lib_install_parse_args --skip-upgrade >/dev/null 2>&1; printf '%s' "$INS_ROLE" ) )"
+lib_manifest_set '.params.role' 'mail'
+lib_manifest_set '.installed_at' '2026-10-04T00:00:00Z'
+assert_eq    "the role is read back from the manifest"        "mail" "$(lib_server_role)"
+assert_true  "and that is what mail-only means"               lib_server_mail_only
+# a re-run - every optional component the menu adds is one - must not turn it back
+assert_eq    "a re-run that says nothing keeps the role"      "mail 1" "$( ( lib_install_parse_args --skip-upgrade >/dev/null 2>&1; printf '%s %s' "$INS_ROLE" "$INS_WITH_MAIL" ) )"
+assert_eq    "--role web is the way back"                     "web" "$( ( lib_install_parse_args --role web --skip-upgrade >/dev/null 2>&1; printf '%s' "$INS_ROLE" ) )"
+assert_eq    "and what this run was asked for wins over the manifest" "web" "$( ( INS_ROLE=web; lib_server_role ) )"
+assert_has   "the params object is merged, so the role survives the manifest step" "lib_manifest_merge_json '.params'" "$(declare -f lib_install_manifest)"
+assert_has   "a server with sites cannot be declared mail-only over their heads"   "cannot become a mail-only server" "$(declare -f lib_install_main)"
+# a mail server needs a name to send as: asked before the first package, not at step 17
+_im_body="$(declare -f lib_install_main)"
+_im_name_ln="$(grep -n 'no name to send mail as' <<<"$_im_body" | head -1 | cut -d: -f1 || true)"
+_im_step_ln="$(grep -n 'lib_steps_begin' <<<"$_im_body" | head -1 | cut -d: -f1 || true)"
+assert_true  "a mail server with no name to send as stops before anything is installed" test "${_im_name_ln:-0}" -gt 0 -a "${_im_name_ln:-0}" -lt "${_im_step_ln:-0}"
+# MariaDB holds the webmail's settings and nothing else; the memory belongs to the mail filter
+SYS_ANALYZED=1; SYS_RAM_MB=4096; SYS_RAM_AVAIL_MB=3000; SYS_CPU_CORES=2; SYS_DISK_TYPE=ssd; SYS_SWAP_MB=0
+DB_BUFFER_PERCENT=""; REDIS_MAX_PERCENT=""
+lib_system_profile
+assert_eq    "a mail server's database gets the smallest share" "5 2" "${CALC_DB_BUFFER_PCT} ${CALC_REDIS_PCT}"
+DB_BUFFER_PERCENT="30"; lib_system_profile
+assert_eq    "unless the operator named one"                    "30" "$CALC_DB_BUFFER_PCT"
+DB_BUFFER_PERCENT=""
+_md_out="$( ( _md_do lib_domain_add_main shop.example --no-ssl ) 2>&1 || true )"
+assert_has   "a site is refused on a mail-only server"          "set up for mail only" "$_md_out"
+assert_has   "with the command that does what was meant"        "lomp mail domain add shop.example" "$_md_out"
+assert_false "and nothing was registered"                       lib_domain_registered shop.example
+assert_has   "restoring a site there is refused the same way"   "cannot be restored here" "$(declare -f lib_restore_main)"
+_md_out="$( ( _md_do lib_mail_enable_main stranger.example ) 2>&1 || true )"
+assert_lacks "and nobody there is told to add a site"           "lomp add stranger.example" "$_md_out"
+assert_has   "its menu is the mail menu"                        "_menu_mail top" "$(declare -f lib_menu_main)"
+lib_json_set "$STATE_DIR/manifest.json" 'del(.params.role)'
+lib_system_profile
+assert_eq    "a web server keeps the profile it always had"     "40 8" "${CALC_DB_BUFFER_PCT} ${CALC_REDIS_PCT}"
+
+# The menu: a site of this server gets its mail switched on, anything else is added for its mail
+# alone, and either can be delivered into a mailbox that exists.
+_mmail() {   # domain [question=answer...] -> the command the menu runs
+  (
+    eval '_menu_ask() { local -n _o="$1"; _o="${_ma[$1]-${3:-}}"; }
+          _menu_run() { printf "%s\n" "$*"; }
+          _menu_pause() { return 0; }'
+    declare -A _ma=([domain]="$1"); shift
+    for _kv in "$@"; do _ma[${_kv%%=*}]="${_kv#*=}"; done
+    _menu_mail_add_domain 2>/dev/null | tail -n 1
+  )
+}
+assert_eq "Enter everywhere on a site: its mail is switched on" \
+  "mail enable site.example --mailbox info --quota 2G" "$(_mmail site.example)"
+assert_eq "anything else is added for its mail alone" \
+  "mail domain add shop.example --mailbox info --quota 2G" "$(_mmail Shop.Example)"
+assert_eq "into a mailbox that exists, one address" \
+  "mail domain add shop.example --to me@site.example --address info" "$(_mmail shop.example how=2 to=me@site.example)"
+assert_eq "or every address" \
+  "mail domain add shop.example --to me@site.example --catch-all" "$(_mmail shop.example how=2 to=me@site.example 'addrs=*')"
+assert_eq "a dash gives it no mailbox yet" \
+  "mail domain add shop.example" "$(_mmail shop.example box=-)"
+assert_eq "what the picker offers: the domains whose mail is on" "all.example col.example" \
+  "$(_menu_mail_domains | grep -E '^(all|col)[.]example$' | tr '\n' ' ' | sed 's/ $//')"
+
+eval "$_md_saved_vars"; eval "$_md_saved_fn"
+unset -f _md_do _md_run _md_sendas _mmail
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 if (( FAIL > 0 )); then exit 1; fi
 exit 0

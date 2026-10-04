@@ -185,8 +185,8 @@ main() {
     notify) [[ " ${rest[*]:-} " == *" --send "* ]] || lib_lock ;;
     proxy)  if [[ "${rest[0]:-list}" != "list" && "${rest[0]:-list}" != "help" ]]; then lib_lock; fi ;;
     # reading the mail stack's state changes nothing; everything else writes a table or
-    # restarts a service. "box list" and "alias list" only read, and "dns" only prints
-    # unless --apply, which writes into Cloudflare and into the domain's own state.
+    # restarts a service. "box list", "alias list" and "domain list" only read, and "dns"
+    # only prints unless --apply, which writes into Cloudflare and into the domain's own state.
     firewall) case "${rest[0]:-status}" in status|--status|"") ;; *) lib_lock ;; esac ;;
     webmail) case "${rest[0]:-status}" in status|--status|help|-h|--help|"") ;; *) lib_lock ;; esac ;;
     mail)   case "${rest[0]:-status}" in
@@ -195,7 +195,7 @@ main() {
               # MX and updating domain.json with nothing holding the lock.
               dns) if [[ " ${rest[*]:-} " == *" --apply "* || " ${rest[*]:-} " == *" --replace-mx "* ]]; then lib_lock; fi ;;
               status|test|queue|help|-h|--help) ;;
-              box|alias) if [[ "${rest[1]:-list}" != "list" ]]; then lib_lock; fi ;;
+              box|alias|domain) if [[ "${rest[1]:-list}" != "list" ]]; then lib_lock; fi ;;
               *) lib_lock ;;
             esac ;;
     # "app deploy" can build for minutes: it takes the site's own lock (lib/app.sh) instead

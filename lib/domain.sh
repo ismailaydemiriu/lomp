@@ -277,6 +277,13 @@ lib_domain_add_main() {
   lib_require_tools
   lib_require_installed
   lib_domain_parse_add_args "$@"
+  # A server installed for mail alone carries OpenLiteSpeed and PHP for the webmail, tuned for
+  # that and nothing more. A site here would be one nobody planned for; a domain gets mail.
+  if lib_server_mail_only; then
+    lib_die "This server is set up for mail only, so ${D_DOMAIN} cannot be added as a site" \
+      "it was installed with --mail-only: a domain gets its mail here and its site somewhere else" \
+      "lomp mail domain add ${D_DOMAIN} --mailbox info   (to host sites here as well: lomp install --role web)"
+  fi
   local domain="$D_DOMAIN" total=6 http_expect="200|301|302" rc="" why=""
   lib_domain_registered "$domain" && lib_die "Site ${domain} already exists" "registered in $(lib_domain_state_dir "$domain")" "use 'setup.sh remove ${domain}' first, or 'renew-ssl' / 'db' to change it"
   lib_ols_is_installed || lib_die "OpenLiteSpeed is not installed" "run install first" "sudo ./setup.sh install"
@@ -1236,11 +1243,73 @@ lib_domain_credentials_main() {
   if [[ "$target" == "--all" ]]; then
     lib_domain_credentials_server
     while read -r d; do [[ -n "$d" ]] && lib_domain_credentials_show "$d"; done < <(lib_domains_list)
+    # ...and the domains that have their mail here and no site
+    if lib_mail_installed; then
+      while read -r d; do
+        [[ -n "$d" ]] || continue
+        lib_domain_registered "$d" && continue
+        lib_domain_credentials_mail_domain "$d"
+      done < <(lib_mail_standalone_domains)
+    fi
     return 0
   fi
   target="${target,,}"
+  if ! lib_domain_registered "$target" && lib_mail_installed && lib_mail_domain_standalone "$target"; then
+    lib_domain_credentials_mail_domain "$target"
+    return 0
+  fi
   lib_domain_registered "$target" || lib_die "Site ${target} is not registered" "" "setup.sh list"
   lib_domain_credentials_show "$target"
+}
+
+# A mail domain that is no site: there is nothing to show but its mail.
+lib_domain_credentials_mail_domain() {   # domain
+  local domain="$1"
+  printf '\n%s== %s ==%s\n' "$C_BLD" "$domain" "$C_RST"
+  lib_print_kv "Kind" "mail domain (its mail is here; no site on this server)"
+  if lib_mail_domain_enabled "$domain"; then
+    lib_domain_credentials_mail "$domain"
+  else
+    lib_print_kv "Mail" "switched off (setup.sh mail enable ${domain})"
+    printf '\n'
+  fi
+  return 0
+}
+
+# What somebody needs to set up a mail client, and nothing they should not have: a mailbox
+# password is not stored anywhere on this server, only its hash. A domain whose addresses are
+# delivered into another domain's mailbox has no login of its own, and says where they go.
+lib_domain_credentials_mail() {   # domain
+  local domain="$1" mhost="" box="" alias="" targets="" all=""
+  lib_mail_installed || return 0
+  lib_mail_domain_enabled "$domain" || return 0
+  mhost="mail.${domain}"
+  [[ -s "${SSL_DEPLOY_DIR}/$(lib_mail_cert_name "$domain")/fullchain.pem" ]] || mhost="$(lib_mail_host)"
+  all="$(lib_mail_catchall "$domain")"
+  printf '%sMail%s\n' "$C_BLD" "$C_RST"
+  lib_print_kv "IMAP"     "${mhost}:993, SSL/TLS"
+  lib_print_kv "SMTP"     "${mhost}:465 (SSL/TLS) or :587 (STARTTLS)"
+  box="$(lib_mail_boxes "$domain" | head -1)"
+  if [[ -z "$box" && -n "$(lib_mail_aliases "$domain")${all}" ]]; then
+    lib_print_kv "User name" "none of its own: the mailbox its addresses are delivered into signs in, with that mailbox's address"
+  else
+    lib_print_kv "User name" "the full address, e.g. ${box:-info@${domain} (no mailbox yet: setup.sh mail box add info@${domain})}"
+    lib_print_kv "Password" "set when the mailbox was made; change it with: setup.sh mail box passwd <address>"
+  fi
+  while read -r box; do [[ -n "$box" ]] && lib_print_kv "Mailbox" "${box} ($(lib_mail_box_quota "$box"))"; done < <(lib_mail_boxes "$domain")
+  # postmaster, abuse and dmarc are on every domain and go where its first address goes
+  while IFS=$'\t' read -r alias targets; do
+    [[ -n "$alias" ]] || continue
+    case "${alias%%@*}" in postmaster|abuse|dmarc) continue ;; esac
+    lib_print_kv "Alias" "${alias} -> ${targets//,/, }"
+  done < <(lib_mail_aliases "$domain")
+  if [[ -n "$all" ]]; then lib_print_kv "Every other address" "-> ${all//,/, }"; fi
+  if [[ "$(lib_json_get "$(lib_mail_json "$domain")" '.mail.webmail')" == "true" ]]; then
+    lib_print_kv "Webmail" "https://$(lib_webmail_host "$domain")  (the same address and password)"
+  fi
+  lib_print_kv "DNS"      "setup.sh mail dns ${domain} --check"
+  printf '\n'
+  return 0
 }
 
 lib_domain_credentials_server() {
@@ -1283,25 +1352,7 @@ lib_domain_credentials_show() {
     printf '\n'
   fi
   if [[ -n "$(lib_redis_password)" ]]; then lib_print_kv "Redis" "127.0.0.1:6379 (password: setup.sh credentials --all)"; fi
-  # what somebody needs to set up a mail client, and nothing they should not have: a mailbox
-  # password is not stored anywhere on this server, only its hash
-  if lib_mail_installed && lib_mail_domain_enabled "$domain"; then
-    local mhost="" box=""
-    mhost="mail.${domain}"
-    [[ -s "${SSL_DEPLOY_DIR}/$(lib_mail_cert_name "$domain")/fullchain.pem" ]] || mhost="$(lib_mail_host)"
-    printf '%sMail%s\n' "$C_BLD" "$C_RST"
-    lib_print_kv "IMAP"     "${mhost}:993, SSL/TLS"
-    lib_print_kv "SMTP"     "${mhost}:465 (SSL/TLS) or :587 (STARTTLS)"
-    box="$(lib_mail_boxes "$domain" | head -1)"
-    lib_print_kv "User name" "the full address, e.g. ${box:-info@${domain} (no mailbox yet: setup.sh mail box add info@${domain})}"
-    lib_print_kv "Password" "set when the mailbox was made; change it with: setup.sh mail box passwd <address>"
-    while read -r box; do [[ -n "$box" ]] && lib_print_kv "Mailbox" "${box} ($(lib_mail_box_quota "$box"))"; done < <(lib_mail_boxes "$domain")
-    if [[ "$(lib_json_get "$(lib_domain_json "$domain")" '.mail.webmail')" == "true" ]]; then
-      lib_print_kv "Webmail" "https://$(lib_webmail_host "$domain")  (the same address and password)"
-    fi
-    lib_print_kv "DNS"      "setup.sh mail dns ${domain} --check"
-    printf '\n'
-  fi
+  lib_domain_credentials_mail "$domain"
 }
 
 lib_domain_list_main() {
@@ -1675,7 +1726,9 @@ lib_domain_remove_main() {
   printf '\n%sThis will remove %s%s\n' "$C_BLD" "$domain" "$C_RST"
   lib_note "vhost + listener maps (archived), $( (( keep_files )) && printf 'files KEPT' || printf "files ${D_HOME} and logs $(lib_domain_log_dir "$domain") DELETED"), $( (( keep_db )) && printf 'database KEPT' || printf 'database DROPPED'), $( (( keep_ssl )) && printf 'certificate KEPT' || printf 'certificate deleted')"
   lib_note "a safety backup (files + database) is written to ${BACKUP_ROOT}/${domain}/ first"
-  if lib_mail_installed && lib_mail_domain_has_traces "$domain"; then
+  if lib_mail_installed && lib_mail_domain_standalone "$domain"; then
+    lib_note "the mail of ${domain} is a mail domain of its own here and stays as it is (setup.sh mail domain del ${domain})"
+  elif lib_mail_installed && lib_mail_domain_has_traces "$domain"; then
     lib_warn "Every mailbox of ${domain} and all of its mail is deleted too, and the safety backup does NOT include it"
     lib_note "to keep the mail, turn it off instead and leave the site: setup.sh mail disable ${domain}"
   fi
@@ -1714,7 +1767,11 @@ lib_domain_remove_main() {
   lib_step "Mail"
   # traces, not the flag: a domain whose mail was turned off still has its mailbox lines, and
   # a mailbox line is a login that works from anywhere until it is taken away
-  if lib_mail_installed && lib_mail_domain_has_traces "$domain"; then
+  if lib_mail_installed && lib_mail_domain_standalone "$domain"; then
+    # added with "mail domain add", before or beside the site: that mail was never the site's,
+    # and it is not what "remove this site" was asked to delete
+    lib_info "the mail of ${domain} does not belong to the site and was left alone"
+  elif lib_mail_installed && lib_mail_domain_has_traces "$domain"; then
     lib_mail_domain_purge "$domain"
     if (( ! OPT_DRY_RUN )); then
       lib_json_set "$(lib_domain_json "$domain")" '.mail.enabled = false' 2>/dev/null || true
