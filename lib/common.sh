@@ -786,6 +786,11 @@ lib_manifest_set() {          # lib_manifest_set '.path.key' 'string value'
 lib_manifest_set_json() {     # lib_manifest_set_json '.path.key' '<json literal>'
   lib_json_set "$STATE_DIR/manifest.json" "$1 = \$v | .updated_at = \$ts" --argjson v "$2" --arg ts "$(lib_iso_now)"
 }
+# For an object that more than one module keeps keys in (.params): the keys given are set, and
+# every other key already there stays. lib_manifest_set_json would take those away.
+lib_manifest_merge_json() {   # lib_manifest_merge_json '.path.key' '<json object>'
+  lib_json_set "$STATE_DIR/manifest.json" "$1 = (($1 // {}) + \$v) | .updated_at = \$ts" --argjson v "$2" --arg ts "$(lib_iso_now)"
+}
 
 lib_installed() { [[ -s "$STATE_DIR/manifest.json" ]] && [[ -n "$(lib_manifest_get '.installed_at')" ]]; }
 

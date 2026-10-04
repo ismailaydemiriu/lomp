@@ -2232,6 +2232,27 @@ assert_eq "--admin-port replaces it" 0 "$(run_isolated lib_install_parse_args --
 _rerun_manifest 8.2 7574 Mars/Olympus_Mons
 _rerun_tz_step() { timedatectl() { return 0; }; lib_install_parse_args --skip-upgrade; lib_system_timezone_apply; }
 assert_eq "a stored timezone that does not exist is refused" 1 "$(run_isolated _rerun_tz_step)"
+# What the run writes at its end is its own settings, beside what other commands keep under
+# .params. It used to write a new object there, so every re-run dropped harden's site_firewall -
+# the rules stayed loaded, but lib_sitefw_regen did nothing and a site added afterwards got none
+# of its own - and the Node major.
+_rerun_manifest 8.2 7574 UTC
+lib_manifest_set_json '.params.site_firewall' 'true'
+lib_manifest_set '.params.node_major' '22'
+_rerun_manifest_step() { PHP_VERSION="8.4"; ADMIN_PORT="7575"; TIMEZONE="Asia/Tokyo"; lib_install_manifest 1; }
+assert_eq "the manifest step gets through with errexit armed" 0 "$(run_isolated _rerun_manifest_step)"
+assert_eq "and records the settings of this run" "8.4 7575 Asia/Tokyo" \
+  "$(jq -r '.params | "\(.php) \(.admin_port) \(.timezone)"' "$_mf")"
+assert_true "the site firewall is still on" lib_sitefw_enabled
+assert_eq "the Node major is still recorded" "22" "$(lib_manifest_get '.params.node_major')"
+_rerun_own_keys="admin_access admin_ip admin_port auto_reboot backup_keep backup_schedule db_buffer_percent email fail2ban_ignore_ip php redis_max_percent redis_persist ssh_ports timezone"
+assert_eq "install's own settings are the ones it always wrote" "$_rerun_own_keys" \
+  "$(jq -r '.params | del(.site_firewall, .node_major) | keys | join(" ")' "$_mf")"
+# a first install has no settings to keep, and may have no .params at all
+jq -n '{version:"test", components:{}}' >"$_mf"
+assert_eq "a first install gets through it with errexit armed" 0 "$(run_isolated lib_install_manifest 0)"
+assert_eq "and has exactly those settings" "$_rerun_own_keys" "$(jq -r '.params | keys | join(" ")' "$_mf")"
+assert_false "the site firewall is off until harden switches it on" lib_sitefw_enabled
 cp "$TMP/manifest.rerun.save" "$_mf"
 
 # =============================================================================

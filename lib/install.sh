@@ -759,7 +759,11 @@ lib_install_manifest() {
   lib_manifest_set '.components.mariadb' "$(lib_db_version)"
   lib_manifest_set '.components.redis' "$(lib_redis_version)"
   lib_manifest_set '.params.admin_access' "$ADMIN_ACCESS"
-  lib_manifest_set_json '.params' "$(jq -n --arg tz "$TIMEZONE" --arg ap "$ADMIN_PORT" --arg ai "$ADMIN_ALLOWED_IP" --arg em "$DEFAULT_EMAIL" \
+  # Merged into .params, not written over it: other commands keep settings of their own there
+  # (harden's site_firewall, the Node major). A new object dropped them on every re-run - and
+  # every optional component the menu adds is one - so the site firewall read as off while its
+  # rules were still loaded, and a site added afterwards got no rules of its own.
+  lib_manifest_merge_json '.params' "$(jq -n --arg tz "$TIMEZONE" --arg ap "$ADMIN_PORT" --arg ai "$ADMIN_ALLOWED_IP" --arg em "$DEFAULT_EMAIL" \
       --arg aa "$ADMIN_ACCESS" \
       --arg ssh "${SYS_SSH_PORTS}${SSH_PORT:+ $SSH_PORT}" --arg php "$PHP_VERSION" --arg keep "$BACKUP_KEEP" --arg sched "$INS_BACKUP_SCHEDULE" \
       --argjson rp "$( (( INS_REDIS_PERSIST )) && printf 'true' || printf 'false')" --argjson ar "$( (( INS_AUTO_REBOOT )) && printf 'true' || printf 'false')" \
