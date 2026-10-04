@@ -2852,9 +2852,21 @@ assert_eq "nor has a site without WordPress"   "" "$(_wc_doc)"
 assert_eq "and the check exits 0"              0 "$(run_isolated _doc_site_wp_config wpc.example.com)"
 if (( CAN_CHMOD )); then
   printf '<?php // config\n' >"$_wc_f"; chmod 0666 "$_wc_f"
+  # whose the file is decides what doctor says to do: the numbers come from a stub, as in the
+  # fix-owner section, because the suite cannot own a file as anybody else
+  _wc_orig_ids="$(declare -f _domain_fix_owner_ids)"
+  eval '_domain_fix_owner_ids() { printf "%s" "$_wc_ids"; [[ "$_wc_ids" == [0-9]* ]]; }'
+  read -r _wc_u _wc_g < <(stat -c '%u %g' "$_wc_f")
+  _wc_ids="${_wc_u} ${_wc_g}"
   _wc_o="$(_wc_doc)"
   assert_has "doctor: the 0666 WordPress's installer leaves is a warning" "WARN|site wpc.example.com: wp-config.php|${_wc_f} is 0666: " "$_wc_o"
-  assert_has "which names the command that closes it" "(chmod 640 ${_wc_f})" "$_wc_o"
+  assert_has "the site's own file is one the minute check closes, and the command is named in case it does not" "if it stays open: chmod 640 ${_wc_f}" "$_wc_o"
+  _wc_ids="$(( _wc_u + 1 )) ${_wc_g}"; _wc_o="$(_wc_doc)"
+  assert_has "a file root uploaded is named with fix-owner" "setup.sh fix-owner wpc.example.com" "$_wc_o"
+  assert_lacks "and not with a chmod that would leave PHP unable to read it" "if it stays open" "$_wc_o"
+  _wc_ids="its user wpc_example_com does not exist"
+  assert_has "so is the file of a site whose account is not there" "setup.sh fix-owner wpc.example.com" "$(_wc_doc)"
+  _wc_ids="${_wc_u} ${_wc_g}"
   assert_eq  "the check exits 0 with a finding too"   0 "$(run_isolated _doc_site_wp_config wpc.example.com)"
   assert_eq  "and leaves the file as it found it"     666 "$(stat -c %a "$_wc_f")"
   D_MODE="wordpress"
@@ -2883,6 +2895,7 @@ if (( CAN_CHMOD )); then
     assert_eq "nor is a file behind a link in place of the document root" "" "$(_wc_doc)"
     rm -f "$D_HOME/public_html"
   fi
+  eval "$_wc_orig_ids"
 fi
 rm -rf "$D_HOME" "$TMP/wpc-docroot" "$TMP/wpc-victim.php"
 unset -f _wc_doc; unset DOC_RESULTS DOC_FAIL DOC_WARN DOC_OK
@@ -5270,8 +5283,7 @@ EOF
   assert_has "and the password"                    "Wp1DbPassw0rdForTheTest" "$_wp_o"
   assert_eq  "which stays out of the log"          0 "$(grep -c 'Wp1DbPassw0rdForTheTest' "$LOG_FILE" || true)"
   assert_has "and that its wp-config.php will be closed" "goes to 0640 by itself within a minute of the installation" "$_wp_o"
-  assert_true "the site is marked as waiting for its installer" test -e "$STATE_DIR/domains/wp1.example.com/wp-config.pending"
-  assert_has "and the check that looks for it runs every minute" "* * * * * root $BIN_LINK htaccess-check --quiet # server-setup:htaccess" "$(cat "$CRON_FILE")"
+  assert_has "and the check that does it runs every minute" "* * * * * root $BIN_LINK htaccess-check --quiet # server-setup:htaccess" "$(cat "$CRON_FILE")"
 
   # a document root that holds something: asked about first, and only the same names replaced
   printf 'mine\n' >"$_wp_d/own.txt"; printf 'old\n' >"$_wp_d/index.php"; printf '<h1>my own page</h1>\n' >"$_wp_d/index.html"
@@ -5329,65 +5341,79 @@ EOF
   assert_has "and no answer is a no"               "not confirmed" "$(cat "$_wp_out")"
   assert_eq  "so nothing is handed over"           "" "$(cat "$_wp_chown")"
   OPT_YES=1
-  assert_false "a run that was not confirmed marks nothing" test -e "$STATE_DIR/domains/wp2.example.com/wp-config.pending"
 else
   printf '   (unzip is not installed here: the runs that unpack the archive were skipped)\n'
 fi
 
-# WordPress's installer writes its wp-config.php 0666. For a site the command set up, the check
-# cron runs every minute closes it, as the site's user, and stops looking once it found it closed.
+# WordPress's installer writes its wp-config.php 0666, in a site this command set up and in one
+# somebody uploaded alike. The check cron runs every minute closes the one in the document root
+# of every PHP and WordPress site to 0640, as the site's user, where the file is that user's.
 _wp_ids="${_wp_u} ${_wp_g}"
 _wp_site wp3.example.com php
-_wp_c="$SITES_ROOT/wp3.example.com/public_html/wp-config.php"; _wp_m="$STATE_DIR/domains/wp3.example.com/wp-config.pending"
-_wp_pass() { run_isolated lib_domain_wp_config_close_pending; }
-assert_eq  "the marker is in the site's state directory" "$_wp_m" "$(_domain_wp_pending_file wp3.example.com)"
-assert_eq  "a pass with nothing to close exits 0" 0 "$(_wp_pass)"
-: >"$_wp_m"; : >"$RUNUSER_LOG"
-assert_eq  "so does one for a site whose installer has not run yet" 0 "$(_wp_pass)"
-assert_true "which goes on waiting"               test -e "$_wp_m"
-assert_eq  "with nothing run there"               "" "$(cat "$RUNUSER_LOG")"
+_wp_c="$SITES_ROOT/wp3.example.com/public_html/wp-config.php"
+_wp_pass() { run_isolated lib_domain_wp_config_close; }
+_wp_mode() { stat -c %a "$_wp_c"; }
+: >"$RUNUSER_LOG"
+assert_eq  "a pass over sites that have no wp-config.php exits 0" 0 "$(_wp_pass)"
+assert_eq  "and runs nothing"                    "" "$(cat "$RUNUSER_LOG")"
 if (( CAN_CHMOD )); then
   printf '<?php // written by the installer\n' >"$_wp_c"; chmod 0666 "$_wp_c"
   OPT_DRY_RUN=1
-  assert_eq  "a dry run closes nothing"            "0 666" "$(_wp_pass) $(stat -c %a "$_wp_c")"
+  assert_eq  "a dry run closes nothing"            "0 666" "$(_wp_pass) $(_wp_mode)"
   OPT_DRY_RUN=0
-  assert_eq  "the wp-config.php the installer left 0666 is closed to 0640" "0 640" "$(_wp_pass) $(stat -c %a "$_wp_c")"
+  assert_eq  "the wp-config.php the installer left 0666 is closed to 0640" "0 640" "$(_wp_pass) $(_wp_mode)"
   assert_has "by the site's user"                  "-u wp3_example_com -- env -C / chmod 0640 " "$(cat "$RUNUSER_LOG")"
-  assert_has "and the log says so"                 "wp-config.php of wp3.example.com closed to 0640 (WordPress's installer left it 666)" "$(cat "$LOG_FILE")"
-  assert_true "the site stays marked for one more pass" test -e "$_wp_m"
-  chmod 0666 "$_wp_c"   # the installer's own chmod, landing after that pass
-  assert_eq  "which closes it again if the installer opened it after the first" "0 640" "$(_wp_pass) $(stat -c %a "$_wp_c")"
-  assert_true "and still watches"                  test -e "$_wp_m"
+  assert_has "and the log says so"                 "wp-config.php of wp3.example.com closed to 0640 (it was 666)" "$(cat "$LOG_FILE")"
   : >"$RUNUSER_LOG"
-  assert_eq  "a pass that finds it closed"         0 "$(_wp_pass)"
-  assert_false "ends the watch"                    test -e "$_wp_m"
+  assert_eq  "a pass that finds it closed exits 0" 0 "$(_wp_pass)"
   assert_eq  "and runs nothing"                    "" "$(cat "$RUNUSER_LOG")"
+  chmod 0666 "$_wp_c"   # the installer's own chmod, landing after a pass
+  assert_eq  "opened again, it is closed again"    "0 640" "$(_wp_pass) $(_wp_mode)"
+  chmod 0644 "$_wp_c"
+  assert_eq  "one that others can only read is closed as well" "0 640" "$(_wp_pass) $(_wp_mode)"
+  : >"$RUNUSER_LOG"
+  for _m in 600 400 440; do
+    chmod "0${_m}" "$_wp_c"
+    assert_eq "a file closed further (0${_m}) is not opened up" "0 ${_m}" "$(_wp_pass) $(_wp_mode)"
+  done
+  assert_eq  "nothing is run for those"            "" "$(cat "$RUNUSER_LOG")"
+  # a file root uploaded: closed by root, PHP could no longer read it
+  chmod 0666 "$_wp_c"; _wp_ids="$(( _wp_u + 1 )) ${_wp_g}"
+  assert_eq  "a file that is not the site user's is left as it is" "0 666" "$(_wp_pass) $(_wp_mode)"
+  _wp_ids="its user wp3_example_com does not exist"
+  eval '_domain_fix_owner_ids() { printf "%s" "$_wp_ids"; [[ "$_wp_ids" == [0-9]* ]]; }'
+  assert_eq  "so is the file of a site whose account is not a site's" "0 666" "$(_wp_pass) $(_wp_mode)"
+  assert_eq  "with nothing run for either"         "" "$(cat "$RUNUSER_LOG")"
+  _wp_ids="${_wp_u} ${_wp_g}"
+  # only where PHP runs
+  for _m in static proxy; do
+    lib_json_set "$(lib_domain_json wp3.example.com)" '.mode = $m' --arg m "$_m"
+    assert_eq "a wp-config.php in a ${_m} site is not looked at" "0 666" "$(_wp_pass) $(_wp_mode)"
+  done
+  lib_json_set "$(lib_domain_json wp3.example.com)" '.mode = "wordpress"'
+  assert_eq  "one in a site added with --wordpress is" "0 640" "$(_wp_pass) $(_wp_mode)"
+  lib_json_set "$(lib_domain_json wp3.example.com)" '.mode = "php"'
+  # every site in one pass, whichever way WordPress got there
+  chmod 0666 "$_wp_c"; printf '<?php // uploaded\n' >"$_wp_d/wp-config.php"; chmod 0666 "$_wp_d/wp-config.php"
+  assert_eq  "every site's is closed in the same pass" "0 640 640" "$(_wp_pass) $(_wp_mode) $(stat -c %a "$_wp_d/wp-config.php")"
+  rm -f "$_wp_d/wp-config.php"
+  # a chmod that fails is tried again in a minute: said every time, it would fill the log
   chmod 0666 "$_wp_c"
-  assert_eq  "a site that is not marked is not touched" "0 666" "$(_wp_pass) $(stat -c %a "$_wp_c")"
-  : >"$_wp_m"; chmod 0600 "$_wp_c"
-  assert_eq  "a file closed further is not opened up" "0 600" "$(_wp_pass) $(stat -c %a "$_wp_c")"
-  assert_false "and ends the watch too"            test -e "$_wp_m"
-  # the site user cannot change it (root's file, say): said once, not tried every minute
-  : >"$_wp_m"; chmod 0666 "$_wp_c"
-  ( eval 'lib_domain_as_user() { return 1; }'; lib_domain_wp_config_close_pending ) >"$_wp_out" 2>&1 || true
-  assert_has "a file the site's user cannot close is reported" "wp3_example_com could not close it: chmod 640 " "$(cat "$_wp_out")"
-  assert_false "once"                              test -e "$_wp_m"
+  _wp_r="$( ( eval 'lib_domain_as_user() { return 1; }'; OPT_QUIET=0; lib_domain_wp_config_close; printf 'rc=%s' "$?" ) 2>&1 )"
+  assert_eq  "a chmod that fails is not reported, and the pass still exits 0" "rc=0" "$_wp_r"
   # the minute check is what runs it, and not while another command holds the lock
-  : >"$_wp_m"
   ( eval 'flock() { return 1; }; lib_ols_htaccess_pending() { return 0; }'; lib_ols_htaccess_check_main ) >/dev/null 2>&1 || true
-  assert_eq  "the minute check leaves it while another command holds the lock" "666" "$(stat -c %a "$_wp_c")"
+  assert_eq  "the minute check leaves it while another command holds the lock" "666" "$(_wp_mode)"
   ( eval 'flock() { return 0; }; lib_ols_htaccess_pending() { return 0; }'; lib_ols_htaccess_check_main ) >/dev/null 2>&1 || true
-  assert_eq  "and closes it otherwise"             "640" "$(stat -c %a "$_wp_c")"
+  assert_eq  "and closes it otherwise"             "640" "$(_wp_mode)"
   if (( CAN_SYMLINK )); then
     rm -f "$_wp_c"; printf 'elsewhere\n' >"$TMP/wp-elsewhere"; chmod 0666 "$TMP/wp-elsewhere"; ln -s "$TMP/wp-elsewhere" "$_wp_c"
     assert_eq  "a wp-config.php that is a link is not followed" "0 666" "$(_wp_pass) $(stat -c %a "$TMP/wp-elsewhere")"
-    assert_true "and the site goes on waiting for a real one" test -e "$_wp_m"
     rm -f "$_wp_c"
   fi
 fi
-: >"$_wp_m"; mv "$STATE_DIR/domains/wp3.example.com/domain.json" "$TMP/wp3-domain.json"
-assert_eq  "a marker without its site"           0 "$(_wp_pass)"
-assert_false "is taken away"                     test -e "$_wp_m"
+mv "$STATE_DIR/domains/wp3.example.com/domain.json" "$TMP/wp3-domain.json"; : >"$STATE_DIR/domains/wp3.example.com/domain.json"
+assert_eq  "a site whose state cannot be read is passed over" 0 "$(_wp_pass)"
 mv "$TMP/wp3-domain.json" "$STATE_DIR/domains/wp3.example.com/domain.json"
 
 # the menu: item 25, for a site PHP runs in
@@ -5418,7 +5444,7 @@ assert_has "the command is dispatched"           'wordpress)      lib_domain_wor
 assert_has "and in the command reference"        "wordpress <domain>" "$(lib_usage)"
 
 eval "$_wp_saved"; eval "$_wp_orig_ids"; eval "$_wp_orig_list"; eval "$_wp_orig_apt"
-unset -f curl _wpf _wp_site _mwp _wp_pass
+unset -f curl _wpf _wp_site _mwp _wp_pass _wp_mode
 rm -rf "$_wp_h" "$SITES_ROOT/wps.example.com" "$SITES_ROOT/wp2.example.com" "$SITES_ROOT/wp3.example.com"
 lib_domain_state_reset
 

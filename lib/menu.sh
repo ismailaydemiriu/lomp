@@ -166,7 +166,7 @@ COMMANDS
   firewall --web-open           Open them again
   htaccess-check                Reload OpenLiteSpeed when a site's .htaccess has changed
                                 (cron runs it every minute; OpenLiteSpeed reads it only on load),
-                                and close the wp-config.php a site of "wordpress" got since
+                                and close to 0640 a wp-config.php WordPress left more open
   notify [opts]                 --email a@b.c [--smtp-host H --smtp-port P
                                 --smtp-user U --smtp-pass P --smtp-from F]
                                 --telegram-token T --telegram-chat ID

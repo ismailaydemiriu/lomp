@@ -1000,33 +1000,36 @@ define('FS_METHOD', 'direct');" || lib_die "wp config create failed" "database c
 # and update itself - and nothing root does follows a name inside the site.
 WP_ARCHIVE_URL="https://wordpress.org/latest.zip"
 
-# The installer ends by making the wp-config.php it wrote 0666, whatever the umask. A site this
-# command put the files into therefore gets a marker in its state directory, and the check
-# cron runs every minute (lib_ols_htaccess_check_main) closes the file to 0640 - what
-# "add --wordpress" gives it - once it is there: as the site's user, who owns it. The marker
-# goes on a later pass, one that finds the file closed, so that a pass landing between the
-# installer's write and its chmod is not the last one. A file closed further (0600) is left
-# as it is, and so is a link.
-_domain_wp_pending_file() { printf '%s/wp-config.pending' "$(lib_domain_state_dir "$1")"; }
-
-lib_domain_wp_config_close_pending() {
-  local m="" d="" f="" mode=""
+# The installer ends by making the wp-config.php it wrote 0666, whatever the umask - in a site
+# this command put the files into, and just the same in one somebody uploaded and installed in
+# the browser. The check cron runs every minute (lib_ols_htaccess_check_main) therefore looks
+# at the wp-config.php in the document root of every PHP and WordPress site and closes one
+# that carries more than 0640, the mode "add --wordpress" gives it: as the site's user, and
+# only where the file is that user's. One root uploaded is not the site user's to change, and
+# closed by root it would be a file PHP could no longer read: that one waits for fix-owner
+# (doctor names it while others may write to it). A file closed further (0600) is left as it
+# is, and so is a link. A site costs a pass one stat; the state is read only for a file that
+# has to change.
+lib_domain_wp_config_close() {
+  local j="" d="" home="" f="" st="" mode="" owner="" ids=""
   (( OPT_DRY_RUN )) && return 0
-  for m in "$STATE_DIR"/domains/*/wp-config.pending; do
-    [[ -e "$m" ]] || continue
-    d="$(basename "$(dirname "$m")")"
-    if ! lib_domain_state_load "$d"; then rm -f -- "$m"; continue; fi
-    f="${D_HOME}/public_html/wp-config.php"
+  for j in "$STATE_DIR"/domains/*/domain.json; do
+    [[ -s "$j" ]] || continue
+    d="${j%/domain.json}"; d="${d##*/}"
+    home="$(lib_domain_home "$d")"; f="${home}/public_html/wp-config.php"
     [[ -f "$f" && ! -L "$f" ]] || continue
-    mode="$(stat -c %a "$f" 2>/dev/null || true)"
+    st="$(stat -c '%a %u' "$f" 2>/dev/null || true)"
+    mode="${st%% *}"; owner="${st##* }"
     [[ "$mode" =~ ^[0-7]{3,4}$ ]] || continue
-    if (( (8#$mode & ~8#640) == 0 )); then rm -f -- "$m"; continue; fi
+    (( (8#$mode & ~8#640) != 0 )) || continue
+    lib_domain_state_load "$d" || continue
+    [[ "$D_MODE" == "php" || "$D_MODE" == "wordpress" ]] || continue
+    # the site's own account, as fix-owner wants it, and the file that account's
+    ids="$(_domain_fix_owner_ids "$home")" || continue
+    [[ "$owner" == "${ids%% *}" ]] || continue
+    # a failure is not reported: this runs again in a minute, and would say so every time
     if lib_domain_as_user chmod 0640 "$f" 2>/dev/null; then
-      lib_ok "wp-config.php of ${d} closed to 0640 (WordPress's installer left it ${mode})"
-    else
-      # not the site user's to change, then: said once, and left to doctor
-      lib_warn "wp-config.php of ${d} is ${mode} and ${D_USER} could not close it: chmod 640 ${f}"
-      rm -f -- "$m"
+      lib_ok "wp-config.php of ${d} closed to 0640 (it was ${mode})"
     fi
   done
   return 0
@@ -1163,8 +1166,7 @@ lib_domain_wordpress_main() {
   lib_domain_as_user rm -rf -- "$stage" || lib_warn "could not remove ${stage}"
   lib_rollback_clear
   lib_log_write INFO "WordPress ${ver:-of an unknown version} put into ${docroot} as ${D_USER}"
-  # for the wp-config.php the installer is going to write (see above)
-  : >"$(_domain_wp_pending_file "$domain")"
+  # the check that will close the wp-config.php the installer is going to write (see above)
   lib_ols_htaccess_watch_ensure
 
   if (( D_SSL )); then scheme="https"; fi

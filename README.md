@@ -285,11 +285,13 @@ A document root that already holds something is asked about first: WordPress's f
 ones with the same name, the rest stays, and what root uploaded there is handed to the site's
 user first (as `fix-owner` does). A site that already has a `wp-config.php` is left alone.
 
-WordPress's installer ends by giving its new `wp-config.php` the mode 0666. For a site this
-command set up, lomp closes it to 0640 - what `add --wordpress` gives it - within a minute of
-the installation: the check cron runs every minute does it, as the site's user. A file you
-closed further yourself (0600) is left as it is. A WordPress you uploaded and installed without
-this command is not watched: `chmod 640 /home/example.com/public_html/wp-config.php` there.
+WordPress's installer ends by giving its new `wp-config.php` the mode 0666. lomp closes it to
+0640 - what `add --wordpress` gives it - within a minute: the check cron runs every minute
+looks at the `wp-config.php` in the document root of every PHP and WordPress site, whichever
+way WordPress got there, and closes one that carries more than 0640, as the site's user. A file
+you closed further yourself (0600) is left as it is. One that root uploaded and still owns is
+not touched - closed by root, PHP could no longer read it - until `fix-owner` has handed it to
+the site.
 
 ### .htaccess
 
@@ -442,9 +444,10 @@ world-readable ones, such as a `config.php` with a database password in it. Serv
 an older release had homes at 0711, which let another site's PHP in; `self-update` or `update`
 closes them, and `doctor` names a home that is open. Directory listing is off, and requests for dotfiles,
 `.git`, `.env`, `*.sql`, `*.bak` and `wp-config.php` are refused. A WordPress installed in the
-browser leaves its `wp-config.php` at 0666: `doctor`, and the daily health check with it, warns
-about one that its group or others may write to, and names the `chmod 640` that closes it.
-(For a site `lomp wordpress` set up, lomp closes it by itself within a minute.)
+browser leaves its `wp-config.php` at 0666: within a minute lomp closes it to 0640, in every PHP
+and WordPress site, where the file is the site user's own. `doctor`, and the daily health check
+with it, warns about one that its group or others may still write to - a file root uploaded,
+which `fix-owner` hands to the site first.
 
 ### What a PHP shell in a site can do
 
