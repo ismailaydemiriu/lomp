@@ -607,6 +607,9 @@ assert_has   "websocket on the proxied root" "websocket / {" "$out"
 assert_lacks "no websocket context of its own (OLS would make it static)" "websocket /socket.io" "$out"
 assert_has   "proxy pool closes before the app's keep-alive does" "pcKeepAliveTimeout      1" "$out"
 assert_lacks "no 60 s proxy pool" "pcKeepAliveTimeout      60" "$out"
+# OpenLiteSpeed 1.9.2 neither removes nor replaces a request header with these: see the note
+# above the proxy extprocessor in lib_ols_render_vhconf
+assert_lacks "no request header operations on a proxied site" "RequestHeader" "$out"
 D_WS_PATH=""
 out="$(lib_ols_render_vhconf)"
 assert_has   "websockets pass without --ws-path too" "websocket / {" "$out"
@@ -1613,6 +1616,7 @@ for _mode in php static proxy wordpress; do
     assert_has  "path proxies ${_tag}: extprocessor" "extprocessor $(lib_proxy_handler_name px_example_com /ws/) {" "$out"
     assert_has  "path proxies ${_tag}: target" "address                 127.0.0.1:4001" "$out"
     assert_has  "path proxies ${_tag}: websocket on the identical uri" "websocket /ws/ {" "$out"
+    assert_lacks "path proxies ${_tag}: no request header operations" "RequestHeader" "$out"
     assert_eq   "path proxies ${_tag}: exits 0" 0 "$(run_isolated lib_ols_render_vhconf)"
   done
 done

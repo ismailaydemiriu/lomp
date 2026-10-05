@@ -1095,6 +1095,16 @@ EOF
   # ---- reverse proxy ------------------------------------------------------
   # pcKeepAliveTimeout stays below the backends' own idle timeouts (Node 5 s, gunicorn 2 s):
   # reusing a pooled connection the application has already closed makes OpenLiteSpeed retry.
+  #
+  # What the application is told about the visitor is OpenLiteSpeed's own doing and nothing
+  # here can change it (measured on 1.9.2 from a client in another network namespace):
+  # X-Forwarded-For gets the visitor's address as its LAST entry (in Cloudflare mode the one
+  # Cloudflare names), X-Forwarded-Proto gets "https" on a TLS connection, and whatever the
+  # client sent under those names, X-Forwarded-Host, X-Real-IP or Forwarded stays in front or
+  # passes untouched. A request from the machine itself over HTTP/1.1 gets no X-Forwarded-For
+  # at all, which is what a curl on the server shows. "RequestHeader" lines in extraHeaders are
+  # no way out: "unset" leaves the client's header in place, "set" adds a second header and
+  # takes no variables, and on a path proxy the lines are applied twice.
   if [[ "$D_MODE" == "proxy" ]]; then
     cat <<EOF
 
