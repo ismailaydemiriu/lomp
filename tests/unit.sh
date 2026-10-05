@@ -7190,6 +7190,9 @@ _rn_stubs='
   _rn_tr() { source "$ROOT/lib/lang.sh"; LIB_LANG="tr"; lib_lang_build; }
   _rn_rename_tr() { _rn_tr; _rn_flow; lib_domain_rename_main "$@"; }
   _rn_redirect_tr() { _rn_tr; _rn_conf; lib_redirect_main "$@"; }
+  _rn_say_tr() { _rn_tr; lib_tr "$1"; printf "%s" "$LIB_TR"; }
+  _rn_usage_tr() { _rn_tr; lib_domain_rename_usage; lib_redirect_usage; }
+  _rn_usage_en() { lib_domain_rename_usage; lib_redirect_usage; }
   _rn_blocker() { lib_domain_state_load "$1"; _domain_rename_blocker "$1" "$2"; }
   _rn_redirect() { _rn_conf; lib_redirect_main "$@"; }
   _rn_vhconf() { lib_redirect_load "$1"; lib_redirect_render_vhconf; }
@@ -8198,6 +8201,42 @@ _rn_case _rn_redirect_tr add old.example alpha.example --www --no-ssl
 assert_has   "redirect add in Turkish" "old.example ve www.old.example artık https://alpha.example adresine gidiyor (yalnızca HTTP)" "$(_rn_out)"
 _rn_case _rn_redirect_tr del nosuch.example
 assert_has   "and a redirect that is not there" "nosuch.example adında bir yönlendirme yok" "$(_rn_out)"
+# the rarer lines: a refusal about somebody else's account, a WordPress nothing could be asked
+# of, a mailbox that could not move
+_rn_case _rn_say_tr "it is on record as running as b_c_example, and that account's home is /home/b-c.example: another site's (setup.sh remove b.c.example puts such a record away)"
+assert_eq    "the account that is another site's" "kayıtta b_c_example olarak çalıştığı yazıyor, o hesabın ev dizini ise /home/b-c.example: başka bir sitenin (setup.sh remove b.c.example böyle bir kaydı kaldırır)rc=0" "$(_rn_out)"
+_rn_case _rn_say_tr "wp-cli could not be installed, so the WordPress database was not looked at: it may give another name than beta.example as its address"
+assert_has   "wp-cli missing for a name that was no address" "wp-cli kurulamadı, bu yüzden WordPress veritabanına bakılmadı: adres olarak beta.example dışında bir ad veriyor olabilir" "$(_rn_out)"
+_rn_case _rn_say_tr "Later: wp option get home - and if that is another name: wp search-replace '//that-name' '//beta.example' --all-tables-with-prefix --skip-columns=guid   (as beta_example, in /home/beta.example/public_html)"
+assert_has   "its command for later: the longer form is the one taken" "Sonra: wp option get home - başka bir ad çıkarsa: wp search-replace '//o-ad' '//beta.example'" "$(_rn_out)"
+_rn_case _rn_say_tr "Later: wp search-replace '//alpha.example' '//beta.example' --all-tables-with-prefix --skip-columns=guid   (as beta_example, in /home/beta.example/public_html)"
+assert_has   "and the plain form still is itself" "Sonra: wp search-replace '//alpha.example' '//beta.example' --all-tables-with-prefix --skip-columns=guid   (beta_example olarak, /home/beta.example/public_html içinde)" "$(_rn_out)"
+_rn_case _rn_say_tr "WordPress did not say which address it has, so no address in its database was rewritten: shop_old itself never was one"
+assert_has   "a WordPress that did not say its address" "WordPress hangi adresi kullandığını söylemedi" "$(_rn_out)"
+_rn_case _rn_say_tr "info@alpha.example stays a mailbox at alpha.example: no password line for info@alpha.example"
+assert_eq    "a mailbox that stays, with a reason of the rarer kind" "info@alpha.example, alpha.example alanında posta kutusu olarak kalıyor: info@alpha.example için şifre satırı yokrc=0" "$(_rn_out)"
+_rn_case _rn_say_tr "sales@alpha.example stays a mailbox at alpha.example: could not move /var/vmail/alpha.example/sales"
+assert_has   "or of this one" "posta kutusu olarak kalıyor: /var/vmail/alpha.example/sales taşınamadı" "$(_rn_out)"
+# the usage texts have their Turkish in the functions themselves
+_rn_case _rn_usage_tr
+_o="$(_rn_out)"
+assert_has   "rename --help in Turkish" "Kullanım: setup.sh rename <eski-alan-adı> <yeni-alan-adı> [seçenekler]" "$_o"
+assert_has   "with every option" "--keep-mail          Posta kutularını taşımak yerine eski alan adında bırak" "$_o"
+for _rn_opt in --no-redirect --no-ssl --no-search-replace --keep-mail; do
+  assert_eq  "the Turkish usage names ${_rn_opt} once, as the English one does" "1 1" \
+    "$(grep -c -- "^  ${_rn_opt} " <<<"$_o") $(lib_domain_rename_usage | grep -c -- "^  ${_rn_opt} ")"
+done
+assert_has   "redirect help in Turkish" "Kullanım: setup.sh redirect <komut>" "$_o"
+assert_has   "with its three commands" "del <kimden> [--keep-ssl]" "$_o"
+assert_lacks "and no English usage beside it" "Usage: setup.sh" "$_o"
+_rn_case _rn_usage_en
+assert_has   "without a language the usage is the English one" "Usage: setup.sh rename <old-domain> <new-domain> [options]" "$(_rn_out)"
+assert_lacks "and only that" "Kullanım" "$(_rn_out)"
+_rn_fresh
+_rn_case _rn_redirect_tr list
+assert_has   "an empty redirect list says so in Turkish" "(yönlendirme yok - eklemek için: setup.sh redirect add old-name.com example.com)" "$(_rn_out)"
+_rn_case _rn_redirect list
+assert_has   "and in English as before" "(no redirects - add one with: setup.sh redirect add old-name.com example.com)" "$(_rn_out)"
 # an English run says what it always said: the scripts and the tests above read that
 _rn_fresh
 _rn_case _rn_rename alpha.example beta.example
