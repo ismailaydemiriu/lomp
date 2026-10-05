@@ -1248,6 +1248,13 @@ One more of the same kind is for a WordPress that gets its certificate after it 
 LOMPSTACK_INTEGRATION=yes bash tests/e2e-wp-https.sh          # http:// to https:// in the database, by renew-ssl and by rename
 ```
 
+`add` has one for a WordPress site with `--www-primary`, and for what an `add` that fails
+half way leaves behind (nothing, the Linux user included):
+
+```bash
+LOMPSTACK_INTEGRATION=yes bash tests/e2e-www-primary.sh
+```
+
 See [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
 
 ---

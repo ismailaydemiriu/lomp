@@ -511,9 +511,24 @@ lib_domain_user_ensure() {
     else
       lib_run useradd -M -d "$D_HOME" -s /usr/sbin/nologin -g "$D_GROUP" -c "site ${D_DOMAIN}" "$D_USER" || lib_die "useradd ${D_USER} failed" "" "check /etc/passwd"
       DOMAIN_CREATED_USER=1
-      lib_rollback_push "userdel '${D_USER}' >/dev/null 2>&1; groupdel '${D_GROUP}' >/dev/null 2>&1"
+      lib_rollback_push "lib_domain_user_drop '${D_USER}' '${D_GROUP}'"
     fi
   fi
+  return 0
+}
+
+# Take back the account lib_domain_user_ensure made, when "add" fails. What still runs as the
+# user is stopped first, as "remove" does: userdel refuses a user something runs as, and the
+# account left behind stands in the way of the next "add" of that name. userdel takes the
+# user's own group along where the system is set up that way (USERGROUPS_ENAB), so a group
+# that is gone already is no failure.
+lib_domain_user_drop() {   # user group
+  local u="$1" g="$2"
+  if id -u "$u" >/dev/null 2>&1; then
+    _domain_rename_quiet_user "$u" || true
+    userdel "$u" || return 1
+  fi
+  if getent group "$g" >/dev/null 2>&1; then groupdel "$g" || return 1; fi
   return 0
 }
 
@@ -684,16 +699,24 @@ lib_domain_apply_config() {   # [description]
   lib_redirect_sync_target "$D_DOMAIN"
 }
 
-# Drop a tiny PHP probe into the docroot, fetch it, remove it.
+# The name the site itself answers under. With --www-primary the bare name answers every
+# request with a redirect to www.<domain>, whatever the path.
+lib_domain_primary_host() {
+  if (( D_WWW && D_WWW_PRIMARY )); then printf 'www.%s' "$D_DOMAIN"; else printf '%s' "$D_DOMAIN"; fi
+}
+
+# Drop a tiny PHP probe into the docroot, fetch it, remove it. Asked for under the name that
+# serves pages: from the redirecting one comes OpenLiteSpeed's 301 page, not what PHP printed.
 lib_domain_php_probe() {
   (( OPT_DRY_RUN )) && return 0
-  local name="" f="" body="" i=""
+  local name="" f="" body="" i="" host=""
+  host="$(lib_domain_primary_host)"
   name="ss-probe-$(lib_random_hex 6).php"
   f="${D_HOME}/public_html/${name}"
   # as the site user: root's chown of a file in the user's docroot follows a link swapped in for it
   printf '<?php echo "server-setup-php-ok:" . PHP_VERSION;\n' | lib_domain_as_user tee "$f" >/dev/null
   for (( i = 0; i < 5; i++ )); do
-    body="$(curl -s --max-time 15 -H "Host: ${D_DOMAIN}" "http://127.0.0.1/${name}" 2>/dev/null || true)"
+    body="$(curl -s --max-time 15 -H "Host: ${host}" "http://127.0.0.1/${name}" 2>/dev/null || true)"
     [[ "$body" == server-setup-php-ok:* ]] && break
     sleep 2
   done
@@ -1009,12 +1032,12 @@ _wp() {   # run wp-cli as the site user
 }
 
 lib_domain_wp_install() {
-  local docroot="${D_HOME}/public_html" url="" scheme="http" host="$D_DOMAIN" title="" admin="" email="" pass="" info=""
+  local docroot="${D_HOME}/public_html" url="" scheme="http" host="" title="" admin="" email="" pass="" info=""
   info="$(lib_domain_state_dir "$D_DOMAIN")/wp.info"
   lib_domain_wpcli_ensure
   lib_db_info_load "$D_DOMAIN" || lib_die "WordPress needs a database" "db.info missing" "run: setup.sh db ${D_DOMAIN}"
   (( D_SSL )) && scheme="https"
-  (( D_WWW && D_WWW_PRIMARY )) && host="www.${D_DOMAIN}"
+  host="$(lib_domain_primary_host)"
   url="${scheme}://${host}"
   title="${DOM_OPT_WP_TITLE:-$D_DOMAIN}"
   admin="${DOM_OPT_WP_ADMIN:-admin}"
@@ -1352,8 +1375,7 @@ lib_domain_wordpress_main() {
   lib_ols_htaccess_watch_ensure
 
   if (( D_SSL )); then scheme="https"; fi
-  host="$D_DOMAIN"
-  if (( D_WWW && D_WWW_PRIMARY )); then host="www.${D_DOMAIN}"; fi
+  host="$(lib_domain_primary_host)"
   printf '\n%s%sWordPress%s is in place and waits for its installation%s\n' "$C_BLD" "$C_GRN" "${ver:+ ${ver}}" "$C_RST"
   lib_print_kv "Open in a browser" "${scheme}://${host}/  (language, database login, admin account)"
   lib_print_kv "Files"             "${docroot}, owned by ${D_USER}:${D_GROUP} (directories 0755, files 0644)"

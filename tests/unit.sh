@@ -10072,6 +10072,128 @@ assert_has   "a warning too" "adresi hâlâ http:// olabilir" "$(_wh_tr "WordPre
 WPCLI_BIN="$_wh_bin"; eval "$_wh_fn"
 unset -f _wh_site _wh_run _wh_opts _wh_info _wh_calls _wh_count _wh_line _wh_tr
 
+# =============================================================================
+section "add --www-primary: the PHP probe asks www, and a failed add takes its user back"
+# With --www-primary the bare name answers every path with a 301 to www.<domain>, so a probe
+# sent to the bare name got OpenLiteSpeed's redirect page, "add" said PHP was not executing
+# and rolled the site back. And the rollback could not delete the user: OpenLiteSpeed had
+# started the site's lsphp by then, and userdel refuses a user something runs as.
+_wp="$TMP/wwwp"; mkdir -p "$_wp/home/wp.example/public_html"
+lib_rollback_clear
+lib_domain_state_reset
+D_DOMAIN="wp.example"; D_IDENT="wp_example"; D_USER="wp_example"; D_GROUP="wp_example"
+D_HOME="$_wp/home/wp.example"; D_MODE="php"; D_PHP="8.3"
+
+assert_eq "a site without www answers under its own name"    "wp.example"     "$(lib_domain_primary_host)"
+D_WWW=1
+assert_eq "so does one whose www redirects to the bare name" "wp.example"     "$(lib_domain_primary_host)"
+D_WWW_PRIMARY=1
+assert_eq "with --www-primary it is www that answers"        "www.wp.example" "$(lib_domain_primary_host)"
+D_WWW=0
+assert_eq "a www-primary mark without www means nothing"     "wp.example"     "$(lib_domain_primary_host)"
+
+# curl as the virtual host answers: the name that redirects gives a 301 page for any path
+_wp_probe() {
+  sleep() { return 0; }
+  curl() {
+    local a="" host="" redirecting=""
+    printf '%s\n' "$*" >>"$_wp/curl.log"
+    while (($# > 0)); do a="$1"; shift; if [[ "$a" == "-H" ]]; then host="${1#Host: }"; fi; done
+    redirecting="$(cat "$_wp/redirecting")"
+    if [[ "$host" == "$redirecting" ]]; then printf '<!DOCTYPE html><html style="height:100%%"><title>301 Moved Permanently</title>'; return 0; fi
+    printf 'server-setup-php-ok:8.3'
+  }
+  if [[ "${1:-}" == "said" ]]; then lib_domain_php_probe || printf '%s' "$OLS_TEST_OUTPUT" >"$_wp/said"; return 0; fi
+  lib_domain_php_probe
+}
+_wp_hosts() { grep -o 'Host: [^ ]*' "$_wp/curl.log" | sort -u | tr '\n' '|'; }
+
+D_WWW=1; D_WWW_PRIMARY=1; printf 'wp.example' >"$_wp/redirecting"; : >"$_wp/curl.log"
+assert_eq  "the probe of a www-primary site succeeds"         0 "$(run_isolated _wp_probe)"
+assert_eq  "it asked www, and only www"                       "Host: www.wp.example|" "$(_wp_hosts)"
+assert_has "for its own file"                                 "http://127.0.0.1/ss-probe-" "$(cat "$_wp/curl.log")"
+assert_eq  "which is gone afterwards"                         "" "$(find "$D_HOME/public_html" -name 'ss-probe-*')"
+D_WWW=1; D_WWW_PRIMARY=0; printf 'www.wp.example' >"$_wp/redirecting"; : >"$_wp/curl.log"
+assert_eq  "www redirecting to the bare name: it succeeds"    0 "$(run_isolated _wp_probe)"
+assert_eq  "having asked the bare name"                       "Host: wp.example|" "$(_wp_hosts)"
+D_WWW=0; D_WWW_PRIMARY=0; printf 'none' >"$_wp/redirecting"; : >"$_wp/curl.log"
+assert_eq  "no www at all: the bare name"                     "0Host: wp.example|" "$(run_isolated _wp_probe)$(_wp_hosts)"
+# and a probe that does get a redirect page still fails, with what it got
+D_WWW=1; D_WWW_PRIMARY=1; printf 'www.wp.example' >"$_wp/redirecting"; : >"$_wp/curl.log"
+assert_eq  "a redirect page instead of PHP's answer is a failure" 1 "$(run_isolated _wp_probe)"
+: >"$_wp/said"
+assert_eq  "and says"                                         0 "$(run_isolated _wp_probe said)"
+assert_has "what came back"                                   "PHP probe returned: <!DOCTYPE html>" "$(cat "$_wp/said")"
+assert_has "add and rename both go through this probe"        "lib_domain_php_probe ||" "$(declare -f lib_domain_add_main)$(declare -f lib_domain_rename_main)"
+assert_has "WordPress is installed under the same name"       'host="$(lib_domain_primary_host)"' "$(declare -f lib_domain_wp_install)"
+
+# ---- the account of a failed add ---------------------------------------------------------
+# a machine in files: user = the account exists, group = its group does, busy = something
+# runs as it (userdel refuses then, as the real one does: "user ... is currently used by process")
+_wp_sys='
+  sleep()    { return 0; }
+  id()       { [[ -e "$_wp/user" ]]; }
+  getent()   { case "$1" in group) [[ -e "$_wp/group" ]] ;; *) [[ -e "$_wp/user" ]] && printf "%s:x:1:1::%s:/x\n" "$2" "$D_HOME" ;; esac; }
+  pgrep()    { [[ -e "$_wp/busy" ]]; }
+  pkill()    { printf "pkill %s\n" "$*" >>"$_wp/calls"; if [[ ! -e "$_wp/stubborn" || "$*" == *KILL* ]]; then rm -f "$_wp/busy"; fi; return 0; }
+  userdel()  { printf "userdel %s\n" "$*" >>"$_wp/calls"; if [[ -e "$_wp/busy" ]]; then echo "userdel: user $1 is currently used by process 1" >&2; return 8; fi
+               rm -f "$_wp/user"; if [[ ! -e "$_wp/own-group-stays" ]]; then rm -f "$_wp/group"; fi; return 0; }
+  groupdel() { printf "groupdel %s\n" "$*" >>"$_wp/calls"; [[ -e "$_wp/group" ]] || return 6; [[ ! -e "$_wp/user" ]] || return 8; rm -f "$_wp/group"; }
+  groupadd() { printf "groupadd %s\n" "$*" >>"$_wp/calls"; : >"$_wp/group"; }
+  useradd()  { printf "useradd %s\n" "$*" >>"$_wp/calls"; : >"$_wp/user"; }'
+_wp_reset() { rm -f "$_wp/user" "$_wp/group" "$_wp/busy" "$_wp/stubborn" "$_wp/own-group-stays"; : >"$_wp/calls"; local f=""; for f in "$@"; do : >"$_wp/$f"; done; }
+_wp_calls() { tr '\n' '|' <"$_wp/calls"; }
+_wp_drop()  { eval "$_wp_sys"; lib_domain_user_drop wp_example wp_example; }
+_wp_left()  { local f="" out=""; for f in user group busy; do if [[ -e "$_wp/$f" ]]; then out+="$f "; fi; done; printf '%s' "$out"; }
+
+_wp_reset user group
+assert_eq "nothing runs as the user: it is deleted"               0 "$(run_isolated _wp_drop)"
+assert_eq "asked to stop first, then userdel, and no groupdel for a group userdel took along" \
+          "pkill -u wp_example|userdel wp_example|" "$(_wp_calls)"
+assert_eq "nothing of it is left"                                 "" "$(_wp_left)"
+_wp_reset user group busy
+assert_eq "something still runs as the user: deleted all the same" 0 "$(run_isolated _wp_drop)"
+assert_eq "because it was stopped before userdel"                 "pkill -u wp_example|userdel wp_example|" "$(_wp_calls)"
+assert_eq "and nothing is left"                                   "" "$(_wp_left)"
+_wp_reset user group busy stubborn
+assert_eq "processes that ignore the request"                     0 "$(run_isolated _wp_drop)"
+assert_has "are killed before userdel"                            "pkill -KILL -u wp_example|userdel wp_example|" "$(_wp_calls)"
+assert_eq "and the account is gone"                               "" "$(_wp_left)"
+_wp_reset user group own-group-stays
+assert_eq "where userdel leaves the group"                        0 "$(run_isolated _wp_drop)"
+assert_eq "groupdel removes it"                                   "pkill -u wp_example|userdel wp_example|groupdel wp_example|" "$(_wp_calls)"
+assert_eq "nothing left there either"                             "" "$(_wp_left)"
+_wp_reset group
+assert_eq "only the group was made before the failure"            "0groupdel wp_example|" "$(run_isolated _wp_drop)$(_wp_calls)"
+_wp_reset
+assert_eq "neither is there: nothing to do, and no failure"       "0" "$(run_isolated _wp_drop)$(_wp_calls)"
+_wp_nokill() { eval "$_wp_sys"; pkill() { return 0; }; lib_domain_user_drop wp_example wp_example; }
+_wp_reset user group busy
+assert_eq "a userdel that fails is a failed step, not a silent one" 1 "$(run_isolated _wp_nokill)"
+assert_eq "and the group is left to the account that still has it" "user group busy " "$(_wp_left)"
+
+# the whole way: the account is made, the run dies, the rollback takes it back while
+# something runs as it
+_wp_failed_add() {
+  eval "$_wp_sys"
+  lib_rollback_clear
+  lib_domain_user_ensure
+  [[ -e "$_wp/user" && -e "$_wp/group" ]] || return 3
+  : >"$_wp/busy"                       # the site's lsphp, started by a request
+  printf '%s\n' "${LIB_ROLLBACK_STACK[@]}" >"$_wp/steps"
+  lib_rollback_run >"$_wp/said" 2>&1
+}
+_wp_reset
+assert_eq    "a user made by add and a run that dies"             0 "$(run_isolated _wp_failed_add)"
+assert_eq    "the rollback step is the one that stops it first"   "lib_domain_user_drop 'wp_example' 'wp_example'" "$(cat "$_wp/steps")"
+assert_has   "the account was made"                               "useradd " "$(_wp_calls)"
+assert_eq    "and is gone after the rollback, group and all"      "" "$(_wp_left)"
+assert_lacks "which reports no failed step"                       "rollback step failed" "$(cat "$_wp/said")"
+
+unset -f _wp_probe _wp_hosts _wp_reset _wp_calls _wp_drop _wp_left _wp_nokill _wp_failed_add
+lib_rollback_clear
+lib_domain_state_reset
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 if (( FAIL > 0 )); then exit 1; fi
 exit 0
