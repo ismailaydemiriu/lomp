@@ -465,6 +465,13 @@ What follows from it:
   without `X-Forwarded-For`: OpenLiteSpeed leaves it out for its own machine. Test from
   another machine before concluding the header is missing.
 
+How this was measured: on OpenLiteSpeed 1.9.2, from a client with an address of its own, over
+HTTP/1.1, HTTP/2 and HTTP/3. The Cloudflare lines were measured with Cloudflare imitated, not
+through Cloudflare itself: Cloudflare mode switched on, the test client's address marked as a
+trusted proxy, and the headers Cloudflare sends (`CF-Connecting-IP`, `X-Forwarded-For`,
+`X-Forwarded-Proto`) written by hand. A request that really came through Cloudflare's edge
+has not been looked at.
+
 ### Node.js applications (PM2)
 
 A Node.js site is a reverse proxy site whose application lompstack runs for you with PM2:
