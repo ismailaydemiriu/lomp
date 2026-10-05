@@ -7724,6 +7724,50 @@ for _rn_fail in usermod-d-fails apply-fails smoke-fails php-fails; do
   assert_has   "${_rn_fail}: and the same rename then goes through" "rc=0" "$(_rn_out)"
 done
 
+# ---- rename: the pages a WordPress had cached on the way --------------------------------
+# OpenLiteSpeed keeps the pages a WordPress site answers with. The first page under the new
+# name is asked for by rename itself, when it looks whether the site answers - before the
+# addresses in the database are rewritten. That page says the old name on every link, and it
+# was what visitors were given from then on, for as long as the cache kept it.
+_rn_rename_cached() {   # the rename, with a page cache that keeps what the site is asked for
+  _rn_flow
+  eval 'lib_ols_smoke_test() {
+          printf "smoke %s\n" "$*" >>"$_rn/calls"
+          if [[ -d "$OLS_CACHE_DIR/$1" ]]; then mkdir -p "$OLS_CACHE_DIR/$1/0/a"; printf "the front page, as the database said it then\n" >"$OLS_CACHE_DIR/$1/0/a/page"; fi
+          return 0
+        }'
+  lib_domain_rename_main "$@"
+}
+_rn_cached_site() {
+  _rn_fresh
+  jq '.mode = "wordpress"' "$_rn/state/domains/alpha.example/domain.json" >"$_rn/t" && cp "$_rn/t" "$_rn/state/domains/alpha.example/domain.json"
+  printf '<?php // wp\n' >"$_rn/home/alpha.example/public_html/wp-config.php"
+  mkdir -p "$_rn/lsws/cachedata/alpha.example"; printf 'a page of the old name\n' >"$_rn/lsws/cachedata/alpha.example/page"
+  cat >"$_rn/wp" <<'EOF'
+#!/bin/sh
+# wp-cli, standing in: somebody asks for a page while the addresses are being rewritten
+d="$(dirname "$0")"
+printf 'wp %s\n' "$*" >>"$d/calls"
+case "$*" in *search-replace*) [ ! -d "$d/lsws/cachedata/beta.example" ] || : >"$d/lsws/cachedata/beta.example/asked-for-during-the-rewrite" ;; esac
+exit 0
+EOF
+  chmod +x "$_rn/wp"
+}
+_rn_cached_site
+_rn_case _rn_rename_cached alpha.example beta.example
+_o="$(_rn_out)"
+assert_has   "a WordPress whose pages are cached is renamed" "rc=0" "$_o"
+assert_has   "it was asked whether it answers, which is when the first page was cached" "smoke beta.example" "$(_rn_calls)"
+assert_true  "its page cache is there under the new name" test -d "$_rn/lsws/cachedata/beta.example"
+assert_eq    "and holds no page from before the addresses were rewritten, nor from while they were" "" "$(find "$_rn/lsws/cachedata/beta.example" -mindepth 1 | sort | tr '\n' ' ')"
+assert_has   "which is said" "page cache emptied" "$_o"
+assert_false "the cache of the old name went with the name" test -e "$_rn/lsws/cachedata/alpha.example"
+_rn_cached_site
+_rn_case _rn_rename_cached alpha.example beta.example --no-search-replace
+assert_true  "--no-search-replace: the pages say what the database still says, and stay" test -s "$_rn/lsws/cachedata/beta.example/0/a/page"
+assert_lacks "and nothing is said about a cache" "page cache" "$(_rn_out)"
+unset -f _rn_rename_cached _rn_cached_site
+
 # ---- rename: a site whose name is no domain name --------------------------------------
 # "restore" registered a site under whatever name it was given until 1.0.87: "shop_old",
 # "staging". Such a site is a site, and this is how it gets its domain name. Its record says

@@ -580,6 +580,26 @@ _domain_rename_wp() {   # old new
   return 0
 }
 
+# The pages OpenLiteSpeed's cache keeps for the site in D_* (new name). The first of them was
+# asked for by this command itself, when it looked whether the site answers - before a single
+# address in the database was rewritten - and LiteSpeed Cache keeps a page for days. Without
+# this the renamed site went on handing out its front page as it was, every link and every
+# stylesheet on it at the old address. The files go and the directory stays: OpenLiteSpeed is
+# writing into it, and a page it stores from now on is made from the new addresses.
+_domain_rename_cache_clear() {
+  local dir="${OLS_CACHE_DIR:?}/${D_DOMAIN:?}"
+  [[ -d "$dir" && ! -L "$dir" ]] || return 0
+  if (( OPT_DRY_RUN )); then lib_info "[dry-run] would empty the page cache ${dir}"; return 0; fi
+  if find "$dir" -mindepth 1 ! -type d -delete 2>>"$LOG_FILE"; then
+    find "$dir" -mindepth 1 -type d -empty -delete 2>/dev/null || true
+    lib_ok "page cache emptied: no page from before the addresses changed is served any more"
+  else
+    lib_warn "The page cache ${dir} could not be emptied: pages cached before the addresses changed may still be served"
+    lib_note "Purge it from WordPress (LiteSpeed Cache > Purge All), or empty that directory"
+  fi
+  return 0
+}
+
 # Configuration files of the site in D_* that still carry the old name - as an address or as
 # the old home directory. Read as the site user, and only the files such a name is kept in.
 _domain_rename_leftovers() {   # what to look for: the old name, or the forms its home is written in
@@ -764,7 +784,13 @@ lib_domain_rename_main() {
   # ---- 7 what still says the old name ------------------------------------------
   lib_step "WordPress addresses, scheduled tasks and logs"
   if _domain_rename_has_wp; then
-    if (( replace )); then _domain_rename_wp "$old" "$new"; else lib_info "WordPress database left as it is (--no-search-replace)"; fi
+    if (( replace )); then
+      _domain_rename_wp "$old" "$new"
+      # after the rewrite: what is in the page cache by now was made from the addresses before it
+      _domain_rename_cache_clear
+    else
+      lib_info "WordPress database left as it is (--no-search-replace)"
+    fi
   fi
   if (( wpcron )); then lib_domain_wpcron_set; fi
   lib_domain_logrotate_regen
