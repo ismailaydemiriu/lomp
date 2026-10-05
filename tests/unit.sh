@@ -5126,7 +5126,23 @@ rm -f "$TMP/hd-code"
 _out="$(OPT_QUIET=0; OPT_DRY_RUN=1; lib_harden_main hd4.example.com 2>&1)"
 assert_eq  "a dry run changes no state" "allowed" "$(jq -r '.security.php_exec' "$STATE_DIR/domains/hd4.example.com/domain.json")"
 assert_has "and says what it would do"  "hd4.example.com: process execution would be blocked" "$_out"
-assert_false "a site that is not registered is refused" bash -c "$(declare -f lib_harden_main lib_require_tools lib_require_installed lib_domain_registered lib_die 2>/dev/null); STATE_DIR='$STATE_DIR'; lib_harden_main nosuch.example.com >/dev/null 2>&1"
+# In a shell that has only these functions, so the words are what is checked: whatever else the
+# command needs is missing there, and a missing function ends it with the same status. That is
+# how this passed for a while with lib_domain_valid left out - refused as "Invalid domain name".
+_out="$(bash -c "$(declare -f lib_harden_main lib_require_tools lib_require_installed lib_domain_valid lib_domain_registered lib_die 2>/dev/null); STATE_DIR='$STATE_DIR'; lib_harden_main nosuch.example.com" 2>&1 || true)"
+assert_has "a site that is not registered is refused" "Site nosuch.example.com is not registered" "$_out"
+# A state directory whose name is no domain name ("restore" took any name until 1.0.87): typed,
+# it is refused like any such name; met by --all, it must not stop the hardening of the others.
+_hd_site old_name php
+# (in a subshell of its own: a refusal ends the shell it happens in)
+_out="$(OPT_QUIET=0; rc=0; ( lib_harden_main old_name ) >"$TMP/hd-out" 2>&1 || rc=$?; cat "$TMP/hd-out"; printf 'rc=%s' "$rc")"
+assert_has "a name that is no domain name is refused when it is typed" "Invalid domain name 'old_name'" "$_out"
+assert_has "with a failing status"                                    "rc=1" "$_out"
+_out="$(OPT_QUIET=0; OPT_DRY_RUN=1; rc=0; ( lib_harden_main --all ) >"$TMP/hd-out" 2>&1 || rc=$?; cat "$TMP/hd-out"; printf 'rc=%s' "$rc")"
+assert_has   "harden --all is not stopped by a state directory under such a name" "rc=0" "$_out"
+assert_has   "the sites beside it are still gone through"                         "hd1.example.com: process execution would be blocked" "$_out"
+assert_lacks "and --all refuses no name of the registry's own"                    "Invalid domain name" "$_out"
+rm -rf "$STATE_DIR/domains/old_name"; rm -f "$TMP/hd-code"
 _st="$(lib_harden_status)"
 assert_has "status shows the firewall" "Site firewall: on" "$_st"
 assert_has "and each site's decision"  "allowed" "$(grep '^hd4.example.com' <<<"$_st")"

@@ -313,10 +313,16 @@ lib_harden_main() {
     while read -r d; do [[ -n "$d" ]] && targets+=("$d"); done < <(lib_domains_list)
   fi
   ((${#targets[@]})) || { lib_harden_usage; return 0; }
-  for d in "${targets[@]}"; do
-    lib_domain_valid "$d" || lib_die "Invalid domain name '${d}'" "" "lomp list"
-    lib_domain_registered "$d" || lib_die "Site ${d} is not registered" "" "lomp list"
-  done
+  # What was typed is checked. With --all the names are the registry's own and are taken as
+  # they come, the way fix-owner and scan take them: a state directory whose name is no domain
+  # name - "restore" took any name until 1.0.87 - would otherwise stop the run here, before a
+  # single site was hardened.
+  if (( ! all )); then
+    for d in "${targets[@]}"; do
+      lib_domain_valid "$d" || lib_die "Invalid domain name '${d}'" "" "lomp list"
+      lib_domain_registered "$d" || lib_die "Site ${d} is not registered" "" "lomp list"
+    done
+  fi
 
   lib_ols_is_installed || lib_die "OpenLiteSpeed is not installed on this server" "" "run 'lompstack install' first"
   lib_system_profile
