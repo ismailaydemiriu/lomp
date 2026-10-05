@@ -379,6 +379,10 @@ lib_restore_main() {
   domain="${domain,,}"
   lib_require_tools
   lib_require_installed
+  # A restore can create the site it restores, so the name is not checked against the sites
+  # that exist - and it becomes a state directory, a Linux user and a home.
+  lib_domain_valid "$domain" || lib_die "Invalid domain name '${domain}'" "not a valid FQDN" \
+    "restore example.com --file /path/to/archive.tar.gz[.enc]"
   [[ -n "$file" && -f "$file" ]] || lib_die "Archive not found: '${file}'" "" "restore <domain> --file /path/to/archive.tar.gz[.enc]"
   lib_backup_verify "$file" || lib_die "Archive verification failed" "$BK_ERROR" "use an intact archive"
   work="$(lib_mktemp -d)"

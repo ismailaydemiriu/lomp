@@ -1619,7 +1619,9 @@ MAIL_DOMAINS_GONE_DIR="${MAIL_DOMAINS_GONE_DIR:-${STATE_DIR}/archive/mail-domain
 # that everything which walks the sites (vhosts, logs, fail2ban, backups, the minute jobs)
 # never meets a "site" that has none of those.
 lib_mail_domain_file()       { printf '%s/%s/domain.json' "$MAIL_DOMAINS_DIR" "$1"; }
-lib_mail_domain_standalone() { [[ -s "$(lib_mail_domain_file "$1")" ]]; }
+# Only a domain name can be one: "../../domains/example.com" also ends at a domain.json - a
+# SITE's - and "mail domain del" then removed that site's state as if it were a record of ours.
+lib_mail_domain_standalone() { lib_domain_valid "$1" && [[ -s "$(lib_mail_domain_file "$1")" ]]; }
 
 lib_mail_standalone_domains() {   # one per line
   local f=""
@@ -1646,6 +1648,10 @@ lib_mail_domain_known() { lib_mail_domain_standalone "$1" || lib_domain_register
 # enabled" is the wrong question to ask before taking things away.
 lib_mail_domain_has_traces() {   # domain
   local d="$1"
+  # Every test below is a path built from the name, so the name has to be one. "../lib" has a
+  # directory "under" the mail store - /var/vmail/../lib - and "yes, traces" is what sends
+  # "mail disable --delete-data" on to remove it.
+  lib_domain_valid "$d" || return 1
   [[ -n "$(lib_mail_boxes "$d")" ]] && return 0
   [[ -s "$(lib_mail_alias_file "$d")" ]] && return 0
   [[ -s "${MAIL_DISABLED_DIR}/${d}.passwd" ]] && return 0
@@ -1657,7 +1663,21 @@ lib_mail_domain_has_traces() {   # domain
   return 1
 }
 
-lib_mail_domain_enabled() { [[ "$(lib_json_get "$(lib_mail_json "$1")" '.mail.enabled')" == "true" ]]; }
+lib_mail_domain_enabled() { lib_domain_valid "$1" && [[ "$(lib_json_get "$(lib_mail_json "$1")" '.mail.enabled')" == "true" ]]; }
+
+# The domain a mail command was given: lower case, and a domain name. It comes back in
+# MAIL_ARG_DOMAIN rather than on standard output, because a lib_die inside $( ) only ends the
+# subshell. Every command below builds paths from this name - the mail store, the alias file,
+# the keys, the record - and several remove what they find there with rm -rf. Unchecked,
+# "mail disable ../lib --delete-data" removed /var/vmail/../lib, and "/" the whole mail store.
+MAIL_ARG_DOMAIN=""
+_mail_domain_arg() {   # value  example-of-the-command
+  MAIL_ARG_DOMAIN="${1,,}"
+  [[ -n "$MAIL_ARG_DOMAIN" ]] || lib_die "Which domain?" "" "$2"
+  lib_domain_valid "$MAIL_ARG_DOMAIN" || lib_die "Invalid domain '${1}'" \
+    "a domain name: letters, digits and dashes with dots between them, like example.com" "$2"
+  return 0
+}
 
 # Every domain this server knows that could have mail - the sites and the mail domains added on
 # their own - once each, in a stable order.
@@ -2260,9 +2280,8 @@ lib_mail_enable_main() {   # domain [--mailbox NAME] [--quota Q] | [--to ADDRESS
 
 lib_mail_disable_main() {   # domain [--keep-data|--delete-data] [--dns-cleanup]
   local d="" keep=1 cleanup=0 a="" _elsewhere=""
-  d="${1:-}"; shift || true
-  [[ -n "$d" ]] || lib_die "Which domain?" "" "lomp mail disable example.com"
-  d="${d,,}"
+  _mail_domain_arg "${1:-}" "lomp mail disable example.com"
+  d="$MAIL_ARG_DOMAIN"; shift || true
   while (($# > 0)); do
     a="$1"; shift
     case "$a" in
@@ -2326,7 +2345,11 @@ lib_mail_disable_main() {   # domain [--keep-data|--delete-data] [--dns-cleanup]
   # The flag goes down LAST, after the logins are really gone. The other way round - and that
   # is how this read until the audit - an interrupt in between left the state saying "off"
   # while Dovecot went on answering, and the guard above then called it done.
-  if (( ! OPT_DRY_RUN )); then
+  # It goes into the record the domain has. Mail that was found here for a domain this server
+  # has no record of - the case the guard above lets through - gets none made for it:
+  # lib_json_set would create domains/<domain>/domain.json, and that file alone is what makes
+  # a name a site, with no user, no home and no virtual host behind it.
+  if (( ! OPT_DRY_RUN )) && lib_mail_domain_known "$d"; then
     lib_json_set "$(lib_mail_json "$d")" '.mail.enabled = false | .mail.disabled_at = $ts' --arg ts "$(lib_iso_now)"
   fi
   lib_mail_tables_apply || lib_die "The mail tables could not be rebuilt" "${MAIL_LAST_ERROR}" "lomp mail status"
@@ -2405,6 +2428,11 @@ _mail_warn_queued() {   # domain
 # Everything that belongs to one domain's mail, for "disable --delete-data" and for "remove".
 lib_mail_domain_purge() {   # domain
   local d="$1" a="" sel=""
+  # Asked once more here, whoever the caller is and whatever it checked: the mail store, the
+  # alias file, the parked lines and the keys below are all "<somewhere>/<domain>", and rm -rf
+  # goes wherever that spells.
+  lib_domain_valid "$d" || lib_die "Refusing to remove the mail of '${d}'" \
+    "that is not a domain name, and what would be removed is ${MAIL_VMAIL_HOME}/${d}" "lomp mail domain list"
   sel="$(lib_mail_selector "$d")"
   # the webmail first: its vhost names a certificate that is about to be deleted
   lib_webmail_domain_disable "$d"
@@ -2608,7 +2636,15 @@ lib_mail_box_remove() {   # address   (no questions; the callers ask)
   fi
   sleep 1                                  # Dovecot re-reads the file about once a second
   if lib_have doveadm; then doveadm kick "$a" >/dev/null 2>&1 || true; fi   # 68 = nobody was logged in
-  lib_rm "${MAIL_VMAIL_HOME}/${d}/${loc}"
+  # The address becomes a path that is removed with rm -rf. The commands check what they are
+  # given, but a domain's purge reads the addresses back from the password file as they stand -
+  # and a restore writes that file from an archive. A line that is not an address loses its
+  # line above, which is safe; no directory is worked out from it.
+  if lib_mail_address_valid "$a"; then
+    lib_rm "${MAIL_VMAIL_HOME}/${d}/${loc}"
+  else
+    lib_warn "'${a}' is not an address; its line is out of the password file, and no directory was removed for it"
+  fi
   return 0
 }
 
@@ -2715,6 +2751,7 @@ lib_mail_box_kick_main() {   # address
 
 lib_mail_box_list_main() {   # [domain]
   local d="${1:-}" a="" q="" used=""
+  if [[ -n "$d" ]]; then _mail_domain_arg "$d" "lomp mail box list example.com"; d="$MAIL_ARG_DOMAIN"; fi
   if (( OPT_JSON )); then
     {
       while read -r a; do
@@ -2821,6 +2858,8 @@ lib_mail_alias_del_main() {   # alias
 
 lib_mail_alias_list_main() {   # [domain]
   local d="" f=""
+  # the file that is read is named after it
+  if [[ -n "${1:-}" ]]; then _mail_domain_arg "$1" "lomp mail alias list example.com"; fi
   if (( OPT_JSON )); then
     {
       while read -r d; do
@@ -2848,6 +2887,8 @@ lib_mail_alias_list_main() {   # [domain]
 # The record itself. No questions and no checks - the callers make them.
 lib_mail_domain_register() {   # domain
   local d="$1" f="" old="" used="[]"
+  # a directory is about to be made under this name
+  lib_domain_valid "$d" || lib_die "'${d}' is not a domain name" "a mail domain is registered under its name" "lomp mail domain add example.com"
   lib_mail_domain_standalone "$d" && return 0
   if (( OPT_DRY_RUN )); then lib_info "[dry-run] would register ${d} as a mail domain (no site, no Linux user, no virtual host)"; return 0; fi
   f="$(lib_mail_domain_file "$d")"
@@ -2891,10 +2932,11 @@ lib_mail_domain_add_main() {   # domain [what "mail enable" takes]
 }
 
 lib_mail_domain_del_main() {   # domain [--dns-cleanup] [--no-backup]
-  local d="${1:-}" a="" cleanup=0 backup=1 boxes=0 parked=0 dir="" _elsewhere=""
-  shift || true
-  [[ -n "$d" ]] || lib_die "Which domain?" "" "lomp mail domain del example.com"
-  d="${d,,}"
+  local d="" a="" cleanup=0 backup=1 boxes=0 parked=0 dir="" _elsewhere=""
+  # Before anything is looked up under it: what this command removes at the end is the record's
+  # own directory, and "../../domains/example.com" names a site's state directory just as well.
+  _mail_domain_arg "${1:-}" "lomp mail domain del example.com"
+  d="$MAIL_ARG_DOMAIN"; shift || true
   while (($# > 0)); do
     a="$1"; shift
     case "$a" in
@@ -3562,10 +3604,9 @@ _mail_alias_cmd() {
 }
 
 _mail_dns_cmd() {
-  local d="${1:-}" a="" check=0 apply=0 replace=""
-  shift || true
-  [[ -n "$d" ]] || lib_die "Which domain?" "" "lomp mail dns example.com"
-  d="${d,,}"
+  local d="" a="" check=0 apply=0 replace=""
+  _mail_domain_arg "${1:-}" "lomp mail dns example.com"
+  d="$MAIL_ARG_DOMAIN"; shift || true
   lib_mail_domain_known "$d" || lib_die "${d} is not a domain of this server" "" "lomp mail domain list"
   while (($# > 0)); do
     a="$1"; shift
@@ -3612,11 +3653,10 @@ _mail_relay_cmd() {
 # The webmail of one domain. It is a mail command because that is where an operator looks
 # for it, but everything it does lives in lib/webmail.sh.
 _mail_webmail_cmd() {   # on|off|status <domain>
-  local a="${1:-status}" d="${2:-}"
-  d="${d,,}"
+  local a="${1:-status}" d=""
   case "$a" in
     on)
-      [[ -n "$d" ]] || lib_die "Which domain?" "" "lomp mail webmail on example.com"
+      _mail_domain_arg "${2:-}" "lomp mail webmail on example.com"; d="$MAIL_ARG_DOMAIN"
       lib_mail_domain_enabled "$d" || lib_die "Mail is not on for ${d}" "" "lomp mail enable ${d}"
       lib_webmail_domain_enable "$d" || lib_die "The webmail could not be set up for ${d}" "${WM_LAST_ERROR}" "lomp doctor"
       # a jail fail2ban refuses is a warning, not the end of the command: the webmail is up,
@@ -3625,7 +3665,8 @@ _mail_webmail_cmd() {   # on|off|status <domain>
       lib_mail_dns_note "$d"
       ;;
     off)
-      [[ -n "$d" ]] || lib_die "Which domain?" "" "lomp mail webmail off example.com"
+      # the flag it takes down is written into whatever state file the name leads to
+      _mail_domain_arg "${2:-}" "lomp mail webmail off example.com"; d="$MAIL_ARG_DOMAIN"
       lib_webmail_domain_disable "$d"
       lib_ok "The webmail of ${d} is off; its mail is untouched"
       ;;
@@ -3636,8 +3677,10 @@ _mail_webmail_cmd() {   # on|off|status <domain>
 }
 
 _mail_restore_cmd() {   # domain [--file ARCHIVE]
-  local d="${1,,}" a="" file=""
-  shift || true
+  local d="" a="" file=""
+  # a restore writes: a record, an alias file, keys and mailbox lines, all named after it
+  _mail_domain_arg "${1:-}" "lomp mail restore example.com [--file ARCHIVE]"
+  d="$MAIL_ARG_DOMAIN"; shift || true
   while (($# > 0)); do
     a="$1"; shift
     case "$a" in
@@ -3683,8 +3726,9 @@ lib_mail_main() {
                 _mail_dns_cmd "$@" ;;
     cert)       lib_mail_installed || lib_die "Mail is not installed" "" "lomp install --with-mail"
                 if [[ -n "${1:-}" && "${1:0:2}" != "--" ]]; then
-                  lib_mail_domain_enabled "${1,,}" || lib_die "Mail is not on for ${1}" "" "lomp mail enable ${1}"
-                  lib_mail_domain_cert_ensure "${1,,}"
+                  _mail_domain_arg "$1" "lomp mail cert example.com"
+                  lib_mail_domain_enabled "$MAIL_ARG_DOMAIN" || lib_die "Mail is not on for ${MAIL_ARG_DOMAIN}" "" "lomp mail enable ${MAIL_ARG_DOMAIN}"
+                  lib_mail_domain_cert_ensure "$MAIL_ARG_DOMAIN"
                   lib_mail_tables_apply || lib_warn "the mail tables could not be rebuilt: ${MAIL_LAST_ERROR}"
                 else
                   lib_mail_cert_ensure "$(lib_mail_host)"
@@ -3699,11 +3743,10 @@ lib_mail_main() {
     dkim)       lib_mail_installed || lib_die "Mail is not installed" "" "lomp install --with-mail"
                 _mail_dkim_cmd "$@" ;;
     backup)     lib_mail_installed || lib_die "Mail is not installed" "" "lomp install --with-mail"
-                [[ -n "${1:-}" ]] || lib_die "Which domain?" "" "lomp mail backup example.com"
-                lib_mail_backup_domain "${1,,}" "${@:2}" \
-                  || lib_die "The mail of ${1} could not be backed up" "${MAIL_LAST_ERROR}" "lomp doctor" ;;
+                _mail_domain_arg "${1:-}" "lomp mail backup example.com"
+                lib_mail_backup_domain "$MAIL_ARG_DOMAIN" "${@:2}" \
+                  || lib_die "The mail of ${MAIL_ARG_DOMAIN} could not be backed up" "${MAIL_LAST_ERROR}" "lomp doctor" ;;
     restore)    lib_mail_installed || lib_die "Mail is not installed" "" "lomp install --with-mail"
-                [[ -n "${1:-}" ]] || lib_die "Which domain?" "" "lomp mail restore example.com [--file ARCHIVE]"
                 _mail_restore_cmd "$@" ;;
     help|-h|--help) lib_mail_usage ;;
     *)          lib_error "Unknown mail command: ${sub}"; printf '\n'; lib_mail_usage; exit 2 ;;
@@ -3963,6 +4006,8 @@ lib_mail_restore_domain() {   # domain [archive]
   local d="$1" file="${2:-}" work="" stage="" a="" local_part="" sel="" adom="" form=""
   local n=0 restored=0 failed=0 have=0
   lib_mail_installed || { MAIL_LAST_ERROR="the mail server is not installed here"; return 1; }
+  # what follows writes a record, an alias file, keys and mailbox lines under this name
+  lib_domain_valid "$d" || { MAIL_LAST_ERROR="'${d}' is not a domain name"; return 1; }
   if [[ -z "$file" ]]; then
     file="$(lib_mail_backup_latest "$d")" || { lib_info "No mail backup for ${d}"; return 0; }
   fi
@@ -4319,14 +4364,14 @@ lib_mail_dkim_status() {   # domain
 }
 
 _mail_dkim_cmd() {   # rotate|status <domain> [--finish|--abort]
-  local a="${1:-status}" d="${2:-}" mode="${3:-}" n=""
-  d="${d,,}"
+  local a="${1:-status}" d="" mode="${3:-}" n=""
   case "$a" in
     status)
-      [[ -n "$d" ]] || lib_die "Which domain?" "" "lomp mail dkim status example.com"
+      _mail_domain_arg "${2:-}" "lomp mail dkim status example.com"; d="$MAIL_ARG_DOMAIN"
       lib_mail_dkim_status "$d" ;;
     rotate)
-      [[ -n "$d" ]] || lib_die "Which domain?" "" "lomp mail dkim rotate example.com"
+      # a key file is made, and one removed, under this name
+      _mail_domain_arg "${2:-}" "lomp mail dkim rotate example.com"; d="$MAIL_ARG_DOMAIN"
       lib_mail_domain_enabled "$d" || lib_die "Mail is not on for ${d}" "" "lomp mail enable ${d}"
       case "$mode" in
         --finish)

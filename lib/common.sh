@@ -850,7 +850,13 @@ lib_domain_ident() {
 
 lib_domain_state_dir() { printf '%s/domains/%s' "$STATE_DIR" "$1"; }
 lib_domain_json()      { printf '%s/domains/%s/domain.json' "$STATE_DIR" "$1"; }
-lib_domain_registered() { [[ -s "$(lib_domain_json "$1")" ]]; }
+# Registered means a domain name that has a state file of its own, and the first half is not a
+# formality. Every command that takes a domain asks this before it touches anything, and then
+# builds paths from the name - some of which it removes. A name with a slash in it can reach a
+# domain.json that is not a site's: "../mail/domains/example.com" is a mail domain's record,
+# "../archive/domains/example.com.20260101-000000" a site that was removed long ago, and
+# "remove" took the answer "yes, registered" as leave to delete what it found there.
+lib_domain_registered() { lib_domain_valid "$1" && [[ -s "$(lib_domain_json "$1")" ]]; }
 lib_domain_home()      { printf '%s/%s' "$SITES_ROOT" "$1"; }
 lib_domain_log_dir()   { printf '%s/%s' "$SITES_LOG_ROOT" "$1"; }
 

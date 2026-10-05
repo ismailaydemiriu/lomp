@@ -6359,6 +6359,217 @@ assert_has   "and the dispatcher knows it"                          'lib_webmail
 eval "$_wf_saved_vars"; eval "$_wf_saved_fn"
 unset -f _wf_do _wf_run _wf_tee _wf_say _wf_users _wf_has _wf_left _wf_asked
 
+# =============================================================================
+section "a domain argument is a domain name before it is a path"
+# Every command that takes a domain builds paths from it - the mail store, the alias file, the
+# keys, the state directory - and several remove what they find there with rm -rf. "mail
+# disable" checked nothing: "../lib --delete-data" removed /var/vmail/../lib, and "/" the whole
+# mail store. "mail domain del ../../domains/<site>" removed a SITE's state directory, and
+# "remove ../mail/domains/<domain>" a mail domain's record, because "is it registered?" was
+# answered by whether a domain.json lay at the end of the path the name spelled.
+#
+# These run the real commands with the real rm, so everything they could touch is moved into
+# one directory first, the section runs none of its cases if any of it is not, and rm itself
+# is given a last net: nothing that resolves outside the test directory is ever removed.
+_da="$TMP/domarg"; rm -rf "$_da"; mkdir -p "$_da"
+_da_saved_fn="$(declare -f lib_domains_list)"
+eval "$(sed -n '/^lib_domains_list() {/,/^}/p' "$ROOT/lib/common.sh")"
+_da_vars="STATE_DIR CRON_FILE MAIL_STATE_DIR MAIL_ALIAS_DIR MAIL_DISABLED_DIR MAIL_DOMAINS_DIR MAIL_DOMAINS_GONE_DIR MAIL_VMAIL_HOME MAIL_PASSWD_FILE MAIL_DKIM_DIR MAIL_POSTFIX_DIR MAIL_SNI_MAP MAIL_DOVECOT_DIR MAIL_RSPAMD_DIR MAIL_RSPAMD_LOMP MAIL_PW_HELPER MAIL_PW_SUDOERS BACKUP_ROOT BACKUP_KEY_FILE WM_ROOT WM_RELEASES WM_CURRENT WM_ETC WM_CONF WM_VAR WM_LOG_DIR WM_INFO WM_IDENT_MAP WM_JAIL_FILE WM_FILTER_FILE LE_LIVE CF_INI"
+# shellcheck disable=SC2086
+_da_saved_vars="$(declare -p $_da_vars INS_ROLE MAIL_ARG_DOMAIN)"
+# the layout a server has, so that a name which climbs lands where it would land there
+STATE_DIR="$_da/root/.server-setup"; CRON_FILE="$_da/etc/cron.d/lomp"
+MAIL_STATE_DIR="$STATE_DIR/mail"; MAIL_ALIAS_DIR="$MAIL_STATE_DIR/aliases"; MAIL_DISABLED_DIR="$MAIL_STATE_DIR/disabled"
+MAIL_DOMAINS_DIR="$MAIL_STATE_DIR/domains"; MAIL_DOMAINS_GONE_DIR="$STATE_DIR/archive/mail-domains"
+MAIL_VMAIL_HOME="$_da/var/vmail"; MAIL_DKIM_DIR="$_da/var/lib/lompstack/dkim"
+MAIL_DOVECOT_DIR="$_da/etc/dovecot/lomp"; MAIL_PASSWD_FILE="$MAIL_DOVECOT_DIR/passwd"
+MAIL_POSTFIX_DIR="$_da/etc/postfix/lomp"; MAIL_SNI_MAP="$MAIL_POSTFIX_DIR/sni"
+MAIL_RSPAMD_DIR="$_da/etc/rspamd/local.d"; MAIL_RSPAMD_LOMP="$_da/etc/rspamd/lomp"
+MAIL_PW_HELPER="$_da/usr/webmail-passwd"; MAIL_PW_SUDOERS="$_da/etc/sudoers.d/lomp-webmail-passwd"
+BACKUP_ROOT="$_da/var/backups/server-setup"; BACKUP_KEY_FILE="$STATE_DIR/backup.key"
+WM_ROOT="$_da/var/www/lomp-webmail"; WM_RELEASES="$WM_ROOT/releases"; WM_CURRENT="$WM_ROOT/current"
+WM_ETC="$_da/etc/lomp-webmail"; WM_CONF="$WM_ETC/config.inc.php"; WM_IDENT_MAP="$WM_ETC/identities.map"
+WM_VAR="$_da/var/lib/lomp-webmail"; WM_LOG_DIR="$_da/var/log/lomp-webmail"; WM_INFO="$STATE_DIR/webmail.info"
+WM_JAIL_FILE="$_da/etc/fail2ban/wm-jail.conf"; WM_FILTER_FILE="$_da/etc/fail2ban/wm-filter.conf"
+LE_LIVE="$_da/etc/letsencrypt/live"; CF_INI="$STATE_DIR/cloudflare.ini"; INS_ROLE=""
+_da_ok=1
+for _v in $_da_vars SSL_DEPLOY_DIR LSWS_HOME LSWS_VHOSTS_DIR LOG_FILE SITES_ROOT SITES_LOG_ROOT TMPDIR; do
+  if [[ "${!_v}" != "$TMP" && "${!_v}" != "$TMP"/* ]]; then _da_ok=0; fail "this section would work outside its directory: ${_v}=${!_v}"; fi
+done
+assert_eq "everything these commands can touch is inside the test directory" 1 "$_da_ok"
+
+# What reaches outside this process is stood in for; what decides and what removes is real.
+# Nothing may wait either: with a check gone, "logs" would follow a file that never comes, and
+# a test that hangs tells nobody what broke.
+_da_stubs='lib_mail_installed() { return 0; }
+  lib_require_tools() { return 0; }
+  lib_mail_tables_apply() { return 0; }
+  _mail_webmail_forget() { return 0; }
+  lib_cf_token() { printf ""; }
+  lib_ssl_obtain_names() { printf "%s\n" "$*" >>"$_da/certbot.log"; return 1; }
+  certbot() { printf "%s\n" "$*" >>"$_da/certbot.log"; return 1; }
+  lib_service_active() { return 1; }
+  lib_service_exists() { return 1; }
+  lib_db_sql() { return 1; }
+  systemctl() { return 1; }
+  runuser() { return 1; }
+  pkill() { return 0; }
+  userdel() { return 1; }
+  mysql() { return 1; }
+  mariadb() { return 1; }
+  doveadm() { return 1; }
+  postqueue() { return 1; }
+  sleep() { return 0; }
+  tail() { local a=""; for a in "$@"; do case "$a" in -F|-f) return 0 ;; esac; done; command tail "$@"; }
+  lib_have() { case "$1" in jq|awk|sed|grep|openssl|tar|realpath|sha256sum) command -v "$1" >/dev/null 2>&1 ;; *) return 1 ;; esac; }
+  rm() {
+    local a="" real=""
+    for a in "$@"; do
+      case "$a" in -*) continue ;; esac
+      real="$(realpath -m -- "$a" 2>/dev/null || true)"
+      if [[ -z "$real" || ( "$real" != "$TMP" && "$real" != "$TMP"/* ) ]]; then printf "%s\n" "$a" >>"$_da/rm-refused.log"; return 0; fi
+    done
+    command rm "$@"
+  }'
+# under run_isolated the status is the answer; what the command said is kept for the next line
+_da_do()  { eval "$_da_stubs"; OPT_YES=1; "$@" >"$_da/said.txt" 2>&1 </dev/null; }
+_da_said() { cat "$_da/said.txt" 2>/dev/null || true; }
+# the same small server before every case: a site, a mail domain, a domain nobody here knows
+# with mail on disk, and a directory beside the mail store that is nobody's mail
+_da_fresh() {
+  rm -rf "$_da/root" "$_da/var" "$_da/etc" "$_da/certbot.log"
+  mkdir -p "$STATE_DIR/domains/site.example" "$MAIL_DOMAINS_DIR/own.example" "$MAIL_ALIAS_DIR" "$MAIL_DKIM_DIR" \
+           "$MAIL_VMAIL_HOME/real.example/info/Maildir/new" "$_da/var/victim" "$MAIL_DOVECOT_DIR" "$BACKUP_ROOT"
+  printf '{"installed_at":"2026-01-01T00:00:00Z","components":{"mail":{"postfix":"3.8"}},"mail":{"hostname":"mail.site.example"},"params":{}}\n' >"$STATE_DIR/manifest.json"
+  printf '{"domain":"site.example","mode":"php","user":"site_example","mail":{"enabled":true,"webmail":true,"selector":"lomp202601"}}\n' >"$(lib_domain_json site.example)"
+  printf 'DB_PASS=the-database-password\n' >"$STATE_DIR/domains/site.example/db.info"
+  printf '{"domain":"own.example","kind":"mail","mail":{"enabled":true,"selector":"lomp202601"}}\n' >"$(lib_mail_domain_file own.example)"
+  printf 'info@real.example:{BLF-CRYPT}x::::::userdb_quota_rule=*:storage=1G\n' >"$MAIL_PASSWD_FILE"
+  printf 'a message\n' >"$MAIL_VMAIL_HOME/real.example/info/Maildir/new/1"
+  printf 'not mail\n' >"$_da/var/victim/precious.txt"
+}
+# everything a refused command must leave exactly as it was: every name in the tree, and what
+# every file holds
+_da_snap() {
+  ( cd "$_da" && { find root var etc -print; find root var etc -type f -exec cksum {} +; } 2>/dev/null | LC_ALL=C sort | cksum ) || true
+}
+
+if (( _da_ok )); then
+  # ---- the commands this was found in -----------------------------------------
+  _da_fresh
+  assert_eq   "mail disable refuses a name that climbs out of the mail store" 1 "$(run_isolated _da_do lib_mail_main disable ../victim --delete-data)"
+  assert_true "and what lies beside the mail store is still there"            test -s "$_da/var/victim/precious.txt"
+  assert_has  "it says which name it will not take"                           "Invalid domain '../victim'" "$(_da_said)"
+  _da_fresh
+  assert_eq   "mail disable / is refused too"                                 1 "$(run_isolated _da_do lib_mail_main disable / --delete-data)"
+  assert_true "and the mail store is still there, every domain of it"         test -s "$MAIL_VMAIL_HOME/real.example/info/Maildir/new/1"
+  _da_fresh
+  assert_eq   "mail domain del refuses a name that points at a site's state"  1 "$(run_isolated _da_do lib_mail_main domain del ../../domains/site.example --no-backup)"
+  assert_true "and the site's state is still there, password and all"         test -s "$STATE_DIR/domains/site.example/db.info"
+  _da_fresh
+  assert_eq   "remove refuses the path of a mail domain's record"             1 "$(run_isolated _da_do lib_domain_remove_main ../mail/domains/own.example)"
+  assert_true "and the record is still there"                                 test -s "$MAIL_DOMAINS_DIR/own.example/domain.json"
+  assert_has  "for remove it is simply no site"                               "is not registered" "$(_da_said)"
+  assert_eq   "webmail off does not reach into another state file"            1 "$(run_isolated _da_do lib_mail_main webmail off ../domains/site.example)"
+  assert_eq   "whose flag is as it was"                                       "true" "$(jq -r '.mail.webmail' "$(lib_domain_json site.example)")"
+  assert_eq   "mail cert asks for no certificate under such a name"           1 "$(run_isolated _da_do lib_mail_main cert ../domains/site.example)"
+  assert_false "certbot was never reached"                                    test -e "$_da/certbot.log"
+
+  # ---- the question every command asks first ---------------------------------
+  _da_fresh
+  assert_true  "a site is registered"                                         lib_domain_registered site.example
+  assert_false "the path of a mail domain's record is not a site"             lib_domain_registered ../mail/domains/own.example
+  assert_false "nor is a name with a slash that leads back to a real site"    lib_domain_registered ../domains/site.example
+  assert_true  "a mail domain is one"                                         lib_mail_domain_standalone own.example
+  assert_false "the path of a site's state is not a mail domain"              lib_mail_domain_standalone ../../domains/site.example
+  assert_true  "mail is on where it is on"                                    lib_mail_domain_enabled own.example
+  assert_false "and for no name that is not a domain"                         lib_mail_domain_enabled ../domains/site.example
+  assert_false "which is known to nobody"                                     lib_mail_domain_known ../../domains/site.example
+  assert_true  "mail on disk is a trace"                                      lib_mail_domain_has_traces real.example
+  assert_false "a directory reached by climbing out of the store is not"      lib_mail_domain_has_traces ../victim
+  assert_false "nor is the store itself"                                      lib_mail_domain_has_traces /
+  MAIL_ARG_DOMAIN=""; _mail_domain_arg "Own.Example" "lomp mail disable example.com"
+  assert_eq    "the name a command is given is handed on in lower case"       "own.example" "$MAIL_ARG_DOMAIN"
+  assert_eq    "no name at all is refused"                                    1 "$(run_isolated _da_do _mail_domain_arg "" "lomp mail disable example.com")"
+  assert_has   "by asking for one"                                            "Which domain?" "$(_da_said)"
+  assert_has   "with the command as it should have been typed"                "lomp mail disable example.com" "$(_da_said)"
+
+  # ---- every mail command that takes a domain or an address ------------------
+  # refused, and with nothing changed: not a name in the tree, not a byte in a file
+  _da_fresh
+  _da_before="$(_da_snap)"
+  for _c in "disable ../victim" "disable ../victim --delete-data" "disable / --delete-data" "disable .. --delete-data" \
+            "disable real.example/../../victim --delete-data" "disable ../domains/site.example --delete-data" \
+            "domain del ../victim" "domain del ../../domains/site.example --no-backup" "domain add ../victim --mailbox info" \
+            "enable ../victim --mailbox info" "dns ../domains/site.example" "dns ../domains/site.example --apply" \
+            "cert ../domains/site.example" "webmail on ../domains/site.example" "webmail off ../domains/site.example" \
+            "dkim status ../domains/site.example" "dkim rotate ../domains/site.example" "dkim rotate ../domains/site.example --abort" \
+            "backup ../victim" "restore ../victim" "restore ../victim --file /nonexistent" \
+            "box list ../victim" "alias list ../victim" "box add info@../victim" "box del info@../victim" \
+            "alias add a@../victim info@real.example" "alias del @../victim"; do
+    read -r -a _ca <<<"$_c"
+    assert_eq  "refused: mail ${_c}" 1 "$(run_isolated _da_do lib_mail_main "${_ca[@]}")"
+    # by the check on the name itself, not further down by something that failed to find it
+    assert_has "as no name at all: mail ${_c}" "Invalid " "$(_da_said)"
+  done
+  assert_eq   "and after all of them nothing on the server has changed" "$_da_before" "$(_da_snap)"
+  # the site commands that only ever asked "is it registered?", and the one that asks nothing
+  for _c in "lib_backup_main ../mail/domains/own.example" "lib_domain_credentials_main ../mail/domains/own.example" \
+            "lib_domain_logs_main ../mail/domains/own.example"; do
+    read -r -a _ca <<<"$_c"
+    assert_eq  "refused: ${_c}" 1 "$(run_isolated _da_do "${_ca[@]}")"
+    assert_has "because it is no site: ${_ca[0]}" "is not registered" "$(_da_said)"
+  done
+  assert_eq   "restore takes no such name either"                       1 "$(run_isolated _da_do lib_restore_main ../victim --file /nonexistent)"
+  assert_has  "and says it is the name, not the archive"                "Invalid domain name '../victim'" "$(_da_said)"
+  assert_eq   "still nothing has changed"                               "$_da_before" "$(_da_snap)"
+
+  # ---- the last check, for a caller that forgot the first ---------------------
+  _da_fresh
+  assert_eq   "the purge itself refuses what is not a domain name"      1 "$(run_isolated _da_do lib_mail_domain_purge ../victim)"
+  assert_true "and removes nothing"                                     test -s "$_da/var/victim/precious.txt"
+  assert_eq   "nor the whole store"                                     1 "$(run_isolated _da_do lib_mail_domain_purge /)"
+  assert_true "which is still there"                                    test -s "$MAIL_VMAIL_HOME/real.example/info/Maildir/new/1"
+  assert_eq   "a record is not made under such a name either"           1 "$(run_isolated _da_do lib_mail_domain_register ../victim)"
+  assert_false "there is none"                                          test -e "$MAIL_DOMAINS_DIR/../victim/domain.json"
+  assert_eq   "and nothing is restored under one"                       1 "$(run_isolated _da_do lib_mail_restore_domain ../victim)"
+  # A mailbox line is read back from the password file as it stands, and a restore writes that
+  # file from an archive. Its address becomes a path too.
+  _da_fresh
+  printf '../../victim@real.example:{BLF-CRYPT}x::::::userdb_quota_rule=*:storage=1G\n' >>"$MAIL_PASSWD_FILE"
+  assert_eq   "a domain whose password file holds a line that is no address is still purged" 0 "$(run_isolated _da_do lib_mail_main disable real.example --delete-data)"
+  assert_true "what that line pointed at is still there"                test -s "$_da/var/victim/precious.txt"
+  assert_eq   "the line itself is gone"                                 0 "$(grep -c 'victim' "$MAIL_PASSWD_FILE" || true)"
+  assert_false "and so is the domain's own mail"                        test -e "$MAIL_VMAIL_HOME/real.example"
+
+  # ---- and the commands still do what they are for ----------------------------
+  _da_fresh
+  assert_eq   "a real domain's mail is deleted when that is asked for"  0 "$(run_isolated _da_do lib_mail_main disable Real.Example --delete-data)"
+  assert_false "all of it"                                              test -e "$MAIL_VMAIL_HOME/real.example"
+  assert_eq   "its mailbox line too"                                    0 "$(grep -c 'real.example' "$MAIL_PASSWD_FILE" || true)"
+  assert_true "and nothing beside it"                                   test -s "$_da/var/victim/precious.txt"
+  # the flag that says "off" belongs in the record the domain has: one that has none must not
+  # be given a state file for it, because that file alone is what makes a name a site here
+  assert_false "a domain nobody here knows is not made a site on the way" test -e "$STATE_DIR/domains/real.example"
+  _da_fresh
+  assert_eq   "without --delete-data its mailboxes are put aside"       0 "$(run_isolated _da_do lib_mail_main disable real.example)"
+  assert_true "under the name it has"                                   test -s "$MAIL_DISABLED_DIR/real.example.passwd"
+  assert_true "with the mail left where it is"                          test -s "$MAIL_VMAIL_HOME/real.example/info/Maildir/new/1"
+  assert_false "and it is no site afterwards either"                    lib_domain_registered real.example
+  _da_fresh
+  assert_eq   "a site's mail is turned off by its name"                 0 "$(run_isolated _da_do lib_mail_main disable site.example)"
+  assert_eq   "and the flag goes into the site's own record"            "false" "$(jq -r '.mail.enabled' "$(lib_domain_json site.example)")"
+  _da_fresh
+  assert_eq   "a mail domain is removed by its name"                    0 "$(run_isolated _da_do lib_mail_main domain del Own.Example --no-backup)"
+  assert_false "its record is gone"                                     test -e "$MAIL_DOMAINS_DIR/own.example"
+  assert_true "and archived"                                            bash -c "compgen -G '${MAIL_DOMAINS_GONE_DIR}/own.example.[0-9]*' >/dev/null"
+  assert_true "the site beside it was not touched"                      test -s "$STATE_DIR/domains/site.example/db.info"
+  assert_false "no removal ever reached outside the test directory"     test -e "$_da/rm-refused.log"
+fi
+
+eval "$_da_saved_vars"; eval "$_da_saved_fn"
+unset -f _da_do _da_said _da_fresh _da_snap
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 if (( FAIL > 0 )); then exit 1; fi
 exit 0
