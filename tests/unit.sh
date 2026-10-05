@@ -7115,12 +7115,24 @@ _rn_stubs='
   chown() { return 0; }; setfacl() { :; }
   runuser() { printf "%s\n" "$*" >>"$_rn/runuser.log"; [[ "${1:-}" == "-u" && -n "${2:-}" && "${3:-}" == "--" ]] || return 1; shift 3; "$@"; }
   pkill() { return 0; }; pgrep() { return 1; }; sleep() { :; }
+  # the account database: who there is ($_rn/users, $_rn/groups) and where each account lives
+  # ($_rn/passwd, "user:home"), which the stand-in for usermod keeps up to date
   id() { if [[ "${1:-}" == "-u" ]]; then grep -qxF -- "${2:-}" "$_rn/users"; else command id "$@"; fi; }
-  getent() { if [[ "${1:-}" == "group" ]]; then grep -qxF -- "${2:-}" "$_rn/groups"; else return 2; fi; }
+  getent() {
+    local h=""
+    case "${1:-}" in
+      group)  grep -qxF -- "${2:-}" "$_rn/groups" ;;
+      passwd) h="$(awk -F: -v u="${2:-}" "\$1 == u { print \$2 }" "$_rn/passwd" 2>/dev/null | tail -n 1)"
+              [[ -n "$h" ]] || return 2
+              printf "%s:x:1001:1001:site:%s:/usr/sbin/nologin\n" "$2" "$h" ;;
+      *)      return 2 ;;
+    esac
+  }
   usermod() {
     printf "usermod %s\n" "$*" >>"$_rn/calls"
     if [[ -e "$_rn/usermod-d-fails" && " $* " == *" -d "* ]]; then return 1; fi
-    if [[ "$1" == "-l" ]]; then sed -i "s/^$3\$/$2/" "$_rn/users"; fi
+    if [[ "$1" == "-l" ]]; then sed -i "s/^$3\$/$2/" "$_rn/users"; sed -i "s/^$3:/$2:/" "$_rn/passwd"; fi
+    if [[ "$1" == "-d" ]]; then sed -i "s|^${*: -1}:.*|${*: -1}:$2|" "$_rn/passwd"; fi
     return 0
   }
   groupmod() { printf "groupmod %s\n" "$*" >>"$_rn/calls"; if [[ "$1" == "-n" ]]; then sed -i "s/^$3\$/$2/" "$_rn/groups"; fi; return 0; }
@@ -7228,11 +7240,11 @@ _rn_site() {   # domain ident [mode]
   printf 'line\n' >"$_rn/sitelogs/$d/access.log"
   printf 'archive\n' >"$_rn/backups/$d/$d-20260101-000000.tar.gz"
   printf 'ini\n' >"$_rn/phpini/$d/90-lomp.ini"
-  printf '%s\n' "$i" >>"$_rn/users"; printf '%s\n' "$i" >>"$_rn/groups"
+  printf '%s\n' "$i" >>"$_rn/users"; printf '%s\n' "$i" >>"$_rn/groups"; printf '%s:%s\n' "$i" "$_rn/home/$d" >>"$_rn/passwd"
 }
 _rn_fresh() {
   rm -rf "$_rn"; mkdir -p "$_rn/state/domains" "$_rn/home" "$_rn/sitelogs" "$_rn/lsws/conf/vhosts" "$_rn/lsws/_default/html" "$_rn/backups" "$_rn/ssl" "$_rn/phpini"
-  : >"$_rn/calls"; : >"$_rn/log"; printf 'root\n' >"$_rn/users"; printf 'root\n' >"$_rn/groups"
+  : >"$_rn/calls"; : >"$_rn/log"; printf 'root\n' >"$_rn/users"; printf 'root\n' >"$_rn/groups"; : >"$_rn/passwd"
   printf '#!/bin/sh\nprintf "wp %%s\\n" "$*" >>"%s/calls"\n' "$_rn" >"$_rn/wp"; chmod +x "$_rn/wp"
   _rn_site alpha.example alpha_example
   printf '%s\n' "*/5 * * * * alpha_example cd $_rn/home/alpha.example/public_html && wp cron # server-setup:wpcron:alpha.example" >"$_rn/cron"
@@ -7442,6 +7454,28 @@ jq 'del(.app)' "$_rn/state/domains/alpha.example/domain.json" >"$_rn/t" && cp "$
 rm -f "$_rn"/mail-*
 jq '.user = "someone"' "$_rn/state/domains/alpha.example/domain.json" >"$_rn/t" && cp "$_rn/t" "$_rn/state/domains/alpha.example/domain.json"
 _rn_case _rn_blocker alpha.example beta.example;   assert_has "a site that runs as another user than its own" "runs as someone:alpha_example" "$(_rn_out)"
+# A record that names another site's account. A restore that was refused used to leave one
+# behind, and with a directory of its name in place - files uploaded for the site the list
+# shows - it is a site to every test above. Renaming "its" user would take the account, and
+# whatever runs as it, away from the site it belongs to.
+_rn_fresh
+_rn_site b-c.example b_c_example
+mkdir -p "$_rn/state/domains/b.c.example" "$_rn/home/b.c.example/public_html" "$_rn/backups/b.c.example"
+jq -n --arg h "$_rn/home/b.c.example" '{domain:"b.c.example", ident:"b_c_example", user:"b_c_example", group:"b_c_example", home:$h, mode:"static", status:"restoring", www:false, ssl:{enabled:false, wanted:false}}' \
+  >"$_rn/state/domains/b.c.example/domain.json"
+_rn_case _rn_blocker b-c.example new.example;      assert_eq  "a site whose account lives in its home is renamed like any other" "rc=0" "$(_rn_out)"
+_rn_case _rn_blocker b.c.example new.example
+assert_has   "a record that names another site's account is no site to rename" "it is on record as running as b_c_example" "$(_rn_out)"
+assert_has   "it says where that account lives" "that account's home is $_rn/home/b-c.example: another site's" "$(_rn_out)"
+assert_has   "and what such a record is for" "setup.sh remove b.c.example puts such a record away" "$(_rn_out)"
+: >"$_rn/calls"
+_rn_case _rn_rename b.c.example new.example --no-ssl
+assert_has   "the command stops on it" "b.c.example cannot be renamed to new.example" "$(_rn_out)"
+assert_lacks "nobody was renamed" "usermod" "$(_rn_calls)"
+assert_lacks "no group either" "groupmod" "$(_rn_calls)"
+assert_lacks "and nothing was taken off the air" "purge" "$(_rn_calls)"
+assert_eq    "the account is still the other site's, where it was" "b_c_example:$_rn/home/b-c.example" "$(grep '^b_c_example:' "$_rn/passwd")"
+assert_false "nothing was made under the new name" test -e "$_rn/state/domains/new.example"
 
 # ---- rename: the arguments ------------------------------------------------------------
 _rn_fresh

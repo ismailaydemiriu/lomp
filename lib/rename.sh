@@ -346,6 +346,14 @@ _domain_rename_blocker() {   # old new
   if [[ "$D_USER" != "$D_IDENT" || "$D_GROUP" != "$D_IDENT" ]]; then
     printf 'the site runs as %s:%s, not as the user lomp named after it (%s)' "$D_USER" "$D_GROUP" "$D_IDENT"; return 0
   fi
+  # And that user has to be this site's own. A record that names another site's account - a
+  # restore that was refused used to leave one behind - passes every test above as soon as a
+  # directory of its name exists, and renaming "its" user would take the account, and whatever
+  # runs as it, away from the site it belongs to.
+  if lib_domain_account_foreign "$old"; then
+    printf "it is on record as running as %s, and that account's home is %s: another site's (setup.sh remove %s puts such a record away)" \
+      "$D_USER" "$(getent passwd "$D_USER" | cut -d: -f6)" "$old"; return 0
+  fi
   if [[ "$ni" != "$D_IDENT" ]]; then
     if id -u "$ni" >/dev/null 2>&1; then printf 'a Linux user called %s exists already' "$ni"; return 0; fi
     if getent group "$ni" >/dev/null 2>&1; then printf 'a Linux group called %s exists already' "$ni"; return 0; fi
