@@ -439,9 +439,10 @@ What follows from it:
   stays the site's name.
 - A WebSocket upgrade (`ws://` and `wss://`, on the site and on a path proxy) carries the
   same `X-Forwarded-For` and `X-Forwarded-Proto` as any other request. It always travels
-  over HTTP/1.1: OpenLiteSpeed 1.9.2 does not announce WebSockets over HTTP/2 (the extended
-  CONNECT of RFC 8441), so a browser opens a connection of its own for `wss://`, next to the
-  HTTP/2 one that carries the pages.
+  over HTTP/1.1: OpenLiteSpeed 1.9.2 announces WebSockets neither over HTTP/2 nor over HTTP/3
+  (the extended CONNECT of RFC 8441 and RFC 9220) and refuses one that is tried anyway, so a
+  browser opens a connection of its own for `wss://`, next to the HTTP/2 or HTTP/3 one that
+  carries the pages.
 - OpenLiteSpeed has no setting that removes or replaces these headers on the way to the
   application (tried on 1.9.2), so the rules above are the application's to keep.
 - A request made on the server itself (`curl -H 'Host: example.com' http://127.0.0.1/`) arrives
