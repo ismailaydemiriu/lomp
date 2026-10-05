@@ -9227,6 +9227,105 @@ assert_has "setup.sh decides it before the first check can fail" "lib_lang_load"
   "$(grep -B2 '^  lib_require_root$' "$ROOT/setup.sh")"
 unset -f _lt _lt_load
 
+# =============================================================================
+section "doctor and ssl status: Turkish for what a person reads"
+# doctor's findings are short and general - "{1} missing", "{1} answers" - and as ordinary
+# lines of lib/lang.sh's table they would also fit the untranslated messages of every other
+# command and turn them into half a sentence. So they are kept there as "@doctor <text>",
+# and lib_doctor_main asks for them under that key. --json, the log and the health check's
+# notice get the English they always got.
+_dt_fn="$(declare -f lib_doctor_run lib_require_tools || true)"
+_dt() {   # a check's name or detail -> what doctor shows in Turkish
+  ( LIB_LANG="tr"; lib_lang_build; _doc_tr "$1"; printf '%s' "$LIB_TR" )
+}
+_dt_plain() {   # an ordinary message -> its Turkish
+  ( LIB_LANG="tr"; lib_lang_build; lib_tr "$1"; printf '%s' "$LIB_TR" )
+}
+assert_eq "a check's name"                        "site a.example: loglar" "$(_dt "site a.example: logs")"
+assert_eq "one that is a technical word stays"    "site a.example: vhost" "$(_dt "site a.example: vhost")"
+assert_eq "the longer name is not taken for the shorter" "uygulama a.example: worker queue yeniden başlama" "$(_dt "app a.example: worker queue restarts")"
+assert_eq "nor the other way round"               "uygulama a.example: worker queue" "$(_dt "app a.example: worker queue")"
+assert_eq "a mail check"                          "posta: kuyruk" "$(_dt "mail: queue")"
+assert_eq "one with a value"                      "posta: port 10587" "$(_dt "mail: port 10587")"
+assert_eq "and the general one last"              "posta: postfix" "$(_dt "mail: postfix")"
+assert_eq "a finding"                             "dinliyor" "$(_dt "listening")"
+assert_eq "one with a value in it"                "/etc/sysctl.d/99-x.conf yerinde" "$(_dt "/etc/sysctl.d/99-x.conf present")"
+assert_eq "the specific finding wins over the general one" "/home/a.example/public_html yok" "$(_dt "/home/a.example/public_html missing")"
+assert_eq "the general one is still there"        "/etc/x.conf eksik" "$(_dt "/etc/x.conf missing")"
+assert_eq "values may change places"              "kısıtlı (7080 portu için 2 güvenlik duvarı kuralı)" "$(_dt "restricted (2 firewall rule(s) for port 7080)")"
+assert_eq "a percent sign in a finding is plain text" "%91 dolu (3 GB boş) - %85 eşiğinin üstünde" "$(_dt "91% used (3 GB free) - above 85% threshold")"
+assert_eq "a redirect's finding"                  "ziyaretçilerini https://b.example adresine gönderiyor" "$(_dt "sends its visitors on to https://b.example")"
+assert_eq "a finding with no Turkish is shown as it is" "something nobody translated" "$(_dt "something nobody translated")"
+assert_eq "and never with the key in front"       "x" "$(_dt "x")"
+assert_eq "an ordinary message that has its Turkish is found from doctor too" "a.example sitesi kayıtlı değil" "$(_dt "Site a.example is not registered")"
+# the reason for the key: outside doctor these patterns do not exist
+assert_eq "another command's message that ends like a finding stays whole" "the key file is missing" "$(_dt_plain "the key file is missing")"
+assert_eq "so does one that ends in 'answers'"    "nobody answers" "$(_dt_plain "nobody answers")"
+assert_eq "and one that is a finding word for word" "listening" "$(_dt_plain "listening")"
+assert_eq "without a language doctor's texts are what they were" "site a.example: logs" "$(_doc_tr "site a.example: logs"; printf '%s' "$LIB_TR")"
+
+# the command: a table in Turkish, the same findings in English for --json
+_dt_run() {   # tr|en [--json]
+  (
+    eval 'lib_require_tools() { :; }
+          lib_doctor_run() {
+            DOC_RESULTS=(); DOC_FAIL=0; DOC_WARN=0; DOC_OK=0
+            _doc_add OK "port 80/tcp" "listening"
+            _doc_add WARN "site a.example: ssl" "wanted but not active (setup.sh renew-ssl a.example)"
+            _doc_add FAIL "site a.example: files" "/home/a.example/public_html missing"
+          }'
+    OPT_QUIET=0; OPT_JSON=0
+    if [[ "$1" == "tr" ]]; then LIB_LANG="tr"; lib_lang_build; fi
+    shift
+    lib_doctor_main "$@" 2>&1 || true
+  )
+}
+_o="$(_dt_run tr)"
+assert_has  "the headline of the table"           "DURUM" "$_o"
+assert_has  "its columns"                         "KONTROL" "$_o"
+assert_has  "a finding that is fine"              "port 80/tcp" "$(grep 'dinliyor' <<<"$_o")"
+assert_has  "a warning, with its command untouched" "isteniyor ama etkin değil (setup.sh renew-ssl a.example)" "$_o"
+assert_has  "a failure, name and finding"         "site a.example: dosyalar" "$(grep '/home/a.example/public_html yok' <<<"$_o")"
+assert_has  "the status words stay what scripts and people know" "FAIL" "$(grep 'public_html yok' <<<"$_o")"
+assert_has  "the summary"                         "Özet: 1 tamam, 1 uyarı, 1 hata" "$_o"
+assert_has  "a Turkish name is padded by its letters, not its bytes: the columns line up" "site a.example: ssl                isteniyor" "$_o"
+assert_has  "for a name with Turkish letters too" "site a.example: dosyalar           /home/a.example/public_html yok" "$_o"
+assert_has  "and the headline over them"          "DURUM  KONTROL                            AYRINTI" "$_o"
+assert_lacks "nothing of it is left in English"   "missing" "$_o"
+_o="$(_dt_run en)"
+assert_has  "in English the table is what it was" "STATUS CHECK                              DETAIL" "$_o"
+assert_has  "row for row"                         "site a.example: files              /home/a.example/public_html missing" "$_o"
+assert_has  "and the summary"                     "Summary: 1 ok, 1 warning(s), 1 failure(s)" "$_o"
+_o="$(_dt_run tr --json)"
+assert_eq   "--json is English whatever the language" "site a.example: files|/home/a.example/public_html missing" \
+  "$(jq -r '.checks[] | select(.status == "FAIL") | "\(.check)|\(.detail)"' <<<"$_o" 2>/dev/null || true)"
+
+# ssl status: the rows, the headings and the commands that put things right
+_st() { ( LIB_LANG="tr"; lib_lang_build; C_GRN=""; C_YEL=""; C_RED=""; C_DIM=""; C_RST=""; "$@" ); }
+assert_has  "a row: the days and what is wrong, in line with the English column" "3 gün      yenileme gerçekleşmiyor" "$(_st _ssl_row a.example FAIL 3 "renewal is not getting through")"
+assert_has  "a certificate that expired"          "4 gün önce süresi doldu" "$(_st _ssl_row a.example FAIL -4 "expired 4 day(s) ago")"
+assert_has  "one that lacks a name"               "www.a.example adını kapsamıyor" "$(_st _ssl_row a.example FAIL 60 "does not cover www.a.example")"
+assert_has  "one that is not there"               "sertifika yok" "$(_st _ssl_row a.example NONE "" "no certificate")"
+assert_has  "an issuer is a name and stays one"   "Let's Encrypt" "$(_st _ssl_row a.example OK 60 "Let's Encrypt")"
+assert_has  "in English a row is what it was"     "3 days     renewal is not getting through" "$(_ssl_row a.example FAIL 3 "renewal is not getting through")"
+assert_eq   "a command that puts things right keeps the command" "lomp renew-ssl a.example    # DNS kaydı buraya yönlenince" "$(_dt_plain "lomp renew-ssl a.example    # once its DNS points here")"
+assert_eq   "for a redirect, with www"            "lomp redirect add old.example a.example --www    # DNS kaydı buraya yönlenince" "$(_dt_plain "lomp redirect add old.example a.example --www    # once its DNS points here")"
+assert_eq   "a value in colour"                   $'\033[0;32mkurulu\033[0m (yenilenen sertifikayı sunuculara verir)' "$(_dt_plain $'\033[0;32minstalled\033[0m (hands a renewed certificate to the servers)')"
+assert_eq   "and the same without colours"        "kurulu (yenilenen sertifikayı sunuculara verir)" "$(_dt_plain "installed (hands a renewed certificate to the servers)")"
+assert_eq   "the closing line"                    "2 sorun, 1 uyarı. Düzeltmek için:" "$(_dt_plain "2 problem(s), 1 warning(s). To put right:")"
+assert_eq   "what Cloudflare would say"           "Cloudflare: 3 siteden 1 tanesi Full (strict) altında 526 yanıtı verir. Bu liste temizlenene kadar Full modunda kalın." "$(_dt_plain "Cloudflare: 1 of 3 site(s) would answer 526 under Full (strict). Stay on Full until this list is clean.")"
+assert_eq   "renew-ssl: a request"                "a.example + www için sertifika isteniyor (webroot ile)" "$(_dt_plain "Requesting certificate for a.example + www via webroot")"
+assert_eq   "and for names that belong to no site" "mail.a.example için _mail_a sertifikası isteniyor (dns ile)" "$(_dt_plain "Requesting certificate _mail_a for mail.a.example via dns")"
+assert_has  "ssl help in Turkish"                 "ssl fix        Otomatik yenilemeyi geri kurar" "$(_st lib_ssl_usage)"
+assert_has  "and in English as before"            "ssl fix        Put automatic renewal back" "$(lib_ssl_usage)"
+for _dt_h in '"CERTIFICATES"' '"Sites"' '"Redirects"' '"Mail"' '"AUTOMATIC RENEWAL"' '"(no sites yet)"'; do
+  assert_has "ssl status sends its heading ${_dt_h} through the table" "lib_tr ${_dt_h}" "$(declare -f lib_ssl_status_main)"
+done
+assert_eq   "each of them has its Turkish"        "SERTİFİKALAR Siteler Yönlendirmeler Posta OTOMATİK YENİLEME (henüz site yok)" \
+  "$(_dt_plain CERTIFICATES) $(_dt_plain Sites) $(_dt_plain Redirects) $(_dt_plain Mail) $(_dt_plain "AUTOMATIC RENEWAL") $(_dt_plain "(no sites yet)")"
+[[ -z "$_dt_fn" ]] || eval "$_dt_fn"
+unset -f _dt _dt_plain _dt_run _st
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 if (( FAIL > 0 )); then exit 1; fi
 exit 0

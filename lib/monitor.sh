@@ -1083,8 +1083,20 @@ lib_doctor_run() {
   _doc_check_log_leaks
 }
 
+# A check's name or what was found, in the language that is shown. lib/lang.sh keeps these
+# as "@doctor <text>": they are short and general ("{1} missing"), and under a key of their
+# own they cannot be taken for a message of another command. One that has no line there may
+# still have one as an ordinary message.
+_doc_tr() {   # text -> LIB_TR
+  lib_tr "@doctor ${1}"
+  if [[ "$LIB_TR" == "@doctor "* ]]; then lib_tr "$1"; fi
+  return 0
+}
+
 lib_doctor_main() {
-  local json=0 quiet="$OPT_QUIET" r="" st="" name="" detail=""
+  local json=0 quiet="$OPT_QUIET" r="" st="" name="" detail="" pad=0
+  # printf pads by bytes, and a Turkish name has letters of two: the columns are padded here
+  local LC_ALL=C.UTF-8
   [[ "${1:-}" == "--json" ]] && json=1
   (( OPT_JSON )) && json=1
   lib_require_tools
@@ -1093,16 +1105,25 @@ lib_doctor_main() {
     printf '%s\n' "${DOC_RESULTS[@]}" | jq -R 'split("|") | {status:.[0], check:.[1], detail:.[2]}' | jq -s --argjson f "$DOC_FAIL" --argjson w "$DOC_WARN" --argjson o "$DOC_OK" \
       '{summary:{ok:$o, warn:$w, fail:$f, healthy:($f==0)}, checks:.}'
   else
-    (( quiet )) || printf '\n%s%-6s %-34s %s%s\n' "$C_BLD" "STATUS" "CHECK" "DETAIL" "$C_RST"
+    if (( ! quiet )); then
+      _doc_tr "STATUS"; st="$LIB_TR"; _doc_tr "CHECK"; name="$LIB_TR"; _doc_tr "DETAIL"
+      pad=$(( 34 - ${#name} )); (( pad > 0 )) || pad=0
+      printf '\n%s%-6s %s%*s %s%s\n' "$C_BLD" "$st" "$name" "$pad" "" "$LIB_TR" "$C_RST"
+    fi
     for r in "${DOC_RESULTS[@]}"; do
       st="${r%%|*}"; name="${r#*|}"; detail="${name#*|}"; name="${name%%|*}"
+      # only what is shown: --json, the log and the health check's notice keep the English
+      _doc_tr "$name"; name="$LIB_TR"; _doc_tr "$detail"; detail="$LIB_TR"
+      pad=$(( 34 - ${#name} )); (( pad > 0 )) || pad=0
       case "$st" in
-        OK)   (( quiet )) || printf '%s%-6s%s %-34s %s\n' "$C_GRN" "OK" "$C_RST" "$name" "$detail" ;;
-        WARN) printf '%s%-6s%s %-34s %s\n' "$C_YEL" "WARN" "$C_RST" "$name" "$detail" ;;
-        FAIL) printf '%s%-6s%s %-34s %s\n' "$C_RED" "FAIL" "$C_RST" "$name" "$detail" ;;
+        OK)   (( quiet )) || printf '%s%-6s%s %s%*s %s\n' "$C_GRN" "OK" "$C_RST" "$name" "$pad" "" "$detail" ;;
+        WARN) printf '%s%-6s%s %s%*s %s\n' "$C_YEL" "WARN" "$C_RST" "$name" "$pad" "" "$detail" ;;
+        FAIL) printf '%s%-6s%s %s%*s %s\n' "$C_RED" "FAIL" "$C_RST" "$name" "$pad" "" "$detail" ;;
       esac
     done
-    printf '\n%sSummary:%s %d ok, %d warning(s), %d failure(s)\n' "$C_BLD" "$C_RST" "$DOC_OK" "$DOC_WARN" "$DOC_FAIL"
+    _doc_tr "Summary:"; name="$LIB_TR"
+    _doc_tr "${DOC_OK} ok, ${DOC_WARN} warning(s), ${DOC_FAIL} failure(s)"
+    printf '\n%s%s%s %s\n' "$C_BLD" "$name" "$C_RST" "$LIB_TR"
   fi
   lib_log_write INFO "doctor: ${DOC_OK} ok, ${DOC_WARN} warn, ${DOC_FAIL} fail"
   (( DOC_FAIL == 0 ))

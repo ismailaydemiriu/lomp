@@ -473,17 +473,32 @@ lib_ssl_lineage_check() {   # cert-name [name...]
 }
 
 _ssl_row() {   # label level days text
-  local colour="$C_GRN" word="ok" left="-"
+  local colour="$C_GRN" word="ok" left="-" pad=0 LC_ALL=C.UTF-8
   case "$2" in
     WARN) colour="$C_YEL"; word="warn" ;;
     FAIL) colour="$C_RED"; word="FAIL" ;;
     NONE) colour="$C_DIM"; word="none" ;;
   esac
-  [[ -n "$3" ]] && left="${3} days"
-  printf '  %-32s %s%-5s%s %-10s %s\n' "$1" "$colour" "$word" "$C_RST" "$left" "$4"
+  if [[ -n "$3" ]]; then lib_tr "days"; left="${3} ${LIB_TR}"; fi
+  lib_tr "$4"
+  # padded here: printf counts bytes, and "gün" has a letter of two
+  pad=$(( 10 - ${#left} )); (( pad > 0 )) || pad=0
+  printf '  %-32s %s%-5s%s %s%*s %s\n' "$1" "$colour" "$word" "$C_RST" "$left" "$pad" "" "$LIB_TR"
 }
 
 lib_ssl_usage() {
+  if [[ "${LIB_LANG:-en}" == "tr" ]]; then
+    cat <<'EOF'
+ssl [status]   Her sertifika (siteler, yönlendirmeler, posta): var mı, ne kadar süresi kaldı
+               ve kendiliğinden yenileniyor mu - certbot'u çalıştıran timer ya da cron satırı,
+               deploy kancası, her biri için certbot'un yenileme dosyası. Hiçbir şeyi
+               değiştirmez. Düzeltilmesi gereken bir şey varsa çıkış kodu 1 olur.
+ssl test       Her sertifikanın yenilenmesini Let's Encrypt'in staging sunucusuna karşı
+               dener (certbot renew --dry-run). Hiçbir sertifika değiştirilmez.
+ssl fix        Otomatik yenilemeyi geri kurar: deploy kancası ve timer (ya da cron satırı).
+EOF
+    return 0
+  fi
   cat <<'EOF'
 ssl [status]   Every certificate (sites, redirects, mail): whether there is one, how long it has,
                and whether it renews by itself - the timer or cron entry that runs certbot,
@@ -518,15 +533,15 @@ lib_ssl_status_main() {
 
   _ssl_count() {   # level fix-hint
     case "$1" in
-      FAIL) fails+=1; fixes+=("$2") ;;
-      WARN) warns+=1; fixes+=("$2") ;;
+      FAIL) fails+=1; lib_tr "$2"; fixes+=("$LIB_TR") ;;
+      WARN) warns+=1; lib_tr "$2"; fixes+=("$LIB_TR") ;;
     esac
     return 0
   }
 
-  printf '\n %sCERTIFICATES%s\n' "$C_BLD" "$C_RST"
+  lib_tr "CERTIFICATES"; printf '\n %s%s%s\n' "$C_BLD" "$LIB_TR" "$C_RST"
   if ! lib_server_mail_only; then
-    printf '  %sSites%s\n' "$C_DIM" "$C_RST"
+    lib_tr "Sites"; printf '  %s%s%s\n' "$C_DIM" "$LIB_TR" "$C_RST"
     while read -r d; do
       [[ -n "$d" ]] || continue
       lib_domain_state_load "$d" || continue
@@ -551,11 +566,11 @@ lib_ssl_status_main() {
       [[ "$level" == "NONE" ]] && level="FAIL"
       _ssl_count "$level" "${me} renew-ssl ${d}"
     done < <(lib_domains_list)
-    (( sites > 0 )) || printf '  (no sites yet)\n'
+    if (( sites == 0 )); then lib_tr "(no sites yet)"; printf '  %s\n' "$LIB_TR"; fi
   fi
   # a name that only redirects answers HTTPS with a certificate of its own, renewed like a site's
   if [[ -n "$(lib_redirects_list)" ]]; then
-    printf '  %sRedirects%s\n' "$C_DIM" "$C_RST"
+    lib_tr "Redirects"; printf '  %s%s%s\n' "$C_DIM" "$LIB_TR" "$C_RST"
     while read -r d; do
       [[ -n "$d" ]] || continue
       lib_redirect_load "$d" || continue
@@ -568,7 +583,7 @@ lib_ssl_status_main() {
     done < <(lib_redirects_list)
   fi
   if lib_mail_installed; then
-    printf '  %sMail%s\n' "$C_DIM" "$C_RST"
+    lib_tr "Mail"; printf '  %s%s%s\n' "$C_DIM" "$LIB_TR" "$C_RST"
     IFS='|' read -r level days trusted text < <(lib_ssl_lineage_check "$MAIL_CERT_NAME" "$(lib_mail_host)")
     # the mail host starts on a self-signed certificate and asks for the real one every six
     # hours by itself: clients warn meanwhile, which is a warning here as it is in doctor
@@ -589,7 +604,7 @@ lib_ssl_status_main() {
     done < <(lib_mail_domains)
   fi
 
-  printf '\n %sAUTOMATIC RENEWAL%s\n' "$C_BLD" "$C_RST"
+  lib_tr "AUTOMATIC RENEWAL"; printf '\n %s%s%s\n' "$C_BLD" "$LIB_TR" "$C_RST"
   how="$(lib_ssl_renewal_how)"
   if ! lib_have certbot; then
     auto_ok=0; lib_print_kv "Runs certbot" "${C_RED}certbot is not installed${C_RST}"
