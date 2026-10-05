@@ -975,6 +975,9 @@ lib_domain_rename_main() {
   if _domain_rename_has_wp; then
     if (( replace )); then
       _domain_rename_wp "$old" "$new"
+      # the new name may be the first this site has a certificate under: http://new is what
+      # the rewrite left of http://old
+      ( lib_domain_wp_https keep-cache ) || true
       # after the rewrite: what is in the page cache by now was made from the addresses before it
       _domain_rename_cache_clear
     else

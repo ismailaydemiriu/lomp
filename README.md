@@ -222,6 +222,15 @@ sudo lomp add example.com --no-ssl
 sudo lomp renew-ssl example.com
 ```
 
+A WordPress that was installed before its certificate has `http://` as its stored address.
+`renew-ssl` puts that right: `home` and `siteurl` become `https://` when they are the plain
+`http://` address of the site (with or without `www`, as stored), and so does the admin address
+`lomp credentials` prints. An address somebody set - another host, a port, a directory - is
+named and left alone. Links inside posts are not rewritten: WordPress and the redirect turn
+them into `https://` as they are served, and `renew-ssl` says how many there are and prints
+the `wp search-replace` command for rewriting them for good. If wp-cli fails, that is a
+warning; the certificate is in place either way, and the next `renew-ssl` looks again.
+
 ---
 
 ## Everyday commands
@@ -1196,6 +1205,13 @@ says what it needs (mail, swaks, the webmail) and stops when that is missing:
 LOMPSTACK_INTEGRATION=yes bash tests/e2e-rename.sh            # a WordPress site, the redirect, rollback, the menu
 LOMPSTACK_INTEGRATION=yes bash tests/e2e-rename-app-mail.sh   # a Node.js application; mailboxes that follow the site
 LOMPSTACK_INTEGRATION=yes bash tests/e2e-rename-webmail.sh    # what Roundcube keeps for a mailbox
+```
+
+One more of the same kind is for a WordPress that gets its certificate after it was installed
+(certbot and the DNS answer are stand-ins for the test's two names under `lomptest.net`):
+
+```bash
+LOMPSTACK_INTEGRATION=yes bash tests/e2e-wp-https.sh          # http:// to https:// in the database, by renew-ssl and by rename
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.

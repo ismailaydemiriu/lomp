@@ -9715,6 +9715,162 @@ assert_has "setup.sh knows it"                          'import)         lib_imp
 eval "$_im_orig"; eval "$_im_saved"
 unset -f _im_row _im_dump _im_site _imf
 
+# =============================================================================
+section "renew-ssl: a WordPress installed before its certificate stops calling itself http://"
+# The WordPress is a stand-in for wp-cli that keeps "home" and "siteurl" in two files.
+_wh="$TMP/wphttps"; _wh_d="late-ssl.example"
+_wh_fn="$(declare -f _wp lib_domain_wpcli_ensure _domain_rename_cache_clear)"; _wh_bin="$WPCLI_BIN"
+WPCLI_BIN="$_wh/wp-bin"
+lib_domain_wpcli_ensure() { return 0; }
+_domain_rename_cache_clear() { printf 'cache-clear\n' >>"$_wh/calls"; }
+_wp() {
+  printf '%s\n' "$*" >>"$_wh/calls"
+  case "$1 $2" in
+    "option get")     [[ ! -e "$_wh/broken" ]] || return 1
+                      [[ ! -e "$_wh/noisy" ]] || printf 'Notice: something a plugin says\n'
+                      cat "$_wh/opt-$3" ;;
+    "option update")  [[ ! -e "$_wh/readonly" ]] || return 1
+                      [[ -e "$_wh/pinned" ]] || printf '%s\n' "$4" >"$_wh/opt-$3" ;;
+    "search-replace "*) [[ ! -e "$_wh/nocount" ]] || return 1
+                      if [[ "$2" == http://www.* ]]; then printf '0\n'; else printf '3\n'; fi ;;
+  esac
+  return 0
+}
+_wh_site() {   # home [siteurl] - a fresh site with these two stored
+  rm -rf "$_wh"; mkdir -p "$_wh/home/public_html" "$STATE_DIR/domains/$_wh_d"
+  : >"$_wh/calls"; : >"$_wh/wp-bin"; chmod +x "$_wh/wp-bin"
+  printf '<?php // wp\n' >"$_wh/home/public_html/wp-config.php"
+  printf '%s\n' "$1" >"$_wh/opt-home"; printf '%s\n' "${2:-$1}" >"$_wh/opt-siteurl"
+  printf '# WordPress admin\nWP_URL=%s\nWP_ADMIN_USER=admin\nWP_PATH=%s\n' "$1" "$_wh/home/public_html" >"$STATE_DIR/domains/$_wh_d/wp.info"
+}
+_wh_run() {   # www(0/1) ssl(0/1) [arguments] -> what it says, then rc=<status>
+  local www="$1" ssl="$2" rc=0; shift 2
+  ( OPT_QUIET=0; D_DOMAIN="$_wh_d"; D_HOME="$_wh/home"; D_USER="late_ssl"; D_WWW="$www"; D_SSL="$ssl"
+    lib_domain_wp_https "$@" ) 2>&1 || rc=$?
+  printf 'rc=%s\n' "$rc"
+}
+_wh_opts()  { printf '%s %s' "$(cat "$_wh/opt-home")" "$(cat "$_wh/opt-siteurl")"; }
+_wh_info()  { grep '^WP_URL=' "$STATE_DIR/domains/$_wh_d/wp.info"; }
+_wh_calls() { cat "$_wh/calls"; }
+_wh_count() { grep -c "$1" "$_wh/calls" || true; }
+
+_wh_site "http://$_wh_d"
+_o="$(_wh_run 0 1)"
+assert_eq    "home and siteurl get https://" "https://$_wh_d https://$_wh_d" "$(_wh_opts)"
+assert_has   "each is said, with what it was" "its home is now https://$_wh_d (was http://$_wh_d)" "$_o"
+assert_has   "the other too" "its siteurl is now https://$_wh_d" "$_o"
+assert_eq    "the address lomp keeps for credentials follows" "WP_URL=https://$_wh_d" "$(_wh_info)"
+assert_eq    "and nothing else in that file changed" "WP_ADMIN_USER=admin" "$(grep '^WP_ADMIN_USER' "$STATE_DIR/domains/$_wh_d/wp.info")"
+assert_has   "the pages kept from before are thrown away" "cache-clear" "$(_wh_calls)"
+assert_has   "WordPress is asked without its plugins" "option get home --skip-plugins --skip-themes" "$(_wh_calls)"
+assert_has   "what the posts still link to is counted" "3 place(s) in its database still say http://$_wh_d" "$_o"
+assert_has   "and the command is one for the site user" "runuser -u late_ssl -- wp --path=$_wh/home/public_html search-replace 'http://$_wh_d' 'https://$_wh_d'" "$_o"
+assert_eq    "the content is not rewritten: each look at it is a dry run" "$(_wh_count '^search-replace')" "$(_wh_count '^search-replace .* --dry-run --format=count')"
+assert_eq    "one look, for a site without www" "1" "$(_wh_count '^search-replace')"
+assert_eq    "both values were written" "2" "$(_wh_count '^option update')"
+assert_has   "it ends well" "rc=0" "$_o"
+: >"$_wh/calls"
+_o="$(_wh_run 0 1)"
+assert_eq    "a second run finds nothing to do" "0" "$(_wh_count 'option update\|cache-clear\|search-replace')"
+assert_lacks "and says nothing about WordPress" "WordPress" "$_o"
+
+_wh_site "http://www.$_wh_d"
+_o="$(_wh_run 1 1)"
+assert_eq    "a site whose address is the www name keeps the www" "https://www.$_wh_d https://www.$_wh_d" "$(_wh_opts)"
+assert_eq    "in lomp's record too" "WP_URL=https://www.$_wh_d" "$(_wh_info)"
+assert_eq    "and both names are looked for in the content" "2" "$(_wh_count '^search-replace')"
+assert_lacks "a name with nothing left under it is not mentioned" "still say http://www." "$_o"
+_wh_site "http://www.$_wh_d"
+_o="$(_wh_run 0 1)"
+assert_eq    "www. of a site that has no www is not its address" "http://www.$_wh_d http://www.$_wh_d" "$(_wh_opts)"
+assert_has   "it is named and left" "its home is http://www.$_wh_d, which is not the plain address of this site; left as it is" "$_o"
+assert_eq    "and so is the record" "WP_URL=http://www.$_wh_d" "$(_wh_info)"
+
+for _wh_v in "http://$_wh_d:8080" "http://$_wh_d/blog" "http://$_wh_d.evil.example" "http://other.example" "http://sub.$_wh_d"; do
+  _wh_site "$_wh_v"
+  _o="$(_wh_run 1 1)"
+  assert_eq  "an address somebody set is left alone: ${_wh_v}" "$_wh_v $_wh_v" "$(_wh_opts)"
+  assert_lacks "nothing is written for it" "option update" "$(_wh_calls)"
+  assert_lacks "and no page is thrown away" "cache-clear" "$(_wh_calls)"
+  assert_eq  "the record keeps it too" "WP_URL=$_wh_v" "$(_wh_info)"
+done
+_wh_site "https://$_wh_d"
+_o="$(_wh_run 0 1)"
+assert_eq    "one that says https:// already is not touched" "0" "$(_wh_count 'option update')"
+_wh_site "http://$_wh_d" "http://$_wh_d/wp"
+_o="$(_wh_run 0 1)"
+assert_eq    "home is the site's address and siteurl a directory: the first only" "https://$_wh_d http://$_wh_d/wp" "$(_wh_opts)"
+assert_has   "the directory is named" "its siteurl is http://$_wh_d/wp, which is not the plain address" "$_o"
+_wh_site "HTTP://Late-SSL.example/"
+_o="$(_wh_run 0 1)"
+assert_eq    "only the scheme changes: capitals and the closing slash stay" "https://Late-SSL.example/ https://Late-SSL.example/" "$(_wh_opts)"
+_wh_site "http://$_wh_d"; : >"$_wh/noisy"
+_o="$(_wh_run 0 1)"
+assert_eq    "what a plugin prints before the value is not the value" "https://$_wh_d https://$_wh_d" "$(_wh_opts)"
+
+# what can go wrong never fails the certificate
+_wh_site "http://$_wh_d"; : >"$_wh/broken"
+_o="$(_wh_run 0 1)"
+assert_has   "a WordPress that cannot be asked is a warning" "WordPress could not be asked for its address" "$_o"
+assert_has   "with the way to try again" "setup.sh renew-ssl $_wh_d" "$_o"
+assert_has   "and no failure" "rc=0" "$_o"
+assert_eq    "nothing was written" "0" "$(_wh_count 'option update')"
+assert_eq    "lomp's own record is right all the same" "WP_URL=https://$_wh_d" "$(_wh_info)"
+_wh_site "http://$_wh_d"; : >"$_wh/readonly"
+_o="$(_wh_run 0 1)"
+assert_has   "a value that cannot be written is a warning" "its home could not be set to https://$_wh_d" "$_o"
+assert_has   "with the command, as the site user" "runuser -u late_ssl -- wp --path=$_wh/home/public_html option update home 'https://$_wh_d'" "$_o"
+assert_has   "and no failure" "rc=0" "$_o"
+assert_lacks "nothing is said to be done" "its home is now" "$_o"
+_wh_site "http://$_wh_d"; : >"$_wh/pinned"
+_o="$(_wh_run 0 1)"
+assert_has   "an address set in wp-config.php is found out by asking again" "WordPress still gives http://$_wh_d as its home" "$_o"
+assert_has   "and where to look is said" "WP_HOME and WP_SITEURL in $_wh/home/public_html/wp-config.php" "$_o"
+assert_lacks "it is not called done" "its home is now" "$_o"
+_wh_site "http://$_wh_d"; : >"$_wh/nocount"
+_o="$(_wh_run 0 1)"
+assert_eq    "a count that fails takes nothing back" "https://$_wh_d https://$_wh_d rc=0" "$(_wh_opts) $(tail -n 1 <<<"$_o")"
+assert_lacks "and no number is made up" "place(s)" "$_o"
+_wh_site "http://$_wh_d"; rm -f "$_wh/wp-bin"
+_o="$(_wh_run 0 1)"
+assert_has   "without wp-cli it is a warning" "wp-cli could not be installed" "$_o"
+assert_eq    "and WordPress is not called" "" "$(_wh_calls)"
+
+# when it does nothing at all
+_wh_site "http://$_wh_d"
+_o="$(_wh_run 0 0)"
+assert_eq    "a site without a certificate keeps http:// everywhere" "http://$_wh_d http://$_wh_d WP_URL=http://$_wh_d" "$(_wh_opts) $(_wh_info)"
+assert_eq    "and WordPress is not even asked" "" "$(_wh_calls)"
+_wh_site "http://$_wh_d"
+_o="$( ( OPT_DRY_RUN=1; _wh_run 0 1 ) )"
+assert_eq    "a dry run changes nothing" "http://$_wh_d http://$_wh_d WP_URL=http://$_wh_d" "$(_wh_opts) $(_wh_info)"
+_wh_site "http://$_wh_d"; rm -f "$_wh/home/public_html/wp-config.php"
+_o="$(_wh_run 0 1)"
+assert_eq    "where no WordPress is, wp-cli is not run" "" "$(_wh_calls)"
+_wh_site "http://$_wh_d"
+_o="$(_wh_run 0 1 keep-cache)"
+assert_lacks "rename empties the page cache itself" "cache-clear" "$(_wh_calls)"
+assert_eq    "and gets the addresses changed" "https://$_wh_d https://$_wh_d" "$(_wh_opts)"
+
+# where it is called from
+_wh_line() { grep -n -- "$1" <<<"$_wh_src" | head -n 1 | cut -d: -f1; }
+_wh_src="$(declare -f lib_ssl_renew_main)"
+assert_has   "renew-ssl does it, where nothing in it can end the command" '( lib_domain_wp_https ) ||' "$_wh_src"
+assert_true  "after the site is switched to HTTPS" test "$(_wh_line 'D_SSL=1')" -lt "$(_wh_line 'lib_domain_wp_https')"
+_wh_src="$(declare -f lib_domain_rename_main)"
+assert_has   "rename does it for a name that is the first with a certificate" '( lib_domain_wp_https keep-cache )' "$_wh_src"
+assert_true  "after the old name was rewritten" test "$(_wh_line '_domain_rename_wp "$old"')" -lt "$(_wh_line 'lib_domain_wp_https')"
+assert_true  "and before the cache is emptied" test "$(_wh_line 'lib_domain_wp_https')" -lt "$(_wh_line '_domain_rename_cache_clear')"
+
+# in Turkish
+_wh_tr() { ( LIB_LANG="tr"; lib_lang_build; lib_tr "$1"; printf '%s' "$LIB_TR" ); }
+assert_eq    "what was done, in Turkish" "WordPress: home değeri artık https://$_wh_d (önceden http://$_wh_d)" "$(_wh_tr "WordPress: its home is now https://$_wh_d (was http://$_wh_d)")"
+assert_eq    "a command stays a command" "Kalıcı olarak yeniden yazmak için: runuser -u u -- wp --path=/p search-replace 'http://a.example' 'https://a.example' --all-tables-with-prefix --skip-columns=guid" \
+  "$(_wh_tr "To rewrite them for good: runuser -u u -- wp --path=/p search-replace 'http://a.example' 'https://a.example' --all-tables-with-prefix --skip-columns=guid")"
+assert_has   "a warning too" "adresi hâlâ http:// olabilir" "$(_wh_tr "WordPress could not be asked for its address (wp-cli failed, see /var/log/x.log): it may still say http://")"
+WPCLI_BIN="$_wh_bin"; eval "$_wh_fn"
+unset -f _wh_site _wh_run _wh_opts _wh_info _wh_calls _wh_count _wh_line _wh_tr
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 if (( FAIL > 0 )); then exit 1; fi
 exit 0

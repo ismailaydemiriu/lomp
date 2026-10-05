@@ -424,6 +424,9 @@ lib_ssl_renew_main() {
   lib_domain_state_save
   lib_domain_apply_config "enable SSL for ${domain}"
   lib_ols_smoke_test "$domain" "$(lib_domain_expected_codes lenient)" https || lib_warn "HTTPS smoke test failed for ${domain} (${OLS_TEST_OUTPUT})"
+  # a WordPress that was installed before its certificate still calls itself http://. In a
+  # subshell: nothing in it may make a certificate that is in place look like a failure
+  ( lib_domain_wp_https ) || lib_warn "The WordPress step ended early; the certificate of ${domain} is in place"
   lib_ok "SSL active for ${domain}: $(lib_ssl_status_line "$domain")"
 }
 

@@ -1066,6 +1066,88 @@ define('FS_METHOD', 'direct');" || lib_die "wp config create failed" "database c
   lib_domain_state_save
 }
 
+# The WordPress of the site in D_*, once the site has a certificate: "home" and "siteurl" from
+# http:// to https://. A WordPress installed before its certificate (add --no-ssl, or DNS that
+# did not point here yet) kept http:// as its address. Its pages were right over HTTPS, but
+# wp-cli, WP-Cron, the mails WordPress sends and its REST index went on saying http://, and so
+# did "credentials".
+#
+# Only a value that is the plain http:// address of this site is changed - its name, or www.
+# before it where the site has www - and only its scheme. An address somebody set (another
+# host, a port, a directory) is named and left alone. What the posts link to is not rewritten:
+# the old links arrive through the redirect, and WordPress (5.7 and later) hands out its own
+# http:// address in content as https:// once "home" has changed this way. How many there are
+# is said, with the command. Never fatal: the certificate is there whatever happens here.
+lib_domain_wp_https() {   # [keep-cache: the caller empties the page cache itself]
+  local docroot="${D_HOME}/public_html" info="" k="" v="" cmp="" new="" now="" h="" n="" own=0 changed=0
+  local -a hosts=("$D_DOMAIN")
+  (( D_SSL )) || return 0
+  (( OPT_DRY_RUN )) && return 0
+  if (( D_WWW )); then hosts+=("www.${D_DOMAIN}"); fi
+  # lomp's own record of the address, which "credentials" prints: right over HTTPS whatever
+  # WordPress turns out to say
+  info="$(lib_domain_state_dir "$D_DOMAIN")/wp.info"
+  if [[ -s "$info" ]]; then
+    for h in "${hosts[@]}"; do
+      grep -qx "WP_URL=http://${h//./\\.}" "$info" || continue
+      if sed -i "s#^WP_URL=http://${h//./\\.}\$#WP_URL=https://${h}#" "$info"; then
+        lib_info "WordPress: the admin address lomp keeps is now https://${h}/wp-admin/"
+      fi
+    done
+  fi
+  lib_domain_as_user test -f "${docroot}/wp-config.php" 2>/dev/null || return 0
+  if ! ( lib_domain_wpcli_ensure ) >/dev/null 2>&1 || [[ ! -x "$WPCLI_BIN" ]]; then
+    lib_warn "wp-cli could not be installed, so WordPress was not asked whether its address still says http://"
+    lib_note "The certificate is in place. To have it looked at again: setup.sh renew-ssl ${D_DOMAIN}"
+    return 0
+  fi
+  for k in home siteurl; do
+    if ! v="$(_wp option get "$k" --skip-plugins --skip-themes 2>>"$LOG_FILE")"; then
+      lib_warn "WordPress could not be asked for its address (wp-cli failed, see ${LOG_FILE}): it may still say http://"
+      lib_note "The certificate is in place. To have it looked at again: setup.sh renew-ssl ${D_DOMAIN}"
+      return 0
+    fi
+    v="${v##*$'\n'}"; cmp="${v,,}"; cmp="${cmp%/}"
+    [[ "$cmp" == http://* ]] || continue
+    own=0
+    for h in "${hosts[@]}"; do
+      if [[ "$cmp" == "http://${h}" ]]; then own=1; fi
+    done
+    if (( ! own )); then
+      lib_info "WordPress: its ${k} is ${v}, which is not the plain address of this site; left as it is"
+      continue
+    fi
+    new="https://${v:7}"
+    if ! lib_run _wp option update "$k" "$new" --skip-plugins --skip-themes; then
+      lib_warn "WordPress: its ${k} could not be set to ${new} (see ${LOG_FILE})"
+      lib_note "By hand: runuser -u ${D_USER} -- wp --path=${docroot} option update ${k} '${new}'"
+      continue
+    fi
+    # asked again: an address that is set outside the database is not reached by writing into it
+    now="$(_wp option get "$k" --skip-plugins --skip-themes 2>>"$LOG_FILE")" || now=""
+    now="${now##*$'\n'}"
+    if [[ "$now" == "$new" ]]; then
+      lib_ok "WordPress: its ${k} is now ${new} (was ${v})"
+      changed=1
+    else
+      lib_warn "WordPress still gives ${v} as its ${k}, although its database now says ${new}"
+      lib_note "The address is then set outside the database: look for WP_HOME and WP_SITEURL in ${docroot}/wp-config.php"
+    fi
+  done
+  (( changed )) || return 0
+  lib_run _wp cache flush --skip-plugins --skip-themes || true
+  # a page kept from before - the REST index is one - still says http://
+  if [[ "${1:-}" != "keep-cache" ]]; then _domain_rename_cache_clear; fi
+  for h in "${hosts[@]}"; do
+    n="$(_wp search-replace "http://${h}" "https://${h}" --all-tables-with-prefix --skip-columns=guid --dry-run --format=count --skip-plugins --skip-themes 2>>"$LOG_FILE")" || continue
+    n="${n##*$'\n'}"
+    [[ "$n" =~ ^[0-9]+$ ]] && (( n > 0 )) || continue
+    lib_info "WordPress: ${n} place(s) in its database still say http://${h}. They work - WordPress and the redirect turn them into https:// - and were left as they are"
+    lib_note "To rewrite them for good: runuser -u ${D_USER} -- wp --path=${docroot} search-replace 'http://${h}' 'https://${h}' --all-tables-with-prefix --skip-columns=guid"
+  done
+  return 0
+}
+
 # WordPress's scheduled events, run every five minutes as the site in D_*. The line names the
 # site's user and its document root, so "rename" writes it again.
 lib_domain_wpcron_set() {
