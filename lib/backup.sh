@@ -318,6 +318,7 @@ lib_backup_main() {
     return 0
   fi
   [[ -n "$domain" ]] || lib_die "Usage: setup.sh backup <domain>|--all [options]" "" "setup.sh backup example.com"
+  lib_domain_valid "$domain" || lib_die "Invalid domain name '${domain}'" "" "setup.sh list"
   if ! lib_domain_registered "$domain" && lib_mail_installed && lib_mail_domain_standalone "$domain"; then
     lib_backup_mail_domain "$domain" "${passthru[@]}" || lib_die "Backup failed for ${domain}" "$BK_ERROR" "check disk space and the log"
     return 0

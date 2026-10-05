@@ -6640,7 +6640,7 @@ if (( _da_ok )); then
   _da_fresh
   assert_eq   "remove refuses the path of a mail domain's record"             1 "$(run_isolated _da_do lib_domain_remove_main ../mail/domains/own.example)"
   assert_true "and the record is still there"                                 test -s "$MAIL_DOMAINS_DIR/own.example/domain.json"
-  assert_has  "for remove it is simply no site"                               "is not registered" "$(_da_said)"
+  assert_has  "and remove says it is the name it will not take"               "Invalid domain name '../mail/domains/own.example'" "$(_da_said)"
   assert_eq   "webmail off does not reach into another state file"            1 "$(run_isolated _da_do lib_mail_main webmail off ../domains/site.example)"
   assert_eq   "whose flag is as it was"                                       "true" "$(jq -r '.mail.webmail' "$(lib_domain_json site.example)")"
   assert_eq   "mail cert asks for no certificate under such a name"           1 "$(run_isolated _da_do lib_mail_main cert ../domains/site.example)"
@@ -6684,13 +6684,21 @@ if (( _da_ok )); then
     assert_has "as no name at all: mail ${_c}" "Invalid " "$(_da_said)"
   done
   assert_eq   "and after all of them nothing on the server has changed" "$_da_before" "$(_da_snap)"
-  # the site commands that only ever asked "is it registered?", and the one that asks nothing
+  # The site commands only ever asked "is it registered?", and that question now answers no to
+  # such a name by itself. But "Site example.com/ is not registered" reads as if the site had
+  # gone missing, so each of them says first that the name is none. The words are what is
+  # checked here: with a command's own check gone, the lookup behind it still ends it with 1.
   for _c in "lib_backup_main ../mail/domains/own.example" "lib_domain_credentials_main ../mail/domains/own.example" \
-            "lib_domain_logs_main ../mail/domains/own.example"; do
+            "lib_domain_logs_main ../mail/domains/own.example" "lib_proxy_add ../mail/domains/own.example /api/ 127.0.0.1:3001" \
+            "lib_proxy_remove ../mail/domains/own.example /api/" "lib_proxy_list ../mail/domains/own.example" \
+            "lib_app_main status ../mail/domains/own.example" "lib_harden_main ../mail/domains/own.example"; do
     read -r -a _ca <<<"$_c"
     assert_eq  "refused: ${_c}" 1 "$(run_isolated _da_do "${_ca[@]}")"
-    assert_has "because it is no site: ${_ca[0]}" "is not registered" "$(_da_said)"
+    assert_has "as no name at all: ${_ca[0]}" "Invalid domain name '../mail/domains/own.example'" "$(_da_said)"
   done
+  # what the shell's completion makes of a site typed in /home
+  assert_eq   "a site's name with a slash after it is no name either"   1 "$(run_isolated _da_do lib_domain_remove_main site.example/)"
+  assert_has  "and is not reported as a site that has gone missing"     "Invalid domain name 'site.example/'" "$(_da_said)"
   assert_eq   "restore takes no such name either"                       1 "$(run_isolated _da_do lib_restore_main ../victim --file /nonexistent)"
   assert_has  "and says it is the name, not the archive"                "Invalid domain name '../victim'" "$(_da_said)"
   assert_eq   "still nothing has changed"                               "$_da_before" "$(_da_snap)"

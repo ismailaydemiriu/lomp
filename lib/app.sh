@@ -1040,6 +1040,7 @@ _app_load_site() {   # domain [optional]  (dies unless the site exists and, by d
   if [[ -z "$domain" ]]; then lib_app_usage >&2; lib_die "Domain missing" "" "setup.sh app list"; fi
   domain="${domain,,}"
   lib_require_tools
+  lib_domain_valid "$domain" || lib_die "Invalid domain name '${domain}'" "" "setup.sh list"
   lib_domain_registered "$domain" || lib_die "Site ${domain} is not registered" "" "setup.sh list"
   lib_domain_state_load "$domain"
   if lib_app_state_load "$domain"; then return 0; fi

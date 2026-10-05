@@ -314,6 +314,7 @@ lib_harden_main() {
   fi
   ((${#targets[@]})) || { lib_harden_usage; return 0; }
   for d in "${targets[@]}"; do
+    lib_domain_valid "$d" || lib_die "Invalid domain name '${d}'" "" "lomp list"
     lib_domain_registered "$d" || lib_die "Site ${d} is not registered" "" "lomp list"
   done
 
