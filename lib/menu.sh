@@ -333,9 +333,15 @@ _menu_header() {
 }
 
 # Lines of explanation above a question or under a heading, for whoever has not been here in
-# a while.
+# a while. They come in Turkish and in English: the Turkish lines first, then the same in
+# English, as one call each.
 _menu_hint() {   # line...
   printf '%s' "$C_DIM"; printf '  %s\n' "$@"; printf '%s' "$C_RST"
+}
+
+# One choice of a numbered list, with its Turkish reading on the line below.
+_menu_kind() {   # number, English, Turkish
+  printf '  %s) %s\n     %s%s%s\n' "$1" "$2" "$C_DIM" "$3" "$C_RST"
 }
 
 _menu_group() { printf ' %s%s%s\n' "$C_BLD" "$1" "$C_RST"; }
@@ -465,26 +471,35 @@ _menu_add_site() {
   args=("$domain")
 
   printf '\n%sWhat kind of site?%s\n' "$C_BLD" "$C_RST"
-  printf '  1) PHP site (default)\n  2) WordPress, installed and configured\n'
-  printf '  3) Static files only\n'
-  printf '  4) Node.js app that lomp keeps running (PM2: starts at boot, comes back after a crash)\n'
-  printf '  5) Reverse proxy: the domain goes to a port where an app you start yourself listens\n'
+  _menu_kind 1 "PHP site (default)" "PHP sitesi (varsayılan)"
+  _menu_kind 2 "WordPress, installed and configured" "WordPress, kurulmuş ve ayarlanmış"
+  _menu_kind 3 "Static files only" "Yalnızca statik dosyalar"
+  _menu_kind 4 "Node.js app that lomp keeps running (PM2: starts at boot, comes back after a crash)" \
+    "lomp'un çalışır tuttuğu Node.js uygulaması (PM2: açılışta başlar, çökünce geri gelir)"
+  _menu_kind 5 "Reverse proxy: the domain goes to a port where an app you start yourself listens" \
+    "Ters proxy: alan adı, sizin başlattığınız uygulamanın dinlediği porta gider"
   _menu_ask kind "Choice" "1"
   case "$kind" in
     2) args+=(--wordpress) ;;
     3) args+=(--static) ;;
-    4) _menu_hint "Visitors reach the app through this site; the app itself listens on a local port." \
+    4) _menu_hint "Ziyaretçiler uygulamaya bu site üzerinden ulaşır; uygulamanın kendisi yerel bir portu dinler." \
+         "Uygulama o portu PORT değişkeninden almalıdır (process.env.PORT), sabit bir sayıdan değil." \
+         "Sonrası: kodu /home/${domain,,}/app içine koyun, ardından menü 6 -> 3 (Deploy)."
+       _menu_hint "Visitors reach the app through this site; the app itself listens on a local port." \
          "It must take that port from the PORT variable (process.env.PORT), not a fixed number." \
          "Afterwards: put the code into /home/${domain,,}/app, then menu 6 -> 3 (Deploy)."
-       _menu_ask port "Port the app listens on (it gets it as PORT)" "$(lib_app_port_pick 2>/dev/null || true)"
+       _menu_ask port "Port the app listens on (it gets it as PORT) / Uygulamanın dinleyeceği port" "$(lib_app_port_pick 2>/dev/null || true)"
        _menu_ask start "Start command (runs without a shell)" "npm start"
        args+=(--node)
        if [[ -n "$port" ]]; then args+=(--port "$port"); fi
        if [[ -n "$start" && "$start" != "npm start" ]]; then args+=(--start "$start"); fi ;;
-    5) _menu_hint "Everything that asks for this domain is passed to the address below, on this server." \
+    5) _menu_hint "Bu alan adına gelen her istek, bu sunucudaki aşağıdaki adrese iletilir." \
+         "O uygulamayı lomp başlatmaz, siz başlatırsınız. Uygulama kapalıyken site 503 yanıtı verir." \
+         "Bir sitenin yalnızca tek bir yolu (example.com/api/) için: menü 6 -> 11 (Path proxies)."
+       _menu_hint "Everything that asks for this domain is passed to the address below, on this server." \
          "lomp does not start that app: you do. While it is down the site answers 503." \
          "Only one path of a site (example.com/api/) instead: menu 6 -> 11 (Path proxies)."
-       _menu_ask proxy "Where the app listens (host:port)" "127.0.0.1:3000"; args+=(--proxy "$proxy") ;;
+       _menu_ask proxy "Where the app listens / Uygulamanın dinlediği adres (host:port)" "127.0.0.1:3000"; args+=(--proxy "$proxy") ;;
     *) ;;
   esac
 
@@ -581,6 +596,10 @@ _menu_apps() {
   while true; do
     printf '\n %sNODE.JS APPS (PM2)%s   every site runs its own PM2 as its own user\n' "$C_BLD" "$C_RST"
     _menu_rule
+    _menu_hint "Nasıl çalışır: alan adı -> OpenLiteSpeed -> kendi yerel portundaki uygulama (3000, 3001...)." \
+      "PM2 uygulamayı ayakta tutar: açılışta başlatır, çökerse yeniden kaldırır." \
+      "Yeni uygulama: 2 (siteyi ekle), kodu /home/<alan-adı>/app içine kopyala, sonra 3 (deploy)." \
+      "Kendi başlattığınız bir uygulama ya da bir sitenin tek bir yolu için: 2 (tür 5) veya 11."
     _menu_hint "How it works: the domain -> OpenLiteSpeed -> the app on its own local port (3000, 3001...)." \
       "PM2 keeps the app running: it starts at boot and comes back after a crash." \
       "A new app: 2 (add the site), copy the code into /home/<domain>/app, then 3 (deploy)." \
@@ -753,6 +772,10 @@ _menu_proxies() {
   while true; do
     printf '\n %sPATH PROXIES%s   example.com/api/... -> an application, the rest of the site stays\n' "$C_BLD" "$C_RST"
     _menu_rule
+    _menu_hint "Var olan bir sitenin tek bir yolunu bu sunucudaki bir porta gönderir," \
+      "örn. /api/ -> 127.0.0.1:3001. Uygulama orada dinliyor olmalı; lomp onu başlatmaz." \
+      "Uygulamaya yolun tamamı gider: /api/users, /users olarak değil /api/users olarak gelir." \
+      "Bir alan adının tamamını bir porta göndermek için: ana menü 2 (Add a site), tür 5."
     _menu_hint "Sends one path of a site you already have to a port on this server," \
       "e.g. /api/ -> 127.0.0.1:3001. The app must be listening there; lomp does not start it." \
       "The app gets the full path: /api/users arrives as /api/users, not as /users." \
@@ -766,18 +789,18 @@ _menu_proxies() {
     case "$choice" in
       1) _menu_run proxy list ;;
       2) if domain="$(_menu_pick_domain)"; then
-           _menu_ask path "Path of the site that goes to the app" "/api/"
-           _menu_ask target "Where the app listens (host:port)" "127.0.0.1:$(lib_app_port_pick 2>/dev/null || printf '3001')"
+           _menu_ask path "Path of the site that goes to the app / Uygulamaya gidecek yol" "/api/"
+           _menu_ask target "Where the app listens / Uygulamanın dinlediği adres (host:port)" "127.0.0.1:$(lib_app_port_pick 2>/dev/null || printf '3001')"
            _menu_run proxy add "$domain" "$path" "$target"
          else _menu_pause; fi ;;
       3) if domain="$(_menu_pick_domain)"; then
            current="$(lib_proxy_state_lines "$domain")"
            if [[ -z "$current" ]]; then
-             printf '%s%s has no path proxies.%s\n' "$C_YEL" "$domain" "$C_RST"; _menu_pause; continue
+             printf '%s%s has no path proxies. / Bu sitede yol yönlendirmesi yok.%s\n' "$C_YEL" "$domain" "$C_RST"; _menu_pause; continue
            fi
-           printf '\n%sPath proxies of %s:%s\n' "$C_BLD" "$domain" "$C_RST"
+           printf '\n%sPath proxies of %s / Yol yönlendirmeleri:%s\n' "$C_BLD" "$domain" "$C_RST"
            while read -r path target; do printf '  %s -> %s\n' "$path" "$target"; done <<<"$current"
-           _menu_ask path "Path to remove (e.g. /api/)"
+           _menu_ask path "Path to remove / Kaldırılacak yol (e.g. /api/)"
            if [[ -n "$path" ]]; then _menu_run proxy remove "$domain" "$path"; else _menu_pause; fi
          else _menu_pause; fi ;;
       0|q|Q|"") return 0 ;;
