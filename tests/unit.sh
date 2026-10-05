@@ -5133,20 +5133,26 @@ assert_has "and says what it would do"  "hd4.example.com: process execution woul
 # In a shell that has only these functions, so the words are what is checked: whatever else the
 # command needs is missing there, and a missing function ends it with the same status. That is
 # how this passed for a while with lib_domain_valid left out - refused as "Invalid domain name".
-_out="$(bash -c "$(declare -f lib_harden_main lib_require_tools lib_require_installed lib_domain_valid lib_domain_registered lib_die 2>/dev/null); STATE_DIR='$STATE_DIR'; lib_harden_main nosuch.example.com" 2>&1 || true)"
+_out="$(bash -c "$(declare -f lib_harden_main lib_require_tools lib_require_installed lib_domain_valid lib_domain_arg_ok lib_domain_registered lib_die 2>/dev/null); STATE_DIR='$STATE_DIR'; lib_harden_main nosuch.example.com" 2>&1 || true)"
 assert_has "a site that is not registered is refused" "Site nosuch.example.com is not registered" "$_out"
-# A state directory whose name is no domain name ("restore" took any name until 1.0.87): typed,
-# it is refused like any such name; met by --all, it must not stop the hardening of the others.
-_hd_site old_name php
-# (in a subshell of its own: a refusal ends the shell it happens in)
-_out="$(OPT_QUIET=0; rc=0; ( lib_harden_main old_name ) >"$TMP/hd-out" 2>&1 || rc=$?; cat "$TMP/hd-out"; printf 'rc=%s' "$rc")"
-assert_has "a name that is no domain name is refused when it is typed" "Invalid domain name 'old_name'" "$_out"
-assert_has "with a failing status"                                    "rc=1" "$_out"
-_out="$(OPT_QUIET=0; OPT_DRY_RUN=1; rc=0; ( lib_harden_main --all ) >"$TMP/hd-out" 2>&1 || rc=$?; cat "$TMP/hd-out"; printf 'rc=%s' "$rc")"
+# Two state directories whose names are no domain names ("restore" took any name until 1.0.87).
+# One is a name a site can have, and that site is hardened by its name like any other. The
+# other is not even that: typed, it is refused; met by --all, it must not stop the hardening
+# of the sites beside it. (With the real lookup, which this section stands in for elsewhere,
+# and each run in a subshell of its own: a refusal ends the shell it happens in.)
+_hd_site old_name php; _hd_site old_name_ php
+_hd_real="$(grep -E '^lib_domain_registered\(\) ' "$ROOT/lib/common.sh")"
+_out="$(eval "$_hd_real"; OPT_QUIET=0; OPT_DRY_RUN=1; rc=0; ( lib_harden_main old_name ) >"$TMP/hd-out" 2>&1 || rc=$?; cat "$TMP/hd-out"; printf 'rc=%s' "$rc")"
+assert_has "a site under a name that is no domain name is hardened by that name" "old_name: process execution would be blocked" "$_out"
+assert_has "and that is no failure"                                              "rc=0" "$_out"
+_out="$(eval "$_hd_real"; OPT_QUIET=0; rc=0; ( lib_harden_main old_name_ ) >"$TMP/hd-out" 2>&1 || rc=$?; cat "$TMP/hd-out"; printf 'rc=%s' "$rc")"
+assert_has "a name no site can have is refused when it is typed" "Invalid domain name 'old_name_'" "$_out"
+assert_has "with a failing status"                               "rc=1" "$_out"
+_out="$(eval "$_hd_real"; OPT_QUIET=0; OPT_DRY_RUN=1; rc=0; ( lib_harden_main --all ) >"$TMP/hd-out" 2>&1 || rc=$?; cat "$TMP/hd-out"; printf 'rc=%s' "$rc")"
 assert_has   "harden --all is not stopped by a state directory under such a name" "rc=0" "$_out"
 assert_has   "the sites beside it are still gone through"                         "hd1.example.com: process execution would be blocked" "$_out"
 assert_lacks "and --all refuses no name of the registry's own"                    "Invalid domain name" "$_out"
-rm -rf "$STATE_DIR/domains/old_name"; rm -f "$TMP/hd-code"
+rm -rf "$STATE_DIR/domains/old_name" "$STATE_DIR/domains/old_name_"; rm -f "$TMP/hd-code"
 _st="$(lib_harden_status)"
 assert_has "status shows the firewall" "Site firewall: on" "$_st"
 assert_has "and each site's decision"  "allowed" "$(grep '^hd4.example.com' <<<"$_st")"
@@ -6722,6 +6728,86 @@ if (( _da_ok )); then
   assert_eq   "restore takes no such name either"                       1 "$(run_isolated _da_do lib_restore_main ../victim --file /nonexistent)"
   assert_has  "and says it is the name, not the archive"                "Invalid domain name '../victim'" "$(_da_said)"
   assert_eq   "still nothing has changed"                               "$_da_before" "$(_da_snap)"
+
+  # ---- a site whose name is no domain name -----------------------------------
+  # "restore" registered a site under whatever name it was given until 1.0.87, and such a site
+  # is still a site. What the check is for is a name that leads somewhere else, and one path
+  # component of letters, digits, dots, dashes and underscores leads nowhere. Asking for a
+  # domain name instead made that site one no command would back up, show or remove - and the
+  # nightly "backup --all" a failure for as long as it was there.
+  for _n in "a/b" "../x" "/" "." ".." ".hidden" "-rf" "a b" "a;b" 'a$b' "a'b" 'a"b' $'a\nb' "a*" "ends." "ends-" "ends_" ""; do
+    assert_false "no name for a site: [${_n}]" lib_domain_name_safe "$_n"
+  done
+  for _n in "example.com" "sub.example.co.uk" "xn--80ak6aa92e.com" "staging" "shop_old" "shop.old-2" "a"; do
+    assert_true "a name a site can have: [${_n}]" lib_domain_name_safe "$_n"
+  done
+  _da_fresh
+  mkdir -p "$STATE_DIR/domains/shop_old" "$SITES_ROOT/shop_old/public_html" "$MAIL_VMAIL_HOME/shop_old"
+  printf '{"domain":"shop_old","ident":"shop_old","user":"shop_old","group":"shop_old","mode":"static"}\n' >"$(lib_domain_json shop_old)"
+  printf 'a page\n' >"$SITES_ROOT/shop_old/public_html/index.html"
+  assert_false "a name with an underscore in it is no domain name"         lib_domain_valid shop_old
+  assert_true  "a site registered under one is a site all the same"        lib_domain_registered shop_old
+  assert_true  "and may be called by that name"                            lib_domain_arg_ok shop_old
+  assert_false "a name of that kind which no site has is not taken"        lib_domain_arg_ok shop_new
+  assert_false "nor a path, whatever lies at the end of it"                lib_domain_arg_ok ../mail/domains/own.example
+  assert_false "nor a site's own name with a slash after it"               lib_domain_arg_ok site.example/
+  assert_true  "a domain name is taken whether or not it is a site"        lib_domain_arg_ok nosuch.example
+  # where two domains must not go by one name it counts like any site: a mail domain with the
+  # same identifier - shop.old - finds this one in its way and is given a name of its own
+  assert_eq    "and it stands in the way of a mail domain of its identifier" "shop_old" "$(_mail_ident_owner "$(lib_domain_ident shop.old)" shop.old)"
+  # each command is stopped at the first thing it does with a site it has accepted
+  _da_do_site() {
+    eval "$_da_stubs"
+    eval 'lib_domain_state_load() { printf "took the site %s\n" "$1"; exit 7; }
+          lib_ols_is_installed() { return 0; }; lib_system_profile() { :; }; lib_ols_change_begin() { OLS_PENDING_RELOAD=0; }'
+    OPT_YES=1; "$@" >"$_da/said.txt" 2>&1 </dev/null
+  }
+  for _c in "lib_domain_remove_main shop_old" "lib_backup_main shop_old" "lib_domain_credentials_main shop_old" \
+            "lib_proxy_add shop_old /api/ 127.0.0.1:3001" "lib_proxy_remove shop_old /api/" \
+            "lib_app_main status shop_old" "lib_harden_main shop_old"; do
+    read -r -a _ca <<<"$_c"
+    assert_eq  "taken: ${_c}" 7 "$(run_isolated _da_do_site "${_ca[@]}")"
+    assert_has "as the site it is: ${_ca[0]}" "took the site shop_old" "$(_da_said)"
+  done
+  assert_eq    "logs follows its log"                                      0 "$(run_isolated _da_do_site lib_domain_logs_main shop_old)"
+  assert_has   "by its name"                                               "/shop_old/" "$(_da_said)"
+  assert_eq    "proxy list takes it"                                       0 "$(run_isolated _da_do_site lib_proxy_list shop_old)"
+  assert_lacks "without a word about its name"                             "Invalid domain name" "$(_da_said)"
+  assert_eq    "restore takes it as far as the archive"                    1 "$(run_isolated _da_do_site lib_restore_main shop_old --file /nonexistent)"
+  assert_has   "which is what is missing here"                             "Archive not found" "$(_da_said)"
+  assert_eq    "but makes no new site under a name of that kind"           1 "$(run_isolated _da_do_site lib_restore_main shop_new --file /nonexistent)"
+  assert_has   "that still takes a domain name"                            "Invalid domain name 'shop_new'" "$(_da_said)"
+  # all of one command, the one the nightly run starts for every site it lists
+  assert_eq    "such a site is backed up by its name"                      0 "$(run_isolated _da_do lib_backup_main shop_old)"
+  assert_true  "into an archive of its own"                                bash -c "compgen -G '${BACKUP_ROOT}/shop_old/shop_old-[0-9]*.tar.gz' >/dev/null"
+  # ...and put back from that archive under the name it has. (This section's stand-ins refuse
+  # every change of user; for this one run the files are unpacked by whoever runs the suite,
+  # as everywhere else.)
+  _da_do_restore() {
+    eval "$_da_stubs"
+    eval 'runuser() { [[ "${1:-}" == "-u" && -n "${2:-}" && "${3:-}" == "--" ]] || return 1; shift 3; "$@"; }'
+    OPT_YES=1; "$@" >"$_da/said.txt" 2>&1 </dev/null
+  }
+  _da_arch="$(compgen -G "${BACKUP_ROOT}/shop_old/shop_old-[0-9]*.tar.gz" | head -n 1 || true)"
+  printf 'changed since\n' >"$SITES_ROOT/shop_old/public_html/index.html"
+  assert_eq    "and restored from it, into the site that is there"         0 "$(run_isolated _da_do_restore lib_restore_main shop_old --file "$_da_arch")"
+  assert_eq    "with what the archive held"                                "a page" "$(cat "$SITES_ROOT/shop_old/public_html/index.html")"
+  # the mail restore takes no such name, and a site under one never had mail: it is not asked
+  assert_lacks "and no complaint about mail it never had"                  "was not restored" "$(_da_said)"
+  unset -f _da_do_restore
+  # What makes something new, and everything about mail, still wants a domain name: the mail
+  # store is where a name was once taken for a path, and nothing there is looser than it was.
+  for _c in "lib_domain_add_main shop_old --no-ssl" "lib_ssl_renew_main shop_old" "lib_mail_main enable shop_old" \
+            "lib_mail_main disable shop_old --delete-data" "lib_mail_main domain add shop_old" "lib_mail_main backup shop_old"; do
+    read -r -a _ca <<<"$_c"
+    assert_eq  "still refused: ${_c}" 1 "$(run_isolated _da_do "${_ca[@]}")"
+    assert_has "as no domain name: ${_c}" "Invalid domain" "$(_da_said)"
+  done
+  assert_false "a directory of that name in the mail store is nobody's mail" lib_mail_domain_has_traces shop_old
+  assert_eq    "and the purge will not have it"                            1 "$(run_isolated _da_do lib_mail_domain_purge shop_old)"
+  assert_true  "it is still there"                                         test -d "$MAIL_VMAIL_HOME/shop_old"
+  rm -rf "$SITES_ROOT/shop_old"
+  unset -f _da_do_site
 
   # ---- the last check, for a caller that forgot the first ---------------------
   _da_fresh

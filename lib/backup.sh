@@ -318,7 +318,7 @@ lib_backup_main() {
     return 0
   fi
   [[ -n "$domain" ]] || lib_die "Usage: setup.sh backup <domain>|--all [options]" "" "setup.sh backup example.com"
-  lib_domain_valid "$domain" || lib_die "Invalid domain name '${domain}'" "" "setup.sh list"
+  lib_domain_arg_ok "$domain" || lib_die "Invalid domain name '${domain}'" "" "setup.sh list"
   if ! lib_domain_registered "$domain" && lib_mail_installed && lib_mail_domain_standalone "$domain"; then
     lib_backup_mail_domain "$domain" "${passthru[@]}" || lib_die "Backup failed for ${domain}" "$BK_ERROR" "check disk space and the log"
     return 0
@@ -380,9 +380,10 @@ lib_restore_main() {
   domain="${domain,,}"
   lib_require_tools
   lib_require_installed
-  # A restore can create the site it restores, so the name is not checked against the sites
-  # that exist - and it becomes a state directory, a Linux user and a home.
-  lib_domain_valid "$domain" || lib_die "Invalid domain name '${domain}'" "not a valid FQDN" \
+  # A restore can create the site it restores, and the name then becomes a state directory, a
+  # Linux user and a home: a site that is not here yet needs a domain name. One that is here
+  # is restored under the name it has, whatever that is.
+  lib_domain_arg_ok "$domain" || lib_die "Invalid domain name '${domain}'" "not a valid FQDN" \
     "restore example.com --file /path/to/archive.tar.gz[.enc]"
   [[ -n "$file" && -f "$file" ]] || lib_die "Archive not found: '${file}'" "" "restore <domain> --file /path/to/archive.tar.gz[.enc]"
   lib_backup_verify "$file" || lib_die "Archive verification failed" "$BK_ERROR" "use an intact archive"
@@ -535,7 +536,9 @@ lib_restore_main() {
   fi
   lib_rollback_clear
   # the mail, from its own archive: the newest one next to the site's unless another is named
-  if (( ! no_mail )) && lib_mail_installed; then
+  # (a site under a name that is no domain name never had any, and the mail restore would
+  # only say that it takes no such name)
+  if (( ! no_mail )) && lib_mail_installed && lib_domain_valid "$domain"; then
     lib_mail_restore_domain "$domain" "$mail_file" || lib_warn "the mail of ${domain} was not restored: ${MAIL_LAST_ERROR}"
   fi
   # a Node.js site: its dependencies are not in the archive; reinstall them and start it again.

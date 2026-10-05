@@ -94,7 +94,7 @@ lib_proxy_add() {
   fi
   lib_require_tools
   domain="${domain,,}"
-  lib_domain_valid "$domain" || lib_die "Invalid domain name '${domain}'" "" "setup.sh list"
+  lib_domain_arg_ok "$domain" || lib_die "Invalid domain name '${domain}'" "" "setup.sh list"
   lib_domain_registered "$domain" || lib_die "Site ${domain} is not registered" "" "setup.sh list"
   path="$(lib_proxy_path_normalize "$raw")" || lib_die "Invalid path '${raw}'" \
     "use a URL prefix of letters, digits and - _ . ~ (not / itself, no segment starting with a dot)" \
@@ -128,7 +128,7 @@ lib_proxy_remove() {
   fi
   lib_require_tools
   domain="${domain,,}"
-  lib_domain_valid "$domain" || lib_die "Invalid domain name '${domain}'" "" "setup.sh list"
+  lib_domain_arg_ok "$domain" || lib_die "Invalid domain name '${domain}'" "" "setup.sh list"
   lib_domain_registered "$domain" || lib_die "Site ${domain} is not registered" "" "setup.sh list"
   path="$(lib_proxy_path_normalize "$raw")" || lib_die "Invalid path '${raw}'" "" "setup.sh proxy list ${domain}"
   lib_domain_state_load "$domain"
@@ -157,7 +157,7 @@ lib_proxy_list() {
   if (( OPT_JSON )); then json=1; fi
   lib_require_tools
   if [[ -n "$want" ]]; then
-    lib_domain_valid "$want" || lib_die "Invalid domain name '${want}'" "" "setup.sh list"
+    lib_domain_arg_ok "$want" || lib_die "Invalid domain name '${want}'" "" "setup.sh list"
     lib_domain_registered "$want" || lib_die "Site ${want} is not registered" "" "setup.sh list"
   fi
   if (( json )); then

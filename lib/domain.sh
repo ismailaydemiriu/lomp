@@ -1300,7 +1300,7 @@ lib_domain_credentials_main() {
     return 0
   fi
   target="${target,,}"
-  lib_domain_valid "$target" || lib_die "Invalid domain name '${target}'" "" "setup.sh list"
+  lib_domain_arg_ok "$target" || lib_die "Invalid domain name '${target}'" "" "setup.sh list"
   if ! lib_domain_registered "$target" && lib_mail_installed && lib_mail_domain_standalone "$target"; then
     lib_domain_credentials_mail_domain "$target"
     return 0
@@ -1449,7 +1449,7 @@ lib_domain_logs_main() {
     esac
   done
   domain="${domain,,}"
-  lib_domain_valid "$domain" || lib_die "Invalid domain name '${domain}'" "" "setup.sh list"
+  lib_domain_arg_ok "$domain" || lib_die "Invalid domain name '${domain}'" "" "setup.sh list"
   lib_domain_registered "$domain" || lib_die "Site ${domain} is not registered" "" "setup.sh list"
   # the directory OpenLiteSpeed writes, not the link in the home: that one is the site user's
   local dir=""; dir="$(lib_domain_log_dir_in_use "$domain")"
@@ -1779,7 +1779,7 @@ lib_domain_remove_main() {
   # Said for what it is. "example.com/" - what the shell's completion makes of a site typed in
   # /home - is no domain name, and "Site example.com/ is not registered" reads as if the site
   # itself had gone missing.
-  lib_domain_valid "$domain" || lib_die "Invalid domain name '${domain}'" "" "setup.sh list"
+  lib_domain_arg_ok "$domain" || lib_die "Invalid domain name '${domain}'" "" "setup.sh list"
   lib_domain_registered "$domain" || lib_die "Site ${domain} is not registered" "" "setup.sh list"
   lib_domain_state_load "$domain"
   # A record whose Linux user is another site's. A restore that was refused because the site's

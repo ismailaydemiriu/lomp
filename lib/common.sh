@@ -850,13 +850,28 @@ lib_domain_ident() {
 
 lib_domain_state_dir() { printf '%s/domains/%s' "$STATE_DIR" "$1"; }
 lib_domain_json()      { printf '%s/domains/%s/domain.json' "$STATE_DIR" "$1"; }
-# Registered means a domain name that has a state file of its own, and the first half is not a
-# formality. Every command that takes a domain asks this before it touches anything, and then
-# builds paths from the name - some of which it removes. A name with a slash in it can reach a
-# domain.json that is not a site's: "../mail/domains/example.com" is a mail domain's record,
-# "../archive/domains/example.com.20260101-000000" a site that was removed long ago, and
-# "remove" took the answer "yes, registered" as leave to delete what it found there.
-lib_domain_registered() { lib_domain_valid "$1" && [[ -s "$(lib_domain_json "$1")" ]]; }
+# A name that can be put after a directory and stay inside it, and into a line of configuration
+# without ending it: one path component of letters, digits, dots, dashes and underscores that
+# begins and ends with a letter or a digit. Every domain name is one. So is "staging" or
+# "shop_old" - no domain name, but "restore" registered a site under any name it was given
+# until 1.0.87, and a site that was made that way is still a site.
+lib_domain_name_safe() { [[ "$1" =~ ^[A-Za-z0-9]([A-Za-z0-9._-]{0,251}[A-Za-z0-9])?$ ]]; }
+
+# Registered means a state file of its own under a name that leads nowhere else, and the second
+# half is not a formality. Every command that takes a site asks this before it touches
+# anything, and then builds paths from the name - some of which it removes. A name with a slash
+# in it can reach a domain.json that is not a site's: "../mail/domains/example.com" is a mail
+# domain's record, "../archive/domains/example.com.20260101-000000" a site that was removed
+# long ago, and "remove" took the answer "yes, registered" as leave to delete what it found
+# there. Not "a domain name", though, which is what this asked for a while: that turned every
+# site under an older, looser name into one no command would back up, show or remove.
+lib_domain_registered() { lib_domain_name_safe "$1" && [[ -s "$(lib_domain_json "$1")" ]]; }
+
+# What a command about a site that exists may be called with: a domain name, or the name a site
+# is registered under, whatever that is. What makes something new - add, a restore of a site
+# that is not here, everything about mail and certificates - asks for a domain name and
+# nothing else (lib_domain_valid).
+lib_domain_arg_ok() { lib_domain_valid "$1" || lib_domain_registered "$1"; }
 lib_domain_home()      { printf '%s/%s' "$SITES_ROOT" "$1"; }
 lib_domain_log_dir()   { printf '%s/%s' "$SITES_LOG_ROOT" "$1"; }
 

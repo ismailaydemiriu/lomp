@@ -319,7 +319,7 @@ lib_harden_main() {
   # single site was hardened.
   if (( ! all )); then
     for d in "${targets[@]}"; do
-      lib_domain_valid "$d" || lib_die "Invalid domain name '${d}'" "" "lomp list"
+      lib_domain_arg_ok "$d" || lib_die "Invalid domain name '${d}'" "" "lomp list"
       lib_domain_registered "$d" || lib_die "Site ${d} is not registered" "" "lomp list"
     done
   fi
