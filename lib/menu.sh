@@ -931,7 +931,8 @@ _menu_rename_site() {
   local -a args=()
   domain="$(_menu_pick_domain)" || { _menu_pause; return 0; }
   printf '\n'; _menu_note "The site moves to the new name as it is: files, settings, database. Nothing is copied." \
-    "Point the DNS of the new name to this server first, so that it gets its certificate right away."
+    "Point the DNS of the new name to this server first, so that it gets its certificate right away." \
+    "Its mailboxes move to the new domain too, and the old addresses keep working. A Node.js application is built again."
   _menu_ask new "$(_menu_tf 'New domain for %s (without www, e.g. example.net)' "$domain")"
   [[ -n "$new" ]] || return 0
   if ! lib_domain_valid "${new,,}"; then
@@ -1612,6 +1613,7 @@ MENU_TR['Keep the database? (y/n)']='Veritabanı kalsın mı? (y/n)'
 MENU_TR['Keep the files? (y/n)']='Dosyalar kalsın mı? (y/n)'
 MENU_TR['The site moves to the new name as it is: files, settings, database. Nothing is copied.']='Site olduğu gibi yeni ada taşınır: dosyalar, ayarlar, veritabanı. Hiçbir şey kopyalanmaz.'
 MENU_TR['Point the DNS of the new name to this server first, so that it gets its certificate right away.']='Sertifikasını hemen alabilmesi için önce yeni adın DNS'\''ini bu sunucuya yönlendirin.'
+MENU_TR['Its mailboxes move to the new domain too, and the old addresses keep working. A Node.js application is built again.']='Posta kutuları da yeni alan adına taşınır, eski adresler çalışmaya devam eder. Node.js uygulaması yeniden derlenir.'
 MENU_TR['New domain for %s (without www, e.g. example.net)']='%s için yeni alan adı (www olmadan, örn. example.net)'
 MENU_TR['Keep %s as a redirect (301) to %s? (y/n)']='%s, %s adresine yönlendirme (301) olarak kalsın mı? (y/n)'
 MENU_TR['List the redirects']='Yönlendirmeleri listele'

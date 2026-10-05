@@ -7185,6 +7185,11 @@ _rn_stubs='
   _rn_rename() { _rn_flow; lib_domain_rename_main "$@"; }
   _rn_rename_asked() { OPT_YES=0; _rn_flow; lib_domain_rename_main "$@"; }
   _rn_rename_dry() { OPT_DRY_RUN=1; _rn_flow; lib_domain_rename_main "$@"; }
+  # the same in Turkish: the fresh modules put the lib_tr that changes nothing back, so the
+  # language module is loaded after them
+  _rn_tr() { source "$ROOT/lib/lang.sh"; LIB_LANG="tr"; lib_lang_build; }
+  _rn_rename_tr() { _rn_tr; _rn_flow; lib_domain_rename_main "$@"; }
+  _rn_redirect_tr() { _rn_tr; _rn_conf; lib_redirect_main "$@"; }
   _rn_blocker() { lib_domain_state_load "$1"; _domain_rename_blocker "$1" "$2"; }
   _rn_redirect() { _rn_conf; lib_redirect_main "$@"; }
   _rn_vhconf() { lib_redirect_load "$1"; lib_redirect_render_vhconf; }
@@ -8146,6 +8151,60 @@ _rn_odd_app "{\"HOME_DIR\":\"$_rn/home/staging\"}"
 _rn_case _rn_rename staging beta.example
 assert_has   "the home itself, with nothing after it, counts too" "A variable of the application still names the old path $_rn/home/staging" "$(_rn_out)"
 unset -f _rn_odd_site _rn_odd_wp _rn_said _rn_odd_app _rn_rename_mail
+
+# ---- in Turkish -------------------------------------------------------------------------
+# What rename prints goes through lib/lang.sh like every other message: on a server set to
+# Turkish the explanation before "Continue?", the steps and the summary are Turkish.
+_rn_mail_boxes
+_rn_case _rn_rename_tr alpha.example beta.example
+_o="$(_rn_out)"
+assert_has   "the Turkish rename succeeds like the English one" "rc=0" "$_o"
+assert_has   "the headline" "alpha.example sitesi beta.example olarak yeniden adlandırılacak" "$_o"
+assert_has   "what happens to the files and the user" "dosyalar $_rn/home/alpha.example, $_rn/home/beta.example olur (taşınır, kopyalanmaz); Linux kullanıcısı alpha_example, beta_example olur" "$_o"
+assert_has   "to the database" "veritabanı alpha_db adını, kullanıcısını ve şifresini korur" "$_o"
+assert_has   "to the old name" "alpha.example  yönlendirme olarak kalır: her istek 301 ile beta.example adresine gider, mevcut sertifikasıyla" "$_o"
+assert_has   "to the mail" "posta    her posta kutusu postaları ve şifresiyle @beta.example alanına taşınır; @alpha.example alanındaki her adres onun takma adı olur" "$_o"
+assert_has   "the safety backup" "önce $_rn/backups/alpha.example/ altına bir güvenlik yedeği yazılır; site yaklaşık bir dakika kapalı kalır" "$_o"
+assert_has   "a step" "alpha.example için güvenlik yedeği" "$_o"
+assert_has   "another" "Site beta.example adına taşınıyor" "$_o"
+assert_has   "the step of the mailboxes" "Posta kutuları @beta.example alanına" "$_o"
+assert_has   "the closing line" "alpha.example, beta.example olarak yeniden adlandırıldı" "$_o"
+assert_has   "the summary's labels" "Eski ad" "$_o"
+assert_has   "where the mail is now" "Posta: artık @beta.example alanında - info@beta.example, sales@beta.example. Şifreler aynı; giriş için kullanıcı adı yeni adrestir." "$_o"
+assert_has   "the DNS the redirect needs" "Yönlendirmenin çalışmasını istediğiniz sürece alpha.example alan adının DNS kaydı buraya yönlenmeli." "$_o"
+_rn_left=""
+for _rn_en in ' becomes ' 'stays as a redirect' 'safety backup' 'Renamed ' 'Moving the site' 'The old name' 'Certificate for' 'Mailboxes to' \
+              'Keep the DNS' 'Mail: now' 'now sends every request' 'Taking ' 'virtual host' 'Old name' 'Backups' 'This will rename' 'every mailbox' 'For mail from outside'; do
+  if [[ "$_o" == *"$_rn_en"* ]]; then _rn_left+="[${_rn_en}] "; fi
+done
+assert_eq    "nothing of it is left in English" "" "$_rn_left"
+_rn_app_site
+_rn_case _rn_rename_tr alpha.example beta.example
+assert_has   "a Node.js site: what happens to the application" "Node.js  PM2 servisi yeni kullanıcıyla yeniden kurulur: bağımlılıklar yeniden yüklenir, uygulama derlenir ve başlatılır" "$(_rn_out)"
+assert_has   "and its step" "Node.js uygulaması" "$(_rn_out)"
+assert_has   "the variable that still names the old domain" "Uygulamanın bir değişkeni hâlâ alpha.example adını içeriyor: setup.sh app env beta.example list" "$(_rn_out)"
+_rn_fresh
+_rn_site gamma.example gamma_example
+_rn_case _rn_rename_tr alpha.example gamma.example
+assert_has   "a refusal is Turkish" "alpha.example, gamma.example olarak yeniden adlandırılamıyor" "$(_rn_out)"
+assert_has   "with its reason" "gamma.example zaten bu sunucunun bir sitesi" "$(_rn_out)"
+_rn_case _rn_rename_tr alpha.example beta.example --keep-mail
+: >"$_rn/mail-installed"
+_rn_mail_site
+_rn_case _rn_rename_tr alpha.example beta.example --keep-mail
+assert_has   "--keep-mail: the mail that stays" "posta    @alpha.example alanında kalır: her posta kutusu, takma ad ve anahtar olduğu gibi; alpha.example kendi başına bir posta alanı olur" "$(_rn_out)"
+_rn_fresh
+_rn_case _rn_redirect_tr add old.example alpha.example --www --no-ssl
+assert_has   "redirect add in Turkish" "old.example ve www.old.example artık https://alpha.example adresine gidiyor (yalnızca HTTP)" "$(_rn_out)"
+_rn_case _rn_redirect_tr del nosuch.example
+assert_has   "and a redirect that is not there" "nosuch.example adında bir yönlendirme yok" "$(_rn_out)"
+# an English run says what it always said: the scripts and the tests above read that
+_rn_fresh
+_rn_case _rn_rename alpha.example beta.example
+assert_has   "without a language the output is English as before" "Renamed alpha.example to beta.example" "$(_rn_out)"
+assert_has   "headline included" "This will rename the site alpha.example to beta.example" "$(_rn_out)"
+assert_true  "the menu's explanation of the rename has its Turkish" test -n "${MENU_TR['Its mailboxes move to the new domain too, and the old addresses keep working. A Node.js application is built again.']:-}"
+assert_has   "and is part of the entry" 'Its mailboxes move to the new domain too' "$(declare -f _menu_rename_site)"
 
 # ---- the helpers ------------------------------------------------------------------------
 _rn_fresh

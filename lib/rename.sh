@@ -787,7 +787,8 @@ lib_domain_rename_main() {
   fi
   (( D_SSL_WANTED )) || ssl=0
 
-  printf '\n%sThis will rename the site %s to %s%s\n' "$C_BLD" "$old" "$new" "$C_RST"
+  lib_tr "This will rename the site ${old} to ${new}"
+  printf '\n%s%s%s\n' "$C_BLD" "$LIB_TR" "$C_RST"
   lib_note "files    ${D_HOME} becomes $(lib_domain_home "$new") (moved, not copied); the Linux user ${D_USER} $( [[ "$(lib_domain_ident "$new")" == "$D_USER" ]] && printf 'keeps its name' || printf 'becomes %s' "$(lib_domain_ident "$new")")"
   lib_note "database ${D_DB_NAME:-none}$( [[ -n "$D_DB_NAME" ]] && printf ' keeps its name, its user and its password')"
   lib_note "HTTPS    $( (( ssl )) && printf 'a new certificate for %s' "$new" || printf 'no certificate is requested for %s now' "$new")"
@@ -952,7 +953,8 @@ lib_domain_rename_main() {
   lib_manifest_set '.updated_at' "$(lib_iso_now)"
   lib_log_write INFO "site ${old} renamed to ${new} (user ${oi} -> ${D_USER})"
 
-  printf '\n%s%sRenamed %s to %s%s\n' "$C_BLD" "$C_GRN" "$old" "$new" "$C_RST"
+  lib_tr "Renamed ${old} to ${new}"
+  printf '\n%s%s%s%s\n' "$C_BLD" "$C_GRN" "$LIB_TR" "$C_RST"
   lib_print_kv "Address"  "$(lib_redirect_target_url "$new")/"
   lib_print_kv "Files"    "${D_HOME}/public_html (user ${D_USER})"
   [[ -z "$D_DB_NAME" ]] || lib_print_kv "Database" "${D_DB_NAME} (unchanged; setup.sh credentials ${new})"
