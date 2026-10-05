@@ -350,6 +350,13 @@ mail domain of its own - `example.com` keeps every mailbox, alias, DKIM key and 
 exactly as they were (`lomp mail domain list`), as if it had been added with `mail domain add`.
 The site under its new name starts without mail; `lomp mail enable example.net` gives it some.
 
+A site that is registered under a name which is no domain name - `shop_old`, `staging`:
+`restore` made such sites until 1.0.87 - gets its domain name the same way, with
+`lomp rename shop_old shop.example.com`. Nothing could ever ask the server for such a name, so
+no redirect is left under it. A WordPress never said that name either: what is rewritten in its
+database is the name WordPress itself gives as its address - the one the site had where its
+archive was made - and nothing when that is the new name already.
+
 A redirect is also available on its own, for a name that never was a site here:
 
 ```bash

@@ -7724,6 +7724,263 @@ for _rn_fail in usermod-d-fails apply-fails smoke-fails php-fails; do
   assert_has   "${_rn_fail}: and the same rename then goes through" "rc=0" "$(_rn_out)"
 done
 
+# ---- rename: a site whose name is no domain name --------------------------------------
+# "restore" registered a site under whatever name it was given until 1.0.87: "shop_old",
+# "staging". Such a site is a site, and this is how it gets its domain name. Its record says
+# the user of the site its archive was made of, and its WordPress says that site's address.
+# The name it is registered under is nothing anybody could ask this server for: no redirect
+# is left under it, and it was never an address - as a pattern, "//staging" is also how
+# "//staging.example.com" begins.
+_rn_odd_site() {   # [name] -> a fresh tree, with a site in it as the old restore left one
+  local n="${1:-shop_old}"
+  _rn_fresh
+  _rn_site "$n" shop_example
+  jq '.ssl.enabled = false | del(.ssl.expires) | del(.ssl.cert_name)' "$_rn/state/domains/$n/domain.json" >"$_rn/t" && cp "$_rn/t" "$_rn/state/domains/$n/domain.json"
+  rm -rf "$_rn/ssl/$n" "$_rn/state/domains/$n/ssl.info" "$_rn/covers-$n"
+  cat >"$_rn/wp" <<'EOF'
+#!/bin/sh
+# wp-cli, standing in. It says what WordPress gives as its address, and gives the new name
+# once the bare address has been rewritten - unless that name is pinned outside the database.
+d="$(dirname "$0")"
+printf 'wp %s\n' "$*" >>"$d/calls"
+case "$*" in
+  *"option get siteurl"*) [ ! -e "$d/wp-deaf" ] || exit 1; cat "$d/wp-siteurl" 2>/dev/null ;;
+  *"option get home"*)    [ ! -e "$d/wp-deaf" ] || exit 1; cat "$d/wp-home" 2>/dev/null ;;
+  *"search-replace "*)    [ ! -e "$d/wp-sr-fails" ] || exit 1
+                          case "$3" in
+                            //www.*) ;;
+                            //*)     [ -e "$d/wp-pinned" ] || { printf 'https://%s\n' "${4#//}" >"$d/wp-siteurl"; cp "$d/wp-siteurl" "$d/wp-home"; } ;;
+                          esac ;;
+esac
+exit 0
+EOF
+  chmod +x "$_rn/wp"
+}
+_rn_odd_wp() {   # a WordPress in shop_old: what it gives as "siteurl", and as "home" (the same when left out)
+  printf '<?php // wp\n' >"$_rn/home/shop_old/public_html/wp-config.php"
+  printf '%s\n' "$1" >"$_rn/wp-siteurl"; printf '%s\n' "${2:-$1}" >"$_rn/wp-home"
+}
+_rn_said() { lib_domain_state_load "$1"; _domain_rename_wp_said; }
+
+# the arguments
+_rn_odd_site
+_rn_before="$(_rn_tree)"
+_rn_case _rn_rename shop_new beta.example;            assert_has "a name of that kind which no site has is not taken" "Invalid domain name 'shop_new'" "$(_rn_out)"
+_rn_case _rn_rename ../domains/shop_old beta.example; assert_has "nor a path that ends at the site" "Invalid domain name '../domains/shop_old'" "$(_rn_out)"
+_rn_case _rn_rename shop_old/ beta.example;           assert_has "nor its name with a slash after it" "Invalid domain name 'shop_old/'" "$(_rn_out)"
+_rn_case _rn_rename shop_old shop_new;                assert_has "what it becomes has to be a domain name" "Invalid domain name 'shop_new'" "$(_rn_out)"
+_rn_case _rn_rename alpha.example shop_old;           assert_has "and no site moves to a name of that kind, taken or not" "Invalid domain name 'shop_old'" "$(_rn_out)"
+_rn_case _rn_rename_dry shop_old beta.example
+_o="$(_rn_out)"
+assert_has   "a dry run says what would happen to the site" "becomes $_rn/home/beta.example" "$_o"
+assert_has   "that the user on its record is the one renamed" "the Linux user shop_example becomes beta_example" "$_o"
+assert_has   "and that nothing stays behind under a name that is none" "shop_old  is no domain name" "$_o"
+assert_lacks "no redirect is promised" "stays as a redirect" "$_o"
+assert_lacks "and no certificate is said to be deleted" "its certificate is deleted" "$_o"
+assert_has   "nor anything else done" "nothing was changed" "$_o"
+assert_eq    "after all of these the site is where it was" "$_rn_before" "$(_rn_tree)"
+assert_lacks "and nobody was renamed" "usermod" "$(_rn_calls)"
+
+# the move, to a name that is not the one its WordPress says
+_rn_odd_site
+_rn_odd_wp 'https://WWW.Shop.Example/wp' 'http://shop.example:8080/?p=1'
+printf "define('WP_ENVIRONMENT_TYPE', 'shop_old');\n" >>"$_rn/home/shop_old/public_html/wp-config.php"
+printf 'php_value error_log %s/home/shop_old/private/php.log\n' "$_rn" >"$_rn/home/shop_old/public_html/.htaccess"
+printf 'open_basedir = "%s/home/shop_old"\n' "$_rn" >"$_rn/home/shop_old/public_html/.user.ini"
+printf 'WP_URL=https://shop.example\nWP_PATH=%s/home/shop.example/public_html\n' "$_rn" >"$_rn/state/domains/shop_old/wp.info"
+printf '%s\n' "*/5 * * * * shop_example cd $_rn/home/shop_old/public_html && wp cron # server-setup:wpcron:shop_old" >>"$_rn/cron"
+_rn_case _rn_rename shop_old beta.example
+_o="$(_rn_out)"; _c="$(_rn_calls)"
+assert_has   "a site under a name that is no domain name is renamed" "rc=0" "$_o"
+assert_has   "and it says so" "Renamed shop_old to beta.example" "$_o"
+assert_true  "its home has the new name" test -s "$_rn/home/beta.example/public_html/index.php"
+assert_false "and not the old one" test -e "$_rn/home/shop_old"
+assert_true  "its logs moved" test -s "$_rn/sitelogs/beta.example/access.log"
+assert_eq    "the state says who the site is now, and what it was called" "beta.example beta_example beta_example beta_example $_rn/home/beta.example shop_old" \
+  "$(_rn_json beta.example '"\(.domain) \(.ident) \(.user) \(.group) \(.home) \(.renamed_from)"')"
+assert_has   "the user that is renamed is the one on its record" "usermod -l beta_example shop_example" "$_c"
+assert_has   "the group too" "groupmod -n beta_example shop_example" "$_c"
+assert_lacks "nobody called after the name it had is looked for" "shop_old" "$(grep -E '^(usermod|groupmod) ' <<<"$_c" || true)"
+assert_has   "a safety backup comes first, by the name it has" "backup shop_old --tag pre-rename --keep 0 --no-mail" "$(head -n 1 "$_rn/calls")"
+assert_true  "the archives follow the site" test -e "$_rn/backups/beta.example/shop_old-pre-rename-20260101-000000.tar.gz"
+assert_has   "the scheduled events run as the new user in the new home" "beta_example cd $_rn/home/beta.example/public_html" "$(grep 'wpcron:beta.example' "$_rn/cron" || true)"
+assert_lacks "and no line is left for the old name" "shop_old" "$(cat "$_rn/cron")"
+# the old name
+assert_false "nothing is left under the old name: no record of any kind" test -e "$_rn/state/domains/shop_old"
+assert_lacks "no redirect is set up for a name nothing can ask for" "redirect-apply" "$_c"
+assert_lacks "and no certificate is looked for under it: one of that name would be somebody else's" "ssl-delete" "$_c"
+assert_has   "that is said" "nothing is left under shop_old" "$_o"
+assert_has   "and again at the end" "shop_old (no domain name: nothing is left under it)" "$_o"
+assert_lacks "nobody is told to keep its DNS" "Keep the DNS of shop_old" "$_o"
+_rn_case lib_redirects_list
+assert_eq    "the redirects on record are as many as before: none" "rc=0" "$(_rn_out)"
+# what its WordPress said
+assert_has   "WordPress is asked which address it has" "option get siteurl" "$_c"
+assert_has   "the addresses of that name are rewritten, www first" "search-replace //www.shop.example //www.beta.example --all-tables-with-prefix --skip-columns=guid" "$_c"
+assert_has   "the bare name" "search-replace //shop.example //beta.example " "$_c"
+assert_has   "the form JSON keeps them in" 'search-replace \/\/shop.example \/\/beta.example ' "$_c"
+assert_has   "the home a site of that name has" "search-replace $_rn/home/shop.example/ $_rn/home/beta.example/ " "$_c"
+assert_has   "and the home this site had" "search-replace $_rn/home/shop_old/ $_rn/home/beta.example/ " "$_c"
+assert_lacks "never the name it was registered under: it was no address" "search-replace //shop_old" "$_c"
+assert_lacks "with www or without" "www.shop_old" "$_c"
+assert_lacks "in neither form" 'search-replace \/\/shop_old' "$_c"
+assert_has   "it runs as the renamed user" "-u beta_example -- env HOME=$_rn/home/beta.example" "$(grep 'search-replace' "$_rn/runuser.log" | tail -n 1)"
+assert_has   "it is said which name the database gave" "its database said shop.example; the addresses in it now say beta.example" "$_o"
+assert_eq    "the note with the admin login follows, from that name" "WP_URL=https://beta.example WP_PATH=$_rn/home/beta.example/public_html" "$(tr '\n' ' ' <"$_rn/state/domains/beta.example/wp.info" | sed 's/ $//')"
+# what still names it
+assert_has   "a file that still names the home it had is pointed out" "$_rn/home/beta.example/public_html/.htaccess" "$_o"
+assert_has   "one that names it with nothing after it too" "$_rn/home/beta.example/public_html/.user.ini" "$_o"
+assert_lacks "one that only has the word in it is not: of a name that may be any word, the path is looked for" "$_rn/home/beta.example/public_html/wp-config.php" "$_o"
+assert_has   "and the files are called what they are" "These files still name the old path $_rn/home/shop_old; have a look at them" "$_o"
+
+# back to the name its user is called after, which is the one its WordPress says
+_rn_odd_site
+_rn_odd_wp 'https://shop.example'
+_rn_case _rn_rename_dry shop_old shop.example
+assert_has   "a user that is called after the new name already is said to keep its name" "the Linux user shop_example keeps its name" "$(_rn_out)"
+_rn_case _rn_rename shop_old shop.example
+_o="$(_rn_out)"; _c="$(_rn_calls)"
+assert_has   "that rename succeeds" "rc=0" "$_o"
+assert_lacks "and renames no user" "usermod -l" "$_c"
+assert_lacks "nor a group" "groupmod" "$_c"
+assert_has   "but points the user at the new home" "usermod -d $_rn/home/shop.example -c site shop.example shop_example" "$_c"
+assert_lacks "a database that gives the new name already has no address rewritten" "search-replace //" "$_c"
+assert_lacks "in neither form" 'search-replace \/\/' "$_c"
+assert_has   "only the home the site had" "search-replace $_rn/home/shop_old/ $_rn/home/shop.example/ " "$_c"
+assert_has   "which is said" "its database gives shop.example as its address already" "$_o"
+
+# a WordPress that does not say
+_rn_odd_site
+_rn_odd_wp 'https://shop.example'; : >"$_rn/wp-deaf"
+_rn_case _rn_rename shop_old beta.example
+_o="$(_rn_out)"; _c="$(_rn_calls)"
+assert_has   "a WordPress that cannot be asked does not stop the rename" "rc=0" "$_o"
+assert_lacks "and no address is rewritten on a guess" "search-replace //" "$_c"
+assert_lacks "in neither form" 'search-replace \/\/' "$_c"
+assert_has   "the home the site had still is" "search-replace $_rn/home/shop_old/ $_rn/home/beta.example/ " "$_c"
+assert_has   "it is said that no address was" "WordPress did not say which address it has" "$_o"
+assert_has   "with what to run once the name is known" "wp search-replace '//that-name' '//beta.example'" "$_o"
+# one whose name is set outside its database
+_rn_odd_site
+_rn_odd_wp 'https://shop.example'; : >"$_rn/wp-pinned"
+_rn_case _rn_rename shop_old beta.example
+assert_has   "a name the rewrite did not reach is not called rewritten" "WordPress does not give beta.example as its address" "$(_rn_out)"
+assert_has   "it is said where such a name is set" "WP_HOME and WP_SITEURL in $_rn/home/beta.example/public_html/wp-config.php" "$(_rn_out)"
+assert_lacks "and nothing claims that the database now says the new name" "the addresses in it now say" "$(_rn_out)"
+# a rewrite that fails
+_rn_odd_site
+_rn_odd_wp 'https://shop.example'; : >"$_rn/wp-sr-fails"
+_rn_case _rn_rename shop_old beta.example
+assert_has   "a rewrite that failed is named for doing again, by the name the database gave" "Again: wp search-replace '//shop.example' '//beta.example'" "$(_rn_out)"
+_rn_odd_site
+_rn_odd_wp 'https://beta.example'; : >"$_rn/wp-sr-fails"
+_rn_case _rn_rename shop_old beta.example
+assert_has   "where only the home was to be rewritten, by the home" "Again: wp search-replace '$_rn/home/shop_old/' '$_rn/home/beta.example/'" "$(_rn_out)"
+# --no-search-replace, and no wp-cli
+_rn_odd_site
+_rn_odd_wp 'https://shop.example'
+_rn_case _rn_rename shop_old beta.example --no-search-replace
+assert_lacks "--no-search-replace: WordPress is not even asked" "option get" "$(_rn_calls)"
+assert_lacks "and nothing in its database is rewritten" "search-replace" "$(_rn_calls)"
+if (( CAN_CHMOD )); then
+  _rn_odd_site
+  _rn_odd_wp 'https://shop.example'; chmod -x "$_rn/wp"
+  _rn_case _rn_rename shop_old beta.example
+  assert_has   "without wp-cli it says that the database was not looked at" "the WordPress database was not looked at" "$(_rn_out)"
+  assert_lacks "and suggests no rewrite from a name that never was an address" "//shop_old" "$(_rn_out)"
+  _rn_fresh
+  printf '<?php // wp\n' >"$_rn/home/alpha.example/public_html/wp-config.php"; chmod -x "$_rn/wp"
+  _rn_case _rn_rename alpha.example beta.example
+  assert_has   "for a site whose name is one, it is the old name that the database still says" "the WordPress database still says alpha.example" "$(_rn_out)"
+  assert_has   "and the old name that is to be rewritten" "Later: wp search-replace '//alpha.example' '//beta.example'" "$(_rn_out)"
+fi
+
+# the name WordPress gives
+_rn_odd_site
+_rn_odd_wp 'https://WWW.Shop.Example/wp' 'http://shop.example:8080/?p=1'
+_rn_case _rn_said shop_old;  assert_eq "the name WordPress gives: no scheme, no www, no port, no path, in lower case" "shop.examplerc=0" "$(_rn_out)"
+_rn_odd_wp 'https://shop.example' 'https://other.example'
+_rn_case _rn_said shop_old;  assert_eq "two names are no answer" "rc=0" "$(_rn_out)"
+_rn_odd_wp 'http://localhost:8080'
+_rn_case _rn_said shop_old;  assert_eq "nor is a host that is no domain name" "rc=0" "$(_rn_out)"
+_rn_odd_wp 'http://192.0.2.7'
+_rn_case _rn_said shop_old;  assert_eq "nor an address in numbers" "rc=0" "$(_rn_out)"
+_rn_odd_wp ''
+_rn_case _rn_said shop_old;  assert_eq "nor silence" "rc=0" "$(_rn_out)"
+_rn_odd_wp 'https://shop.example'; : >"$_rn/wp-deaf"
+_rn_case _rn_said shop_old;  assert_eq "nor a WordPress that cannot be asked" "rc=0" "$(_rn_out)"
+# and the pairs that come of it
+_rn_case _domain_rename_wp_pairs staging staging.example 1
+assert_eq "a name that is no domain name has no address to rewrite: its home, and that is all" "$_rn/home/staging/>$_rn/home/staging.example/|rc=0" "$(_rn_out | tr '\t\n' '>|' | sed 's/|$//')"
+_rn_case _domain_rename_wp_pairs staging b.example 1 a.example
+assert_eq "with the name WordPress gave: that name's addresses and home, then the home the site had" \
+  "//www.a.example>//www.b.example|//a.example>//b.example|\\/\\/www.a.example>\\/\\/www.b.example|\\/\\/a.example>\\/\\/b.example|$_rn/home/a.example/>$_rn/home/b.example/|$_rn/home/staging/>$_rn/home/b.example/|rc=0" "$(_rn_out | tr '\t\n' '>|' | sed 's/|$//')"
+_rn_case _domain_rename_wp_pairs staging b.example 1 b.example
+assert_eq "none where that is the new name already" "$_rn/home/staging/>$_rn/home/b.example/|rc=0" "$(_rn_out | tr '\t\n' '>|' | sed 's/|$//')"
+_rn_case _domain_rename_wp_pairs staging b.example 1 localhost
+assert_eq "and none for what is no domain name itself" "$_rn/home/staging/>$_rn/home/b.example/|rc=0" "$(_rn_out | tr '\t\n' '>|' | sed 's/|$//')"
+_rn_case _domain_rename_wp_pairs a.example b.example 1 c.example
+assert_eq "a site whose name is a domain name is rewritten from that name, whatever else is handed in" \
+  "//www.a.example>//www.b.example|//a.example>//b.example|\\/\\/www.a.example>\\/\\/www.b.example|\\/\\/a.example>\\/\\/b.example|$_rn/home/a.example/>$_rn/home/b.example/|rc=0" "$(_rn_out | tr '\t\n' '>|' | sed 's/|$//')"
+
+# a failure half way puts such a site back under the name it had
+_rn_odd_site
+_rn_before="$(_rn_tree)"; _rn_state_before="$(jq -S 'del(.updated_at)' "$_rn/state/domains/shop_old/domain.json")"
+: >"$_rn/smoke-fails"
+_rn_case _rn_rename shop_old beta.example
+assert_has   "a rename of such a site that fails half way rolls back" "Rolling back" "$(_rn_out)"
+assert_eq    "every directory is where it was" "$(grep -v '^phpini' <<<"$_rn_before")" "$(_rn_tree | grep -v '^phpini')"
+assert_eq    "the state is what it was" "$_rn_state_before" "$(jq -S 'del(.updated_at)' "$_rn/state/domains/shop_old/domain.json")"
+assert_eq    "the user has the name it had" "root alpha_example shop_example" "$(tr '\n' ' ' <"$_rn/users" | sed 's/ $//')"
+assert_eq    "and lives where it lived" "shop_example:$_rn/home/shop_old" "$(grep '^shop_example:' "$_rn/passwd")"
+assert_has   "the virtual host is put back under the name the site has" "apply shop_old user=shop_example home=$_rn/home/shop_old ssl=0" "$(_rn_calls | tail -n 6)"
+rm -f "$_rn/smoke-fails"
+_rn_case _rn_rename shop_old beta.example
+assert_has   "and the same rename then goes through" "rc=0" "$(_rn_out)"
+
+# Mail it cannot have: no mail command takes a name that is no domain name. What its record
+# says about mail came out of its archive, and a directory of its name in the mail store is
+# nobody's. Here the question "does this name have mail" is the real one, not a stand-in.
+_rn_rename_mail() {
+  _rn_flow
+  eval "$(sed -n '/^lib_mail_domain_has_traces() {/,/^}/p' "$ROOT/lib/mail.sh")"
+  MAIL_VMAIL_HOME="$_rn/vmail"; MAIL_PASSWD_FILE="$_rn/mail-passwd"; MAIL_ALIAS_DIR="$_rn/mail-aliases"; MAIL_DISABLED_DIR="$_rn/mail-disabled"; MAIL_DKIM_DIR="$_rn/mail-dkim"
+  lib_domain_rename_main "$@"
+}
+_rn_odd_site
+jq '.mail = {enabled: true, selector: "s2026"}' "$_rn/state/domains/shop_old/domain.json" >"$_rn/t" && cp "$_rn/t" "$_rn/state/domains/shop_old/domain.json"
+: >"$_rn/mail-installed"; mkdir -p "$_rn/vmail/shop_old/info/Maildir"
+_rn_case _rn_rename_mail shop_old beta.example
+_o="$(_rn_out)"
+assert_has   "a site of that kind whose record came with a mail block is renamed" "rc=0" "$_o"
+assert_lacks "nothing is said about mail that stays: such a name has none" "stays at @shop_old" "$_o"
+assert_false "no mail domain is made under a name that is no domain name" test -e "$_rn/maildomains/shop_old"
+assert_eq    "the block does not follow the site" "false" "$(_rn_json beta.example 'has("mail")')"
+assert_true  "its archives do: nothing of a mail domain lies beside them" test -e "$_rn/backups/beta.example/shop_old-20260101-000000.tar.gz"
+assert_true  "and the directory in the mail store is as it was" test -d "$_rn/vmail/shop_old/info/Maildir"
+
+# with a Node.js application: a variable is a leftover when it names the home, not the word
+_rn_odd_app() {   # the application's variables, as JSON
+  _rn_odd_site staging
+  jq '.mode = "proxy" | .php = {} | .proxy = {target: "127.0.0.1:3000", static_paths: "none"} | .app = {manager: "pm2", port: 3000, start: "npm start", enabled: true}' \
+    "$_rn/state/domains/staging/domain.json" >"$_rn/t" && cp "$_rn/t" "$_rn/state/domains/staging/domain.json"
+  printf '%s\n' "$1" >"$_rn/state/domains/staging/app-env.json"
+  mkdir -p "$_rn/home/staging/app"
+}
+_rn_odd_app '{"NODE_ENV":"staging"}'
+_rn_case _rn_rename staging beta.example
+assert_has   "a site of that kind with an application is renamed" "rc=0" "$(_rn_out)"
+assert_has   "its PM2 service is taken down for the user on its record" "app-teardown shop_example" "$(_rn_calls)"
+assert_has   "and set up for the new one" "app-restore beta_example home=$_rn/home/beta.example" "$(_rn_calls)"
+assert_lacks "a variable that only has the word in it is no leftover" "A variable of the application still names" "$(_rn_out)"
+_rn_odd_app "{\"NODE_ENV\":\"staging\",\"UPLOADS\":\"$_rn/home/staging/app/uploads\"}"
+_rn_case _rn_rename staging beta.example
+assert_has   "one that names the home the site had is" "A variable of the application still names the old path $_rn/home/staging: setup.sh app env beta.example list" "$(_rn_out)"
+_rn_odd_app "{\"HOME_DIR\":\"$_rn/home/staging\"}"
+_rn_case _rn_rename staging beta.example
+assert_has   "the home itself, with nothing after it, counts too" "A variable of the application still names the old path $_rn/home/staging" "$(_rn_out)"
+unset -f _rn_odd_site _rn_odd_wp _rn_said _rn_odd_app _rn_rename_mail
+
 # ---- the helpers ------------------------------------------------------------------------
 _rn_fresh
 _rn_case _domain_rename_wp_pairs a.example b.example 1
@@ -7765,6 +8022,24 @@ assert_has  "and the redirects" "27) _menu_redirects" "$(tr -s ' \n' ' ' <<<"$_r
 _rn_menu_fn="$(declare -f _menu_rename_site)"
 assert_has  "from the menu the old name stays a redirect unless that is declined" '--no-redirect' "$_rn_menu_fn"
 assert_has  "and the name typed is checked before the command runs" 'lib_domain_valid' "$_rn_menu_fn"
+# the menu entry itself: what it asks, and the command it runs
+_mrn() {   # the site picked, the name typed, [the answer about the redirect]
+  (
+    eval '_menu_ask() { local -n _o="$1"; printf "asked: %s\n" "$2"; if [[ "$1" == "new" ]]; then _o="$_mrn_new"; else _o="${_mrn_keep:-${3:-}}"; fi; }
+          _menu_run() { printf "runs: %s\n" "$*"; }
+          _menu_pick_domain() { printf "%s" "$_mrn_site"; }
+          _menu_pause() { :; }'
+    _mrn_site="$1"; _mrn_new="$2"; _mrn_keep="${3:-}"; MENU_LANG="en"
+    _menu_rename_site 2>&1
+  )
+}
+assert_has   "the menu renames the site that was picked, to the name typed" "runs: rename alpha.example beta.example" "$(_mrn alpha.example Beta.Example)"
+assert_has   "after asking whether the old name stays as a redirect" "asked: Keep alpha.example as a redirect (301) to beta.example" "$(_mrn alpha.example beta.example)"
+assert_has   "which a no drops" "runs: rename alpha.example beta.example --no-redirect" "$(_mrn alpha.example beta.example n)"
+assert_lacks "a site whose name is no domain name is not asked: nothing could ask for that name" "asked: Keep" "$(_mrn shop_old beta.example)"
+assert_eq    "it is renamed without the question" "runs: rename shop_old beta.example" "$(_mrn shop_old beta.example n | tail -n 1)"
+assert_lacks "a new name that is none goes no further than the menu" "runs:" "$(_mrn shop_old shop_new)"
+unset -f _mrn
 unset -f _rn_case _rn_out _rn_calls _rn_site _rn_fresh _rn_tree _rn_json _rn_mail_site _rn_app_site
 
 # =============================================================================

@@ -323,6 +323,9 @@ Usage: setup.sh rename <old-domain> <new-domain> [options]
   the new one with a 301. A safety backup is taken first; the site is away for about a minute.
   A Node.js application is set up again under the new user (dependencies, build, PM2). Mail
   stays at the old domain, which becomes a mail domain of its own: addresses do not change.
+  A site that is registered under a name which is no domain name ("shop_old": an old restore
+  made such) gets its domain name this way too. Nothing could ever ask for such a name, so no
+  redirect is left under it, and a WordPress has the name its database gives rewritten.
   --no-redirect        Do not keep the old name as a redirect (its certificate goes too)
   --no-ssl             Do not request a certificate for the new name now (renew-ssl later)
   --no-search-replace  Leave the addresses inside a WordPress database as they are
@@ -481,57 +484,117 @@ _domain_rename_has_wp() { lib_domain_as_user test -f "${D_HOME}/public_html/wp-c
 # only - "//name" - so that a mail address at the old domain stays what it is. The www form
 # first; each also in the form JSON stores it in. Then the home directory, which plugins
 # write into their options as an absolute path.
-_domain_rename_wp_pairs() {   # old new www(0/1)
-  local old="$1" new="$2" wnew="$2"
+#
+# The addresses are those of the name the database says, and that is the old name - unless the
+# old name is no domain name. Such a name was never an address, and as a pattern it is worse
+# than none: "//staging" is also how "//staging.example.com" begins. What the database of such
+# a site says is the name WordPress gives as its own (_domain_rename_wp_said, handed in as the
+# fourth argument): the addresses of that name are rewritten, and the home a site of that name
+# has. None are where WordPress gave no name, or gives the new one already.
+_domain_rename_wp_pairs() {   # old new www(0/1) [the name the database says, where the old one is none]
+  local old="$1" new="$2" wnew="$2" said="$1"
   (( ${3:-0} )) && wnew="www.${2}"
-  printf '//www.%s\t//%s\n' "$old" "$wnew"
-  printf '//%s\t//%s\n' "$old" "$new"
-  printf '\\/\\/www.%s\t\\/\\/%s\n' "$old" "$wnew"
-  printf '\\/\\/%s\t\\/\\/%s\n' "$old" "$new"
+  if ! lib_domain_valid "$old"; then
+    said=""
+    if lib_domain_valid "${4:-}"; then said="$4"; fi
+  fi
+  if [[ -n "$said" && "$said" != "$new" ]]; then
+    printf '//www.%s\t//%s\n' "$said" "$wnew"
+    printf '//%s\t//%s\n' "$said" "$new"
+    printf '\\/\\/www.%s\t\\/\\/%s\n' "$said" "$wnew"
+    printf '\\/\\/%s\t\\/\\/%s\n' "$said" "$new"
+    if [[ "$said" != "$old" ]]; then printf '%s/\t%s/\n' "$(lib_domain_home "$said")" "$(lib_domain_home "$new")"; fi
+  fi
   printf '%s/\t%s/\n' "$(lib_domain_home "$old")" "$(lib_domain_home "$new")"
+}
+
+# The domain name the WordPress in D_* gives as its own address, without a leading www.
+# Nothing when it cannot be asked, when its "siteurl" and its "home" name two hosts, or when
+# what they name is no domain name: a database is rewritten by this name, and a guess is none.
+_domain_rename_wp_said() {
+  local k="" v="" said=""
+  for k in siteurl home; do
+    v="$(_wp option get "$k" --skip-plugins --skip-themes 2>/dev/null | tail -n 1)" || return 0
+    v="${v#*://}"; v="${v%%[/:?#]*}"; v="${v,,}"; v="${v#www.}"
+    [[ -n "$v" && ( -z "$said" || "$v" == "$said" ) ]] || return 0
+    said="$v"
+  done
+  lib_domain_valid "$said" || return 0
+  printf '%s' "$said"
 }
 
 # The addresses inside the database of the WordPress in D_* (new name). Never fatal: the site
 # has moved by now, and what is left over is said so that it can be done by hand.
 _domain_rename_wp() {   # old new
-  local old="$1" new="$2" a="" b="" failed=0 info="" oe="${1//./\\.}" ohe=""
+  local old="$1" new="$2" a="" b="" failed=0 info="" nodom=0 said="$1" h="" from="//${1}" to="//${2}"
+  local -a names=("$1")
   if (( OPT_DRY_RUN )); then lib_info "[dry-run] would rewrite ${old} to ${new} in the WordPress database"; return 0; fi
+  lib_domain_valid "$old" || nodom=1
   if ! ( lib_domain_wpcli_ensure ) >/dev/null 2>&1 || [[ ! -x "$WPCLI_BIN" ]]; then
-    lib_warn "wp-cli could not be installed, so the WordPress database still says ${old}"
-    lib_note "Later: wp search-replace '//${old}' '//${new}' --all-tables-with-prefix --skip-columns=guid   (as ${D_USER}, in ${D_HOME}/public_html)"
+    if (( nodom )); then
+      lib_warn "wp-cli could not be installed, so the WordPress database was not looked at: it may give another name than ${new} as its address"
+      lib_note "Later: wp option get home - and if that is another name: wp search-replace '//that-name' '//${new}' --all-tables-with-prefix --skip-columns=guid   (as ${D_USER}, in ${D_HOME}/public_html)"
+    else
+      lib_warn "wp-cli could not be installed, so the WordPress database still says ${old}"
+      lib_note "Later: wp search-replace '//${old}' '//${new}' --all-tables-with-prefix --skip-columns=guid   (as ${D_USER}, in ${D_HOME}/public_html)"
+    fi
     return 0
+  fi
+  # A name that is no domain name was never an address. What the database of such a site says
+  # is the name WordPress gives as its own - the one the site had where its archive was made.
+  if (( nodom )); then
+    said="$(_domain_rename_wp_said)"
+    if [[ -n "$said" ]]; then names+=("$said"); fi
+    if [[ -n "$said" && "$said" != "$new" ]]; then from="//${said}"; else from="$(lib_domain_home "$old")/"; to="$(lib_domain_home "$new")/"; fi
   fi
   while IFS=$'\t' read -r a b; do
     [[ -n "$a" ]] || continue
     lib_run _wp search-replace "$a" "$b" --all-tables-with-prefix --skip-columns=guid --skip-plugins --skip-themes --report-changed-only || failed=1
-  done < <(_domain_rename_wp_pairs "$old" "$new" "$D_WWW")
+  done < <(_domain_rename_wp_pairs "$old" "$new" "$D_WWW" "$said")
   lib_run _wp cache flush --skip-plugins --skip-themes || true
   info="$(lib_domain_state_dir "$new")/wp.info"
   if [[ -s "$info" ]]; then
-    ohe="$(lib_domain_home "$old")"; ohe="${ohe//./\\.}"
-    sed -i -e "s#//${oe}\$#//${new}#" -e "s#//www\\.${oe}\$#//www.${new}#" -e "s#=${ohe}/#=$(lib_domain_home "$new")/#" "$info" || true
+    for a in "${names[@]}"; do
+      [[ "$a" != "$new" ]] || continue
+      h="$(lib_domain_home "$a")"
+      sed -i -e "s#//${a//./\\.}\$#//${new}#" -e "s#//www\\.${a//./\\.}\$#//www.${new}#" -e "s#=${h//./\\.}/#=$(lib_domain_home "$new")/#" "$info" || true
+    done
   fi
   if (( failed )); then
     lib_warn "Not every address in the WordPress database could be rewritten (see ${LOG_FILE})"
-    lib_note "Again: wp search-replace '//${old}' '//${new}' --all-tables-with-prefix --skip-columns=guid   (as ${D_USER}, in ${D_HOME}/public_html)"
-  else
+    lib_note "Again: wp search-replace '${from}' '${to}' --all-tables-with-prefix --skip-columns=guid   (as ${D_USER}, in ${D_HOME}/public_html)"
+  elif (( ! nodom )); then
     lib_ok "WordPress: the addresses in its database now say ${new}"
+  elif [[ -z "$said" ]]; then
+    lib_warn "WordPress did not say which address it has, so no address in its database was rewritten: ${old} itself never was one"
+    lib_note "If it answers under another name than ${new}: wp search-replace '//that-name' '//${new}' --all-tables-with-prefix --skip-columns=guid   (as ${D_USER}, in ${D_HOME}/public_html)"
+  elif [[ "$said" == "$new" ]]; then
+    lib_ok "WordPress: its database gives ${new} as its address already"
+  elif [[ "$(_domain_rename_wp_said)" == "$new" ]]; then
+    lib_ok "WordPress: its database said ${said}; the addresses in it now say ${new}"
+  else
+    # asked again, because a name that is set outside the database is not reached by rewriting it
+    lib_warn "WordPress does not give ${new} as its address, although its database was rewritten from ${said}"
+    lib_note "The name is then set outside the database: look for WP_HOME and WP_SITEURL in ${D_HOME}/public_html/wp-config.php"
   fi
   return 0
 }
 
 # Configuration files of the site in D_* that still carry the old name - as an address or as
 # the old home directory. Read as the site user, and only the files such a name is kept in.
-_domain_rename_leftovers() {   # old
-  local -a dirs=("${D_HOME}/public_html")
+_domain_rename_leftovers() {   # what to look for: the old name, or the forms its home is written in
+  local -a dirs=("${D_HOME}/public_html") seek=()
+  local p=""
+  for p in "$@"; do seek+=(-e "$p"); done
   if [[ -d "${D_HOME}/app" ]]; then dirs+=("${D_HOME}/app"); fi
   lib_domain_as_user timeout 30 find "${dirs[@]}" -maxdepth 3 -name node_modules -prune -o -type f -size -1024k \
     \( -name .htaccess -o -name .user.ini -o -name wp-config.php -o -name .env -o -name 'config*.php' -o -name 'settings*.php' \) \
-    -exec grep -lF -e "$1" {} + 2>/dev/null | head -n 20 || true
+    -exec grep -lF "${seek[@]}" {} + 2>/dev/null | head -n 20 || true
 }
 
 lib_domain_rename_main() {
-  local old="${1:-}" new="${2:-}" redirect=1 ssl=1 replace=1 a="" why="" rc=0 saved="" wpcron=0 oldssl=0 f="" total=7 left="" oi="" app=0 mail=0
+  local old="${1:-}" new="${2:-}" redirect=1 ssl=1 replace=1 a="" why="" rc=0 saved="" wpcron=0 oldssl=0 f="" total=7 left="" oi="" app=0 mail=0 nodom=0 oh="" what=""
+  local -a seek=() greps=()
   if [[ "$old" == "-h" || "$old" == "--help" || "$old" == "help" ]]; then lib_domain_rename_usage; return 0; fi
   if [[ -z "$old" || -z "$new" || "$old" == -* || "$new" == -* ]]; then
     lib_domain_rename_usage >&2; lib_die "Two names are needed: the site and its new name" "" "setup.sh rename old-name.com new-name.com"
@@ -549,11 +612,18 @@ lib_domain_rename_main() {
   old="${old,,}"; new="${new,,}"
   lib_require_tools
   lib_require_installed
-  lib_domain_valid "$old" || lib_die "Invalid domain name '${old}'" "" "setup.sh list"
+  # The site is taken by the name it is registered under, and "restore" registered sites under
+  # whatever it was given until 1.0.87: "shop_old", "staging". This is how such a site gets
+  # its domain name. What it becomes is a domain name, as for every other site.
+  lib_domain_arg_ok "$old" || lib_die "Invalid domain name '${old}'" "" "setup.sh list"
   lib_domain_valid "$new" || lib_die "Invalid domain name '${new}'" "not a valid FQDN (use the bare domain, without http:// or paths)" "setup.sh rename ${old} new-name.com"
   [[ "$new" != www.* ]] || lib_die "Use the bare name instead of ${new}" "whether www.<name> is served is a setting the site keeps" "setup.sh rename ${old} ${new#www.}"
   [[ "$old" != "$new" ]] || lib_die "${old} is called that already" "" "setup.sh rename ${old} new-name.com"
   lib_domain_registered "$old" || lib_die "Site ${old} is not registered" "" "setup.sh list"
+  # Nothing ever asked this server for a name that is no domain name, so there is nothing to
+  # send on from it - and a redirect.json under it would be a record that "redirect list"
+  # leaves out and "redirect del" refuses.
+  if ! lib_domain_valid "$old"; then nodom=1; redirect=0; fi
   lib_ols_is_installed || lib_die "OpenLiteSpeed is not installed" "run install first" "sudo ./setup.sh install"
   lib_domain_state_load "$old"
   why="$(_domain_rename_blocker "$old" "$new")"
@@ -564,10 +634,11 @@ lib_domain_rename_main() {
   (( D_SSL_WANTED )) || ssl=0
 
   printf '\n%sThis will rename the site %s to %s%s\n' "$C_BLD" "$old" "$new" "$C_RST"
-  lib_note "files    ${D_HOME} becomes $(lib_domain_home "$new") (moved, not copied); the Linux user ${D_USER} becomes $(lib_domain_ident "$new")"
+  lib_note "files    ${D_HOME} becomes $(lib_domain_home "$new") (moved, not copied); the Linux user ${D_USER} $( [[ "$(lib_domain_ident "$new")" == "$D_USER" ]] && printf 'keeps its name' || printf 'becomes %s' "$(lib_domain_ident "$new")")"
   lib_note "database ${D_DB_NAME:-none}$( [[ -n "$D_DB_NAME" ]] && printf ' keeps its name, its user and its password')"
   lib_note "HTTPS    $( (( ssl )) && printf 'a new certificate for %s' "$new" || printf 'no certificate is requested for %s now' "$new")"
-  if (( redirect )); then lib_note "${old}  stays as a redirect: every request goes on to ${new} with a 301$( (( oldssl )) && printf ', under the certificate it has')"
+  if (( nodom )); then lib_note "${old}  is no domain name, so nothing ever asked this server for it: nothing stays behind under it"
+  elif (( redirect )); then lib_note "${old}  stays as a redirect: every request goes on to ${new} with a 301$( (( oldssl )) && printf ', under the certificate it has')"
   else lib_note "${old}  is no longer answered here, and its certificate is deleted (--no-redirect)"; fi
   if _domain_rename_has_wp; then
     lib_note "WordPress $( (( replace )) && printf 'the addresses in its database are rewritten to %s' "$new" || printf 'its database is left as it is (--no-search-replace)')"
@@ -653,6 +724,10 @@ lib_domain_rename_main() {
       lib_warn "The redirect from ${old} could not be set up; later: setup.sh redirect add ${old} ${new}$( (( D_WWW )) && printf ' --www')"
     fi
     lib_rollback_clear
+  elif (( nodom )); then
+    # no certificate to delete either: lomp never asked for one under a name that is none, so
+    # a lineage called that is somebody else's
+    lib_ok "nothing is left under ${old}: it was no name anything could ask for"
   else
     lib_ssl_delete "$old"
     lib_ok "${old} is no longer answered here"
@@ -707,7 +782,7 @@ lib_domain_rename_main() {
   lib_print_kv "Address"  "$(lib_redirect_target_url "$new")/"
   lib_print_kv "Files"    "${D_HOME}/public_html (user ${D_USER})"
   [[ -z "$D_DB_NAME" ]] || lib_print_kv "Database" "${D_DB_NAME} (unchanged; setup.sh credentials ${new})"
-  lib_print_kv "Old name" "$( (( redirect )) && printf '%s -> 301 -> %s' "$old" "$new" || printf 'no longer answered')"
+  lib_print_kv "Old name" "$( if (( redirect )); then printf '%s -> 301 -> %s' "$old" "$new"; elif (( nodom )); then printf '%s (no domain name: nothing is left under it)' "$old"; else printf 'no longer answered'; fi )"
   lib_print_kv "Backups"  "${f}/ (the one from before the rename: $(basename "${BK_LAST_FILE:-none}"))"
   if (( ! D_SSL && D_SSL_WANTED )); then lib_note "No certificate yet: point the DNS of ${new} here, then run: setup.sh renew-ssl ${new}"; fi
   if (( redirect )); then lib_note "Keep the DNS of ${old} pointing here for as long as the redirect should work."; fi
@@ -715,12 +790,21 @@ lib_domain_rename_main() {
     lib_note "Mail: the mailboxes at @${old} work as before; ${old} is a mail domain of its own now (setup.sh mail domain list)."
     lib_note "Mail for ${new}, if it should have any: setup.sh mail enable ${new} --mailbox info"
   fi
-  if (( app )) && lib_app_env_json "$new" | grep -qF -- "$old"; then
-    lib_warn "A variable of the application still names ${old}: setup.sh app env ${new} list"
+  # What still carries the old name is looked for by that name. A name that is no domain name
+  # is often a word that says nothing by itself - "staging", "test" - and was never an address:
+  # of such a name only the home directory it gave the site is looked for, in the forms a
+  # path is written in.
+  seek=("$old"); what="$old"
+  if (( nodom )); then
+    oh="$(lib_domain_home "$old")"; seek=("${oh}/" "${oh}'" "${oh}\""); what="the old path ${oh}"
   fi
-  left="$(_domain_rename_leftovers "$old")"
+  for a in "${seek[@]}"; do greps+=(-e "$a"); done
+  if (( app )) && lib_app_env_json "$new" | grep -qF "${greps[@]}"; then
+    lib_warn "A variable of the application still names ${what}: setup.sh app env ${new} list"
+  fi
+  left="$(_domain_rename_leftovers "${seek[@]}")"
   if [[ -n "$left" ]]; then
-    lib_warn "These files still name ${old} (an address, or the old path ${SITES_ROOT}/${old}); have a look at them:"
+    lib_warn "These files still name ${what}$( (( nodom )) || printf ' (an address, or the old path %s/%s)' "$SITES_ROOT" "$old"); have a look at them:"
     while read -r a; do [[ -n "$a" ]] && lib_note "$a"; done <<<"$left"
   fi
   printf '\n'

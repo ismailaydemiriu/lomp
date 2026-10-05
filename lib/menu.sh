@@ -939,8 +939,12 @@ _menu_rename_site() {
     _menu_pause; return 0
   fi
   args=("$domain" "${new,,}")
-  _menu_ask keep "$(_menu_tf 'Keep %s as a redirect (301) to %s? (y/n)' "$domain" "${new,,}")" "y"
-  [[ "${keep,,}" == y* ]] || args+=(--no-redirect)
+  # not asked about a site whose name is no domain name: nothing can ask for such a name, so
+  # the command leaves no redirect under it whatever the answer
+  if lib_domain_valid "$domain"; then
+    _menu_ask keep "$(_menu_tf 'Keep %s as a redirect (301) to %s? (y/n)' "$domain" "${new,,}")" "y"
+    [[ "${keep,,}" == y* ]] || args+=(--no-redirect)
+  fi
   _menu_run rename "${args[@]}"
 }
 
