@@ -486,6 +486,35 @@ lib_domain_user_ensure() {
   return 0
 }
 
+# Is the account a site is about to be given somebody else's? It exists, and its home is not
+# the one this site will have: another site whose name comes out as the same identifier
+# (a-b.example and a.b.example), or an account that has nothing to do with lomp. It is what
+# lib_domain_user_ensure dies on, asked on its own by a caller that has to know before it
+# writes anything.
+lib_domain_user_taken() {   # the site in D_USER / D_HOME
+  id -u "${D_USER:-}" >/dev/null 2>&1 || return 1
+  [[ "$(getent passwd "$D_USER" | cut -d: -f6)" != "$D_HOME" ]]
+}
+
+# The same about a record that exists: is the account it names another site's? Not if the
+# account lives where a site of this name lives. Otherwise yes - unless the record itself
+# gives that home and no other site on record has the user, which is a site whose home was
+# simply put somewhere else. The last test is what catches a record copied out of the archive
+# of the very site whose account it is: it says the same user and the same home as that
+# site's own record does.
+lib_domain_account_foreign() {   # domain  (its D_* are loaded)
+  local h="" x=""
+  id -u "${D_USER:-}" >/dev/null 2>&1 || return 1
+  h="$(getent passwd "$D_USER" | cut -d: -f6)"
+  [[ "$h" != "$(lib_domain_home "$1")" ]] || return 1
+  [[ "$h" == "$D_HOME" ]] || return 0
+  while read -r x; do
+    [[ -n "$x" && "$x" != "$1" ]] || continue
+    if [[ "$(lib_json_get "$(lib_domain_json "$x")" '.user')" == "$D_USER" ]]; then return 0; fi
+  done < <(lib_domains_list)
+  return 1
+}
+
 # Run a command as the site user, from "/". Writes and mode changes inside a site's home belong
 # here rather than in root: every name below /home/<domain> is under that user's control, and
 # root following one of its links turns "chmod a WordPress file" into "chmod /etc/shadow". As
@@ -1753,6 +1782,27 @@ lib_domain_remove_main() {
   lib_domain_valid "$domain" || lib_die "Invalid domain name '${domain}'" "" "setup.sh list"
   lib_domain_registered "$domain" || lib_die "Site ${domain} is not registered" "" "setup.sh list"
   lib_domain_state_load "$domain"
+  # A record whose Linux user is another site's. A restore that was refused because the site's
+  # user was taken used to leave its record behind, and nothing else: no home, no virtual
+  # host, no user. Every step below goes by the record's user and identifier - and those are
+  # the OTHER site's: its account, its PHP, its Node.js application - and, where the record
+  # was copied from that site's own archive, its home. Of such a record the record is all
+  # there is, so the record is all that goes.
+  if lib_domain_account_foreign "$domain"; then
+    lib_warn "${domain} is on record as running as ${D_USER}, and that account's home is $(getent passwd "$D_USER" | cut -d: -f6): another site's"
+    lib_note "nothing but the record exists of ${domain} - a restore that was refused left it - so the record is put away and nothing else is touched"
+    lib_confirm "Put the record of ${domain} away?" n || lib_die "Removal cancelled" "" "re-run with --yes to skip the question"
+    if (( OPT_DRY_RUN )); then lib_info "[dry-run] would put the record of ${domain} away"; return 0; fi
+    mkdir -p "${STATE_DIR}/archive/domains" && chmod 0700 "${STATE_DIR}/archive/domains"
+    mv "$(lib_domain_state_dir "$domain")" "${STATE_DIR}/archive/domains/${domain}.$(lib_ts)" 2>/dev/null || rm -rf "$(lib_domain_state_dir "$domain")"
+    # the lists that are written from the sites on record
+    lib_domain_logrotate_regen
+    lib_domain_fail2ban_regen
+    lib_sitefw_regen
+    lib_manifest_set '.updated_at' "$(lib_iso_now)"
+    lib_ok "The record of ${domain} is put away (${STATE_DIR}/archive/domains/); ${D_USER} and the site it belongs to are as they were"
+    return 0
+  fi
   printf '\n%sThis will remove %s%s\n' "$C_BLD" "$domain" "$C_RST"
   lib_note "vhost + listener maps (archived), $( (( keep_files )) && printf 'files KEPT' || printf "files ${D_HOME} and logs $(lib_domain_log_dir "$domain") DELETED"), $( (( keep_db )) && printf 'database KEPT' || printf 'database DROPPED'), $( (( keep_ssl )) && printf 'certificate KEPT' || printf 'certificate deleted')"
   lib_note "a safety backup (files + database) is written to ${BACKUP_ROOT}/${domain}/ first"

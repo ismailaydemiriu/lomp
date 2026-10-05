@@ -430,13 +430,23 @@ lib_restore_main() {
     # (.mail.ident: the name its mail went by on the server the archive was made on. Here that
     # name may be another domain's, so this server gives it one itself - lib_mail_ident)
     jq --arg d "$domain" '.domain = $d | .ssl.enabled = false | .status = "restoring" | del(.db) | del(.backup) | del(.mail.ident)' "${work}/x/state/domain.json" >"$recreated"
-    if (( OPT_DRY_RUN )); then
-      # A dry run writes no state file, so the steps below read the state it would have
-      # written straight out of the archive. Asking for the site's own domain.json here found
-      # nothing - and the load resets every D_* before it checks - so the dry run went on to
-      # describe creating a user with no name in a directory with no name.
-      lib_domain_state_load_file "$recreated" "$domain" || true
-    else
+    # The state it will have, read from the copy that is not in place yet. A dry run writes no
+    # state file at all, so for it this is where the steps below get the site from: asking
+    # for the site's own domain.json found nothing - and the load resets every D_* before it
+    # checks - so the dry run went on to describe creating a user with no name in a directory
+    # with no name.
+    lib_domain_state_load_file "$recreated" "$domain" || true
+    D_DOMAIN="$domain"; D_HOME="$(lib_domain_home "$domain")"
+    # And before the record is put in place, the one question that can refuse this site. "add"
+    # rolls its record back when the site's user cannot be made; a restore does not, and the
+    # record a refused one left behind named ANOTHER site's user as its own. "remove" of that
+    # record - the natural way to be rid of it - then deleted that site's user.
+    if lib_domain_user_taken; then
+      lib_die "Site ${domain} cannot be restored on this server" \
+        "it runs as the system user ${D_USER}, and that account exists with home $(getent passwd "$D_USER" | cut -d: -f6): another site whose name comes out as the same identifier, or an unrelated account" \
+        "nothing was written; restore it where that user name is free"
+    fi
+    if (( ! OPT_DRY_RUN )); then
       mkdir -p "$(lib_domain_state_dir "$domain")" && chmod 0700 "$(lib_domain_state_dir "$domain")"
       cp -f "$recreated" "$(lib_domain_json "$domain")"
       chmod 0600 "$(lib_domain_json "$domain")"

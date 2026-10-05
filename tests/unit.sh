@@ -8004,6 +8004,165 @@ fi
 eval "$_id_saved_vars"; eval "$_id_saved_fn"
 unset -f _id_issue _id_do _id_run _id_said _id_asked _id_rec _id_is_name _id_hash _id_fresh _id_old_mail _id_old_site _id_vhost _id_things _id_record _id_doc _id_pair _id_ar
 
+# =============================================================================
+section "a record that names another site's Linux user is not acted on"
+# Two sites cannot share an identifier: they would share a Linux user, and "add" refuses the
+# second and rolls its record back. A restore refused it as well - but only after it had put
+# the record in place, and that record named the first site's user as its own. "remove" of the
+# record, the natural way to be rid of it, then went by that user: it ended the first site's
+# processes and deleted its account.
+_lr="$TMP/leftover"; rm -rf "$_lr"; mkdir -p "$_lr"
+_lr_saved_fn="$(declare -f lib_domains_list)"
+eval "$(sed -n '/^lib_domains_list() {/,/^}/p' "$ROOT/lib/common.sh")"
+_lr_saved_vars="$(declare -p STATE_DIR SITES_ROOT BACKUP_ROOT CRON_FILE HARDEN_PHP_INI_ROOT INS_ROLE)"
+STATE_DIR="$_lr/state"; SITES_ROOT="$_lr/home"; BACKUP_ROOT="$_lr/backups"; CRON_FILE="$_lr/cron"; HARDEN_PHP_INI_ROOT="$_lr/php-ini"; INS_ROLE=""
+# The account database is stood in for: one account, a_b_example, the site a-b.example's. So is
+# every step of a removal - each says that it ran, and that is what is looked at.
+_lr_stubs='lib_require_tools() { return 0; }
+  lib_mail_installed() { return 1; }
+  id() { [[ "${1:-}" == "-u" && "${2:-}" == "a_b_example" && -e "$_lr/account" ]]; }
+  getent() {
+    if [[ "${1:-}" == "passwd" && "${2:-}" == "a_b_example" && -e "$_lr/account" ]]; then printf "a_b_example:x:1001:1001:site a-b.example:%s/a-b.example:/usr/sbin/nologin\n" "$SITES_ROOT"; return 0; fi
+    if [[ "${1:-}" == "group" && "${2:-}" == "a_b_example" && -e "$_lr/account" ]]; then printf "a_b_example:x:1001:\n"; return 0; fi
+    return 2
+  }
+  pkill()    { printf "pkill %s\n" "$*" >>"$_lr/done.log"; return 0; }
+  pgrep()    { return 1; }
+  userdel()  { printf "userdel %s\n" "$*" >>"$_lr/done.log"; return 0; }
+  groupdel() { printf "groupdel %s\n" "$*" >>"$_lr/done.log"; return 0; }
+  lib_ols_vhost_purge()      { printf "vhost %s\n" "$1" >>"$_lr/done.log"; }
+  lib_app_teardown()         { printf "app %s\n" "$D_IDENT" >>"$_lr/done.log"; }
+  lib_app_state_load()       { return 1; }
+  lib_backup_domain()        { printf "backup %s\n" "$1" >>"$_lr/done.log"; }
+  lib_db_drop_for_domain()   { printf "db %s\n" "$1" >>"$_lr/done.log"; }
+  lib_ssl_delete()           { printf "cert %s\n" "$1" >>"$_lr/done.log"; }
+  lib_domain_logrotate_regen() { printf "lists\n" >>"$_lr/lists.log"; }
+  lib_domain_fail2ban_regen()  { return 0; }
+  lib_sitefw_regen()           { return 0; }
+  lib_domain_user_ensure()   { printf "user wanted: %s in %s\n" "$D_USER" "$D_HOME" >>"$_lr/done.log"; exit 7; }
+  lib_php_ensure_version()   { return 0; }'
+_lr_do()   { eval "$_lr_stubs"; OPT_YES=1; OPT_QUIET=0; "$@" >"$_lr/said.txt" 2>&1 </dev/null; }
+_lr_said() { cat "$_lr/said.txt" 2>/dev/null || true; }
+_lr_done() { if [[ -f "$_lr/done.log" ]]; then tr '\n' '|' <"$_lr/done.log"; fi; }
+# the site that is there, and its account
+_lr_fresh() {
+  rm -rf "$_lr/state" "$_lr/home" "$_lr/backups" "$_lr/done.log" "$_lr/lists.log" "$_lr/cron"
+  mkdir -p "$STATE_DIR/domains/a-b.example" "$SITES_ROOT" "$BACKUP_ROOT"
+  printf '{"installed_at":"2026-01-01T00:00:00Z","params":{}}\n' >"$STATE_DIR/manifest.json"
+  jq -n --arg h "$SITES_ROOT/a-b.example" '{domain:"a-b.example", ident:"a_b_example", user:"a_b_example", group:"a_b_example", home:$h, mode:"static", status:"active"}' \
+    >"$(lib_domain_json a-b.example)"
+  : >"$_lr/account"
+}
+# the archive of a site of the other name, made on a server where it was alone
+_lr_archive() {   # -> the archive
+  local w="$_lr/ar"
+  rm -rf "$w"; mkdir -p "$w/state"
+  printf '{"format":1,"domain":"a.b.example","created_at":"2026-01-01T00:00:00Z"}\n' >"$w/manifest.json"
+  printf '{"domain":"a.b.example","ident":"a_b_example","user":"a_b_example","group":"a_b_example","home":"/home/a.b.example","mode":"static","status":"active"}\n' >"$w/state/domain.json"
+  ( cd "$w" && sha256sum manifest.json state/domain.json >SHA256SUMS )
+  tar -C "$w" -czf "$_lr/site.tar.gz" manifest.json state SHA256SUMS
+  printf '%s' "$_lr/site.tar.gz"
+}
+
+_lr_fresh
+_lr_du="${D_USER:-}"; _lr_dh="${D_HOME:-}"
+D_USER="a_b_example"; D_HOME="$SITES_ROOT/a-b.example"
+assert_eq    "an account whose home is the site's is the site's own"       1 "$(run_isolated _lr_do lib_domain_user_taken)"
+D_HOME="$SITES_ROOT/a.b.example"
+assert_eq    "one whose home is another site's is taken"                   0 "$(run_isolated _lr_do lib_domain_user_taken)"
+D_USER="nobody_has_this"
+assert_eq    "a name no account has is free"                               1 "$(run_isolated _lr_do lib_domain_user_taken)"
+D_USER=""
+assert_eq    "and no name at all is not an account"                        1 "$(run_isolated _lr_do lib_domain_user_taken)"
+D_USER="$_lr_du"; D_HOME="$_lr_dh"
+
+# ---- the restore asks before it writes -----------------------------------------
+_lr_f="$(_lr_archive)"
+_lr_r1="$(cksum <"$(lib_domain_json a-b.example)")"
+assert_eq    "a site whose user is another site's is not restored"         1 "$(run_isolated _lr_do lib_restore_main a.b.example --file "$_lr_f")"
+assert_has   "it says why"                                                 "the system user a_b_example" "$(_lr_said)"
+assert_has   "whose the account is"                                        "${SITES_ROOT}/a-b.example" "$(_lr_said)"
+assert_has   "and that nothing was written"                                "nothing was written" "$(_lr_said)"
+assert_false "which is so: no record is left of it"                        test -e "$STATE_DIR/domains/a.b.example"
+assert_eq    "the sites are the one that was there"                        "a-b.example" "$(lib_domains_list | tr '\n' ' ' | sed 's/ $//')"
+assert_eq    "and its record is as it was"                                 "$_lr_r1" "$(cksum <"$(lib_domain_json a-b.example)")"
+assert_eq    "a dry run of it is refused the same way"                     1 "$(OPT_DRY_RUN=1 run_isolated _lr_do lib_restore_main a.b.example --file "$_lr_f")"
+# The home that counts is the one the site would have HERE. An archive of a-b.example put back
+# under another name carries a-b.example's user and a-b.example's home - which is exactly the
+# account that exists - and is refused all the same: the new site's home would be another one.
+mkdir -p "$_lr/ar2/state"
+printf '{"format":1,"domain":"a-b.example","created_at":"2026-01-01T00:00:00Z"}\n' >"$_lr/ar2/manifest.json"
+jq -c '.status = "active"' "$(lib_domain_json a-b.example)" >"$_lr/ar2/state/domain.json"
+( cd "$_lr/ar2" && sha256sum manifest.json state/domain.json >SHA256SUMS )
+tar -C "$_lr/ar2" -czf "$_lr/site2.tar.gz" manifest.json state SHA256SUMS
+assert_eq    "a site's archive put back under another name is refused for that site's user" 1 "$(run_isolated _lr_do lib_restore_main c.example --file "$_lr/site2.tar.gz")"
+assert_has   "for the same reason"                                         "the system user a_b_example" "$(_lr_said)"
+assert_false "and leaves no record either"                                 test -e "$STATE_DIR/domains/c.example"
+# where the name is free the restore goes on, and only then is the record written
+rm -f "$_lr/account"
+assert_eq    "with the user name free it goes on to make the user"         7 "$(run_isolated _lr_do lib_restore_main a.b.example --file "$_lr_f")"
+assert_eq    "the site's own, in the site's own home"                      "user wanted: a_b_example in ${SITES_ROOT}/a.b.example|" "$(_lr_done)"
+assert_true  "and by then its record is in place"                          test -s "$STATE_DIR/domains/a.b.example/domain.json"
+
+# ---- a record of that kind, left by a release before this one -------------------
+_lr_fresh
+mkdir -p "$STATE_DIR/domains/a.b.example"
+printf '{"domain":"a.b.example","ident":"a_b_example","user":"a_b_example","group":"a_b_example","home":"/home/a.b.example","mode":"static","status":"restoring"}\n' >"$(lib_domain_json a.b.example)"
+_lr_r1="$(cksum <"$(lib_domain_json a-b.example)")"
+assert_eq    "a dry run of removing it changes nothing"                    0 "$(OPT_DRY_RUN=1 run_isolated _lr_do lib_domain_remove_main a.b.example)"
+assert_true  "the record is still there"                                   test -s "$STATE_DIR/domains/a.b.example/domain.json"
+assert_eq    "remove of the record a refused restore left"                 0 "$(run_isolated _lr_do lib_domain_remove_main a.b.example)"
+assert_has   "it says whose the account is"                                "that account's home is ${SITES_ROOT}/a-b.example" "$(_lr_said)"
+assert_eq    "no step of a removal ran: not the account, not the application, not the virtual host" "" "$(_lr_done)"
+assert_false "the record is gone from the sites"                           test -e "$STATE_DIR/domains/a.b.example"
+assert_true  "put away, not deleted"                                       bash -c "compgen -G '${STATE_DIR}/archive/domains/a.b.example.[0-9]*' >/dev/null"
+assert_true  "the lists written from the sites on record are written again" test -s "$_lr/lists.log"
+assert_eq    "the site whose account it is has its record as it was"       "$_lr_r1" "$(cksum <"$(lib_domain_json a-b.example)")"
+# The same record, copied out of the archive of the very site whose account it is - that
+# site's archive restored under the other name. It says that site's user AND that site's
+# home, so nothing in it tells it from that site's own record. What does: the account does
+# not live where a site of this name lives, and another site on record has the user.
+_lr_fresh
+mkdir -p "$STATE_DIR/domains/a.b.example"
+jq -c '.domain = "a.b.example" | .status = "restoring"' "$(lib_domain_json a-b.example)" >"$(lib_domain_json a.b.example)"
+assert_eq    "a record that names the other site's home as well"           0 "$(run_isolated _lr_do lib_domain_remove_main a.b.example)"
+assert_eq    "is put away too, and nothing is done by what it names"       "" "$(_lr_done)"
+assert_false "it is gone from the sites"                                   test -e "$STATE_DIR/domains/a.b.example"
+# with that record still there, the site whose account it is can be removed as a site
+_lr_fresh
+mkdir -p "$STATE_DIR/domains/a.b.example"
+jq -c '.domain = "a.b.example" | .status = "restoring"' "$(lib_domain_json a-b.example)" >"$(lib_domain_json a.b.example)"
+assert_eq    "the site the account belongs to is removed as a site, leftover or not" 0 "$(run_isolated _lr_do lib_domain_remove_main a-b.example)"
+assert_has   "its virtual host goes"                                       "vhost a-b.example|" "$(_lr_done)"
+assert_has   "and its account"                                             "userdel a_b_example|" "$(_lr_done)"
+# an account that no site on record has, living somewhere the record does not say
+_lr_fresh
+rm -rf "$STATE_DIR/domains/a-b.example"; mkdir -p "$STATE_DIR/domains/a.b.example"
+printf '{"domain":"a.b.example","ident":"a_b_example","user":"a_b_example","group":"a_b_example","home":"/home/a.b.example","mode":"static","status":"restoring"}\n' >"$(lib_domain_json a.b.example)"
+assert_eq    "a record whose user is an account of nobody on record"       0 "$(run_isolated _lr_do lib_domain_remove_main a.b.example)"
+assert_eq    "is put away as well: the account lives where the record does not say" "" "$(_lr_done)"
+# a site whose home was simply put somewhere else: the record says where, and nobody else has the user
+_lr_fresh
+rm -rf "$STATE_DIR/domains/a-b.example"; mkdir -p "$STATE_DIR/domains/elsewhere.example"
+jq -n --arg h "$SITES_ROOT/a-b.example" '{domain:"elsewhere.example", ident:"a_b_example", user:"a_b_example", group:"a_b_example", home:$h, mode:"static", status:"active"}' >"$(lib_domain_json elsewhere.example)"
+assert_eq    "a site whose home is not where its name says, and says so itself" 0 "$(run_isolated _lr_do lib_domain_remove_main elsewhere.example)"
+assert_has   "is removed as a site, account and all"                       "userdel a_b_example|" "$(_lr_done)"
+# and a site whose account is its own is removed as it always was
+_lr_fresh
+assert_eq    "remove of a site whose account is its own"                   0 "$(run_isolated _lr_do lib_domain_remove_main a-b.example)"
+assert_has   "takes its virtual host"                                      "vhost a-b.example|" "$(_lr_done)"
+assert_has   "its application"                                             "app a_b_example|" "$(_lr_done)"
+assert_has   "and its account"                                             "userdel a_b_example|" "$(_lr_done)"
+assert_false "and its record"                                              test -e "$STATE_DIR/domains/a-b.example"
+# one whose account is gone already still has the rest of it removed
+_lr_fresh; rm -f "$_lr/account"
+assert_eq    "remove of a site whose account is gone already"              0 "$(run_isolated _lr_do lib_domain_remove_main a-b.example)"
+assert_has   "takes what is left of it"                                    "vhost a-b.example|" "$(_lr_done)"
+assert_lacks "and deletes no account"                                      "userdel" "$(_lr_done)"
+
+eval "$_lr_saved_vars"; eval "$_lr_saved_fn"
+unset -f _lr_do _lr_said _lr_done _lr_fresh _lr_archive
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 if (( FAIL > 0 )); then exit 1; fi
 exit 0
