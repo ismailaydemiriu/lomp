@@ -344,11 +344,21 @@ a restore does it: dependencies installed again, the build run, PM2 started unde
 the new user, scheduled jobs back in cron. The port and the variables stay; a variable that
 still mentions the old domain is pointed out (`lomp app env example.net list`).
 
-Mail does not move, on purpose: a mailbox is an address at the old domain, and it has to go on
-receiving. A site whose mail was switched on for the site itself leaves that mail behind as a
-mail domain of its own - `example.com` keeps every mailbox, alias, DKIM key and its webmail
-exactly as they were (`lomp mail domain list`), as if it had been added with `mail domain add`.
-The site under its new name starts without mail; `lomp mail enable example.net` gives it some.
+Mail moves with the site. A site whose mail was switched on for the site itself has every
+mailbox taken to the new domain - `info@example.com` becomes `info@example.net`, with its mail,
+its password and its quota - and every alias copied there. At the old domain each address is
+left as an alias of its new one, so mail to an old address still arrives and the mailbox may
+still send as it; `example.com` stays a mail domain for that, with the DKIM key its earlier
+mail was signed with (keep its MX pointing here). People sign in with their new address from
+then on, in their mail program and in the webmail, whose address book and settings follow.
+For mail from outside to reach `@example.net` directly, its DNS needs the usual records:
+`lomp mail dns example.net` (written into Cloudflare by itself when a token is stored). A
+mailbox whose new address is already taken stays where it is and is named.
+
+`--keep-mail` leaves the mail at the old domain instead: `example.com` becomes a mail domain of
+its own with everything as it was, and the site starts without mail under its new name. That is
+also what happens to mail that is switched off, and to a domain whose mail was added on its own
+(`mail domain add`) - that mail was never the site's.
 
 A site that is registered under a name which is no domain name - `shop_old`, `staging`:
 `restore` made such sites until 1.0.87 - gets its domain name the same way, with

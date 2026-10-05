@@ -321,14 +321,17 @@ Usage: setup.sh rename <old-domain> <new-domain> [options]
   password. The new name gets a certificate of its own, and a WordPress has the addresses in
   its database rewritten. The old name keeps its certificate and sends every request on to
   the new one with a 301. A safety backup is taken first; the site is away for about a minute.
-  A Node.js application is set up again under the new user (dependencies, build, PM2). Mail
-  stays at the old domain, which becomes a mail domain of its own: addresses do not change.
+  A Node.js application is set up again under the new user (dependencies, build, PM2).
+  Mailboxes move to the new domain with their mail and their passwords, and every old address
+  becomes an alias of its new one: mail to it still arrives, and people sign in with the new
+  address from then on.
   A site that is registered under a name which is no domain name ("shop_old": an old restore
   made such) gets its domain name this way too. Nothing could ever ask for such a name, so no
   redirect is left under it, and a WordPress has the name its database gives rewritten.
   --no-redirect        Do not keep the old name as a redirect (its certificate goes too)
   --no-ssl             Do not request a certificate for the new name now (renew-ssl later)
   --no-search-replace  Leave the addresses inside a WordPress database as they are
+  --keep-mail          Leave the mailboxes at the old domain instead of moving them
 EOF
 }
 
@@ -453,11 +456,13 @@ _domain_rename_undo() {   # old new saved-domain.json had-wpcron(0/1)
 # new domain cannot take it over without every correspondent being told. So the old name
 # becomes a mail domain of its own - the record "mail domain add" would have made, carrying
 # the site's .mail block as it is (selectors, webmail, its mail identifier) - and the site
-# under its new name starts without mail. Sets RENAME_MAIL_KEPT when there was mail to keep.
+# under its new name starts without mail - until _domain_rename_mail_move, unless --keep-mail,
+# brings the mailboxes over. Sets RENAME_MAIL_KEPT when there was mail to keep, and
+# RENAME_MAIL_DETACHED when this run is what made the record.
 _domain_rename_mail_detach() {   # old new
   local old="$1" sf="" mf=""
   sf="$(lib_domain_json "$2")"
-  RENAME_MAIL_KEPT=0
+  RENAME_MAIL_KEPT=0; RENAME_MAIL_DETACHED=0
   [[ "$(jq -r 'has("mail")' "$sf" 2>/dev/null || true)" == "true" ]] || return 0
   if lib_mail_domain_standalone "$old"; then
     RENAME_MAIL_KEPT=1   # it had a record of its own all along, and that one counts
@@ -466,10 +471,133 @@ _domain_rename_mail_detach() {   # old new
     mkdir -p "$(dirname "$mf")" && chmod 0700 "$(dirname "$mf")" || return 1
     jq --arg d "$old" --arg ts "$(lib_iso_now)" '{domain: $d, kind: "mail", created_at: $ts, mail: (.mail // {})}' "$sf" >"${mf}.new" || return 1
     chmod 0600 "${mf}.new" && mv -f "${mf}.new" "$mf" || return 1
-    RENAME_MAIL_KEPT=1
+    RENAME_MAIL_KEPT=1; RENAME_MAIL_DETACHED=1
     lib_log_write INFO "the mail of ${old} is a mail domain of its own now (the site was renamed to ${2})"
   fi
   lib_json_set "$sf" 'del(.mail)'
+}
+
+# ---- the mailboxes follow the site ------------------------------------------------------
+# The targets of an alias, with every address of the old domain that has moved - a mailbox, or
+# an alias that is copied - named at the new one. "moved" is those addresses, one per line.
+_domain_rename_mail_targets() {   # targets old new moved
+  local t="" out=""
+  local -a list=()
+  IFS=',' read -r -a list <<<"${1// /}"
+  for t in ${list[@]+"${list[@]}"}; do
+    [[ -n "$t" ]] || continue
+    if [[ "${t#*@}" == "$2" ]] && grep -qxF -- "$t" <<<"$4"; then t="${t%%@*}@${3}"; fi
+    out+="${out:+,}${t}"
+  done
+  printf '%s' "$out"
+}
+
+# One mailbox to the new domain: its mail, and a line for the new address with the password
+# hash and the quota it had. The line of the old address stays for now - see below.
+_domain_rename_box_move() {   # user@old new-domain
+  local a="$1" nd="$2" loc="${1%%@*}" od="${1#*@}" na="" hash="" quota="" src="" dst=""
+  na="${loc}@${nd}"
+  src="${MAIL_VMAIL_HOME}/${od}/${loc}"; dst="${MAIL_VMAIL_HOME}/${nd}/${loc}"
+  if lib_mail_box_exists "$na"; then MAIL_LAST_ERROR="${na} exists already"; return 1; fi
+  if [[ -e "$dst" || -L "$dst" ]]; then MAIL_LAST_ERROR="${dst} is in the way"; return 1; fi
+  hash="$(awk -F: -v u="$a" '$1 == u { print $2; exit }' "$MAIL_PASSWD_FILE")"
+  [[ -n "$hash" ]] || { MAIL_LAST_ERROR="no password line for ${a}"; return 1; }
+  quota="$(lib_mail_box_quota "$a")"
+  if lib_have doveadm; then doveadm kick "$a" >/dev/null 2>&1 || true; fi
+  if [[ -d "$src" && ! -L "$src" ]]; then
+    if [[ ! -d "${MAIL_VMAIL_HOME}/${nd}" ]]; then
+      mkdir -- "${MAIL_VMAIL_HOME}/${nd}" \
+        && chown --reference="${MAIL_VMAIL_HOME}/${od}" "${MAIL_VMAIL_HOME}/${nd}" \
+        && chmod --reference="${MAIL_VMAIL_HOME}/${od}" "${MAIL_VMAIL_HOME}/${nd}" \
+        || { MAIL_LAST_ERROR="could not make ${MAIL_VMAIL_HOME}/${nd}"; return 1; }
+    fi
+    mv -T -- "$src" "$dst" || { MAIL_LAST_ERROR="could not move ${src}"; return 1; }
+  fi
+  lib_mail_passwd_set "$na" "$hash" "$quota"
+  lib_mail_alias_set "$od" "$a" "$na"
+}
+
+# A message that reached the old address in the moment between the move of its mail and the
+# alias taking effect was put into a mailbox made afresh under the old name. It goes on to
+# the new one, and the leftover directory goes.
+_domain_rename_box_sweep() {   # user@old new-domain
+  local loc="${1%%@*}" od="${1#*@}" src="" dst="" f="" n=0
+  src="${MAIL_VMAIL_HOME}/${od}/${loc}"; dst="${MAIL_VMAIL_HOME}/${2}/${loc}/Maildir/new"
+  [[ -d "$src" && ! -L "$src" ]] || return 0
+  if [[ -d "$dst" ]]; then
+    while IFS= read -r -d '' f; do
+      mv -n -- "$f" "${dst}/" && n=$((n + 1))
+    done < <(find "${src}/Maildir/new" "${src}/Maildir/cur" -maxdepth 1 -type f -print0 2>/dev/null)
+  fi
+  if (( n > 0 )); then lib_log_write INFO "${n} message(s) that arrived for ${1} during the move went on to ${loc}@${2}"; fi
+  if [[ -z "$(find "$src" -type f -path '*/Maildir/*' \( -path '*/new/*' -o -path '*/cur/*' \) -print -quit 2>/dev/null)" ]]; then rm -rf -- "$src"; fi
+  return 0
+}
+
+# What the webmail keeps for a mailbox - address book, settings, identities - is kept under
+# the name it signs in with. That name changes, so the row is renamed rather than left behind
+# for whoever is given the old address one day.
+_domain_rename_webmail_user() {   # user@old user@new
+  local o="${1,,}" n="${2,,}"
+  lib_mail_address_valid "$o" && lib_mail_address_valid "$n" || return 0
+  _wm_info_load || return 0
+  [[ -z "$(_wm_users "$n" || true)" ]] || return 0   # somebody signed in under the new name already
+  [[ -n "$(_wm_users "$o" || true)" ]] || return 0
+  lib_db_sql "UPDATE \`${WM_DB_NAME}\`.users SET username = '${n}' WHERE LOWER(username) = '${o}';
+UPDATE \`${WM_DB_NAME}\`.identities i JOIN \`${WM_DB_NAME}\`.users u ON u.user_id = i.user_id SET i.email = '${n}' WHERE u.username = '${n}' AND LOWER(i.email) = '${o}';" >/dev/null 2>&1
+}
+
+# The mail of the old domain moves to the new one: every mailbox with its mail, its password
+# and its quota, every alias with its targets. What is left at the old domain is one alias per
+# address, pointing at the same address of the new domain - so mail to an old address still
+# arrives, and the mailbox it arrives in may still send as it. The old domain stays a mail
+# domain (it has to, to take that mail) with the DKIM key its earlier mail was signed with.
+# Nothing is ever without a home on the way: the new address exists before the old one stops
+# being a mailbox, and the old one is an alias by the time it stops. RENAME_MAIL_MOVED lists
+# the new addresses. Status 1 with MAIL_LAST_ERROR when the new domain could not get mail at
+# all: then nothing has moved.
+_domain_rename_mail_move() {   # old new
+  local old="$1" new="$2" boxes="" aliases="" catchall="" moved="" a="" t="" webmail=""
+  RENAME_MAIL_MOVED=""
+  lib_mail_domain_enabled "$old" || { MAIL_LAST_ERROR="the mail of ${old} is switched off"; return 1; }
+  boxes="$(lib_mail_boxes "$old")"; aliases="$(lib_mail_aliases "$old")"; catchall="$(lib_mail_catchall "$old")"
+  webmail="$(lib_json_get "$(lib_mail_json "$old")" '.mail.webmail')"
+  # a subshell: it ends with lib_die when it cannot finish, and that must not end the rename
+  ( lib_mail_enable_main "$new" --yes ) || true
+  lib_mail_domain_enabled "$new" || { MAIL_LAST_ERROR="mail could not be switched on for ${new}"; return 1; }
+  # what moves, so that a target at the old domain is named at the new one
+  moved="$boxes"$'\n'"$(awk -F'\t' '{ print $1 }' <<<"$aliases")"
+  while read -r a; do
+    [[ -n "$a" ]] || continue
+    if _domain_rename_box_move "$a" "$new"; then RENAME_MAIL_MOVED+="${RENAME_MAIL_MOVED:+ }${a%%@*}@${new}"
+    else lib_warn "${a} stays a mailbox at ${old}: ${MAIL_LAST_ERROR}"; moved="$(grep -vxF -- "$a" <<<"$moved" || true)"; fi
+  done <<<"$boxes"
+  while IFS=$'\t' read -r a t; do
+    [[ -n "$a" && -n "$t" ]] || continue
+    lib_mail_alias_set "$new" "${a%%@*}@${new}" "$(_domain_rename_mail_targets "$t" "$old" "$new" "$moved")"
+    lib_mail_alias_set "$old" "$a" "${a%%@*}@${new}"
+  done <<<"$aliases"
+  if [[ -n "$catchall" ]]; then
+    t="$(_domain_rename_mail_targets "$catchall" "$old" "$new" "$moved")"
+    lib_mail_alias_set "$new" "@${new}" "$t"
+    lib_mail_alias_set "$old" "@${old}" "$t"
+  fi
+  lib_mail_tables_apply || lib_warn "The mail tables could not be rebuilt (${MAIL_LAST_ERROR}): setup.sh mail status"
+  # the old addresses are aliases now, for Postfix too: their mailbox lines go, and whatever
+  # arrived for them in between goes on
+  for a in $RENAME_MAIL_MOVED; do
+    a="${a%%@*}@${old}"
+    awk -F: -v u="$a" '$1 != u' "$MAIL_PASSWD_FILE" | lib_write_file "$MAIL_PASSWD_FILE" 0640 root:dovecot secret
+    _domain_rename_box_sweep "$a" "$new"
+    ( _domain_rename_webmail_user "$a" "${a%%@*}@${new}" ) || true
+  done
+  lib_mail_tables_apply || lib_warn "The mail tables could not be rebuilt (${MAIL_LAST_ERROR}): setup.sh mail status"
+  if [[ "$webmail" == "true" ]]; then
+    ( lib_webmail_domain_enable "$new" ) >/dev/null 2>&1 \
+      || lib_warn "The webmail of ${new} could not be set up; later: setup.sh mail webmail on ${new}"
+  fi
+  lib_log_write INFO "the mail of ${old} moved to ${new}: ${RENAME_MAIL_MOVED:-no mailbox}"
+  return 0
 }
 
 # Does the site in D_* have mail that is the site's own - not a mail domain's?
@@ -613,7 +741,7 @@ _domain_rename_leftovers() {   # what to look for: the old name, or the forms it
 }
 
 lib_domain_rename_main() {
-  local old="${1:-}" new="${2:-}" redirect=1 ssl=1 replace=1 a="" why="" rc=0 saved="" wpcron=0 oldssl=0 f="" total=7 left="" oi="" app=0 mail=0 nodom=0 oh="" what=""
+  local old="${1:-}" new="${2:-}" redirect=1 ssl=1 replace=1 a="" why="" rc=0 saved="" wpcron=0 oldssl=0 f="" total=7 left="" oi="" app=0 mail=0 nodom=0 oh="" what="" mailmove=1
   local -a seek=() greps=()
   if [[ "$old" == "-h" || "$old" == "--help" || "$old" == "help" ]]; then lib_domain_rename_usage; return 0; fi
   if [[ -z "$old" || -z "$new" || "$old" == -* || "$new" == -* ]]; then
@@ -626,6 +754,7 @@ lib_domain_rename_main() {
       --no-redirect)       redirect=0 ;;
       --no-ssl)            ssl=0 ;;
       --no-search-replace) replace=0 ;;
+      --keep-mail)         mailmove=0 ;;
       *)                   lib_domain_rename_usage >&2; lib_die "Unknown option for rename: ${a}" "" "see the usage above" ;;
     esac
   done
@@ -650,7 +779,12 @@ lib_domain_rename_main() {
   [[ -z "$why" ]] || lib_die "${old} cannot be renamed to ${new}" "$why" "setup.sh list"
   oi="$D_IDENT"; oldssl="$D_SSL"
   if lib_app_state_load "$old"; then app=1; total=8; fi
-  if _domain_rename_has_mail "$old"; then mail=1; fi
+  if _domain_rename_has_mail "$old"; then
+    mail=1
+    if (( mailmove )) && lib_mail_domain_enabled "$old"; then total=$((total + 1)); else mailmove=0; fi
+  else
+    mailmove=0
+  fi
   (( D_SSL_WANTED )) || ssl=0
 
   printf '\n%sThis will rename the site %s to %s%s\n' "$C_BLD" "$old" "$new" "$C_RST"
@@ -667,8 +801,13 @@ lib_domain_rename_main() {
     lib_note "Node.js  its PM2 service is set up again under the new user: dependencies are installed again, the application is built and started"
   fi
   if (( mail )); then
-    lib_note "mail     stays at @${old}: every mailbox, alias and key as it is, ${old} becoming a mail domain of its own"
-    lib_note "         (${new} starts without mail: setup.sh mail enable ${new})"
+    if (( mailmove )); then
+      lib_note "mail     every mailbox moves to @${new} with its mail and its password; each address at @${old} becomes an alias of it"
+      lib_note "         (people sign in with their new address from then on; --keep-mail leaves the mail where it is)"
+    else
+      lib_note "mail     stays at @${old}: every mailbox, alias and key as it is, ${old} becoming a mail domain of its own"
+      lib_note "         (${new} starts without mail: setup.sh mail enable ${new})"
+    fi
   fi
   lib_note "a safety backup is written to ${BACKUP_ROOT}/${old}/ first; the site is away for about a minute$( (( app )) && printf ', its application until it is built')"
   if (( ssl )); then
@@ -781,6 +920,15 @@ lib_domain_rename_main() {
     lib_info "no certificate requested (setup.sh renew-ssl ${new})"
   fi
 
+  # ---- the mailboxes ------------------------------------------------------------
+  # last of what takes time: switching mail on for the new name asks for a certificate too
+  if (( mailmove && RENAME_MAIL_DETACHED )) && lib_mail_domain_enabled "$old"; then
+    lib_step "Mailboxes to @${new}"
+    # in a subshell for the same reason as the certificate above: nothing in it may end the rename
+    RENAME_MAIL_MOVED="$( ( _domain_rename_mail_move "$old" "$new" >&2 && printf '%s' "$RENAME_MAIL_MOVED" ) || printf 'FAILED' )"
+    lib_rollback_clear
+  fi
+
   # ---- 7 what still says the old name ------------------------------------------
   lib_step "WordPress addresses, scheduled tasks and logs"
   if _domain_rename_has_wp; then
@@ -812,7 +960,12 @@ lib_domain_rename_main() {
   lib_print_kv "Backups"  "${f}/ (the one from before the rename: $(basename "${BK_LAST_FILE:-none}"))"
   if (( ! D_SSL && D_SSL_WANTED )); then lib_note "No certificate yet: point the DNS of ${new} here, then run: setup.sh renew-ssl ${new}"; fi
   if (( redirect )); then lib_note "Keep the DNS of ${old} pointing here for as long as the redirect should work."; fi
-  if (( RENAME_MAIL_KEPT )); then
+  if [[ -n "${RENAME_MAIL_MOVED:-}" && "$RENAME_MAIL_MOVED" != FAILED ]]; then
+    lib_note "Mail: now at @${new} - ${RENAME_MAIL_MOVED// /, }. Same passwords; the user name to sign in with is the new address."
+    lib_note "Mail to the old addresses at @${old} still arrives, as aliases, and may still be sent from. Keep the MX of ${old} pointing here."
+    lib_note "For mail from outside to reach @${new} directly, its DNS needs the records: setup.sh mail dns ${new}"
+  elif (( RENAME_MAIL_KEPT )); then
+    if [[ "${RENAME_MAIL_MOVED:-}" == FAILED ]]; then lib_warn "The mailboxes could not be moved to @${new}; they are at @${old} and work as before"; fi
     lib_note "Mail: the mailboxes at @${old} work as before; ${old} is a mail domain of its own now (setup.sh mail domain list)."
     lib_note "Mail for ${new}, if it should have any: setup.sh mail enable ${new} --mailbox info"
   fi

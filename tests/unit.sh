@@ -7096,6 +7096,18 @@ _rn="$TMP/rename"
 _rn_mods="common system ols php db ssl domain harden scan proxy app mail webmail cloudflare backup monitor install rename menu"
 _rn_stubs='
   HARDEN_PHP_INI_ROOT="$_rn/phpini"; LE_LIVE="$_rn/le"; WPCLI_BIN="$_rn/wp"; MAIL_DOMAINS_DIR="$_rn/maildomains"
+  MAIL_PASSWD_FILE="$_rn/mail/passwd"; MAIL_ALIAS_DIR="$_rn/mail/aliases"; MAIL_VMAIL_HOME="$_rn/vmail"; MAIL_DISABLED_DIR="$_rn/mail/disabled"
+  lib_mail_enable_main() {
+    printf "mail-enable %s\n" "$*" >>"$_rn/calls"
+    if [[ -e "$_rn/mail-enable-fails" ]]; then lib_die "The DKIM key could not be created"; fi
+    lib_json_set "$(lib_mail_json "$1")" ".mail.enabled = true"
+  }
+  lib_mail_tables_apply() { printf "mail-tables %s\n" "$(lib_mail_boxes | tr "\n" " ")" >>"$_rn/calls"; }
+  doveadm() { printf "doveadm %s\n" "$*" >>"$_rn/calls"; }
+  lib_webmail_domain_enable() { printf "webmail-enable %s\n" "$1" >>"$_rn/calls"; }
+  _wm_info_load() { [[ -e "$_rn/wm-users" ]] && WM_DB_NAME=wm; }
+  _wm_users() { grep -xF -- "${1,,}" "$_rn/wm-users" 2>/dev/null || true; }
+  lib_db_sql() { printf "sql %s\n" "$1" >>"$_rn/calls"; }
   lib_require_tools() { :; }; lib_require_installed() { :; }; lib_system_profile() { :; }
   lib_ols_is_installed() { return 0; }
   lib_ols_change_begin() { OLS_PENDING_RELOAD=0; }
@@ -7594,12 +7606,13 @@ _rn_mail_site() {
   : >"$_rn/mail-installed"; : >"$_rn/mail-traces-alpha.example"
 }
 _rn_mail_site
-_rn_case _rn_rename_dry alpha.example beta.example
-assert_has   "it is said beforehand that the mail stays" "stays at @alpha.example" "$(_rn_out)"
+_rn_case _rn_rename_dry alpha.example beta.example --keep-mail
+assert_has   "--keep-mail: it is said beforehand that the mail stays" "stays at @alpha.example" "$(_rn_out)"
 assert_false "a dry run registers nothing" test -e "$_rn/maildomains"
-_rn_case _rn_rename alpha.example beta.example
+_rn_case _rn_rename alpha.example beta.example --keep-mail
 _o="$(_rn_out)"
 assert_has   "a site with mail is renamed" "rc=0" "$_o"
+assert_lacks "--keep-mail: mail is not switched on for the new name" "mail-enable" "$(_rn_calls)"
 assert_eq    "the old name is a mail domain of its own, with everything its mail had" "alpha.example mail true s2026 true alpha_example s2025,s2026" \
   "$(jq -r '"\(.domain) \(.kind) \(.mail.enabled) \(.mail.selector) \(.mail.webmail) \(.mail.ident) \(.mail.selectors_used | join(","))"' "$_rn/maildomains/alpha.example/domain.json")"
 assert_eq    "the site under its new name has no mail" "false" "$(_rn_json beta.example 'has("mail")')"
@@ -7615,6 +7628,7 @@ fi
 _rn_mail_site
 mkdir -p "$_rn/maildomains/alpha.example"; printf '{"domain":"alpha.example","kind":"mail","mail":{"enabled":true,"selector":"own"}}\n' >"$_rn/maildomains/alpha.example/domain.json"
 _rn_case _rn_rename alpha.example beta.example
+assert_lacks "mail that was never the site's does not move with it" "mail-enable" "$(_rn_calls)"
 assert_eq    "a mail domain that had its own record keeps it" "own" "$(jq -r .mail.selector "$_rn/maildomains/alpha.example/domain.json")"
 assert_eq    "and the site's stale block goes" "false" "$(_rn_json beta.example 'has("mail")')"
 # mail that was switched off and left nothing behind
@@ -7631,6 +7645,114 @@ _rn_case _rn_rename alpha.example beta.example
 assert_has   "a failed rename of a site with mail rolls back" "Rolling back" "$(_rn_out)"
 assert_eq    "its mail is still the site's" "true s2026" "$(_rn_json alpha.example '"\(.mail.enabled) \(.mail.selector)"')"
 assert_false "and no mail domain was made" test -e "$_rn/maildomains/alpha.example"
+
+# ---- rename: the mailboxes follow the site --------------------------------------------
+# Unless --keep-mail: every mailbox to the new domain with its mail, its password hash and its
+# quota, every alias with its targets; at the old domain one alias per address is left.
+_rn_mail_boxes() {
+  _rn_mail_site
+  mkdir -p "$_rn/mail/aliases" "$_rn/vmail/alpha.example/info/Maildir/new" "$_rn/vmail/alpha.example/sales/Maildir/cur"
+  printf 'a message\n' >"$_rn/vmail/alpha.example/info/Maildir/new/m1"
+  printf '%s\n' 'info@alpha.example:{H}infohash::::::userdb_quota_rule=*:storage=2G' 'other@gamma.example:{H}otherhash::::::userdb_quota_rule=*:storage=1G' \
+    'sales@alpha.example:{H}saleshash::::::userdb_quota_rule=*:storage=1G' >"$_rn/mail/passwd"
+  printf 'postmaster@alpha.example\tinfo@alpha.example\nteam@alpha.example\tinfo@alpha.example,sales@alpha.example,boss@elsewhere.example\n@alpha.example\tinfo@alpha.example\n' >"$_rn/mail/aliases/alpha.example"
+}
+_rn_alias() { awk -F'\t' -v k="$2" '$1 == k { print $2 }' "$_rn/mail/aliases/$1" 2>/dev/null || true; }
+_rn_mail_boxes
+_rn_case _rn_rename_dry alpha.example beta.example
+assert_has   "it is said beforehand that the mailboxes move" "every mailbox moves to @beta.example" "$(_rn_out)"
+printf 'info@alpha.example\n' >"$_rn/wm-users"
+_rn_case _rn_rename alpha.example beta.example
+_o="$(_rn_out)"; _c="$(_rn_calls)"; _p="$(cat "$_rn/mail/passwd")"
+assert_has   "the rename succeeds" "rc=0" "$_o"
+assert_has   "mail is switched on for the new name" "mail-enable beta.example --yes" "$_c"
+assert_has   "a mailbox is one of the new domain now, with its password hash and its quota" 'info@beta.example:{H}infohash::::::userdb_quota_rule=*:storage=2G' "$_p"
+assert_has   "each of them" 'sales@beta.example:{H}saleshash::::::userdb_quota_rule=*:storage=1G' "$_p"
+assert_lacks "none is left a mailbox of the old domain" "@alpha.example:" "$_p"
+assert_has   "another domain's mailbox is not touched" 'other@gamma.example:{H}otherhash::::::userdb_quota_rule=*:storage=1G' "$_p"
+assert_true  "its mail moved with it" test -s "$_rn/vmail/beta.example/info/Maildir/new/m1"
+assert_false "and is not left behind" test -e "$_rn/vmail/alpha.example/info"
+assert_has   "open sessions under the old address are closed first" "doveadm kick info@alpha.example" "$_c"
+assert_eq    "the old address is an alias of the new one" "info@beta.example" "$(_rn_alias alpha.example info@alpha.example)"
+assert_eq    "every one" "sales@beta.example" "$(_rn_alias alpha.example sales@alpha.example)"
+assert_eq    "an alias exists at the new domain, its targets named there; one elsewhere is left alone" "info@beta.example,sales@beta.example,boss@elsewhere.example" "$(_rn_alias beta.example team@beta.example)"
+assert_eq    "and the old alias leads to it" "team@beta.example" "$(_rn_alias alpha.example team@alpha.example)"
+assert_eq    "postmaster too" "info@beta.example postmaster@beta.example" "$(_rn_alias beta.example postmaster@beta.example) $(_rn_alias alpha.example postmaster@alpha.example)"
+assert_eq    "a catch-all is one at both, into the mailbox where it is now" "info@beta.example info@beta.example" "$(_rn_alias beta.example @beta.example) $(_rn_alias alpha.example @alpha.example)"
+assert_eq    "the old domain is still a mail domain: it has to take the mail it forwards" "true s2026" "$(jq -r '"\(.mail.enabled) \(.mail.selector)"' "$_rn/maildomains/alpha.example/domain.json")"
+assert_eq    "the new one has mail" "true" "$(_rn_json beta.example '.mail.enabled')"
+# never without a home: the tables are rebuilt while the old addresses are still mailboxes too,
+# and their lines go only after that
+assert_has   "the tables are rebuilt with both names of a mailbox there" "info@alpha.example info@beta.example" "$(grep '^mail-tables' "$_rn/calls" | head -n 1)"
+assert_lacks "and again once the old lines are gone" "@alpha.example" "$(grep '^mail-tables' "$_rn/calls" | tail -n 1)"
+assert_eq    "twice in all" 2 "$(grep -c '^mail-tables' "$_rn/calls")"
+assert_true  "after the certificate: it is the last thing that takes time" bash -c 'm="$(grep -n "^mail-enable" "$1" | cut -d: -f1)"; s="$(grep -n "^add-ssl" "$1" | cut -d: -f1)"; [ "$s" -lt "$m" ]' _ "$_rn/calls"
+assert_has   "the webmail the old domain had is set up for the new one" "webmail-enable beta.example" "$_c"
+assert_has   "what the webmail kept for a mailbox follows its new name" "SET username = 'info@beta.example' WHERE LOWER(username) = 'info@alpha.example'" "$_c"
+assert_lacks "a mailbox that never signed in there has nothing to rename" "sales@beta.example' WHERE" "$_c"
+assert_has   "it is said where the mail is now" "Mail: now at @beta.example - info@beta.example, sales@beta.example" "$_o"
+assert_has   "and what the new domain's DNS needs" "setup.sh mail dns beta.example" "$_o"
+assert_has   "it is a step of its own" "Mailboxes to @beta.example" "$_o"
+# a mailbox whose new address is taken stays where it is, and so does what points at it
+_rn_mail_boxes
+printf '%s\n' 'info@beta.example:{H}taken::::::userdb_quota_rule=*:storage=1G' >>"$_rn/mail/passwd"
+_rn_case _rn_rename alpha.example beta.example
+_p="$(cat "$_rn/mail/passwd")"
+assert_has   "an address that is taken at the new domain is said" "info@alpha.example stays a mailbox at alpha.example: info@beta.example exists already" "$(_rn_out)"
+assert_has   "that mailbox stays one of the old domain" 'info@alpha.example:{H}infohash' "$_p"
+assert_has   "the one at the new domain is not written over" 'info@beta.example:{H}taken' "$_p"
+assert_true  "its mail stays" test -s "$_rn/vmail/alpha.example/info/Maildir/new/m1"
+assert_eq    "it is not made an alias" "" "$(_rn_alias alpha.example info@alpha.example)"
+assert_has   "the others move" 'sales@beta.example:{H}saleshash' "$_p"
+assert_eq    "an alias names each target where it is now" "info@alpha.example,sales@beta.example,boss@elsewhere.example" "$(_rn_alias beta.example team@beta.example)"
+# mail of somebody else's lies where a mailbox would go: that mailbox stays too
+_rn_mail_boxes
+mkdir -p "$_rn/vmail/beta.example/sales/Maildir"
+_rn_case _rn_rename alpha.example beta.example
+assert_has   "a directory in the way at the new domain is said" "sales@alpha.example stays a mailbox at alpha.example: $_rn/vmail/beta.example/sales is in the way" "$(_rn_out)"
+assert_has   "and that mailbox keeps its line" 'sales@alpha.example:{H}saleshash' "$(cat "$_rn/mail/passwd")"
+assert_true  "and its mail directory" test -d "$_rn/vmail/alpha.example/sales/Maildir/cur"
+# somebody already signed in to the webmail under the new address: that user is not written over
+_rn_mail_boxes
+printf 'info@alpha.example\ninfo@beta.example\n' >"$_rn/wm-users"
+_rn_case _rn_rename alpha.example beta.example
+assert_lacks "a webmail user that exists under the new name is left alone" "sql UPDATE" "$(_rn_calls)"
+# mail cannot be switched on for the new name: nothing moves
+_rn_mail_boxes
+: >"$_rn/mail-enable-fails"
+_rn_before_pw="$(cat "$_rn/mail/passwd")"; _rn_before_al="$(cat "$_rn/mail/aliases/alpha.example")"
+_rn_case _rn_rename alpha.example beta.example
+assert_has   "the rename itself is not undone by it" "Renamed alpha.example to beta.example" "$(_rn_out)"
+assert_has   "it is said that the mailboxes stayed" "The mailboxes could not be moved to @beta.example" "$(_rn_out)"
+assert_eq    "no mailbox line changed" "$_rn_before_pw" "$(cat "$_rn/mail/passwd")"
+assert_eq    "no alias" "$_rn_before_al" "$(cat "$_rn/mail/aliases/alpha.example")"
+assert_true  "no mail moved" test -s "$_rn/vmail/alpha.example/info/Maildir/new/m1"
+assert_true  "and the old domain still has its mail, as a mail domain" test -s "$_rn/maildomains/alpha.example/domain.json"
+# mail that is switched off is not moved: it is parked, not in use
+_rn_mail_boxes
+jq '.mail.enabled = false' "$_rn/state/domains/alpha.example/domain.json" >"$_rn/t" && cp "$_rn/t" "$_rn/state/domains/alpha.example/domain.json"
+_rn_case _rn_rename alpha.example beta.example
+assert_lacks "mail that is switched off stays where it is" "mail-enable" "$(_rn_calls)"
+assert_has   "and that is what is said beforehand" "stays at @alpha.example" "$(_rn_out)"
+# --keep-mail with mailboxes
+_rn_mail_boxes
+_rn_before_pw="$(cat "$_rn/mail/passwd")"
+_rn_case _rn_rename alpha.example beta.example --keep-mail
+assert_eq    "--keep-mail leaves every mailbox line as it is" "$_rn_before_pw" "$(cat "$_rn/mail/passwd")"
+assert_true  "and the mail" test -s "$_rn/vmail/alpha.example/info/Maildir/new/m1"
+# a message that arrived under the old name in between
+_rn_mail_boxes
+mkdir -p "$_rn/vmail/beta.example/info/Maildir/new"
+printf 'late\n' >"$_rn/vmail/alpha.example/info/Maildir/new/late"
+_rn_case _domain_rename_box_sweep info@alpha.example beta.example
+assert_true  "a message delivered to the old mailbox during the move goes on to the new one" test -s "$_rn/vmail/beta.example/info/Maildir/new/late"
+assert_false "and the directory made for it goes" test -e "$_rn/vmail/alpha.example/info"
+mkdir -p "$_rn/vmail/alpha.example/sales/Maildir/new"; printf 'x\n' >"$_rn/vmail/alpha.example/sales/Maildir/new/keep"
+_rn_case _domain_rename_box_sweep sales@alpha.example beta.example
+assert_true  "with nowhere to put it, a message is left where it is" test -s "$_rn/vmail/alpha.example/sales/Maildir/new/keep"
+_rn_case _domain_rename_mail_targets "a@old.example, b@old.example,c@old.example,x@other.example" old.example new.example "a@old.example
+c@old.example"
+assert_eq    "targets: what moved is named at the new domain, what did not is not" "a@new.example,b@old.example,c@new.example,x@other.examplerc=0" "$(_rn_out)"
 
 # ---- rename: a site with a Node.js application ----------------------------------------
 # The PM2 service is named after the user and runs out of the home. It is taken down before
@@ -8084,7 +8206,7 @@ assert_lacks "a site whose name is no domain name is not asked: nothing could as
 assert_eq    "it is renamed without the question" "runs: rename shop_old beta.example" "$(_mrn shop_old beta.example n | tail -n 1)"
 assert_lacks "a new name that is none goes no further than the menu" "runs:" "$(_mrn shop_old shop_new)"
 unset -f _mrn
-unset -f _rn_case _rn_out _rn_calls _rn_site _rn_fresh _rn_tree _rn_json _rn_mail_site _rn_app_site
+unset -f _rn_case _rn_out _rn_calls _rn_site _rn_fresh _rn_tree _rn_json _rn_mail_site _rn_app_site _rn_mail_boxes _rn_alias
 
 # =============================================================================
 section "two domains never share the name their certificate and webmail go by"
