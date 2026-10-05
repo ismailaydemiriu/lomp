@@ -9377,6 +9377,37 @@ if true; then
 fi
 assert_eq   "a one-line usage" "Kullanım: lomp php-cleanup [--php 8.3]" "$(_dt_plain "Usage: lomp php-cleanup [--php 8.3]")"
 unset -f _uo
+# import: the lines its own Turkish did not have, and the table of what was found there
+assert_eq   "import: a refusal"  "--path ve --as birlikte verilir" "$(_dt_plain "--path and --as go together")"
+assert_eq   "its reason"         "oradaki bir dizin buradaki bir site olur" "$(_dt_plain "one directory there becomes one site here")"
+assert_eq   "a site that cannot be taken" "a.example burada bir proxy sitesi" "$(_dt_plain "a.example is a proxy site here")"
+assert_eq   "a copy that failed" "a.example kopyalanamadı: /var/www/a/wp-config.php yok" "$(_dt_plain "a.example could not be copied: /var/www/a/wp-config.php is missing")"
+assert_eq   "a mailbox that could not be made" "info@a.example posta kutusu oluşturulamadı" "$(_dt_plain "The mailbox info@a.example could not be made")"
+assert_eq   "the choice that is none" "\"9\" listeden bir seçim değil" "$(_dt_plain "\"9\" is not a choice from the list")"
+assert_eq   "what to run again"  "bunları giderip yalnızca onlar için içe aktarmayı yeniden çalıştırın: --only a.example,b.example" "$(_dt_plain "clear them up and run the import again for those: --only a.example,b.example")"
+if declare -F lib_import_list_print >/dev/null; then
+  _il() {   # tr|en -> the list of what was found on the other server
+    (
+      IMP_SSH_TARGET="root@old.example"; IMP_DOMAIN=(a.example b.example); IMP_KB=(2048 1024); IMP_KIND=(wordpress php)
+      IMP_DB=(a_db -); IMP_ROOT=(/var/www/a /var/www/b); IMP_NAMELESS=(); IMP_OPT_ONLY_MAIL=0; C_BLD=""; C_RST=""
+      eval 'lib_import_here() { if [[ "$1" == a.example ]]; then printf "new"; else printf "exists"; fi; }
+            _import_boxes_of() { if [[ "$1" == a.example ]]; then printf "info@a.example\nsales@a.example\n"; fi; }
+            _import_aliases_of() { :; }
+            _import_mail_kb() { printf 0; }'
+      if [[ "$1" == "tr" ]]; then LIB_LANG="tr"; lib_lang_build; fi
+      lib_import_list_print
+    )
+  }
+  _o="$(_il tr)"
+  assert_has  "import --list: the headings in Turkish" "ALAN ADI" "$_o"
+  assert_has  "its kinds and databases" "TÜR        VERİTABANI            KUTULAR  " "$_o"
+  assert_has  "to the last column"  "BURADA    ORADAKİ DİZİN" "$_o"
+  assert_has  "a site that would be new, with its mailboxes counted" "a_db                  2          -        yeni      /var/www/a" "$_o"
+  assert_has  "one that is here already, its columns in line" "-                     -          -        var       /var/www/b" "$_o"
+  assert_has  "in English the list is what it was" "TYPE       DATABASE              MAILBOXES  ALIASES  HERE      DIRECTORY THERE" "$(_il en)"
+  assert_has  "row and all"         "a_db                  2          -        new       /var/www/a" "$(_il en)"
+  unset -f _il
+fi
 # lib_tprintf: printf for a table
 _tp() { ( LIB_LANG="tr"; lib_lang_build; lib_tprintf "$@" ); }
 assert_eq   "in English it is printf, flags and all" "$(printf '%-10s|%5s|%4s%%|%d|%s\n' MODE SIZE 7 3 x)" "$(lib_tprintf '%-10s|%5s|%4s%%|%d|%s\n' MODE SIZE 7 3 x)"
