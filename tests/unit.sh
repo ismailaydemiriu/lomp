@@ -5355,7 +5355,7 @@ assert_true  "none of which touched the entry" lib_cron_has backup
 ( lib_backup_main --schedule off ) >/dev/null 2>&1
 assert_false "off removes the entry"    lib_cron_has backup
 assert_eq  "and the record of it"       "" "$(lib_manifest_get '.backup.schedule')$(lib_manifest_get '.backup.schedule_flags')"
-assert_has "the menu offers it"         '3) Automatic backups' "$(declare -f _menu_backup)"
+assert_has "the menu offers it"         "_menu_opt 3 \"\$(_menu_tf 'Automatic backups" "$(declare -f _menu_backup)"
 assert_has "and the command reference"  '--schedule "daily 03:00"' "$(lib_usage)"
 
 # =============================================================================
@@ -8332,6 +8332,115 @@ assert_has   "but its own"                                                      
 
 eval "$_cm_saved"
 unset -f _cm_q
+
+# =============================================================================
+section "menu: two languages"
+# The menu's texts are English where they are used, and MENU_TR holds the Turkish for each.
+# A text added to the menu without its Turkish, or a Turkish format that takes other values
+# than its English one, shows only on somebody's terminal - so both are looked for here.
+_ml_src="$(sed -n '/^MENU_CMD=""/,/^# MENU_TR-BEGIN/p' "$ROOT/lib/menu.sh")"
+_ml_missing=""; _ml_n=0
+while IFS= read -r _ml_k; do
+  [[ -n "$_ml_k" ]] || continue
+  _ml_n=$((_ml_n + 1))
+  [[ -n "${MENU_TR[$_ml_k]:-}" ]] || _ml_missing+="[${_ml_k}] "
+done < <(
+  {
+    grep -oE "_menu_printf '[^']*'" <<<"$_ml_src" | sed -e "s/^_menu_printf '//" -e "s/'\$//" || true
+    grep -oE "_menu_tf? '[^']*'" <<<"$_ml_src" | sed -e "s/^_menu_tf* '//" -e "s/'\$//" || true
+    grep -oE '_menu_(item|opt) +[0-9]+ "[^"$]*"' <<<"$_ml_src" | sed -e 's/^[^"]*"//' -e 's/"$//' || true
+    grep -oE '_menu_(group|prompt|hint|note) "[^"$]*"' <<<"$_ml_src" | sed -e 's/^[^"]*"//' -e 's/"$//' || true
+    grep -oE '_menu_ask [a-z_]+ "[^"$]*"' <<<"$_ml_src" | sed -e 's/^[^"]*"//' -e 's/"$//' || true
+    grep -E '^[[:space:]]+"[^"$]*"( \\)?$' <<<"$_ml_src" | sed -e 's/^[^"]*"//' -e 's/"[^"]*$//' || true
+  } | sort -u
+)
+assert_true "the menu's texts were found"            test "$_ml_n" -ge 200
+assert_eq   "every one of them has its Turkish"      "" "$_ml_missing"
+
+# the same values in the same order, the same line breaks, the same indent
+_ml_bad=""; _ml_nl='\n'
+for _ml_k in "${!MENU_TR[@]}"; do
+  _ml_v="${MENU_TR[$_ml_k]}"
+  _ml_a="${_ml_k//"$_ml_nl"/}"; _ml_b="${_ml_v//"$_ml_nl"/}"
+  if [[ "${_ml_k//[^%]/}" != "${_ml_v//[^%]/}" ]] \
+     || (( ${#_ml_k} - ${#_ml_a} != ${#_ml_v} - ${#_ml_b} )) \
+     || [[ "${_ml_k:0:2}" == "$_ml_nl" && "${_ml_v:0:2}" != "$_ml_nl" ]] \
+     || [[ "${_ml_k: -2}" == "$_ml_nl" && "${_ml_v: -2}" != "$_ml_nl" ]] \
+     || [[ -z "$_ml_v" ]]; then
+    _ml_bad+="[${_ml_k}] "
+  fi
+done
+assert_true "the table is there"                              test "${#MENU_TR[@]}" -ge 200
+assert_eq   "no Turkish text takes other values than its English one" "" "$_ml_bad"
+assert_true "and none of them was left out of the menu"       test "${#MENU_TR[@]}" -le "$((_ml_n + 3))"
+
+# what is shown, by language
+_ml() {   # language, command...
+  ( MENU_LANG="$1"; C_BLD="" C_DIM="" C_CYN="" C_YEL="" C_GRN="" C_RST=""; shift; "$@" ) 2>&1
+}
+assert_eq "English alone"                         "Back"        "$(_ml en _menu_t "Back")"
+assert_eq "Turkish alone"                         "Geri"        "$(_ml tr _menu_t "Back")"
+assert_eq "both, on one line"                     "Back / Geri" "$(_ml both _menu_t "Back")"
+assert_eq "a text with no Turkish stays as it is" "zzz"         "$(_ml both _menu_t "zzz")"
+assert_eq "also when only Turkish is asked for"   "zzz"         "$(_ml tr _menu_t "zzz")"
+assert_eq "one that reads the same is not said twice" "Port"    "$(_ml both _menu_t "Port")"
+assert_eq "an empty text is no key"               ""            "$(_ml both _menu_t "")"
+assert_eq "values go into both languages" \
+  "Also serve www.a.example? (y/n) / www.a.example adresi de sunulsun mu? (y/n)" \
+  "$(_ml both _menu_tf 'Also serve www.%s? (y/n)' a.example)"
+assert_eq "and into the one asked for"            "www.a.example adresi de sunulsun mu? (y/n)" \
+  "$(_ml tr _menu_tf 'Also serve www.%s? (y/n)' a.example)"
+assert_eq "whole lines: the English one, then the Turkish one" \
+  $'a.example has no path proxies.\na.example sitesinde yol yönlendirmesi yok.' \
+  "$(_ml both _menu_printf '%s%s has no path proxies.%s\n' "" a.example "")"
+assert_eq "the blank line in front is not said twice" \
+  $'\nWhich site?\nHangi site?' "$(_ml both _menu_printf '\n%sWhich site?%s\n' "" "")"
+assert_eq "one language, one line"                $'\nHangi site?' "$(_ml tr _menu_printf '\n%sWhich site?%s\n' "" "")"
+assert_eq "a line that is in no table is printed once" "plain 7" "$(_ml both _menu_printf 'plain %s\n' 7)"
+assert_eq "an item carries both"                  "   3) Back / Geri" "$(_ml both _menu_item 3 "Back")"
+assert_eq "or the one asked for"                  "   3) Geri"        "$(_ml tr _menu_item 3 "Back")"
+assert_eq "a heading too"                         " SITES / SİTELER"  "$(_ml both _menu_group "SITES")"
+assert_eq "the question as well"                  "Choice / Seçim: "  "$(_ml both _menu_prompt "Choice")"
+_ml_long="Node.js app that lomp keeps running (PM2: starts at boot, comes back after a crash)"
+assert_eq "two long texts take a line each"       2 "$(_ml both _menu_opt 4 "$_ml_long" | wc -l | tr -d ' ')"
+assert_eq "one language never does"               1 "$(_ml tr _menu_opt 4 "$_ml_long" | wc -l | tr -d ' ')"
+_ml_h1="PM2 keeps the app running: it starts at boot and comes back after a crash."
+_ml_h1tr="PM2 uygulamayı ayakta tutar: açılışta başlatır, çökerse yeniden kaldırır."
+assert_eq "an explanation: Turkish block, then English block" \
+  "  ${_ml_h1tr}"$'\n'"  ${_ml_h1}" "$(_ml both _menu_hint "$_ml_h1")"
+assert_eq "or Turkish alone"                      "  ${_ml_h1tr}" "$(_ml tr _menu_hint "$_ml_h1")"
+assert_eq "or English alone"                      "  ${_ml_h1}"   "$(_ml en _menu_hint "$_ml_h1")"
+assert_eq "one with no Turkish is not lost in Turkish" "  only english" "$(_ml tr _menu_note "only english")"
+
+# which language: LOMP_MENU_LANG, else the manifest, else both
+_ml_load() {   # LOMP_MENU_LANG value, manifest value
+  ( MENU_LANG=""; LOMP_MENU_LANG="$1"
+    : >"$TMP/ml-manifest"; STATE_DIR="$TMP/ml-state"; mkdir -p "$STATE_DIR"; printf '{}' >"$STATE_DIR/manifest.json"
+    eval 'lib_manifest_get() { printf "%s" "'"$2"'"; }'
+    _menu_lang_load; printf '%s' "$MENU_LANG" )
+}
+assert_eq "both when nothing says otherwise"      "both" "$(_ml_load "" "")"
+assert_eq "what the manifest holds"               "tr"   "$(_ml_load "" tr)"
+assert_eq "the environment before the manifest"   "en"   "$(_ml_load en tr)"
+assert_eq "a value that is no language is both"   "both" "$(_ml_load "" deutsch)"
+
+# "Menu language" in the menu: applies at once, and is kept when there is a server to keep it on
+_ml_pick() {   # answer, installed 0|1 -> "language|what was stored"
+  ( MENU_LANG="both"; : >"$TMP/ml-set"
+    eval '_menu_ask() { local -n _o="$1"; _o="'"$1"'"; }
+          lib_installed() { return '"$(( $2 ? 0 : 1 ))"'; }
+          lib_manifest_set() { printf "%s=%s" "$1" "$2" >"$TMP/ml-set"; }'
+    _menu_language >/dev/null 2>&1
+    printf '%s|%s' "$MENU_LANG" "$(cat "$TMP/ml-set")" )
+}
+assert_eq "1 is Turkish, and it is stored"        "tr|.menu.lang=tr"     "$(_ml_pick 1 1)"
+assert_eq "2 is English"                          "en|.menu.lang=en"     "$(_ml_pick 2 1)"
+assert_eq "3 is both"                             "both|.menu.lang=both" "$(_ml_pick 3 1)"
+assert_eq "anything else changes nothing"         "both|"                "$(_ml_pick "" 1)"
+assert_eq "before the install it lasts for this menu only" "tr|"         "$(_ml_pick 1 0)"
+_menu_block="$(awk '/_menu_group "SITES"/{f=1} f{print} f && /^[[:space:]]*esac/{exit}' "$ROOT/lib/menu.sh")"
+assert_has "it is item 28 of the main menu"       '28) _menu_language ;;' "$_menu_block"
+unset -f _ml _ml_load _ml_pick
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 if (( FAIL > 0 )); then exit 1; fi

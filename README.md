@@ -146,6 +146,14 @@ entry just runs the corresponding command, so nothing is hidden from you. Piped 
 `--non-interactive` it prints the command reference instead, so scripts and cron are
 unaffected.
 
+The menu speaks English and Turkish. Out of the box every entry, question and explanation
+shows both (`Add a site / Site ekle`); **28 → Menu language** in the menu switches to Turkish
+alone, English alone or back, and the server remembers it. `LOMP_MENU_LANG=tr|en|both` does the
+same for one run. Only the menu is translated: the commands it runs, their output and the
+command reference stay in English. The Turkish texts are the `MENU_TR` table at the end of
+`lib/menu.sh`, one line per text; a text added to the menu without a line there fails the unit
+suite.
+
 After installation the script is available system-wide as `lomp` (or the longer
 `lompstack`), so you do not need to stay in the clone directory.
 

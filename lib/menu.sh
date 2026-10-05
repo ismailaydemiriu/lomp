@@ -224,7 +224,8 @@ COMMANDS
                                 current state and the SSH tunnel command, "close"
                                 shuts it immediately. Built for dynamic IPs.
   logs <domain> [--access|--error] [-n LINES]
-  menu                          Interactive menu (also what a bare "lomp" opens)
+  menu                          Interactive menu (also what a bare "lomp" opens); in
+                                English and Turkish, item 28 or LOMP_MENU_LANG=tr|en|both
   help                          This text
 
 GLOBAL FLAGS
@@ -251,9 +252,120 @@ _menu_cmd_name() { if [[ -x "$BIN_SHORT" ]]; then basename "$BIN_SHORT"; else ba
 
 _menu_rule() { printf '%s%s%s\n' "$C_DIM" "------------------------------------------------------------" "$C_RST"; }
 
+# -----------------------------------------------------------------------------
+#  Two languages
+# -----------------------------------------------------------------------------
+# The menu's texts are written in English where they are used, and MENU_TR at the end of this
+# file holds the Turkish for each of them, keyed by the English text exactly as written. A
+# text with no entry there is shown in English alone. MENU_LANG says what is shown:
+#   both  English with the Turkish next to it (the default)      tr  Turkish      en  English
+# from LOMP_MENU_LANG, else from the manifest (.menu.lang, set by "Menu language" in the menu).
+# Commands, their output and the command reference are not translated.
+MENU_LANG=""            # "" = not read yet
+MENU_TXT="" MENU_ALT="" # what _menu_pair found: the text to show, and its other language
+
+_menu_lang_load() {
+  local v="${LOMP_MENU_LANG:-}"
+  if [[ -z "$v" && -s "${STATE_DIR}/manifest.json" ]]; then v="$(lib_manifest_get '.menu.lang' 2>/dev/null || true)"; fi
+  case "$v" in tr|en|both) MENU_LANG="$v" ;; *) MENU_LANG="both" ;; esac
+}
+
+_menu_pair() {   # English text -> MENU_TXT, MENU_ALT
+  local tr=""
+  [[ -n "$MENU_LANG" ]] || _menu_lang_load
+  MENU_TXT="$1"; MENU_ALT=""
+  [[ -n "$1" ]] || return 0
+  tr="${MENU_TR[$1]:-}"
+  [[ -n "$tr" && "$tr" != "$1" ]] || return 0
+  case "$MENU_LANG" in
+    tr)   MENU_TXT="$tr" ;;
+    both) MENU_ALT="$tr" ;;
+  esac
+  return 0
+}
+
+# A text on one line: "English / Türkçe" when both are shown.
+_menu_t() {   # English text
+  _menu_pair "$1"
+  printf '%s%s' "$MENU_TXT" "${MENU_ALT:+ / $MENU_ALT}"
+}
+
+# The same for a text with values in it: the English text is a printf format.
+_menu_tf() {   # format, value...
+  local a="" b=""
+  _menu_pair "$1"; shift
+  # shellcheck disable=SC2059
+  printf -v a "$MENU_TXT" "$@"
+  if [[ -n "$MENU_ALT" ]]; then
+    # shellcheck disable=SC2059
+    printf -v b "$MENU_ALT" "$@"
+    a+=" / ${b}"
+  fi
+  printf '%s' "$a"
+}
+
+# printf for whole lines: the English lines, then the Turkish ones.
+_menu_printf() {   # format, value...
+  local nl='\n'
+  _menu_pair "$1"; shift
+  # shellcheck disable=SC2059
+  printf "$MENU_TXT" "$@"
+  if [[ -n "$MENU_ALT" ]]; then
+    # shellcheck disable=SC2059
+    printf "${MENU_ALT#"$nl"}" "$@"
+  fi
+  return 0
+}
+
+# What follows a number in a list: the text, and its Turkish beside it or, when the two do
+# not fit one line, below it.
+_menu_label() {   # English text
+  _menu_pair "$1"
+  if [[ -z "$MENU_ALT" ]]; then printf '%s\n' "$MENU_TXT"
+  elif (( ${#MENU_TXT} + ${#MENU_ALT} > 96 )); then printf '%s\n      %s%s%s\n' "$MENU_TXT" "$C_DIM" "$MENU_ALT" "$C_RST"
+  else printf '%s %s/ %s%s\n' "$MENU_TXT" "$C_DIM" "$MENU_ALT" "$C_RST"; fi
+}
+
+# Lines of explanation: the Turkish block first, then the English one.
+_menu_lines() {   # colour ("" for none), line...
+  local c="$1" l="" any=0
+  shift
+  [[ -n "$MENU_LANG" ]] || _menu_lang_load
+  if [[ "$MENU_LANG" != "en" ]]; then
+    for l in "$@"; do
+      if [[ -n "${MENU_TR[$l]:-}" ]]; then printf '  %s%s%s\n' "$c" "${MENU_TR[$l]}" "${c:+$C_RST}"; any=1; fi
+    done
+  fi
+  if [[ "$MENU_LANG" != "tr" ]] || (( ! any )); then
+    for l in "$@"; do printf '  %s%s%s\n' "$c" "$l" "${c:+$C_RST}"; done
+  fi
+  return 0
+}
+
+_menu_prompt() { printf '%s%s: %s' "$C_BLD" "$(_menu_t "$1")" "$C_RST"; }   # English text
+
+_menu_language() {
+  local what="" new=""
+  [[ -n "$MENU_LANG" ]] || _menu_lang_load
+  _menu_printf '\n  The menu speaks Turkish, English, or both at once. Now: %s\n' "$MENU_LANG"
+  printf '  1) Türkçe\n  2) English\n  3) English + Türkçe\n'
+  _menu_ask what "Choice"
+  case "$what" in
+    1) new="tr" ;;
+    2) new="en" ;;
+    3) new="both" ;;
+    *) return 0 ;;
+  esac
+  MENU_LANG="$new"
+  # kept for the next time the menu opens; before the server is installed there is nowhere to
+  # keep it, and it lasts as long as this menu
+  if lib_installed; then lib_manifest_set '.menu.lang' "$new" || true; fi
+  return 0
+}
+
 _menu_pause() {
   local _ignored=""
-  printf '\n%sPress Enter to go back to the menu...%s' "$C_DIM" "$C_RST"
+  printf '\n%s%s%s' "$C_DIM" "$(_menu_t 'Press Enter to go back to the menu...')" "$C_RST"
   read -r _ignored || true
   printf '\n'
 }
@@ -269,8 +381,8 @@ _menu_run() {
   trap ':' INT
   "$SCRIPT_PATH" "$@" </dev/tty || rc=$?
   trap - INT
-  if (( rc == 130 )); then printf '\n%sStopped.%s\n' "$C_DIM" "$C_RST"
-  elif (( rc != 0 )); then printf '\n%sThat command exited with status %s.%s\n' "$C_YEL" "$rc" "$C_RST"; fi
+  if (( rc == 130 )); then _menu_printf '\n%sStopped.%s\n' "$C_DIM" "$C_RST"
+  elif (( rc != 0 )); then _menu_printf '\n%sThat command exited with status %s.%s\n' "$C_YEL" "$rc" "$C_RST"; fi
   _menu_pause
 }
 
@@ -295,15 +407,15 @@ _menu_pick_domain() {   # [apps|php]
   local d="" i=1 choice="" only="${1:-}"
   mapfile -t doms < <(_menu_domains "$only")
   if ((${#doms[@]} == 0)); then
-    if [[ "$only" == "apps" ]]; then printf '%sNo Node.js applications yet: add a site and choose "Node.js app".%s\n' "$C_YEL" "$C_RST" >&2
-    elif [[ "$only" == "php" ]]; then printf '%sNo PHP sites yet: add a site and choose "PHP site".%s\n' "$C_YEL" "$C_RST" >&2
-    else printf '%sNo sites have been added yet.%s\n' "$C_YEL" "$C_RST" >&2; fi
+    if [[ "$only" == "apps" ]]; then _menu_printf '%sNo Node.js applications yet: add a site and choose "Node.js app".%s\n' "$C_YEL" "$C_RST" >&2
+    elif [[ "$only" == "php" ]]; then _menu_printf '%sNo PHP sites yet: add a site and choose "PHP site".%s\n' "$C_YEL" "$C_RST" >&2
+    else _menu_printf '%sNo sites have been added yet.%s\n' "$C_YEL" "$C_RST" >&2; fi
     return 1
   fi
-  printf '\n%sWhich site?%s\n' "$C_BLD" "$C_RST" >&2
+  _menu_printf '\n%sWhich site?%s\n' "$C_BLD" "$C_RST" >&2
   for d in "${doms[@]}"; do printf '  %2d) %s\n' "$i" "$d" >&2; i=$((i + 1)); done
-  printf '   0) cancel\n' >&2
-  printf '%sNumber: %s' "$C_BLD" "$C_RST" >&2
+  printf '   0) %s\n' "$(_menu_t 'cancel')" >&2
+  _menu_prompt "Number" >&2
   read -r choice </dev/tty || return 1
   [[ "$choice" =~ ^[0-9]+$ ]] || return 1
   (( choice >= 1 && choice <= ${#doms[@]} )) || return 1
@@ -313,7 +425,12 @@ _menu_pick_domain() {   # [apps|php]
 _menu_ask() {   # _menu_ask VAR "prompt" ["default"]
   local -n _out="$1"
   local prompt="$2" def="${3:-}" ans=""
-  printf '%s%s%s%s: ' "$C_BLD" "$prompt" "${def:+ [$def]}" "$C_RST"
+  _menu_pair "$prompt"
+  if [[ -n "$MENU_ALT" ]]; then
+    if (( ${#MENU_TXT} + ${#MENU_ALT} > 96 )); then printf '%s%s%s\n' "$C_DIM" "$MENU_ALT" "$C_RST"
+    else MENU_TXT+=" / ${MENU_ALT}"; fi
+  fi
+  printf '%s%s%s%s: ' "$C_BLD" "$MENU_TXT" "${def:+ [$def]}" "$C_RST"
   read -r ans </dev/tty || ans=""
   _out="${ans:-$def}"
 }
@@ -333,19 +450,14 @@ _menu_header() {
 }
 
 # Lines of explanation above a question or under a heading, for whoever has not been here in
-# a while. They come in Turkish and in English: the Turkish lines first, then the same in
-# English, as one call each.
-_menu_hint() {   # line...
-  printf '%s' "$C_DIM"; printf '  %s\n' "$@"; printf '%s' "$C_RST"
-}
+# a while: dimmed (hint) or plain (note).
+_menu_hint() { _menu_lines "$C_DIM" "$@"; }   # line...
+_menu_note() { _menu_lines "" "$@"; }         # line...
 
-# One choice of a numbered list, with its Turkish reading on the line below.
-_menu_kind() {   # number, English, Turkish
-  printf '  %s) %s\n     %s%s%s\n' "$1" "$2" "$C_DIM" "$3" "$C_RST"
-}
-
-_menu_group() { printf ' %s%s%s\n' "$C_BLD" "$1" "$C_RST"; }
-_menu_item()  { printf '  %s%2s%s) %s\n' "$C_CYN" "$1" "$C_RST" "$2"; }
+_menu_group() { printf ' %s%s%s\n' "$C_BLD" "$(_menu_t "$1")" "$C_RST"; }
+_menu_item()  { printf '  %s%2s%s) ' "$C_CYN" "$1" "$C_RST"; _menu_label "$2"; }
+# One choice of a short numbered list that is asked about with "Choice".
+_menu_opt()   { printf '  %s) ' "$1"; _menu_label "$2"; }
 
 # =============================================================================
 #  Menu shown before the server is provisioned
@@ -353,14 +465,15 @@ _menu_item()  { printf '  %s%2s%s) %s\n' "$C_CYN" "$1" "$C_RST" "$2"; }
 _menu_not_installed() {
   local choice="" email=""
   while true; do
-    printf '\n %s%slompstack%s  this server is not provisioned yet\n' "$C_BLD" "$C_CYN" "$C_RST"
+    _menu_printf '\n %s%slompstack%s  this server is not provisioned yet\n' "$C_BLD" "$C_CYN" "$C_RST"
     _menu_rule
     _menu_item 1 "Install the server (OpenLiteSpeed, PHP, MariaDB, Redis, firewall)"
     _menu_item 2 "Show what the installation would do, changing nothing (dry run)"
     _menu_item 3 "Command reference"
     _menu_item 4 "Install a mail-only server (mail and webmail for your domains, no web sites)"
+    _menu_item 5 "Menu language: Türkçe, English, or both"
     _menu_item 0 "Exit"
-    printf '\n%sChoice: %s' "$C_BLD" "$C_RST"
+    printf '\n'; _menu_prompt "Choice"
     read -r choice </dev/tty || return 0
     case "$choice" in
       1) _menu_ask email "E-mail for Let's Encrypt and alerts" "$DEFAULT_EMAIL"
@@ -368,8 +481,9 @@ _menu_not_installed() {
       2) _menu_run install --dry-run ;;
       3) lib_usage | ${PAGER:-less} 2>/dev/null || lib_usage; _menu_pause ;;
       4) _menu_install_mail_only ;;
+      5) _menu_language ;;
       0|q|Q|"") return 0 ;;
-      *) printf '%sPick a number from the list.%s\n' "$C_YEL" "$C_RST" ;;
+      *) _menu_printf '%sPick a number from the list.%s\n' "$C_YEL" "$C_RST" ;;
     esac
   done
 }
@@ -384,6 +498,7 @@ lib_menu_main() {
     return 0
   fi
   lib_require_tools
+  _menu_lang_load
   if ! lib_installed; then _menu_not_installed; return 0; fi
   # a server installed for mail alone has no site to list: its menu is the mail menu
   if lib_server_mail_only; then _menu_mail top; return 0; fi
@@ -421,8 +536,9 @@ lib_menu_main() {
     _menu_item 18 "Optional components (Node.js, Python, Netdata, Mail)"
     _menu_item 22 "Remove extra PHP packages (after apt install lsphp83*)"
     _menu_item 19 "Command reference"
+    _menu_item 28 "Menu language: Türkçe, English, or both"
     _menu_item  0 "Exit"
-    printf '\n%sChoice: %s' "$C_BLD" "$C_RST"
+    printf '\n'; _menu_prompt "Choice"
     read -r choice </dev/tty || return 0
 
     case "$choice" in
@@ -453,8 +569,9 @@ lib_menu_main() {
       17) _menu_run notify --show ;;
       18) _menu_runtimes ;;
       19) lib_usage | ${PAGER:-less} 2>/dev/null || lib_usage; _menu_pause ;;
+      28) _menu_language ;;
       0|q|Q|"") printf '\n'; return 0 ;;
-      *) printf '%sPick a number from the list.%s\n' "$C_YEL" "$C_RST" ;;
+      *) _menu_printf '%sPick a number from the list.%s\n' "$C_YEL" "$C_RST" ;;
     esac
   done
 }
@@ -465,45 +582,37 @@ _menu_add_site() {
   _menu_ask domain "Domain (without www, e.g. example.com)"
   [[ -n "$domain" ]] || return 0
   if ! lib_domain_valid "${domain,,}"; then
-    printf '%s"%s" is not a valid domain name.%s\n' "$C_YEL" "$domain" "$C_RST"
+    _menu_printf '%s"%s" is not a valid domain name.%s\n' "$C_YEL" "$domain" "$C_RST"
     _menu_pause; return 0
   fi
   args=("$domain")
 
-  printf '\n%sWhat kind of site?%s\n' "$C_BLD" "$C_RST"
-  _menu_kind 1 "PHP site (default)" "PHP sitesi (varsayılan)"
-  _menu_kind 2 "WordPress, installed and configured" "WordPress, kurulmuş ve ayarlanmış"
-  _menu_kind 3 "Static files only" "Yalnızca statik dosyalar"
-  _menu_kind 4 "Node.js app that lomp keeps running (PM2: starts at boot, comes back after a crash)" \
-    "lomp'un çalışır tuttuğu Node.js uygulaması (PM2: açılışta başlar, çökünce geri gelir)"
-  _menu_kind 5 "Reverse proxy: the domain goes to a port where an app you start yourself listens" \
-    "Ters proxy: alan adı, sizin başlattığınız uygulamanın dinlediği porta gider"
+  _menu_printf '\n%sWhat kind of site?%s\n' "$C_BLD" "$C_RST"
+  _menu_opt 1 "PHP site (default)"
+  _menu_opt 2 "WordPress, installed and configured"
+  _menu_opt 3 "Static files only"
+  _menu_opt 4 "Node.js app that lomp keeps running (PM2: starts at boot, comes back after a crash)"
+  _menu_opt 5 "Reverse proxy: the domain goes to a port where an app you start yourself listens"
   _menu_ask kind "Choice" "1"
   case "$kind" in
     2) args+=(--wordpress) ;;
     3) args+=(--static) ;;
-    4) _menu_hint "Ziyaretçiler uygulamaya bu site üzerinden ulaşır; uygulamanın kendisi yerel bir portu dinler." \
-         "Uygulama o portu PORT değişkeninden almalıdır (process.env.PORT), sabit bir sayıdan değil." \
-         "Sonrası: kodu /home/${domain,,}/app içine koyun, ardından menü 6 -> 3 (Deploy)."
-       _menu_hint "Visitors reach the app through this site; the app itself listens on a local port." \
+    4) _menu_hint "Visitors reach the app through this site; the app itself listens on a local port." \
          "It must take that port from the PORT variable (process.env.PORT), not a fixed number." \
-         "Afterwards: put the code into /home/${domain,,}/app, then menu 6 -> 3 (Deploy)."
-       _menu_ask port "Port the app listens on (it gets it as PORT) / Uygulamanın dinleyeceği port" "$(lib_app_port_pick 2>/dev/null || true)"
+         "Afterwards: put the code into /home/<domain>/app, then menu 6 -> 3 (Deploy)."
+       _menu_ask port "Port the app listens on (it gets it as PORT)" "$(lib_app_port_pick 2>/dev/null || true)"
        _menu_ask start "Start command (runs without a shell)" "npm start"
        args+=(--node)
        if [[ -n "$port" ]]; then args+=(--port "$port"); fi
        if [[ -n "$start" && "$start" != "npm start" ]]; then args+=(--start "$start"); fi ;;
-    5) _menu_hint "Bu alan adına gelen her istek, bu sunucudaki aşağıdaki adrese iletilir." \
-         "O uygulamayı lomp başlatmaz, siz başlatırsınız. Uygulama kapalıyken site 503 yanıtı verir." \
-         "Bir sitenin yalnızca tek bir yolu (example.com/api/) için: menü 6 -> 11 (Path proxies)."
-       _menu_hint "Everything that asks for this domain is passed to the address below, on this server." \
+    5) _menu_hint "Everything that asks for this domain is passed to the address below, on this server." \
          "lomp does not start that app: you do. While it is down the site answers 503." \
          "Only one path of a site (example.com/api/) instead: menu 6 -> 11 (Path proxies)."
-       _menu_ask proxy "Where the app listens / Uygulamanın dinlediği adres (host:port)" "127.0.0.1:3000"; args+=(--proxy "$proxy") ;;
+       _menu_ask proxy "Where the app listens (host:port)" "127.0.0.1:3000"; args+=(--proxy "$proxy") ;;
     *) ;;
   esac
 
-  _menu_ask www "Also serve www.${domain}? (y/n)" "y"
+  _menu_ask www "$(_menu_tf 'Also serve www.%s? (y/n)' "$domain")" "y"
   [[ "${www,,}" == y* ]] && args+=(--www)
 
   # "n" by default: a site usually goes in before its DNS moves here. The certificate comes
@@ -517,7 +626,7 @@ _menu_add_site() {
   # only where this server actually runs mail; otherwise the question is an offer it cannot keep
   if lib_mail_installed; then
     local mail="" mailbox=""
-    _menu_ask mail "Give this site its own mail (mailboxes at @${domain})? (y/n)" "n"
+    _menu_ask mail "$(_menu_tf 'Give this site its own mail (mailboxes at @%s)? (y/n)' "$domain")" "n"
     if [[ "${mail,,}" == y* ]]; then
       _menu_ask mailbox "First mailbox name (before the @)" "info"
       args+=(--mail)
@@ -537,27 +646,27 @@ _menu_run_input() {   # value args...
   trap ':' INT
   printf '%s' "$value" | "$SCRIPT_PATH" "$@" || rc=$?
   trap - INT
-  if (( rc != 0 )); then printf '\n%sThat command exited with status %s.%s\n' "$C_YEL" "$rc" "$C_RST"; fi
+  if (( rc != 0 )); then _menu_printf '\n%sThat command exited with status %s.%s\n' "$C_YEL" "$rc" "$C_RST"; fi
   _menu_pause
 }
 
 _menu_databases() {
   local choice="" domain=""
   while true; do
-    printf '\n %sDATABASES%s\n' "$C_BLD" "$C_RST"
+    _menu_printf '\n %sDATABASES%s\n' "$C_BLD" "$C_RST"
     _menu_rule
     _menu_item 1 "List databases (sizes, no passwords)"
     _menu_item 2 "Create or show the database of a site"
     _menu_item 3 "Give a site's database a new random password"
     _menu_item 0 "Back"
-    printf '\n%sChoice: %s' "$C_BLD" "$C_RST"
+    printf '\n'; _menu_prompt "Choice"
     read -r choice </dev/tty || return 0
     case "$choice" in
       1) _menu_run db list ;;
       2) domain="$(_menu_pick_domain)" && _menu_run db "$domain" || _menu_pause ;;
       3) domain="$(_menu_pick_domain)" && _menu_run db passwd "$domain" || _menu_pause ;;
       0|q|Q|"") return 0 ;;
-      *) printf '%sPick a number from the list.%s\n' "$C_YEL" "$C_RST" ;;
+      *) _menu_printf '%sPick a number from the list.%s\n' "$C_YEL" "$C_RST" ;;
     esac
   done
 }
@@ -567,7 +676,7 @@ _menu_databases() {
 _menu_certificates() {
   local choice="" domain=""
   while true; do
-    printf '\n %sCERTIFICATES%s   renewal is automatic; item 1 shows whether it is working\n' "$C_BLD" "$C_RST"
+    _menu_printf '\n %sCERTIFICATES%s   renewal is automatic; item 1 shows whether it is working\n' "$C_BLD" "$C_RST"
     _menu_rule
     _menu_item 1 "Check: which certificates exist, days left, is renewal automatic"
     _menu_item 2 "Get a certificate for a site (its DNS must point here)"
@@ -576,7 +685,7 @@ _menu_certificates() {
     _menu_item 5 "Switch automatic renewal back on (timer or cron, deploy hook)"
     _menu_item 6 "Get a certificate for every site that has none"
     _menu_item 0 "Back"
-    printf '\n%sChoice: %s' "$C_BLD" "$C_RST"
+    printf '\n'; _menu_prompt "Choice"
     read -r choice </dev/tty || return 0
     case "$choice" in
       1) _menu_run ssl status ;;
@@ -586,7 +695,7 @@ _menu_certificates() {
       5) _menu_run ssl fix ;;
       6) _menu_run renew-ssl --missing ;;
       0|q|Q|"") return 0 ;;
-      *) printf '%sPick a number from the list.%s\n' "$C_YEL" "$C_RST" ;;
+      *) _menu_printf '%sPick a number from the list.%s\n' "$C_YEL" "$C_RST" ;;
     esac
   done
 }
@@ -594,18 +703,14 @@ _menu_certificates() {
 _menu_apps() {
   local choice="" domain=""
   while true; do
-    printf '\n %sNODE.JS APPS (PM2)%s   every site runs its own PM2 as its own user\n' "$C_BLD" "$C_RST"
+    _menu_printf '\n %sNODE.JS APPS (PM2)%s   every site runs its own PM2 as its own user\n' "$C_BLD" "$C_RST"
     _menu_rule
-    _menu_hint "Nasıl çalışır: alan adı -> OpenLiteSpeed -> kendi yerel portundaki uygulama (3000, 3001...)." \
-      "PM2 uygulamayı ayakta tutar: açılışta başlatır, çökerse yeniden kaldırır." \
-      "Yeni uygulama: 2 (siteyi ekle), kodu /home/<alan-adı>/app içine kopyala, sonra 3 (deploy)." \
-      "Kendi başlattığınız bir uygulama ya da bir sitenin tek bir yolu için: 2 (tür 5) veya 11."
     _menu_hint "How it works: the domain -> OpenLiteSpeed -> the app on its own local port (3000, 3001...)." \
       "PM2 keeps the app running: it starts at boot and comes back after a crash." \
       "A new app: 2 (add the site), copy the code into /home/<domain>/app, then 3 (deploy)." \
       "An app you start yourself, or one path of a site sent to a port: 2 (kind 5), or 11."
     _menu_item  1 "List applications"
-    _menu_item  2 "Add a site (choose \"Node.js app\")"
+    _menu_item  2 "Add a site (choose 'Node.js app')"
     _menu_item  3 "Deploy: install dependencies, build, restart"
     _menu_item  4 "Start"
     _menu_item  5 "Stop"
@@ -619,7 +724,7 @@ _menu_apps() {
     _menu_item 13 "Deploy key for a private repository"
     _menu_item 14 "Workers and scheduled jobs (queues, bots, cron)"
     _menu_item  0 "Back"
-    printf '\n%sChoice: %s' "$C_BLD" "$C_RST"
+    printf '\n'; _menu_prompt "Choice"
     read -r choice </dev/tty || return 0
     case "$choice" in
       1) _menu_run app list ;;
@@ -637,7 +742,7 @@ _menu_apps() {
       13) domain="$(_menu_pick_domain apps)" && _menu_run app deploy-key "$domain" || _menu_pause ;;
       14) domain="$(_menu_pick_domain apps)" && _menu_workers "$domain" || _menu_pause ;;
       0|q|Q|"") return 0 ;;
-      *) printf '%sPick a number from the list.%s\n' "$C_YEL" "$C_RST" ;;
+      *) _menu_printf '%sPick a number from the list.%s\n' "$C_YEL" "$C_RST" ;;
     esac
   done
 }
@@ -649,10 +754,11 @@ _menu_pick_worker() {   # domain [process|job]
   while IFS= read -r n; do
     if [[ -n "$n" ]]; then names+=("$n"); fi
   done < <(jq -r --arg k "${2:-}" '.[] | select($k == "" or (($k == "job") == ((.cron // "") != ""))) | .name' <<<"$(lib_app_workers_json "$1")" || true)
-  if ((${#names[@]} == 0)); then printf '%sThere is nothing to choose from here yet.%s\n' "$C_YEL" "$C_RST" >&2; return 1; fi
-  printf '\n%sWhich one?%s\n' "$C_BLD" "$C_RST" >&2
+  if ((${#names[@]} == 0)); then _menu_printf '%sThere is nothing to choose from here yet.%s\n' "$C_YEL" "$C_RST" >&2; return 1; fi
+  _menu_printf '\n%sWhich one?%s\n' "$C_BLD" "$C_RST" >&2
   for n in "${names[@]}"; do printf '  %2d) %s\n' "$i" "$n" >&2; i=$((i + 1)); done
-  printf '   0) cancel\n%sNumber: %s' "$C_BLD" "$C_RST" >&2
+  printf '   0) %s\n' "$(_menu_t 'cancel')" >&2
+  _menu_prompt "Number" >&2
   read -r choice </dev/tty || return 1
   [[ "$choice" =~ ^[0-9]+$ ]] || return 1
   (( choice >= 1 && choice <= ${#names[@]} )) || return 1
@@ -663,7 +769,7 @@ _menu_workers() {   # domain
   local domain="$1" choice="" name="" start="" cron="" port="" cwd=""
   local -a args=()
   while true; do
-    printf '\n %sWORKERS AND JOBS OF %s%s   run as the site user, next to the application\n' "$C_BLD" "$domain" "$C_RST"
+    _menu_printf '\n %sWORKERS AND JOBS OF %s%s   run as the site user, next to the application\n' "$C_BLD" "$domain" "$C_RST"
     _menu_rule
     _menu_item 1 "List"
     _menu_item 2 "Add a background worker (queue consumer, bot)"
@@ -675,7 +781,7 @@ _menu_workers() {   # domain
     _menu_item 8 "Start one"
     _menu_item 9 "Remove one"
     _menu_item 0 "Back"
-    printf '\n%sChoice: %s' "$C_BLD" "$C_RST"
+    printf '\n'; _menu_prompt "Choice"
     read -r choice </dev/tty || return 0
     case "$choice" in
       1) _menu_run app worker "$domain" list ;;
@@ -702,7 +808,7 @@ _menu_workers() {   # domain
       8) name="$(_menu_pick_worker "$domain")" && _menu_run app start "$domain" --process "$name" || _menu_pause ;;
       9) name="$(_menu_pick_worker "$domain")" && _menu_run app worker "$domain" remove "$name" || _menu_pause ;;
       0|q|Q|"") return 0 ;;
-      *) printf '%sPick a number from the list.%s\n' "$C_YEL" "$C_RST" ;;
+      *) _menu_printf '%sPick a number from the list.%s\n' "$C_YEL" "$C_RST" ;;
     esac
   done
 }
@@ -710,7 +816,7 @@ _menu_workers() {   # domain
 _menu_app_git() {   # domain
   local domain="$1" url="" branch=""
   lib_app_state_load "$domain" || return 0
-  printf '\n%sA private repository needs the deploy key first (item 13).%s\n' "$C_DIM" "$C_RST"
+  _menu_printf '\n%sA private repository needs the deploy key first (item 13).%s\n' "$C_DIM" "$C_RST"
   _menu_ask url "Repository URL (https://host/owner/repo.git or git@host:owner/repo.git)" "$APP_GIT_URL"
   if [[ -z "$url" ]]; then _menu_pause; return 0; fi
   _menu_ask branch "Branch (empty: the repository's default)" "$APP_GIT_BRANCH"
@@ -721,20 +827,20 @@ _menu_app_git() {   # domain
 _menu_app_env() {   # domain
   local domain="$1" choice="" name="" value=""
   while true; do
-    printf '\n %sENVIRONMENT OF %s%s   stored root-only, never logged\n' "$C_BLD" "$domain" "$C_RST"
+    _menu_printf '\n %sENVIRONMENT OF %s%s   stored root-only, never logged\n' "$C_BLD" "$domain" "$C_RST"
     _menu_rule
     _menu_item 1 "List the names"
     _menu_item 2 "Set a variable (the value is typed hidden)"
     _menu_item 3 "Remove a variable"
     _menu_item 4 "Add this site's database login (DB_*, DATABASE_URL)"
     _menu_item 0 "Back"
-    printf '\n%sChoice: %s' "$C_BLD" "$C_RST"
+    printf '\n'; _menu_prompt "Choice"
     read -r choice </dev/tty || return 0
     case "$choice" in
       1) _menu_run app env "$domain" list ;;
       2) _menu_ask name "Name (A-Z, 0-9 and _)"
          if [[ -n "$name" ]]; then
-           printf '%sValue (hidden): %s' "$C_BLD" "$C_RST"
+           _menu_prompt "Value (hidden)"
            IFS= read -r -s value </dev/tty || value=""
            printf '\n'
            _menu_run_input "$value" app env "$domain" set "$name"
@@ -744,7 +850,7 @@ _menu_app_env() {   # domain
          if [[ -n "$name" ]]; then _menu_run app env "$domain" unset "$name"; fi ;;
       4) _menu_run app env "$domain" import-db ;;
       0|q|Q|"") return 0 ;;
-      *) printf '%sPick a number from the list.%s\n' "$C_YEL" "$C_RST" ;;
+      *) _menu_printf '%sPick a number from the list.%s\n' "$C_YEL" "$C_RST" ;;
     esac
   done
 }
@@ -754,7 +860,7 @@ _menu_app_set() {   # domain
   local -a args=()
   lib_app_state_load "$domain" || return 0
   current="${APP_SCRIPT:-$APP_START}"
-  printf '\n%sPress Enter to keep a value.%s\n' "$C_DIM" "$C_RST"
+  _menu_printf '\n%sPress Enter to keep a value.%s\n' "$C_DIM" "$C_RST"
   _menu_ask port "Port" "$APP_PORT"
   _menu_ask start "Start command, or a file such as dist/main.js" "$current"
   _menu_ask mem "Memory limit (e.g. 512M, or none)" "${APP_MEMORY:-none}"
@@ -763,19 +869,15 @@ _menu_app_set() {   # domain
     if [[ "$start" =~ ^[^[:space:]]+\.(c|m)?js$ ]]; then args+=(--script "$start"); else args+=(--start "$start"); fi
   fi
   if [[ -n "$mem" && "$mem" != "${APP_MEMORY:-none}" ]]; then args+=(--memory "$mem"); fi
-  if ((${#args[@]} == 0)); then printf '%sNothing changed.%s\n' "$C_DIM" "$C_RST"; _menu_pause; return 0; fi
+  if ((${#args[@]} == 0)); then _menu_printf '%sNothing changed.%s\n' "$C_DIM" "$C_RST"; _menu_pause; return 0; fi
   _menu_run app set "$domain" "${args[@]}"
 }
 
 _menu_proxies() {
   local choice="" domain="" path="" target="" current=""
   while true; do
-    printf '\n %sPATH PROXIES%s   example.com/api/... -> an application, the rest of the site stays\n' "$C_BLD" "$C_RST"
+    _menu_printf '\n %sPATH PROXIES%s   example.com/api/... -> an application, the rest of the site stays\n' "$C_BLD" "$C_RST"
     _menu_rule
-    _menu_hint "Var olan bir sitenin tek bir yolunu bu sunucudaki bir porta gönderir," \
-      "örn. /api/ -> 127.0.0.1:3001. Uygulama orada dinliyor olmalı; lomp onu başlatmaz." \
-      "Uygulamaya yolun tamamı gider: /api/users, /users olarak değil /api/users olarak gelir." \
-      "Bir alan adının tamamını bir porta göndermek için: ana menü 2 (Add a site), tür 5."
     _menu_hint "Sends one path of a site you already have to a port on this server," \
       "e.g. /api/ -> 127.0.0.1:3001. The app must be listening there; lomp does not start it." \
       "The app gets the full path: /api/users arrives as /api/users, not as /users." \
@@ -784,27 +886,27 @@ _menu_proxies() {
     _menu_item 2 "Add a path proxy"
     _menu_item 3 "Remove a path proxy"
     _menu_item 0 "Back"
-    printf '\n%sChoice: %s' "$C_BLD" "$C_RST"
+    printf '\n'; _menu_prompt "Choice"
     read -r choice </dev/tty || return 0
     case "$choice" in
       1) _menu_run proxy list ;;
       2) if domain="$(_menu_pick_domain)"; then
-           _menu_ask path "Path of the site that goes to the app / Uygulamaya gidecek yol" "/api/"
-           _menu_ask target "Where the app listens / Uygulamanın dinlediği adres (host:port)" "127.0.0.1:$(lib_app_port_pick 2>/dev/null || printf '3001')"
+           _menu_ask path "Path of the site that goes to the app" "/api/"
+           _menu_ask target "Where the app listens (host:port)" "127.0.0.1:$(lib_app_port_pick 2>/dev/null || printf '3001')"
            _menu_run proxy add "$domain" "$path" "$target"
          else _menu_pause; fi ;;
       3) if domain="$(_menu_pick_domain)"; then
            current="$(lib_proxy_state_lines "$domain")"
            if [[ -z "$current" ]]; then
-             printf '%s%s has no path proxies. / Bu sitede yol yönlendirmesi yok.%s\n' "$C_YEL" "$domain" "$C_RST"; _menu_pause; continue
+             _menu_printf '%s%s has no path proxies.%s\n' "$C_YEL" "$domain" "$C_RST"; _menu_pause; continue
            fi
-           printf '\n%sPath proxies of %s / Yol yönlendirmeleri:%s\n' "$C_BLD" "$domain" "$C_RST"
+           _menu_printf '\n%sPath proxies of %s:%s\n' "$C_BLD" "$domain" "$C_RST"
            while read -r path target; do printf '  %s -> %s\n' "$path" "$target"; done <<<"$current"
-           _menu_ask path "Path to remove / Kaldırılacak yol (e.g. /api/)"
+           _menu_ask path "Path to remove (e.g. /api/)"
            if [[ -n "$path" ]]; then _menu_run proxy remove "$domain" "$path"; else _menu_pause; fi
          else _menu_pause; fi ;;
       0|q|Q|"") return 0 ;;
-      *) printf '%sPick a number from the list.%s\n' "$C_YEL" "$C_RST" ;;
+      *) _menu_printf '%sPick a number from the list.%s\n' "$C_YEL" "$C_RST" ;;
     esac
   done
 }
@@ -814,8 +916,8 @@ _menu_remove_site() {
   local -a args=()
   domain="$(_menu_pick_domain)" || { _menu_pause; return 0; }
   args=("$domain")
-  printf '\n%sRemoving %s deletes its files, database and certificate.%s\n' "$C_YEL" "$domain" "$C_RST"
-  printf '%sA safety backup is taken first.%s\n' "$C_DIM" "$C_RST"
+  _menu_printf '\n%sRemoving %s deletes its files, database and certificate.%s\n%sA safety backup is taken first.%s\n' \
+    "$C_YEL" "$domain" "$C_RST" "$C_DIM" "$C_RST"
   _menu_ask keep "Keep the database? (y/n)" "n"
   [[ "${keep,,}" == y* ]] && args+=(--keep-db)
   _menu_ask keep "Keep the files? (y/n)" "n"
@@ -828,16 +930,16 @@ _menu_rename_site() {
   local domain="" new="" keep=""
   local -a args=()
   domain="$(_menu_pick_domain)" || { _menu_pause; return 0; }
-  printf '\n  %s\n  %s\n' "The site moves to the new name as it is: files, settings, database. Nothing is copied." \
+  printf '\n'; _menu_note "The site moves to the new name as it is: files, settings, database. Nothing is copied." \
     "Point the DNS of the new name to this server first, so that it gets its certificate right away."
-  _menu_ask new "New domain for ${domain} (without www, e.g. example.net)"
+  _menu_ask new "$(_menu_tf 'New domain for %s (without www, e.g. example.net)' "$domain")"
   [[ -n "$new" ]] || return 0
   if ! lib_domain_valid "${new,,}"; then
-    printf '%s"%s" is not a valid domain name.%s\n' "$C_YEL" "$new" "$C_RST"
+    _menu_printf '%s"%s" is not a valid domain name.%s\n' "$C_YEL" "$new" "$C_RST"
     _menu_pause; return 0
   fi
   args=("$domain" "${new,,}")
-  _menu_ask keep "Keep ${domain} as a redirect (301) to ${new,,}? (y/n)" "y"
+  _menu_ask keep "$(_menu_tf 'Keep %s as a redirect (301) to %s? (y/n)' "$domain" "${new,,}")" "y"
   [[ "${keep,,}" == y* ]] || args+=(--no-redirect)
   _menu_run rename "${args[@]}"
 }
@@ -846,7 +948,10 @@ _menu_rename_site() {
 _menu_redirects() {
   local what="" from="" to="" www=""
   local -a args=()
-  printf '\n  1) List the redirects\n  2) Add one (or fetch the certificate of one whose DNS points here now)\n  3) Remove one\n'
+  printf '\n'
+  _menu_opt 1 "List the redirects"
+  _menu_opt 2 "Add one (or fetch the certificate of one whose DNS points here now)"
+  _menu_opt 3 "Remove one"
   _menu_ask what "Choice" "1"
   case "$what" in
     2) _menu_ask from "Domain that redirects (without www, e.g. old-name.com)"
@@ -854,7 +959,7 @@ _menu_redirects() {
        _menu_ask to "Where to (a site here, or any other domain)"
        [[ -n "$to" ]] || return 0
        args=("$from" "$to")
-       _menu_ask www "Also redirect www.${from}? (y/n)" "y"
+       _menu_ask www "$(_menu_tf 'Also redirect www.%s? (y/n)' "$from")" "y"
        [[ "${www,,}" == y* ]] && args+=(--www)
        _menu_run redirect add "${args[@]}" ;;
     3) _menu_run redirect list
@@ -870,11 +975,12 @@ _menu_redirects() {
 _menu_fix_owner() {
   local what="" domain="" auto="on"
   lib_domain_fix_owner_auto_enabled || auto="off"
-  printf '\n  %s\n' "Files uploaded as root go to their site's own user; what already is the site's stays as it is."
-  if [[ "$auto" == "on" ]]; then printf '  %s\n' "It happens by itself within a minute of an upload; this does it right now."; fi
-  printf '  1) Every site\n  2) One site\n'
-  if [[ "$auto" == "on" ]]; then printf '  3) Stop doing it automatically (root keeps files of its own in a site)\n'
-  else printf '  3) Do it automatically again, within a minute of an upload (now: off)\n'; fi
+  printf '\n'; _menu_note "Files uploaded as root go to their site's own user; what already is the site's stays as it is."
+  if [[ "$auto" == "on" ]]; then _menu_note "It happens by itself within a minute of an upload; this does it right now."; fi
+  _menu_opt 1 "Every site"
+  _menu_opt 2 "One site"
+  if [[ "$auto" == "on" ]]; then _menu_opt 3 "Stop doing it automatically (root keeps files of its own in a site)"
+  else _menu_opt 3 "Do it automatically again, within a minute of an upload (now: off)"; fi
   _menu_ask what "Choice" "1"
   if [[ "$what" == "3" ]]; then
     if [[ "$auto" == "on" ]]; then _menu_run fix-owner --auto off; else _menu_run fix-owner --auto on; fi
@@ -889,8 +995,10 @@ _menu_fix_owner() {
 # Every site at once, or one - and for one, whether it keeps process execution.
 _menu_harden() {
   local what="" domain="" keep=""
-  printf '\n  %s\n  %s\n' "PHP in a site can then start no process, read only its own files and run no script in an upload directory;" "its user reaches only DNS, the web server, MariaDB and Redis on this machine."
-  printf '  1) Every site\n  2) One site\n  3) Show what is set\n'
+  printf '\n'; _menu_note "PHP in a site can then start no process, read only its own files and run no script in an upload directory;" "its user reaches only DNS, the web server, MariaDB and Redis on this machine."
+  _menu_opt 1 "Every site"
+  _menu_opt 2 "One site"
+  _menu_opt 3 "Show what is set"
   _menu_ask what "Choice" "1"
   case "$what" in
     3) _menu_run harden status ;;
@@ -906,8 +1014,9 @@ _menu_harden() {
 _menu_scan() {
   local what="" domain="" wide=""
   local -a args=()
-  printf '\n  %s\n' "Reads the PHP files for what web shells are made of and lists the files to open. It changes nothing."
-  printf '  1) Every site\n  2) One site\n'
+  printf '\n'; _menu_note "Reads the PHP files for what web shells are made of and lists the files to open. It changes nothing."
+  _menu_opt 1 "Every site"
+  _menu_opt 2 "One site"
   _menu_ask what "Choice" "1"
   if [[ "$what" == "2" ]]; then
     domain="$(_menu_pick_domain)" || { _menu_pause; return 0; }
@@ -924,7 +1033,7 @@ _menu_scan() {
 # whole instead. The command asks before it puts them next to something.
 _menu_wordpress() {
   local domain=""
-  printf '\n  %s\n  %s\n' "The latest WordPress (wordpress.org/latest.zip) goes straight into the site's public_html, as the" \
+  printf '\n'; _menu_note "The latest WordPress (wordpress.org/latest.zip) goes straight into the site's public_html, as the" \
     "site's own user. You finish the installation in the browser; the database login is printed for it."
   domain="$(_menu_pick_domain php)" || { _menu_pause; return 0; }
   _menu_run wordpress "$domain"
@@ -948,13 +1057,13 @@ _menu_pick_mail_domain() {   # [all]
   local d="" i=1 choice=""
   mapfile -t doms < <(_menu_mail_domains "${1:-}")
   if ((${#doms[@]} == 0)); then
-    printf '%sNo domain has mail yet: "Add a domain" gives one its mail.%s\n' "$C_YEL" "$C_RST" >&2
+    _menu_printf '%sNo domain has mail yet: "Add a domain" gives one its mail.%s\n' "$C_YEL" "$C_RST" >&2
     return 1
   fi
-  printf '\n%sWhich domain?%s\n' "$C_BLD" "$C_RST" >&2
+  _menu_printf '\n%sWhich domain?%s\n' "$C_BLD" "$C_RST" >&2
   for d in "${doms[@]}"; do printf '  %2d) %s\n' "$i" "$d" >&2; i=$((i + 1)); done
-  printf '   0) cancel\n' >&2
-  printf '%sNumber: %s' "$C_BLD" "$C_RST" >&2
+  printf '   0) %s\n' "$(_menu_t 'cancel')" >&2
+  _menu_prompt "Number" >&2
   read -r choice </dev/tty || return 1
   [[ "$choice" =~ ^[0-9]+$ ]] || return 1
   (( choice >= 1 && choice <= ${#doms[@]} )) || return 1
@@ -971,7 +1080,7 @@ _menu_mail_add_domain() {
   [[ -n "$domain" ]] || return 0
   domain="${domain,,}"
   if ! lib_domain_valid "$domain"; then
-    printf '%s"%s" is not a valid domain name.%s\n' "$C_YEL" "$domain" "$C_RST"
+    _menu_printf '%s"%s" is not a valid domain name.%s\n' "$C_YEL" "$domain" "$C_RST"
     _menu_pause; return 0
   fi
   if lib_domain_registered "$domain" && ! lib_mail_domain_standalone "$domain"; then
@@ -979,27 +1088,27 @@ _menu_mail_add_domain() {
   else
     args=(mail domain add "$domain")
     if ! lib_server_mail_only; then
-      printf '\n  %s is not a site of this server: it is added for its mail alone (no site, no Linux user).\n' "$domain"
+      _menu_printf '\n  %s is not a site of this server: it is added for its mail alone (no site, no Linux user).\n' "$domain"
     fi
   fi
   first="$(lib_mail_boxes | head -n 1 || true)"
-  printf '\n%sWhere does the mail of %s go?%s\n' "$C_BLD" "$domain" "$C_RST"
-  printf '  1) Into a mailbox of its own (info@%s, with a password of its own)\n' "$domain"
-  printf '  2) Into a mailbox that exists already - one inbox for several domains\n'
+  _menu_printf '\n%sWhere does the mail of %s go?%s\n' "$C_BLD" "$domain" "$C_RST"
+  _menu_opt 1 "$(_menu_tf 'Into a mailbox of its own (info@%s, with a password of its own)' "$domain")"
+  _menu_opt 2 "Into a mailbox that exists already - one inbox for several domains"
   _menu_ask how "Choice" "1"
   if [[ "$how" == "2" ]]; then
     if [[ -z "$first" ]]; then
-      printf '%sThere is no mailbox on this server yet: the first domain needs one of its own.%s\n' "$C_YEL" "$C_RST"
+      _menu_printf '%sThere is no mailbox on this server yet: the first domain needs one of its own.%s\n' "$C_YEL" "$C_RST"
       _menu_pause; return 0
     fi
     _menu_ask to "Deliver into which mailbox" "$first"
     [[ -n "$to" ]] || return 0
-    _menu_ask addrs "Which addresses of ${domain}? Names with commas (info,sales), or * for every address" "info"
+    _menu_ask addrs "$(_menu_tf 'Which addresses of %s? Names with commas (info,sales), or * for every address' "$domain")" "info"
     args+=(--to "$to")
     if [[ "$addrs" == "*" ]]; then args+=(--catch-all)
     elif [[ -n "$addrs" ]]; then args+=(--address "$addrs"); fi
   else
-    _menu_ask box 'Mailbox name (before the @), or a dash for none' "info"
+    _menu_ask box "Mailbox name (before the @), or a dash for none" "info"
     _menu_ask quota "Mailbox size" "2G"
     if [[ -n "$box" && "$box" != "-" ]]; then args+=(--mailbox "$box" --quota "$quota"); fi
   fi
@@ -1008,7 +1117,10 @@ _menu_mail_add_domain() {
 
 _menu_mail_webmail() {
   local what="" domain=""
-  printf '\n  1) What runs, and for which domains\n  2) Switch it on for a domain (it answers at webmail.<domain>)\n  3) Switch it off for a domain\n'
+  printf '\n'
+  _menu_opt 1 "What runs, and for which domains"
+  _menu_opt 2 "Switch it on for a domain (it answers at webmail.<domain>)"
+  _menu_opt 3 "Switch it off for a domain"
   _menu_ask what "Choice" "1"
   if [[ "$what" == "2" ]]; then
     domain="$(_menu_pick_mail_domain)" || { _menu_pause; return 0; }
@@ -1027,8 +1139,9 @@ _menu_mail_off() {
   local domain="" what=""
   domain="$(_menu_pick_mail_domain all)" || { _menu_pause; return 0; }
   if ! lib_mail_domain_standalone "$domain"; then _menu_run mail disable "$domain"; return 0; fi
-  printf '\n  1) Turn its mail off: no delivery and no login, every message stays, and it can be turned on again\n'
-  printf '  2) Remove the domain with all of its mail (a last backup is taken first)\n'
+  printf '\n'
+  _menu_opt 1 "Turn its mail off: no delivery and no login, every message stays, and it can be turned on again"
+  _menu_opt 2 "Remove the domain with all of its mail (a last backup is taken first)"
   _menu_ask what "Choice" "1"
   if [[ "$what" == "2" ]]; then _menu_run mail domain del "$domain"
   else _menu_run mail disable "$domain"; fi
@@ -1054,13 +1167,13 @@ _menu_mail() {   # [top]
   local top="${1:-}" choice="" domain="" box="" quota="" alias="" target=""
   while true; do
     if ! lib_mail_installed; then
-      printf '\n  The mail server is not installed yet. Optional components (18) installs it.\n'
+      _menu_printf '\n  The mail server is not installed yet. Optional components (18) installs it.\n'
       _menu_pause
       return 0
     fi
     if [[ -n "$top" ]]; then _menu_mail_header
     else
-      printf '\n %sMAIL%s   (this server sends as %s)\n' "$C_BLD" "$C_RST" "$(lib_mail_host)"
+      _menu_printf '\n %sMAIL%s   (this server sends as %s)\n' "$C_BLD" "$C_RST" "$(lib_mail_host)"
       _menu_rule
     fi
     _menu_item  1 "Domains that have mail here"
@@ -1075,11 +1188,12 @@ _menu_mail() {   # [top]
     _menu_item 10 "Turn mail off for a domain, or remove a mail domain"
     if [[ -n "$top" ]]; then
       _menu_item 11 "Server: status, health check, backups, updates"
+      _menu_item 12 "Menu language: Türkçe, English, or both"
       _menu_item  0 "Exit"
     else
       _menu_item  0 "Back"
     fi
-    printf '\n%sChoice: %s' "$C_BLD" "$C_RST"
+    printf '\n'; _menu_prompt "Choice"
     read -r choice </dev/tty || return 0
     case "$choice" in
       1) _menu_run mail domain list ;;
@@ -1103,9 +1217,11 @@ _menu_mail() {   # [top]
       9) _menu_mail_webmail ;;
       10) _menu_mail_off ;;
       11) if [[ -n "$top" ]]; then _menu_mail_server
-          else printf '%sPick a number from the list.%s\n' "$C_YEL" "$C_RST"; fi ;;
+          else _menu_printf '%sPick a number from the list.%s\n' "$C_YEL" "$C_RST"; fi ;;
+      12) if [[ -n "$top" ]]; then _menu_language
+          else _menu_printf '%sPick a number from the list.%s\n' "$C_YEL" "$C_RST"; fi ;;
       0|q|Q|"") [[ -n "$top" ]] && printf '\n'; return 0 ;;
-      *) printf '%sPick a number from the list.%s\n' "$C_YEL" "$C_RST" ;;
+      *) _menu_printf '%sPick a number from the list.%s\n' "$C_YEL" "$C_RST" ;;
     esac
   done
 }
@@ -1115,7 +1231,7 @@ _menu_mail() {   # [top]
 _menu_mail_server() {
   local choice=""
   while true; do
-    printf '\n %sSERVER%s\n' "$C_BLD" "$C_RST"
+    _menu_printf '\n %sSERVER%s\n' "$C_BLD" "$C_RST"
     _menu_rule
     _menu_item  1 "Status"
     _menu_item  2 "Health check"
@@ -1129,7 +1245,7 @@ _menu_mail_server() {
     _menu_item 10 "Command reference"
     _menu_item 11 "Certificates: which exist, is renewal automatic"
     _menu_item  0 "Back"
-    printf '\n%sChoice: %s' "$C_BLD" "$C_RST"
+    printf '\n'; _menu_prompt "Choice"
     read -r choice </dev/tty || return 0
     case "$choice" in
       1) _menu_run status ;;
@@ -1144,7 +1260,7 @@ _menu_mail_server() {
       10) lib_usage | ${PAGER:-less} 2>/dev/null || lib_usage; _menu_pause ;;
       11) _menu_run ssl status ;;
       0|q|Q|"") return 0 ;;
-      *) printf '%sPick a number from the list.%s\n' "$C_YEL" "$C_RST" ;;
+      *) _menu_printf '%sPick a number from the list.%s\n' "$C_YEL" "$C_RST" ;;
     esac
   done
 }
@@ -1155,7 +1271,10 @@ _menu_mail_backup() {
   local what="" enc="" sched="" domain=""
   local -a args=()
   sched="$(lib_manifest_get '.backup.schedule' 2>/dev/null || true)"
-  printf '\n  1) Every domain, now\n  2) One domain, now\n  3) Automatic backups (now: %s)\n' "${sched:-off}"
+  printf '\n'
+  _menu_opt 1 "Every domain, now"
+  _menu_opt 2 "One domain, now"
+  _menu_opt 3 "$(_menu_tf 'Automatic backups (now: %s)' "${sched:-off}")"
   _menu_ask what "Choice" "1"
   if [[ "$what" == "3" ]]; then _menu_backup_schedule; return 0; fi
   if [[ "$what" == "2" ]]; then
@@ -1177,12 +1296,12 @@ _menu_mail_restore() {
   [[ -n "$domain" ]] || return 0
   domain="${domain,,}"
   if ! lib_domain_valid "$domain"; then
-    printf '%s"%s" is not a valid domain name.%s\n' "$C_YEL" "$domain" "$C_RST"
+    _menu_printf '%s"%s" is not a valid domain name.%s\n' "$C_YEL" "$domain" "$C_RST"
     _menu_pause; return 0
   fi
-  printf '\n%sMail archives of %s:%s\n' "$C_BLD" "$domain" "$C_RST"
+  _menu_printf '\n%sMail archives of %s:%s\n' "$C_BLD" "$domain" "$C_RST"
   if ! find "${BACKUP_ROOT}/${domain}" -maxdepth 1 -name "${domain}-mail-*.tar.gz*" ! -name '*.sha256' -printf '  %p\n' 2>/dev/null | sort | tail -20 | grep .; then
-    printf '  (none found under %s - copy the archive there, or give its path below)\n' "${BACKUP_ROOT}/${domain}"
+    _menu_printf '  (none found under %s - copy the archive there, or give its path below)\n' "${BACKUP_ROOT}/${domain}"
   fi
   _menu_ask file "Full path of the archive (empty: the newest one above)"
   if [[ -n "$file" ]]; then _menu_run mail restore "$domain" --file "$file"
@@ -1194,9 +1313,11 @@ _menu_mail_restore() {
 _menu_install_mail_only() {
   local email="" mh=""
   local -a args=(install --mail-only)
-  printf '\n  A server for mail alone: Postfix, Dovecot, Rspamd and a webmail. Your domains get their\n'
-  printf '  mail here; their web sites stay where they are. It needs a name of its own, like\n'
-  printf '  mail.example.com, with an A record pointing here and a PTR record your provider sets.\n\n'
+  printf '\n'
+  _menu_note "A server for mail alone: Postfix, Dovecot, Rspamd and a webmail. Your domains get their" \
+    "mail here; their web sites stay where they are. It needs a name of its own, like" \
+    "mail.example.com, with an A record pointing here and a PTR record your provider sets."
+  printf '\n'
   _menu_ask mh "Name this server sends mail as" "$(hostname -f 2>/dev/null || true)"
   [[ -n "$mh" ]] || return 0
   _menu_ask email "E-mail for Let's Encrypt and alerts" "$DEFAULT_EMAIL"
@@ -1215,18 +1336,18 @@ _menu_runtimes() {
     nd="$(lib_manifest_get '.components.netdata')"
     mail_v="$(lib_manifest_get '.components.mail.postfix')"
     mail_host="$(lib_mail_host)"
-    printf '\n %sOPTIONAL COMPONENTS%s   (nothing here is installed by default)\n' "$C_BLD" "$C_RST"
+    _menu_printf '\n %sOPTIONAL COMPONENTS%s   (nothing here is installed by default)\n' "$C_BLD" "$C_RST"
     _menu_rule
     printf '  %s1%s) Node.js + PM2        %s\n' "$C_CYN" "$C_RST" \
-      "$( [[ -n "$node_v" ]] && printf '%sinstalled %s%s' "$C_GRN" "$node_v" "$C_RST" || printf '%snot installed%s' "$C_DIM" "$C_RST")"
+      "$( [[ -n "$node_v" ]] && printf '%s%s %s%s' "$C_GRN" "$(_menu_t 'installed')" "$node_v" "$C_RST" || printf '%s%s%s' "$C_DIM" "$(_menu_t 'not installed')" "$C_RST")"
     printf '  %s2%s) Python venv + pip    %s\n' "$C_CYN" "$C_RST" \
-      "$( [[ -n "$py_v" ]] && printf '%sinstalled %s%s' "$C_GRN" "$py_v" "$C_RST" || printf '%snot installed%s' "$C_DIM" "$C_RST")"
+      "$( [[ -n "$py_v" ]] && printf '%s%s %s%s' "$C_GRN" "$(_menu_t 'installed')" "$py_v" "$C_RST" || printf '%s%s%s' "$C_DIM" "$(_menu_t 'not installed')" "$C_RST")"
     printf '  %s3%s) Netdata monitoring   %s\n' "$C_CYN" "$C_RST" \
-      "$( [[ "$nd" == "true" ]] && printf '%sinstalled%s' "$C_GRN" "$C_RST" || printf '%snot installed%s' "$C_DIM" "$C_RST")"
+      "$( [[ "$nd" == "true" ]] && printf '%s%s%s' "$C_GRN" "$(_menu_t 'installed')" "$C_RST" || printf '%s%s%s' "$C_DIM" "$(_menu_t 'not installed')" "$C_RST")"
     printf '  %s4%s) Mail server          %s\n' "$C_CYN" "$C_RST" \
-      "$( [[ -n "$mail_v" ]] && printf '%sinstalled, sends as %s%s' "$C_GRN" "$mail_host" "$C_RST" || printf '%snot installed%s' "$C_DIM" "$C_RST")"
-    printf '  %s0%s) Back\n' "$C_CYN" "$C_RST"
-    printf '\n%sChoice: %s' "$C_BLD" "$C_RST"
+      "$( [[ -n "$mail_v" ]] && printf '%s%s%s' "$C_GRN" "$(_menu_tf 'installed, sends as %s' "$mail_host")" "$C_RST" || printf '%s%s%s' "$C_DIM" "$(_menu_t 'not installed')" "$C_RST")"
+    printf '  %s0%s) %s\n' "$C_CYN" "$C_RST" "$(_menu_t 'Back')"
+    printf '\n'; _menu_prompt "Choice"
     read -r choice </dev/tty || return 0
     case "$choice" in
       1) _menu_ask ver "Node.js major version" "$(lib_install_node_major_resolve)"
@@ -1237,13 +1358,14 @@ _menu_runtimes() {
            _menu_run mail status
          else
            local mh=""
-           printf '\n  The mail server needs a name of its own (mail.example.com), an A record\n'
-           printf '  pointing here, and a PTR record your provider sets to the same name.\n'
+           printf '\n'
+           _menu_note "The mail server needs a name of its own (mail.example.com), an A record" \
+             "pointing here, and a PTR record your provider sets to the same name."
            _menu_ask mh "Name this server sends mail as" "$(hostname -f 2>/dev/null || true)"
            [[ -n "$mh" ]] && _menu_run install --with-mail --mail-hostname "$mh" --skip-upgrade
          fi ;;
       0|q|Q|"") return 0 ;;
-      *) printf '%sPick a number from the list.%s\n' "$C_YEL" "$C_RST" ;;
+      *) _menu_printf '%sPick a number from the list.%s\n' "$C_YEL" "$C_RST" ;;
     esac
   done
 }
@@ -1253,9 +1375,13 @@ _menu_runtimes() {
 _menu_backup_schedule() {
   local how="" at="" day="" keep="" enc="" rem="" spec="" keep_def="$BACKUP_KEEP"
   local -a args=()
-  printf '\n  Every site gets an archive of its own under %s/<domain>/:\n' "$BACKUP_ROOT"
-  printf '  files, database, vhost and state. Older archives are removed as new ones arrive.\n'
-  printf '\n  1) Every day\n  2) Once a week\n  3) Every hour\n  4) Turn automatic backups off\n  0) Back\n'
+  _menu_printf '\n  Every site gets an archive of its own under %s/<domain>/:\n  files, database, vhost and state. Older archives are removed as new ones arrive.\n' "$BACKUP_ROOT"
+  printf '\n'
+  _menu_opt 1 "Every day"
+  _menu_opt 2 "Once a week"
+  _menu_opt 3 "Every hour"
+  _menu_opt 4 "Turn automatic backups off"
+  _menu_opt 0 "Back"
   _menu_ask how "Choice" "1"
   case "$how" in
     1) _menu_ask at "At what time (HH:MM, the server's clock)" "03:00"; spec="daily ${at}" ;;
@@ -1267,23 +1393,23 @@ _menu_backup_schedule() {
     *) return 0 ;;
   esac
   if [[ "$how" != "3" ]] && ! [[ "$at" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]]; then
-    printf '%s"%s" is not a time like 03:00.%s\n' "$C_YEL" "$at" "$C_RST"; _menu_pause; return 0
+    _menu_printf '%s"%s" is not a time like 03:00.%s\n' "$C_YEL" "$at" "$C_RST"; _menu_pause; return 0
   fi
   if [[ "$how" == "2" ]] && ! [[ "$day" =~ ^(mon|tue|wed|thu|fri|sat|sun)$ ]]; then
-    printf '%s"%s" is not one of mon tue wed thu fri sat sun.%s\n' "$C_YEL" "$day" "$C_RST"; _menu_pause; return 0
+    _menu_printf '%s"%s" is not one of mon tue wed thu fri sat sun.%s\n' "$C_YEL" "$day" "$C_RST"; _menu_pause; return 0
   fi
   _menu_ask keep "Archives to keep per site" "$keep_def"
   if ! [[ "$keep" =~ ^[1-9][0-9]*$ ]]; then
-    printf '%s"%s" is not a number of archives.%s\n' "$C_YEL" "$keep" "$C_RST"; _menu_pause; return 0
+    _menu_printf '%s"%s" is not a number of archives.%s\n' "$C_YEL" "$keep" "$C_RST"; _menu_pause; return 0
   fi
   args=(--schedule "$spec" --keep "$keep")
   _menu_ask enc "Encrypt the archives? (y/n)" "n"
   [[ "${enc,,}" == y* ]] && args+=(--encrypt)
   if lib_backup_remote_load; then
-    _menu_ask rem "Also upload each one to ${BKR_TYPE} ${BKR_TARGET}? (y/n)" "y"
+    _menu_ask rem "$(_menu_tf 'Also upload each one to %s %s? (y/n)' "$BKR_TYPE" "$BKR_TARGET")" "y"
     [[ "${rem,,}" == y* ]] && args+=(--remote)
   else
-    printf '%s  They stay on this server only: "%s backup --configure-remote" adds a second place.%s\n' "$C_DIM" "$MENU_CMD" "$C_RST"
+    _menu_printf '%s  They stay on this server only: "%s backup --configure-remote" adds a second place.%s\n' "$C_DIM" "$MENU_CMD" "$C_RST"
   fi
   _menu_run backup "${args[@]}"
 }
@@ -1292,7 +1418,10 @@ _menu_backup() {
   local what="" enc="" sched=""
   local -a args=()
   sched="$(lib_manifest_get '.backup.schedule' 2>/dev/null || true)"
-  printf '\n  1) Every site, now\n  2) One site, now\n  3) Automatic backups (now: %s)\n' "${sched:-off}"
+  printf '\n'
+  _menu_opt 1 "Every site, now"
+  _menu_opt 2 "One site, now"
+  _menu_opt 3 "$(_menu_tf 'Automatic backups (now: %s)' "${sched:-off}")"
   _menu_ask what "Choice" "1"
   if [[ "$what" == "3" ]]; then _menu_backup_schedule; return 0; fi
   if [[ "$what" == "2" ]]; then
@@ -1310,11 +1439,270 @@ _menu_backup() {
 _menu_restore() {
   local domain="" file=""
   domain="$(_menu_pick_domain)" || { _menu_pause; return 0; }
-  printf '\n%sAvailable archives for %s:%s\n' "$C_BLD" "$domain" "$C_RST"
+  _menu_printf '\n%sAvailable archives for %s:%s\n' "$C_BLD" "$domain" "$C_RST"
   if ! find "${BACKUP_ROOT}/${domain}" -maxdepth 1 -name '*.tar.gz*' -printf '  %p\n' 2>/dev/null | sort | head -20; then
-    printf '  (none found under %s)\n' "${BACKUP_ROOT}/${domain}"
+    _menu_printf '  (none found under %s)\n' "${BACKUP_ROOT}/${domain}"
   fi
   _menu_ask file "Full path of the archive to restore"
   [[ -n "$file" ]] || return 0
   _menu_run restore "$domain" --file "$file"
 }
+
+# =============================================================================
+#  The menu's texts in Turkish
+# =============================================================================
+# MENU_TR-BEGIN  One line per text: the English exactly as it is written above (a printf format keeps
+# its %s and \n, in the same order), and the Turkish for it. A text that is missing here is
+# shown in English alone; tests/unit.sh fails when one is missing or has other placeholders.
+declare -gA MENU_TR=()
+MENU_TR['\n  The menu speaks Turkish, English, or both at once. Now: %s\n']='\n  Menü Türkçe, İngilizce ya da ikisi birden gösterilebilir. Şimdi: %s\n'
+MENU_TR['Choice']='Seçim'
+MENU_TR['Press Enter to go back to the menu...']='Menüye dönmek için Enter'\''a basın...'
+MENU_TR['\n%sStopped.%s\n']='\n%sDurduruldu.%s\n'
+MENU_TR['\n%sThat command exited with status %s.%s\n']='\n%sKomut %s durum koduyla bitti.%s\n'
+MENU_TR['%sNo Node.js applications yet: add a site and choose "Node.js app".%s\n']='%sHenüz Node.js uygulaması yok: bir site ekleyin ve Node.js uygulaması türünü seçin.%s\n'
+MENU_TR['%sNo PHP sites yet: add a site and choose "PHP site".%s\n']='%sHenüz PHP sitesi yok: bir site ekleyin ve PHP sitesi türünü seçin.%s\n'
+MENU_TR['%sNo sites have been added yet.%s\n']='%sHenüz hiç site eklenmedi.%s\n'
+MENU_TR['\n%sWhich site?%s\n']='\n%sHangi site?%s\n'
+MENU_TR['cancel']='vazgeç'
+MENU_TR['Number']='Numara'
+MENU_TR['\n %s%slompstack%s  this server is not provisioned yet\n']='\n %s%slompstack%s  bu sunucu henüz kurulmadı\n'
+MENU_TR['Install the server (OpenLiteSpeed, PHP, MariaDB, Redis, firewall)']='Sunucuyu kur (OpenLiteSpeed, PHP, MariaDB, Redis, güvenlik duvarı)'
+MENU_TR['Show what the installation would do, changing nothing (dry run)']='Kurulumun ne yapacağını göster, hiçbir şeyi değiştirmeden (deneme)'
+MENU_TR['Command reference']='Komut başvurusu'
+MENU_TR['Install a mail-only server (mail and webmail for your domains, no web sites)']='Yalnızca posta sunucusu kur (alan adlarınız için posta ve webmail, web sitesi yok)'
+MENU_TR['Menu language: Türkçe, English, or both']='Menü dili: Türkçe, English ya da ikisi birden'
+MENU_TR['Exit']='Çıkış'
+MENU_TR['E-mail for Let'\''s Encrypt and alerts']='Let'\''s Encrypt ve uyarılar için e-posta'
+MENU_TR['%sPick a number from the list.%s\n']='%sListeden bir numara seçin.%s\n'
+MENU_TR['SITES']='SİTELER'
+MENU_TR['List sites']='Siteleri listele'
+MENU_TR['Add a site']='Site ekle'
+MENU_TR['Site credentials']='Site giriş bilgileri'
+MENU_TR['Site logs']='Site logları'
+MENU_TR['Databases']='Veritabanları'
+MENU_TR['Node.js apps (PM2) and proxies (a domain or a path -> an app'\''s port)']='Node.js uygulamaları (PM2) ve proxy'\''ler (alan adı ya da yol -> uygulamanın portu)'
+MENU_TR['Remove a site']='Site kaldır'
+MENU_TR['Rename a site (new domain name; the old one redirects to it)']='Siteyi yeniden adlandır (yeni alan adı; eskisi ona yönlenir)'
+MENU_TR['Redirects (a domain that only sends visitors on to another)']='Yönlendirmeler (ziyaretçiyi yalnızca başka bir alan adına gönderen alan adı)'
+MENU_TR['Mail: domains, mailboxes, DNS']='Posta: alan adları, posta kutuları, DNS'
+MENU_TR['Fix file ownership (after uploading as root)']='Dosya sahipliğini düzelt (root olarak yükledikten sonra)'
+MENU_TR['Harden sites against PHP shells']='Siteleri PHP shell'\''lerine karşı sıkılaştır'
+MENU_TR['Scan sites for PHP shells (eval, base64, exec)']='Sitelerde PHP shell tara (eval, base64, exec)'
+MENU_TR['Download WordPress into a site (you finish the setup in the browser)']='Bir siteye WordPress indir (kurulumu tarayıcıda siz bitirirsiniz)'
+MENU_TR['SERVER']='SUNUCU'
+MENU_TR['Status']='Durum'
+MENU_TR['Health check']='Sağlık kontrolü'
+MENU_TR['Open WebAdmin panel']='WebAdmin panelini aç'
+MENU_TR['Certificates (which exist, automatic renewal, a site'\''s first one)']='Sertifikalar (hangileri var, otomatik yenileme, bir sitenin ilk sertifikası)'
+MENU_TR['Back up sites (now, or automatically)']='Siteleri yedekle (şimdi ya da otomatik)'
+MENU_TR['Restore a site']='Bir siteyi geri yükle'
+MENU_TR['MAINTENANCE']='BAKIM'
+MENU_TR['Update packages']='Paketleri güncelle'
+MENU_TR['Update lompstack']='lompstack'\''i güncelle'
+MENU_TR['Re-tune to hardware']='Donanıma göre yeniden ayarla'
+MENU_TR['Notifications']='Bildirimler'
+MENU_TR['Optional components (Node.js, Python, Netdata, Mail)']='İsteğe bağlı bileşenler (Node.js, Python, Netdata, Posta)'
+MENU_TR['Remove extra PHP packages (after apt install lsphp83*)']='Fazla PHP paketlerini kaldır (apt install lsphp83* sonrası)'
+MENU_TR['Domain (without www, e.g. example.com)']='Alan adı (www olmadan, örn. example.com)'
+MENU_TR['%s"%s" is not a valid domain name.%s\n']='%s"%s" geçerli bir alan adı değil.%s\n'
+MENU_TR['\n%sWhat kind of site?%s\n']='\n%sNe tür bir site?%s\n'
+MENU_TR['PHP site (default)']='PHP sitesi (varsayılan)'
+MENU_TR['WordPress, installed and configured']='WordPress, kurulmuş ve ayarlanmış'
+MENU_TR['Static files only']='Yalnızca statik dosyalar'
+MENU_TR['Node.js app that lomp keeps running (PM2: starts at boot, comes back after a crash)']='lomp'\''un çalışır tuttuğu Node.js uygulaması (PM2: açılışta başlar, çökünce geri gelir)'
+MENU_TR['Reverse proxy: the domain goes to a port where an app you start yourself listens']='Ters proxy: alan adı, sizin başlattığınız uygulamanın dinlediği porta gider'
+MENU_TR['Visitors reach the app through this site; the app itself listens on a local port.']='Ziyaretçiler uygulamaya bu site üzerinden ulaşır; uygulamanın kendisi yerel bir portu dinler.'
+MENU_TR['It must take that port from the PORT variable (process.env.PORT), not a fixed number.']='Uygulama o portu PORT değişkeninden almalıdır (process.env.PORT), sabit bir sayıdan değil.'
+MENU_TR['Afterwards: put the code into /home/<domain>/app, then menu 6 -> 3 (Deploy).']='Sonrası: kodu /home/<alan-adı>/app içine koyun, ardından menü 6 -> 3 (Deploy).'
+MENU_TR['Port the app listens on (it gets it as PORT)']='Uygulamanın dinleyeceği port (PORT değişkeniyle verilir)'
+MENU_TR['Start command (runs without a shell)']='Başlatma komutu (kabuk olmadan çalışır)'
+MENU_TR['Everything that asks for this domain is passed to the address below, on this server.']='Bu alan adına gelen her istek, bu sunucudaki aşağıdaki adrese iletilir.'
+MENU_TR['lomp does not start that app: you do. While it is down the site answers 503.']='O uygulamayı lomp başlatmaz, siz başlatırsınız. Uygulama kapalıyken site 503 yanıtı verir.'
+MENU_TR['Only one path of a site (example.com/api/) instead: menu 6 -> 11 (Path proxies).']='Bir sitenin yalnızca tek bir yolu (example.com/api/) için: menü 6 -> 11 (Yol yönlendirmeleri).'
+MENU_TR['Where the app listens (host:port)']='Uygulamanın dinlediği adres (host:port)'
+MENU_TR['Also serve www.%s? (y/n)']='www.%s adresi de sunulsun mu? (y/n)'
+MENU_TR['Request a Let'\''s Encrypt certificate now? DNS must already point here (y/n)']='Şimdi Let'\''s Encrypt sertifikası istensin mi? DNS zaten buraya yönlenmiş olmalı (y/n)'
+MENU_TR['Contact e-mail']='İletişim e-postası'
+MENU_TR['Give this site its own mail (mailboxes at @%s)? (y/n)']='Bu siteye kendi postası verilsin mi (@%s posta kutuları)? (y/n)'
+MENU_TR['First mailbox name (before the @)']='İlk posta kutusunun adı (@ işaretinden önceki kısım)'
+MENU_TR['\n %sDATABASES%s\n']='\n %sVERİTABANLARI%s\n'
+MENU_TR['List databases (sizes, no passwords)']='Veritabanlarını listele (boyutlar, parola yok)'
+MENU_TR['Create or show the database of a site']='Bir sitenin veritabanını oluştur ya da göster'
+MENU_TR['Give a site'\''s database a new random password']='Bir sitenin veritabanına yeni rastgele parola ver'
+MENU_TR['Back']='Geri'
+MENU_TR['\n %sCERTIFICATES%s   renewal is automatic; item 1 shows whether it is working\n']='\n %sSERTİFİKALAR%s   yenileme otomatiktir; 1. madde çalışıp çalışmadığını gösterir\n'
+MENU_TR['Check: which certificates exist, days left, is renewal automatic']='Kontrol: hangi sertifikalar var, kalan gün, yenileme otomatik mi'
+MENU_TR['Get a certificate for a site (its DNS must point here)']='Bir site için sertifika al (DNS'\''i buraya yönlenmiş olmalı)'
+MENU_TR['Renew every certificate now']='Tüm sertifikaları şimdi yenile'
+MENU_TR['Rehearse the automatic renewal (replaces nothing)']='Otomatik yenilemeyi dene (hiçbir şeyi değiştirmez)'
+MENU_TR['Switch automatic renewal back on (timer or cron, deploy hook)']='Otomatik yenilemeyi yeniden aç (timer ya da cron, deploy hook)'
+MENU_TR['Get a certificate for every site that has none']='Sertifikası olmayan her site için sertifika al'
+MENU_TR['\n %sNODE.JS APPS (PM2)%s   every site runs its own PM2 as its own user\n']='\n %sNODE.JS UYGULAMALARI (PM2)%s   her site kendi PM2'\''sini kendi kullanıcısıyla çalıştırır\n'
+MENU_TR['How it works: the domain -> OpenLiteSpeed -> the app on its own local port (3000, 3001...).']='Nasıl çalışır: alan adı -> OpenLiteSpeed -> kendi yerel portundaki uygulama (3000, 3001...).'
+MENU_TR['PM2 keeps the app running: it starts at boot and comes back after a crash.']='PM2 uygulamayı ayakta tutar: açılışta başlatır, çökerse yeniden kaldırır.'
+MENU_TR['A new app: 2 (add the site), copy the code into /home/<domain>/app, then 3 (deploy).']='Yeni uygulama: 2 (siteyi ekle), kodu /home/<alan-adı>/app içine kopyala, sonra 3 (deploy).'
+MENU_TR['An app you start yourself, or one path of a site sent to a port: 2 (kind 5), or 11.']='Kendi başlattığınız bir uygulama ya da bir sitenin tek bir yolu için: 2 (tür 5) veya 11.'
+MENU_TR['List applications']='Uygulamaları listele'
+MENU_TR['Add a site (choose '\''Node.js app'\'')']='Site ekle (Node.js uygulaması türünü seçin)'
+MENU_TR['Deploy: install dependencies, build, restart']='Deploy: bağımlılıkları kur, derle, yeniden başlat'
+MENU_TR['Start']='Başlat'
+MENU_TR['Stop']='Durdur'
+MENU_TR['Restart']='Yeniden başlat'
+MENU_TR['Follow the logs']='Logları izle'
+MENU_TR['Status of one application']='Tek bir uygulamanın durumu'
+MENU_TR['Environment variables']='Ortam değişkenleri'
+MENU_TR['Port, start command, memory limit']='Port, başlatma komutu, bellek sınırı'
+MENU_TR['Path proxies (example.com/api -> an app)']='Yol yönlendirmeleri (example.com/api -> bir uygulama)'
+MENU_TR['Deploy from a Git repository (URL, branch)']='Git deposundan deploy (URL, dal)'
+MENU_TR['Deploy key for a private repository']='Özel depo için deploy anahtarı'
+MENU_TR['Workers and scheduled jobs (queues, bots, cron)']='Worker'\''lar ve zamanlanmış işler (kuyruklar, botlar, cron)'
+MENU_TR['%sThere is nothing to choose from here yet.%s\n']='%sBurada henüz seçilecek bir şey yok.%s\n'
+MENU_TR['\n%sWhich one?%s\n']='\n%sHangisi?%s\n'
+MENU_TR['\n %sWORKERS AND JOBS OF %s%s   run as the site user, next to the application\n']='\n %sWORKER VE İŞLER: %s%s   site kullanıcısıyla, uygulamanın yanında çalışır\n'
+MENU_TR['List']='Listele'
+MENU_TR['Add a background worker (queue consumer, bot)']='Arka plan worker'\''ı ekle (kuyruk tüketici, bot)'
+MENU_TR['Add a scheduled job (cron)']='Zamanlanmış iş ekle (cron)'
+MENU_TR['Run a scheduled job now']='Zamanlanmış bir işi şimdi çalıştır'
+MENU_TR['Follow the logs of one']='Birinin loglarını izle'
+MENU_TR['Restart a worker']='Bir worker'\''ı yeniden başlat'
+MENU_TR['Stop one']='Birini durdur'
+MENU_TR['Start one']='Birini başlat'
+MENU_TR['Remove one']='Birini kaldır'
+MENU_TR['Name (a-z, 0-9 and -)']='Ad (a-z, 0-9 ve -)'
+MENU_TR['Command, run without a shell (e.g. node worker.js)']='Komut, kabuk olmadan çalışır (örn. node worker.js)'
+MENU_TR['Directory, inside the site'\''s home']='Dizin, sitenin home dizini içinde'
+MENU_TR['Port, only if it listens on one']='Port, yalnızca bir port dinliyorsa'
+MENU_TR['Schedule: minute hour day month weekday']='Zamanlama: dakika saat gün ay haftanın-günü'
+MENU_TR['Command, run without a shell (e.g. npm run cleanup)']='Komut, kabuk olmadan çalışır (örn. npm run cleanup)'
+MENU_TR['\n%sA private repository needs the deploy key first (item 13).%s\n']='\n%sÖzel bir depo için önce deploy anahtarı gerekir (13. madde).%s\n'
+MENU_TR['Repository URL (https://host/owner/repo.git or git@host:owner/repo.git)']='Depo URL'\''si (https://host/owner/repo.git ya da git@host:owner/repo.git)'
+MENU_TR['Branch (empty: the repository'\''s default)']='Dal (boş: deponun varsayılanı)'
+MENU_TR['\n %sENVIRONMENT OF %s%s   stored root-only, never logged\n']='\n %sORTAM DEĞİŞKENLERİ: %s%s   yalnızca root okuyabilir, loglara yazılmaz\n'
+MENU_TR['List the names']='Adları listele'
+MENU_TR['Set a variable (the value is typed hidden)']='Değişken ata (değer gizli yazılır)'
+MENU_TR['Remove a variable']='Değişken kaldır'
+MENU_TR['Add this site'\''s database login (DB_*, DATABASE_URL)']='Bu sitenin veritabanı girişini ekle (DB_*, DATABASE_URL)'
+MENU_TR['Name (A-Z, 0-9 and _)']='Ad (A-Z, 0-9 ve _)'
+MENU_TR['Value (hidden)']='Değer (gizli)'
+MENU_TR['Name to remove']='Kaldırılacak ad'
+MENU_TR['\n%sPress Enter to keep a value.%s\n']='\n%sBir değeri korumak için Enter'\''a basın.%s\n'
+MENU_TR['Port']='Port'
+MENU_TR['Start command, or a file such as dist/main.js']='Başlatma komutu ya da dist/main.js gibi bir dosya'
+MENU_TR['Memory limit (e.g. 512M, or none)']='Bellek sınırı (örn. 512M ya da none)'
+MENU_TR['%sNothing changed.%s\n']='%sHiçbir şey değişmedi.%s\n'
+MENU_TR['\n %sPATH PROXIES%s   example.com/api/... -> an application, the rest of the site stays\n']='\n %sYOL YÖNLENDİRMELERİ%s   example.com/api/... -> bir uygulama, sitenin geri kalanı yerinde kalır\n'
+MENU_TR['Sends one path of a site you already have to a port on this server,']='Var olan bir sitenin tek bir yolunu bu sunucudaki bir porta gönderir,'
+MENU_TR['e.g. /api/ -> 127.0.0.1:3001. The app must be listening there; lomp does not start it.']='örn. /api/ -> 127.0.0.1:3001. Uygulama orada dinliyor olmalı; lomp onu başlatmaz.'
+MENU_TR['The app gets the full path: /api/users arrives as /api/users, not as /users.']='Uygulamaya yolun tamamı gider: /api/users, /users olarak değil /api/users olarak gelir.'
+MENU_TR['A whole domain to a port instead: main menu 2 (Add a site), kind 5.']='Bir alan adının tamamını bir porta göndermek için: ana menü 2 (Site ekle), tür 5.'
+MENU_TR['List path proxies']='Yol yönlendirmelerini listele'
+MENU_TR['Add a path proxy']='Yol yönlendirmesi ekle'
+MENU_TR['Remove a path proxy']='Yol yönlendirmesi kaldır'
+MENU_TR['Path of the site that goes to the app']='Sitenin uygulamaya gidecek yolu'
+MENU_TR['%s%s has no path proxies.%s\n']='%s%s sitesinde yol yönlendirmesi yok.%s\n'
+MENU_TR['\n%sPath proxies of %s:%s\n']='\n%s%s sitesinin yol yönlendirmeleri:%s\n'
+MENU_TR['Path to remove (e.g. /api/)']='Kaldırılacak yol (örn. /api/)'
+MENU_TR['\n%sRemoving %s deletes its files, database and certificate.%s\n%sA safety backup is taken first.%s\n']='\n%s%s kaldırılınca dosyaları, veritabanı ve sertifikası silinir.%s\n%sÖnce bir güvenlik yedeği alınır.%s\n'
+MENU_TR['Keep the database? (y/n)']='Veritabanı kalsın mı? (y/n)'
+MENU_TR['Keep the files? (y/n)']='Dosyalar kalsın mı? (y/n)'
+MENU_TR['The site moves to the new name as it is: files, settings, database. Nothing is copied.']='Site olduğu gibi yeni ada taşınır: dosyalar, ayarlar, veritabanı. Hiçbir şey kopyalanmaz.'
+MENU_TR['Point the DNS of the new name to this server first, so that it gets its certificate right away.']='Sertifikasını hemen alabilmesi için önce yeni adın DNS'\''ini bu sunucuya yönlendirin.'
+MENU_TR['New domain for %s (without www, e.g. example.net)']='%s için yeni alan adı (www olmadan, örn. example.net)'
+MENU_TR['Keep %s as a redirect (301) to %s? (y/n)']='%s, %s adresine yönlendirme (301) olarak kalsın mı? (y/n)'
+MENU_TR['List the redirects']='Yönlendirmeleri listele'
+MENU_TR['Add one (or fetch the certificate of one whose DNS points here now)']='Ekle (ya da DNS'\''i artık buraya yönlenen birinin sertifikasını al)'
+MENU_TR['Domain that redirects (without www, e.g. old-name.com)']='Yönlenecek alan adı (www olmadan, örn. old-name.com)'
+MENU_TR['Where to (a site here, or any other domain)']='Nereye (buradaki bir site ya da başka herhangi bir alan adı)'
+MENU_TR['Also redirect www.%s? (y/n)']='www.%s de yönlendirilsin mi? (y/n)'
+MENU_TR['Which one (its name, empty to cancel)']='Hangisi (adı; vazgeçmek için boş bırakın)'
+MENU_TR['Files uploaded as root go to their site'\''s own user; what already is the site'\''s stays as it is.']='Root olarak yüklenen dosyalar sitenin kendi kullanıcısına geçer; zaten sitenin olanlar olduğu gibi kalır.'
+MENU_TR['It happens by itself within a minute of an upload; this does it right now.']='Bu, yüklemeden sonra bir dakika içinde kendiliğinden olur; bu seçenek hemen şimdi yapar.'
+MENU_TR['Every site']='Tüm siteler'
+MENU_TR['One site']='Tek site'
+MENU_TR['Stop doing it automatically (root keeps files of its own in a site)']='Otomatik yapmayı bırak (root sitede kendi dosyalarını tutar)'
+MENU_TR['Do it automatically again, within a minute of an upload (now: off)']='Yeniden otomatik yap, yüklemeden sonra bir dakika içinde (şimdi: kapalı)'
+MENU_TR['PHP in a site can then start no process, read only its own files and run no script in an upload directory;']='Sitedeki PHP artık süreç başlatamaz, yalnızca kendi dosyalarını okur ve yükleme dizininde betik çalıştıramaz;'
+MENU_TR['its user reaches only DNS, the web server, MariaDB and Redis on this machine.']='kullanıcısı bu makinede yalnızca DNS, web sunucusu, MariaDB ve Redis'\''e ulaşır.'
+MENU_TR['Show what is set']='Ayarlı olanı göster'
+MENU_TR['Does this site need exec/proc_open (y/N)']='Bu sitenin exec/proc_open'\''a ihtiyacı var mı (y/N)'
+MENU_TR['Reads the PHP files for what web shells are made of and lists the files to open. It changes nothing.']='PHP dosyalarında web shell'\''lerin yapıtaşlarını arar ve açıp bakılacak dosyaları listeler. Hiçbir şeyi değiştirmez.'
+MENU_TR['Also list every use of eval, base64_decode and exec? Plugins use them too (y/N)']='eval, base64_decode ve exec'\''in her kullanımı da listelensin mi? Eklentiler de bunları kullanır (y/N)'
+MENU_TR['The latest WordPress (wordpress.org/latest.zip) goes straight into the site'\''s public_html, as the']='En güncel WordPress (wordpress.org/latest.zip) doğrudan sitenin public_html dizinine, sitenin kendi'
+MENU_TR['site'\''s own user. You finish the installation in the browser; the database login is printed for it.']='kullanıcısıyla konur. Kurulumu tarayıcıda bitirirsiniz; veritabanı giriş bilgileri bunun için yazdırılır.'
+MENU_TR['%sNo domain has mail yet: "Add a domain" gives one its mail.%s\n']='%sHenüz hiçbir alan adının postası yok: "Alan adı ekle" bir alan adına posta verir.%s\n'
+MENU_TR['\n%sWhich domain?%s\n']='\n%sHangi alan adı?%s\n'
+MENU_TR['\n  %s is not a site of this server: it is added for its mail alone (no site, no Linux user).\n']='\n  %s bu sunucunun bir sitesi değil: yalnızca postası için eklenir (site yok, Linux kullanıcısı yok).\n'
+MENU_TR['\n%sWhere does the mail of %s go?%s\n']='\n%s%s postası nereye gitsin?%s\n'
+MENU_TR['Into a mailbox of its own (info@%s, with a password of its own)']='Kendi posta kutusuna (info@%s, kendi parolasıyla)'
+MENU_TR['Into a mailbox that exists already - one inbox for several domains']='Zaten var olan bir posta kutusuna - birkaç alan adı için tek gelen kutusu'
+MENU_TR['%sThere is no mailbox on this server yet: the first domain needs one of its own.%s\n']='%sBu sunucuda henüz posta kutusu yok: ilk alan adının kendi kutusu olmalı.%s\n'
+MENU_TR['Deliver into which mailbox']='Hangi posta kutusuna teslim edilsin'
+MENU_TR['Which addresses of %s? Names with commas (info,sales), or * for every address']='%s alan adının hangi adresleri? Virgülle adlar (info,sales) ya da her adres için *'
+MENU_TR['Mailbox name (before the @), or a dash for none']='Posta kutusu adı (@ işaretinden önceki kısım) ya da olmasın diye tire'
+MENU_TR['Mailbox size']='Posta kutusu boyutu'
+MENU_TR['What runs, and for which domains']='Ne çalışıyor ve hangi alan adları için'
+MENU_TR['Switch it on for a domain (it answers at webmail.<domain>)']='Bir alan adı için aç (webmail.<alan-adı> adresinde yanıt verir)'
+MENU_TR['Switch it off for a domain']='Bir alan adı için kapat'
+MENU_TR['Turn its mail off: no delivery and no login, every message stays, and it can be turned on again']='Postasını kapat: teslimat ve giriş olmaz, tüm iletiler kalır, yeniden açılabilir'
+MENU_TR['Remove the domain with all of its mail (a last backup is taken first)']='Alan adını tüm postasıyla kaldır (önce son bir yedek alınır)'
+MENU_TR['\n  The mail server is not installed yet. Optional components (18) installs it.\n']='\n  Posta sunucusu henüz kurulu değil. İsteğe bağlı bileşenler (18) onu kurar.\n'
+MENU_TR['\n %sMAIL%s   (this server sends as %s)\n']='\n %sPOSTA%s   (bu sunucu %s adıyla gönderir)\n'
+MENU_TR['Domains that have mail here']='Burada postası olan alan adları'
+MENU_TR['Add a domain (a mailbox of its own, or into one that exists)']='Alan adı ekle (kendi posta kutusu ya da var olan birine)'
+MENU_TR['Mailboxes: who has one, its size, how full it is']='Posta kutuları: kimin var, boyutu, ne kadar dolu'
+MENU_TR['Add a mailbox']='Posta kutusu ekle'
+MENU_TR['Change a mailbox password']='Posta kutusu parolasını değiştir'
+MENU_TR['Aliases: an address that is delivered into another mailbox']='Takma adlar: başka bir posta kutusuna teslim edilen adres'
+MENU_TR['What to put in DNS (and whether it is there)']='DNS'\''e ne yazılmalı (ve yazılmış mı)'
+MENU_TR['Can this server send? (reverse DNS, port 25)']='Bu sunucu posta gönderebiliyor mu? (ters DNS, port 25)'
+MENU_TR['Webmail (on or off for a domain, or what runs)']='Webmail (bir alan adı için aç/kapat ya da ne çalışıyor)'
+MENU_TR['Turn mail off for a domain, or remove a mail domain']='Bir alan adının postasını kapat ya da posta alan adını kaldır'
+MENU_TR['Server: status, health check, backups, updates']='Sunucu: durum, sağlık kontrolü, yedekler, güncellemeler'
+MENU_TR['Mailbox name (before the @)']='Posta kutusu adı (@ işaretinden önceki kısım)'
+MENU_TR['Which address?']='Hangi adres?'
+MENU_TR['Alias address, or @domain for every address of a domain (empty to only list them)']='Takma ad adresi ya da bir alan adının her adresi için @alanadı (yalnızca listelemek için boş bırakın)'
+MENU_TR['Where should it go? (an address, or several with commas)']='Nereye gitsin? (bir adres ya da virgülle birkaç adres)'
+MENU_TR['\n %sSERVER%s\n']='\n %sSUNUCU%s\n'
+MENU_TR['Back up the mail (now, or automatically)']='Postayı yedekle (şimdi ya da otomatik)'
+MENU_TR['Restore a domain'\''s mail from a backup']='Bir alan adının postasını yedekten geri yükle'
+MENU_TR['Certificates: which exist, is renewal automatic']='Sertifikalar: hangileri var, yenileme otomatik mi'
+MENU_TR['Every domain, now']='Tüm alan adları, şimdi'
+MENU_TR['One domain, now']='Tek alan adı, şimdi'
+MENU_TR['Automatic backups (now: %s)']='Otomatik yedekler (şimdi: %s)'
+MENU_TR['Encrypt the archive? (y/n)']='Arşiv şifrelensin mi? (y/n)'
+MENU_TR['Domain whose mail to restore']='Postası geri yüklenecek alan adı'
+MENU_TR['\n%sMail archives of %s:%s\n']='\n%s%s posta arşivleri:%s\n'
+MENU_TR['  (none found under %s - copy the archive there, or give its path below)\n']='  (%s altında bulunamadı - arşivi oraya kopyalayın ya da yolunu aşağıya yazın)\n'
+MENU_TR['Full path of the archive (empty: the newest one above)']='Arşivin tam yolu (boş: yukarıdaki en yenisi)'
+MENU_TR['A server for mail alone: Postfix, Dovecot, Rspamd and a webmail. Your domains get their']='Yalnızca posta için bir sunucu: Postfix, Dovecot, Rspamd ve bir webmail. Alan adlarınızın postası'
+MENU_TR['mail here; their web sites stay where they are. It needs a name of its own, like']='buraya gelir; web siteleri oldukları yerde kalır. Kendine ait bir ada ihtiyacı var, örneğin'
+MENU_TR['mail.example.com, with an A record pointing here and a PTR record your provider sets.']='mail.example.com; buraya yönlenen bir A kaydı ve sağlayıcınızın ayarladığı bir PTR kaydıyla.'
+MENU_TR['Name this server sends mail as']='Bu sunucunun posta gönderirken kullanacağı ad'
+MENU_TR['\n %sOPTIONAL COMPONENTS%s   (nothing here is installed by default)\n']='\n %sİSTEĞE BAĞLI BİLEŞENLER%s   (buradaki hiçbir şey varsayılan olarak kurulmaz)\n'
+MENU_TR['installed']='kurulu'
+MENU_TR['not installed']='kurulu değil'
+MENU_TR['installed, sends as %s']='kurulu, %s adıyla gönderir'
+MENU_TR['Node.js major version']='Node.js ana sürümü'
+MENU_TR['The mail server needs a name of its own (mail.example.com), an A record']='Posta sunucusunun kendine ait bir adı (mail.example.com), buraya yönlenen bir A kaydı'
+MENU_TR['pointing here, and a PTR record your provider sets to the same name.']='ve sağlayıcınızın aynı ada ayarladığı bir PTR kaydı olmalıdır.'
+MENU_TR['\n  Every site gets an archive of its own under %s/<domain>/:\n  files, database, vhost and state. Older archives are removed as new ones arrive.\n']='\n  Her site %s/<alan-adı>/ altında kendi arşivini alır:\n  dosyalar, veritabanı, vhost ve durum. Yeni arşivler geldikçe eskileri silinir.\n'
+MENU_TR['Every day']='Her gün'
+MENU_TR['Once a week']='Haftada bir'
+MENU_TR['Every hour']='Her saat'
+MENU_TR['Turn automatic backups off']='Otomatik yedekleri kapat'
+MENU_TR['At what time (HH:MM, the server'\''s clock)']='Saat kaçta (SS:DD, sunucunun saati)'
+MENU_TR['On which day (mon tue wed thu fri sat sun)']='Hangi gün (mon tue wed thu fri sat sun)'
+MENU_TR['%s"%s" is not a time like 03:00.%s\n']='%s"%s" 03:00 gibi bir saat değil.%s\n'
+MENU_TR['%s"%s" is not one of mon tue wed thu fri sat sun.%s\n']='%s"%s" mon tue wed thu fri sat sun günlerinden biri değil.%s\n'
+MENU_TR['Archives to keep per site']='Site başına saklanacak arşiv sayısı'
+MENU_TR['%s"%s" is not a number of archives.%s\n']='%s"%s" bir arşiv sayısı değil.%s\n'
+MENU_TR['Encrypt the archives? (y/n)']='Arşivler şifrelensin mi? (y/n)'
+MENU_TR['Also upload each one to %s %s? (y/n)']='Her biri %s %s hedefine de yüklensin mi? (y/n)'
+MENU_TR['%s  They stay on this server only: "%s backup --configure-remote" adds a second place.%s\n']='%s  Yalnızca bu sunucuda kalırlar: "%s backup --configure-remote" ikinci bir yer ekler.%s\n'
+MENU_TR['Every site, now']='Tüm siteler, şimdi'
+MENU_TR['One site, now']='Tek site, şimdi'
+MENU_TR['\n%sAvailable archives for %s:%s\n']='\n%s%s için mevcut arşivler:%s\n'
+MENU_TR['  (none found under %s)\n']='  (%s altında bulunamadı)\n'
+MENU_TR['Full path of the archive to restore']='Geri yüklenecek arşivin tam yolu'
+# MENU_TR-END
