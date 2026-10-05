@@ -1331,15 +1331,96 @@ lib_webmail_user_forget() {   # address | @domain
   return 0
 }
 
+# The addresses the webmail has a user for and this server has no mailbox for: neither one
+# that can sign in nor one that "mail disable" put aside. They are what was left behind when a
+# mailbox was deleted by a release that did not take its webmail user along yet, and what a
+# removal left when the database was down that minute - and each is exactly what the next
+# mailbox made under that address would sign in to. One address a line, in lower case, a
+# domain's addresses together: the way "lomp webmail forget" takes them.
+# "None" and "cannot tell" are two answers here, and the status keeps them apart:
+#   0  that is all of them (nothing printed: there are none)
+#   1  the table of users could not be read
+#   2  it could, and there is no mailbox on this server to hold it against
+# The last is the one that matters. A mailbox file that is missing, empty or not what it
+# should be must never turn every user of the webmail into one whose mailbox is gone: this
+# list is what doctor names and what "forget --gone" removes.
+lib_webmail_gone() {
+  local names="" name="" live="" out=""
+  # no database, no users: a server that never had a webmail, or one whose database was dropped
+  _wm_info_load || return 0
+  names="$(lib_db_sql "SELECT username FROM \`${WM_DB_NAME}\`.users ORDER BY user_id" 2>/dev/null)" || return 1
+  # a file that cannot be read is an empty list here, and an empty list is "cannot tell" below
+  live="$(lib_mail_boxes 2>/dev/null)"
+  while IFS= read -r name; do
+    [[ -n "$name" ]] || continue
+    # what a table hands back is text like any other, and this text ends up in a list somebody
+    # is asked to remove: a name that is not an address is no mailbox's, and nothing "forget"
+    # could be told to take
+    lib_mail_address_valid "$name" || continue
+    name="${name,,}"
+    # put aside is not gone, whatever the live file says
+    if lib_mail_box_parked "$name"; then continue; fi
+    [[ -n "$live" ]] || return 2
+    if grep -qxF -- "$name" <<<"$live"; then continue; fi
+    out+="${name}"$'\n'
+  done <<<"$names"
+  [[ -n "$out" ]] || return 0
+  # once each - a user may be stored twice, under two hosts or in two spellings - and compared
+  # byte for byte, so that no locale decides two addresses are one
+  printf '%s' "$out" | LC_ALL=C sort -t@ -k2 -k1,1 -u
+  return 0
+}
+
+# "lomp webmail forget --gone": all of those at once. The whole list first - doctor names only
+# the first few - then one question, and a dry run stops after the list. Each address goes the
+# way a single one does, so one that cannot be removed is said and the others still go.
+_wm_forget_gone() {
+  local list="" a="" why=0 n=0 went=0 kept=0
+  list="$(lib_webmail_gone)" || why=$?
+  case "$why" in
+    0) ;;
+    2) lib_die "Which of the webmail's users have no mailbox any more cannot be told" \
+         "${MAIL_PASSWD_FILE} is missing or names no mailbox, and held against that every one of them would look gone" \
+         "name the one that is gone: lomp webmail forget <address>" ;;
+    *) lib_die "The webmail's users could not be read" "its database did not answer (is MariaDB running?)" "lomp doctor" ;;
+  esac
+  if [[ -z "$list" ]]; then
+    lib_ok "The webmail keeps nothing for an address that has no mailbox"
+    return 0
+  fi
+  n="$(wc -l <<<"$list" | tr -d ' ')"
+  lib_info "The webmail keeps an address book, identities and settings for ${n} address(es) that have no mailbox any more:"
+  sed 's/^/        /' <<<"$list"
+  # said before the question, not after it: an answer nothing here could carry out
+  lib_webmail_installed || lib_die "None of them can be removed" \
+    "the webmail is not installed, and it is Roundcube's own script that removes a user" \
+    "its database was kept: 'lomp webmail purge' drops all of it"
+  if (( OPT_DRY_RUN )); then lib_info "[dry-run] would remove what the webmail keeps for them"; return 0; fi
+  lib_confirm "Remove what the webmail keeps for these ${n} address(es)?" n \
+    || lib_die "Nothing was removed" "" "re-run with --yes to skip the question"
+  # on a descriptor of its own: what runs in there must not be able to read the list away
+  while IFS= read -r a <&3; do
+    [[ -n "$a" ]] || continue
+    if lib_webmail_user_forget "$a"; then went=$((went + 1))
+    else kept=$((kept + 1)); lib_warn "${a} is still there: ${WM_LAST_ERROR}"; fi
+  done 3<<<"$list"
+  if (( went > 0 )); then lib_ok "The webmail has forgotten ${went} address(es) that have no mailbox any more"; fi
+  (( kept == 0 )) || lib_die "The webmail still holds what was kept there for ${kept} of ${n} address(es)" \
+    "the warnings above say why, one address each" "lomp doctor"
+  return 0
+}
+
 # "lomp webmail forget <address>|@<domain>": the same removal, asked for by hand. It is for
 # what a release before this one left behind, and for a removal that could not finish because
 # the database was down that minute. A mailbox that exists is refused, whether it is live or
 # only put aside by "mail disable": what the webmail keeps for that one is its owner's.
-lib_webmail_forget_main() {   # address | @domain
+# "--gone" in place of a name is every address that has no mailbox any more (above).
+lib_webmail_forget_main() {   # address | @domain | --gone
   local key="${1:-}" d=""
+  if [[ "$key" == "--gone" ]]; then _wm_forget_gone; return 0; fi
   key="${key,,}"
   lib_mail_alias_key_valid "$key" || lib_die "Whose? '${key:-nothing}' is neither an address nor @domain" \
-    "an address names one mailbox that is gone, @domain every mailbox a domain used to have" \
+    "an address names one mailbox that is gone, @domain every mailbox a domain used to have, --gone all that are gone" \
     "lomp webmail forget info@example.com   or   lomp webmail forget @example.com"
   d="${key#*@}"
   if [[ "$key" == @* ]]; then

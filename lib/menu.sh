@@ -125,11 +125,13 @@ COMMANDS
   webmail status                What runs, and for which domains (people change their own
                                 password in it, under Settings)
   webmail update [version]      Take a newer Roundcube (it also happens by itself, daily)
-  webmail forget <user@domain>|@<domain>
+  webmail forget <user@domain>|@<domain>|--gone
                                 Remove what the webmail still keeps for a mailbox that is gone
                                 (address book, identities, settings). Deleting a mailbox does
                                 this by itself; the command is for one that went before lomp
-                                did, or while the database was down
+                                did, or while the database was down. --gone is every such
+                                address at once: it lists them (doctor names the first few)
+                                and asks before it removes them
   webmail uninstall | purge     Remove it; "purge" drops its database too
   mail dkim status <domain>     Which key this domain signs with
   mail dkim rotate <domain> [--abort]

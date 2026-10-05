@@ -824,9 +824,17 @@ again, and an empty address book.
 ```bash
 sudo lomp webmail forget info@example.com   # a mailbox that went before lomp did this by
 sudo lomp webmail forget @example.com       # itself, or while the database was down
+sudo lomp webmail forget --gone             # every such address: the list, then one question
 ```
 
 `forget` refuses an address that still has a mailbox, live or switched off.
+
+Which addresses those are is not something to remember: `lomp doctor`, and the daily health
+check with it, warns when the webmail still keeps something for an address that has no mailbox
+any more, and names the first few. `forget --gone` lists all of them and asks before it removes
+them; with `--dry-run` it only lists, and `--yes` answers the question in a script. Both read
+the same list, and neither guesses: when the mailbox file is missing or names no mailbox at
+all, they say that it cannot be told instead of calling every user of the webmail left over.
 
 ### Rotating a DKIM key
 

@@ -914,8 +914,35 @@ _doc_check_mail() {
   return 0
 }
 
-# The webmail: what runs, whether anyone could reach what it must not serve, and whether the
-# name in a browser's address bar is on the certificate it will be handed.
+# What the webmail still keeps for a mailbox that is gone. Deleting a mailbox takes its webmail
+# user along, but one deleted by a release that did not do that yet, or while the database was
+# down, left it behind - and the next mailbox made under that address signs in to it. Nothing
+# else says they are there, so they are named here: the first few, "forget --gone" has them all.
+# When it cannot be told which users those are, that is what is said. A mailbox file that is
+# missing or empty is no reason to call every user of the webmail left over.
+_doc_webmail_gone() {
+  local gone="" why=0 n=0 shown=""
+  local -a names=()
+  gone="$(lib_webmail_gone)" || why=$?
+  if (( why == 2 )); then
+    _doc_add WARN "webmail: mailboxes gone" "the webmail has users, and ${MAIL_PASSWD_FILE} is missing or names no mailbox to hold them against: which of them are left from a mailbox that is gone cannot be told (lomp webmail forget <address> removes one by name)"
+  elif (( why != 0 )); then
+    _doc_add WARN "webmail: mailboxes gone" "the webmail's database did not answer, so whether it still keeps something for a mailbox that is gone could not be checked (is MariaDB running?)"
+  elif [[ -z "$gone" ]]; then
+    _doc_add OK "webmail: mailboxes gone" "it keeps nothing for an address that has no mailbox"
+  else
+    mapfile -t names <<<"$gone"
+    n="${#names[@]}"
+    shown="$(lib_join ', ' "${names[@]:0:5}")"
+    if (( n > 5 )); then shown+=" and $((n - 5)) more"; fi
+    _doc_add WARN "webmail: mailboxes gone" "it still keeps the address book, identities and settings of ${n} address(es) that have no mailbox any more: ${shown}; a mailbox made under one of them later would be shown them (lomp webmail forget <address>, or lomp webmail forget --gone: it lists them all and asks)"
+  fi
+  return 0
+}
+
+# The webmail: what runs, whether anyone could reach what it must not serve, whether the name
+# in a browser's address bar is on the certificate it will be handed, and whether it still
+# keeps something for a mailbox that is gone.
 _doc_check_webmail() {
   local d="" mode="" cur="" latest="" host=""
   lib_webmail_installed || return 0
@@ -971,6 +998,7 @@ _doc_check_webmail() {
       _doc_add WARN "webmail: ${d}" "a virtual host with no domain behind it (lomp mail webmail off <domain>)"
     fi
   done
+  _doc_webmail_gone
   return 0
 }
 

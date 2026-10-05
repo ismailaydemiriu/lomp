@@ -6120,6 +6120,8 @@ lib_db_sql() {
       awk -F'\t' -v v="$v" '{ n = split($1, p, "@"); if (tolower(p[n]) == v) print }' "$_wf/users.tsv" ;;
     *"users WHERE LOWER(username) = '"*) awk -F'\t' -v v="$v" 'tolower($1) == v' "$_wf/users.tsv" ;;
     *"users WHERE username = '"*)        awk -F'\t' -v v="$v" '$1 == v' "$_wf/users.tsv" ;;
+    # every user, for the list of those whose mailbox is gone: this statement and no other
+    'SELECT username FROM `lomp_webmail`.users ORDER BY user_id') cut -f1 "$_wf/users.tsv" ;;
     *) return 1 ;;
   esac
 }
@@ -6356,8 +6358,177 @@ rm -f "$_wf/php.fail"
 assert_has   "the command is in the reference"                      "webmail forget <user@domain>|@<domain>" "$(lib_usage)"
 assert_has   "and the dispatcher knows it"                          'lib_webmail_forget_main "${1:-}"' "$(declare -f lib_webmail_main)"
 
+# ---- the users whose mailbox is gone -----------------------------------------
+# What a release before this one left behind, and what a removal left when the database was
+# down that minute: nothing listed them, so nobody could know what there was to forget. The
+# list is every address the webmail has a user for and this server has no mailbox for - and a
+# mailbox that is only switched off is a mailbox. live@cmd.example signs in, p@off.example is
+# put aside; the others have no line anywhere.
+_wf_gone()  { _wf_say lib_webmail_gone | tr '\n' ' ' | sed 's/ $//'; }     # "rc=N address address"
+_wf_users live@cmd.example p@off.example gone@cmd.example old@nomail.example
+assert_eq    "the users with no mailbox are listed, and no other"   "rc=0 gone@cmd.example old@nomail.example" "$(_wf_gone)"
+assert_eq    "the table is asked once, for every user it has"       'SELECT username FROM `lomp_webmail`.users ORDER BY user_id' "$(cat "$_wf/sql.log")"
+assert_eq    "a list starts nothing and removes nobody"             ":live@cmd.example p@off.example gone@cmd.example old@nomail.example" "$(cat "$_wf/php.log"):$(_wf_left)"
+_wf_users live@cmd.example p@off.example
+assert_eq    "a webmail whose users all have a mailbox has none"    "rc=0" "$(_wf_gone)"
+_wf_users
+assert_eq    "and so has one nobody ever signed in to"              "rc=0" "$(_wf_gone)"
+# compared the way a login is, whatever the case a name was stored in
+_wf_users Live@Cmd.Example P@Off.Example Gone@Cmd.Example
+assert_eq    "a user stored in another case is its mailbox's all the same" "rc=0 gone@cmd.example" "$(_wf_gone)"
+# ...and as a whole address, letter for letter: one that is a part of a mailbox's name, or
+# that matches it when its dot is read as "any character", is not that mailbox
+_wf_users ive@cmd.example l.ve@cmd.example live@cmd.example.tr live@cmd.example
+assert_eq    "an address that only looks like a mailbox's is not one" "rc=0 ive@cmd.example l.ve@cmd.example live@cmd.example.tr" "$(_wf_gone)"
+# Roundcube's key is the name and the host together, and a name can be stored in two spellings
+printf 'dup@cmd.example\t127.0.0.1\ndup@cmd.example\tlocalhost\nDup@Cmd.Example\t127.0.0.1\n' >"$_wf/users.tsv"
+assert_eq    "an address stored more than once is listed once"      "rc=0 dup@cmd.example" "$(_wf_gone)"
+_wf_users z@b.example b@a.example a@b.example z@a.example
+assert_eq    "the addresses of a domain stand together"             "rc=0 b@a.example z@a.example a@b.example z@b.example" "$(_wf_gone)"
+# what comes back from a table is text: a name that is no address is nobody's mailbox, and
+# nothing "forget" could be told to take - an option, two addresses in one, a quote, a space
+printf '%s\t127.0.0.1\n' '--age=1@cmd.example' 'nobody' 'a@b@cmd.example' "x'y@cmd.example" 'sp ace@cmd.example' 'tail@cmd.example ' 'ok@cmd.example' >"$_wf/users.tsv"
+assert_eq    "a stored name that is no address is not listed"       "rc=0 ok@cmd.example" "$(_wf_gone)"
+_wf_users gone@cmd.example; : >"$_wf/wm.off"
+assert_eq    "the list needs Roundcube's table, not Roundcube on the disk" "rc=0 gone@cmd.example" "$(_wf_gone)"
+rm -f "$_wf/wm.off"; : >"$_wf/sql.log"
+assert_eq    "a server with no webmail database has nobody, and asks nothing" "rc=0:" "$(WM_INFO="$_wf/no-such.info" _wf_gone):$(cat "$_wf/sql.log")"
+
+# ---- "none" and "cannot tell" are two answers --------------------------------
+# The list is what doctor names and what "forget --gone" removes. A mailbox file that is
+# missing, empty or unreadable would make every user of the webmail look like one whose mailbox
+# is gone - so without a single mailbox to hold the users against, the answer is that it cannot
+# be told (2), as it is when the table cannot be read (1).
+_wf_users live@cmd.example p@off.example gone@cmd.example old@nomail.example
+: >"$_wf/db.down"
+assert_eq    "a database that does not answer is not an empty list" "rc=1" "$(_wf_gone)"
+rm -f "$_wf/db.down"
+mv "$MAIL_PASSWD_FILE" "$_wf/passwd.kept"
+assert_eq    "with no mailbox file, nobody is called gone"          "rc=2" "$(_wf_gone)"
+: >"$MAIL_PASSWD_FILE"
+assert_eq    "nor with an empty one"                                "rc=2" "$(_wf_gone)"
+printf '# every line of it was lost\n' >"$MAIL_PASSWD_FILE"
+assert_eq    "nor with one that names no mailbox"                   "rc=2" "$(_wf_gone)"
+if (( CAN_CHMOD )) && [[ "$(id -u)" != "0" ]]; then   # root reads what nobody may
+  cp "$_wf/passwd.kept" "$MAIL_PASSWD_FILE"; chmod 000 "$MAIL_PASSWD_FILE"
+  assert_eq  "nor with one that cannot be read"                     "rc=2" "$(_wf_gone)"
+  chmod 600 "$MAIL_PASSWD_FILE"
+fi
+rm -f "$MAIL_PASSWD_FILE"
+# what is known is still said: a mailbox that is put aside is in a file of its own
+_wf_users p@off.example
+assert_eq    "a mailbox put aside is not gone, whatever the live file says" "rc=0" "$(_wf_gone)"
+_wf_users
+assert_eq    "and a webmail without users leaves nothing to be unsure about" "rc=0" "$(_wf_gone)"
+mv "$_wf/passwd.kept" "$MAIL_PASSWD_FILE"
+
+# ---- doctor names them -------------------------------------------------------
+_wf_doc()   { DOC_RESULTS=(); DOC_FAIL=0; DOC_WARN=0; DOC_OK=0; _doc_webmail_gone; printf '%s\n' "${DOC_RESULTS[@]-}" "ok=${DOC_OK} warn=${DOC_WARN} fail=${DOC_FAIL}"; }
+_wf_users live@cmd.example p@off.example
+_wf_out="$(_wf_say _wf_doc)"
+assert_has   "doctor says so when the webmail keeps nothing it should not" "OK|webmail: mailboxes gone|it keeps nothing for an address that has no mailbox" "$_wf_out"
+assert_has   "and that is no warning"                               "ok=1 warn=0 fail=0" "$_wf_out"
+_wf_users live@cmd.example p@off.example gone@cmd.example old@nomail.example
+_wf_out="$(_wf_say _wf_doc)"
+assert_has   "doctor warns about users with no mailbox, and names them" \
+  "WARN|webmail: mailboxes gone|it still keeps the address book, identities and settings of 2 address(es) that have no mailbox any more: gone@cmd.example, old@nomail.example;" "$_wf_out"
+assert_has   "with the command that removes one"                    "lomp webmail forget <address>" "$_wf_out"
+assert_has   "and the one that lists them all"                      "lomp webmail forget --gone" "$_wf_out"
+assert_lacks "a mailbox that signs in is not named"                 "live@cmd.example" "$_wf_out"
+assert_lacks "nor one that is switched off"                         "p@off.example" "$_wf_out"
+assert_has   "it is a warning, and the check itself does not fail"  "rc=0" "$_wf_out"
+assert_has   "one warning for all of them"                          "ok=0 warn=1 fail=0" "$_wf_out"
+assert_eq    "doctor only looks: nothing is started, nobody removed" ":live@cmd.example p@off.example gone@cmd.example old@nomail.example" "$(cat "$_wf/php.log"):$(_wf_left)"
+# a line of doctor is one line: the first five by name, the rest by their number
+_wf_users g1@cmd.example g2@cmd.example g3@cmd.example g4@cmd.example g5@cmd.example
+_wf_out="$(_wf_say _wf_doc)"
+assert_has   "five are all named"                                   "of 5 address(es) that have no mailbox any more: g1@cmd.example, g2@cmd.example, g3@cmd.example, g4@cmd.example, g5@cmd.example;" "$_wf_out"
+_wf_users g1@cmd.example g2@cmd.example g3@cmd.example g4@cmd.example g5@cmd.example g6@cmd.example g7@cmd.example
+_wf_out="$(_wf_say _wf_doc)"
+assert_has   "of more, the first five and how many there are besides" "of 7 address(es) that have no mailbox any more: g1@cmd.example, g2@cmd.example, g3@cmd.example, g4@cmd.example, g5@cmd.example and 2 more;" "$_wf_out"
+assert_lacks "the sixth is for the command to list"                 "g6@cmd.example" "$_wf_out"
+# and when it cannot be told, that is what doctor says - with no name in it
+_wf_users live@cmd.example gone@cmd.example
+: >"$_wf/db.down"
+_wf_out="$(_wf_say _wf_doc)"
+rm -f "$_wf/db.down"
+assert_has   "a database that does not answer is said"              "WARN|webmail: mailboxes gone|the webmail's database did not answer" "$_wf_out"
+assert_lacks "and not read as a webmail that keeps nothing"         "OK|" "$_wf_out"
+mv "$MAIL_PASSWD_FILE" "$_wf/passwd.kept"
+_wf_out="$(_wf_say _wf_doc)"
+mv "$_wf/passwd.kept" "$MAIL_PASSWD_FILE"
+assert_has   "without a mailbox file doctor says that it cannot tell" \
+  "WARN|webmail: mailboxes gone|the webmail has users, and ${MAIL_PASSWD_FILE} is missing or names no mailbox to hold them against: which of them are left from a mailbox that is gone cannot be told" "$_wf_out"
+assert_lacks "and calls nobody gone: not the user whose mailbox is" "gone@cmd.example" "$_wf_out"
+assert_lacks "nor the one who has a mailbox"                        "live@cmd.example" "$_wf_out"
+assert_lacks "nor does it send anybody to remove them all"          "--gone" "$_wf_out"
+assert_has   "the check runs where doctor looks at the webmail"     "_doc_webmail_gone" "$(declare -f _doc_check_webmail)"
+
+# ---- lomp webmail forget --gone ----------------------------------------------
+# All of them at once: the whole list - doctor names five - then one question.
+_wf_users live@cmd.example p@off.example gone@cmd.example old@nomail.example
+_wf_out="$(OPT_DRY_RUN=1 _wf_say lib_webmail_forget_main --gone)"
+assert_has   "a dry run of --gone lists them"                       "        gone@cmd.example" "$_wf_out"
+assert_has   "every one"                                            "        old@nomail.example" "$_wf_out"
+assert_has   "says what a real run would do"                        "[dry-run] would remove what the webmail keeps for them" "$_wf_out"
+assert_has   "and succeeds"                                         "rc=0" "$_wf_out"
+assert_lacks "it does not claim anybody went"                       "has forgotten" "$_wf_out"
+assert_lacks "it names no mailbox that signs in"                    "live@cmd.example" "$_wf_out"
+assert_lacks "and none that is switched off"                        "p@off.example" "$_wf_out"
+assert_eq    "and it starts nothing and removes nobody"             ":live@cmd.example p@off.example gone@cmd.example old@nomail.example" "$(cat "$_wf/php.log"):$(_wf_left)"
+# asked once, after the list; with no terminal and no --yes the answer is no
+_wf_out="$(OPT_YES=0 _wf_say lib_webmail_forget_main --gone)"
+assert_has   "without a yes nothing is removed, and the command says so" "Nothing was removed" "$_wf_out"
+assert_has   "which is a failure, for a script to notice"           "rc=1" "$_wf_out"
+assert_has   "the list came before the question"                    "        gone@cmd.example" "$_wf_out"
+assert_eq    "everybody is where they were, and nothing was started" ":live@cmd.example p@off.example gone@cmd.example old@nomail.example" "$(cat "$_wf/php.log"):$(_wf_left)"
+_wf_out="$(_wf_say lib_webmail_forget_main --gone)"
+assert_has   "with a yes they go"                                   "rc=0" "$_wf_out"
+assert_eq    "all that had no mailbox, and nobody that has one"     "live@cmd.example p@off.example" "$(_wf_left)"
+assert_has   "and the command says how many"                        "The webmail has forgotten 2 address(es) that have no mailbox any more" "$_wf_out"
+assert_eq    "each by Roundcube's own script, once" \
+  "1.7.4|bin/deluser.sh --host=127.0.0.1 gone@cmd.example"$'\n'"1.7.4|bin/deluser.sh --host=127.0.0.1 old@nomail.example" "$(cat "$_wf/php.log")"
+: >"$_wf/php.log"
+_wf_out="$(_wf_say lib_webmail_forget_main --gone)"
+assert_has   "asked again, it says there is nothing"                "The webmail keeps nothing for an address that has no mailbox" "$_wf_out"
+assert_eq    "which is no failure, and starts nothing"              "rc=0:" "$(sed -n 1p <<<"$_wf_out"):$(cat "$_wf/php.log")"
+# it removes what the list names, so it must not guess where the list will not
+_wf_users live@cmd.example gone@cmd.example
+mv "$MAIL_PASSWD_FILE" "$_wf/passwd.kept"
+_wf_out="$(_wf_say lib_webmail_forget_main --gone)"
+mv "$_wf/passwd.kept" "$MAIL_PASSWD_FILE"
+assert_has   "--gone removes nobody when the mailbox file is missing" "rc=1" "$_wf_out"
+assert_has   "and says that it cannot tell who is gone"             "cannot be told" "$_wf_out"
+assert_eq    "not the user with a mailbox, not the one without"     ":live@cmd.example gone@cmd.example" "$(cat "$_wf/php.log"):$(_wf_left)"
+: >"$_wf/db.down"
+_wf_out="$(_wf_say lib_webmail_forget_main --gone)"
+rm -f "$_wf/db.down"
+assert_has   "a database that does not answer is a failed command"  "rc=1" "$_wf_out"
+assert_has   "and not a webmail that keeps nothing"                 "The webmail's users could not be read" "$_wf_out"
+# one that cannot be removed - here a stored host no host name looks like - is said, and does
+# not stand in the way of those that come after it in the list
+printf 'gone@cmd.example\t127.0.0.1\nbad@cmd.example\t127.0.0.1 --age=1\nlast@cmd.example\t127.0.0.1\n' >"$_wf/users.tsv"; : >"$_wf/php.log"
+_wf_out="$(_wf_say lib_webmail_forget_main --gone)"
+assert_eq    "one that cannot go does not keep the others, and stays" "bad@cmd.example" "$(_wf_left)"
+assert_eq    "it is not handed to the script"                       "gone@cmd.example last@cmd.example" "$(sed 's/.* //' "$_wf/php.log" | tr '\n' ' ' | sed 's/ $//')"
+assert_has   "it is named, with the reason"                         "bad@cmd.example is still there: Roundcube's bin/deluser.sh left 1 of 1 user(s) in place" "$_wf_out"
+assert_has   "what did go is said"                                  "The webmail has forgotten 2 address(es)" "$_wf_out"
+assert_has   "and so is what did not"                               "The webmail still holds what was kept there for 1 of 3 address(es)" "$_wf_out"
+assert_has   "which makes it a failed command"                      "rc=1" "$_wf_out"
+# uninstalled with its database kept: the list is still there to read, and nothing to remove it with
+_wf_users gone@cmd.example; : >"$_wf/wm.off"
+_wf_out="$(_wf_say lib_webmail_forget_main --gone)"
+assert_has   "a webmail that is not installed still lists them"     "        gone@cmd.example" "$_wf_out"
+assert_has   "and says, before any question, that it cannot remove them" "None of them can be removed" "$_wf_out"
+assert_eq    "a failure, with nothing started"                      "rc=1:" "$(sed -n 1p <<<"$_wf_out"):$(cat "$_wf/php.log")"
+assert_has   "a dry run does not promise what a real run refuses"   "rc=1" "$(OPT_DRY_RUN=1 _wf_say lib_webmail_forget_main --gone)"
+rm -f "$_wf/wm.off"
+assert_eq    "another word with dashes is nobody's name"            1 "$(run_isolated _wf_do lib_webmail_forget_main --all)"
+assert_true  "and removed nobody"                                   _wf_has gone@cmd.example
+assert_has   "--gone is in the reference"                           "webmail forget <user@domain>|@<domain>|--gone" "$(lib_usage)"
+
 eval "$_wf_saved_vars"; eval "$_wf_saved_fn"
-unset -f _wf_do _wf_run _wf_tee _wf_say _wf_users _wf_has _wf_left _wf_asked
+unset -f _wf_do _wf_run _wf_tee _wf_say _wf_users _wf_has _wf_left _wf_asked _wf_gone _wf_doc
 
 # =============================================================================
 section "a domain argument is a domain name before it is a path"
