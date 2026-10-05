@@ -9323,6 +9323,32 @@ for _dt_h in '"CERTIFICATES"' '"Sites"' '"Redirects"' '"Mail"' '"AUTOMATIC RENEW
 done
 assert_eq   "each of them has its Turkish"        "SERTİFİKALAR Siteler Yönlendirmeler Posta OTOMATİK YENİLEME (henüz site yok)" \
   "$(_dt_plain CERTIFICATES) $(_dt_plain Sites) $(_dt_plain Redirects) $(_dt_plain Mail) $(_dt_plain "AUTOMATIC RENEWAL") $(_dt_plain "(no sites yet)")"
+# the other commands: a line from each of them, so that a module whose messages fell out of
+# the table is noticed
+assert_eq   "install"  "SSH port değişikliği başarısız oldu ve geri alındı" "$(_dt_plain "SSH port change failed and was reverted")"
+assert_eq   "a site"   "WordPress için bir veritabanı gerekli" "$(_dt_plain "WordPress needs a database")"
+assert_eq   "a database" "b_db veritabanı geri yüklendi" "$(_dt_plain "Database b_db restored")"
+assert_eq   "a backup" "Zamanlanmış yedekler kapalı (/var/backups/server-setup içindeki arşivler kalır)" "$(_dt_plain "Scheduled backups are off (the archives in /var/backups/server-setup stay)")"
+assert_eq   "mail"     "a.example için posta kapalı ve posta kutuları silindi" "$(_dt_plain "Mail is off for a.example and its mailboxes are gone")"
+assert_eq   "a quota"  "Geçersiz kota '5X'" "$(_dt_plain "Invalid quota '5X'")"
+assert_eq   "OpenLiteSpeed" "OpenLiteSpeed yeniden yüklenemedi (add vhost a.example)" "$(_dt_plain "OpenLiteSpeed failed to reload (add vhost a.example)")"
+assert_eq   "tuning"   "Swap gerekmiyor (RAM 8 GB)" "$(_dt_plain "No swap needed (RAM 8 GB)")"
+assert_eq   "a dry run keeps its tag" "[dry-run] /home/a.example/logs içindeki loglar /var/log/lomp-sites/a.example içine taşınacaktı" "$(_dt_plain "[dry-run] would move the logs in /home/a.example/logs to /var/log/lomp-sites/a.example")"
+assert_eq   "a command in a message is not touched" "soruyu atlamak için --yes ile yeniden çalıştırın" "$(_dt_plain "re-run with --yes to skip the question")"
+assert_true "the table holds a couple of thousand lines now" test "${#LIB_TR_PAIRS[@]}" -ge 3800
+# no line of the table may be so general that it takes another message for its own: one that
+# begins or ends with a value needs words of its own around it
+_dt_gen=""
+for (( _dt_i = 0; _dt_i + 1 < ${#LIB_TR_PAIRS[@]}; _dt_i += 2 )); do
+  _dt_en="${LIB_TR_PAIRS[_dt_i]}"
+  [[ "$_dt_en" == "@doctor "* ]] && continue
+  [[ "$_dt_en" == "{1}"* ]] || continue
+  _dt_w="${_dt_en//\{[1-9]\}/ }"
+  # shellcheck disable=SC2086
+  set -- $_dt_w
+  (( $# >= 2 )) || _dt_gen+="[${_dt_en}] "
+done
+assert_eq   "a line that starts with a value has at least two words of its own" "" "$_dt_gen"
 [[ -z "$_dt_fn" ]] || eval "$_dt_fn"
 unset -f _dt _dt_plain _dt_run _st
 
