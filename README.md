@@ -422,7 +422,10 @@ What follows from it:
 
 - Take the visitor's address from the last entry of `X-Forwarded-For`. In Express that is
   `app.set('trust proxy', 'loopback')` and then `req.ip`; other frameworks have the same
-  setting under "trusted proxies", with `127.0.0.1` as the one proxy to trust.
+  setting under "trusted proxies", with `127.0.0.1` as the one proxy to trust. Not
+  `app.set('trust proxy', true)`: that takes the first entry, the one the client writes
+  (seen with Express 4 and 5: `req.ip` was the forged address). Without the setting `req.ip`
+  is `127.0.0.1` for everyone.
 - Do not read `X-Real-IP` or `Forwarded`: a visitor can write anything there. The same goes
   for `CF-Connecting-IP`, unless the origin is closed to everyone but Cloudflare (see
   "Closing the origin").
@@ -430,7 +433,10 @@ What follows from it:
   can claim it as well, and so can a client claim a host in `X-Forwarded-Host`. A site with a
   certificate sends plain HTTP to HTTPS before the application is asked, except for requests
   that carry `X-Forwarded-Proto: https` (that is how Cloudflare's "Flexible" mode gets
-  through). Build links from `Host` or from a name you configure, not from `X-Forwarded-Host`.
+  through). Build links from `Host` or from a name you configure, not from `X-Forwarded-Host`:
+  with `trust proxy` set, Express's `req.hostname` is that header's first value, so a request
+  sent with `X-Forwarded-Host: evil.example` gets `evil.example` there. `req.headers.host`
+  stays the site's name.
 - A WebSocket upgrade (`ws://` and `wss://`, on the site and on a path proxy) carries the
   same `X-Forwarded-For` and `X-Forwarded-Proto` as any other request.
 - OpenLiteSpeed has no setting that removes or replaces these headers on the way to the
