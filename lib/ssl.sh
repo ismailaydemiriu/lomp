@@ -485,7 +485,7 @@ _ssl_row() {   # label level days text
 
 lib_ssl_usage() {
   cat <<'EOF'
-ssl [status]   Every certificate (sites and mail): whether there is one, how long it has,
+ssl [status]   Every certificate (sites, redirects, mail): whether there is one, how long it has,
                and whether it renews by itself - the timer or cron entry that runs certbot,
                the deploy hook, certbot's renewal file for each. Changes nothing.
                Exit status 1 when something needs putting right.
@@ -552,6 +552,20 @@ lib_ssl_status_main() {
       _ssl_count "$level" "${me} renew-ssl ${d}"
     done < <(lib_domains_list)
     (( sites > 0 )) || printf '  (no sites yet)\n'
+  fi
+  # a name that only redirects answers HTTPS with a certificate of its own, renewed like a site's
+  if [[ -n "$(lib_redirects_list)" ]]; then
+    printf '  %sRedirects%s\n' "$C_DIM" "$C_RST"
+    while read -r d; do
+      [[ -n "$d" ]] || continue
+      lib_redirect_load "$d" || continue
+      names=("$d"); (( R_WWW )) && names+=("www.${d}")
+      IFS='|' read -r level days trusted text < <(lib_ssl_lineage_check "$d" "${names[@]}")
+      _ssl_row "$d" "$level" "$days" "$text"
+      # without one it still redirects, over HTTP only: worth saying, and nothing is down
+      [[ "$level" == "NONE" ]] && level="WARN"
+      _ssl_count "$level" "${me} redirect add ${d} ${R_TARGET}$( (( R_WWW )) && printf ' --www')    # once its DNS points here"
+    done < <(lib_redirects_list)
   fi
   if lib_mail_installed; then
     printf '  %sMail%s\n' "$C_DIM" "$C_RST"

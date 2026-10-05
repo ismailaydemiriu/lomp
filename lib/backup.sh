@@ -419,6 +419,11 @@ lib_restore_main() {
         "the archive holds a site: files, a database and a virtual host" \
         "restore it on a web server; its mail alone goes back with: setup.sh mail restore ${domain}"
     fi
+    # the same refusal "add" gives: the name's virtual host and certificate are a redirect's
+    if lib_redirect_exists "$domain"; then
+      lib_die "${domain} only redirects to $(lib_json_get "$(lib_redirect_file "$domain")" '.target') on this server" \
+        "restoring a site of that name would take the redirect's place" "setup.sh redirect del ${domain}   (then restore)"
+    fi
     [[ -s "${work}/x/state/domain.json" ]] || lib_die "Site ${domain} is not registered and the archive carries no state" "" "add the site first: setup.sh add ${domain}"
     lib_info "Site ${domain} is not registered; recreating it from the archived state"
     local recreated="${work}/domain-restored.json"

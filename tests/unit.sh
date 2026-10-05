@@ -23,7 +23,7 @@ INSTALL_DIR="$TMP/install"; BIN_LINK="$TMP/lompstack"; BIN_SHORT="$TMP/lomp"; LO
 OPT_YES=1 OPT_DRY_RUN=0 OPT_QUIET=1 OPT_VERBOSE=0 OPT_NO_COLOR=1 OPT_JSON=0 OPT_NON_INTERACTIVE=1
 SCRIPT_PATH="$ROOT/setup.sh"; SCRIPT_DIR="$ROOT"
 export TMPDIR="$TMP"
-for m in common system ols php db ssl domain harden scan proxy app mail webmail cloudflare backup monitor install menu; do
+for m in common system ols php db ssl domain harden scan proxy app mail webmail cloudflare backup monitor install rename menu; do
   # shellcheck source=/dev/null
   source "$ROOT/lib/$m.sh"
 done
@@ -6992,6 +6992,558 @@ assert_has  "and it is in the command reference"                       "ssl [sta
 
 eval "$_sc_saved_vars"; eval "$_sc_saved_fn"
 unset -f _sc_mk _sc_tee
+# =============================================================================
+section "rename: a site under another name, and the old name as a redirect"
+# A site is its name: the home, the Linux user, the log directory, the state directory, the
+# virtual host and the certificate are all called after it. "rename" moves every one of them
+# and leaves the old name behind as a redirect - a record that is no site, so that nothing
+# which walks the sites meets it, and that still keeps the name from being given away twice.
+#
+# Each case loads the modules afresh over a tree of its own, so nothing an earlier section
+# stood in for is still standing in here; what reaches outside the process is stood in for
+# below, and what decides, moves and writes is real.
+_rn="$TMP/rename"
+_rn_mods="common system ols php db ssl domain harden scan proxy app mail webmail cloudflare backup monitor install rename menu"
+_rn_stubs='
+  HARDEN_PHP_INI_ROOT="$_rn/phpini"; LE_LIVE="$_rn/le"; WPCLI_BIN="$_rn/wp"
+  lib_require_tools() { :; }; lib_require_installed() { :; }; lib_system_profile() { :; }
+  lib_ols_is_installed() { return 0; }
+  lib_ols_change_begin() { OLS_PENDING_RELOAD=0; }
+  lib_ols_change_commit() { printf "commit pending=%s %s\n" "$OLS_PENDING_RELOAD" "$*" >>"$_rn/calls"; OLS_PENDING_RELOAD=0; }
+  lib_mail_installed() { [[ -e "$_rn/mail-installed" ]]; }
+  lib_mail_domain_has_traces() { [[ -e "$_rn/mail-traces-$1" ]]; }
+  lib_mail_domain_standalone() { [[ -e "$_rn/mail-own-$1" ]]; }
+  lib_ssl_dns_check() { SSL_LAST_ERROR="no A record"; return "$(cat "$_rn/dns-rc" 2>/dev/null || printf 0)"; }
+  lib_ssl_obtain_names() { printf "obtain %s\n" "$*" >>"$_rn/calls"; SSL_LAST_ERROR="certbot said no"; [[ -e "$_rn/certbot-works" ]] || return 1; mkdir -p "$SSL_DEPLOY_DIR/$1"; printf c >"$SSL_DEPLOY_DIR/$1/fullchain.pem"; printf k >"$SSL_DEPLOY_DIR/$1/privkey.pem"; }
+  lib_ssl_cert_covers() { local c="$1" n=""; shift; for n in "$@"; do grep -qxF -- "$n" "$_rn/covers-$c" 2>/dev/null || return 1; done; }
+  lib_ssl_status_line() { printf "60 days"; }
+  lib_ssl_delete() { printf "ssl-delete %s\n" "$1" >>"$_rn/calls"; rm -rf "${SSL_DEPLOY_DIR:?}/$1"; }
+  lib_ols_smoke_test() { printf "smoke %s\n" "$*" >>"$_rn/calls"; OLS_TEST_OUTPUT="HTTP 500"; [[ ! -e "$_rn/smoke-fails" ]]; }
+  lib_manifest_set() { :; }
+  lib_php_cli() { printf "/php"; }
+  lib_domain_wpcli_ensure() { :; }
+  certbot() { return 1; }; systemctl() { return 1; }
+  chown() { return 0; }; setfacl() { :; }
+  runuser() { printf "%s\n" "$*" >>"$_rn/runuser.log"; [[ "${1:-}" == "-u" && -n "${2:-}" && "${3:-}" == "--" ]] || return 1; shift 3; "$@"; }
+  pkill() { return 0; }; pgrep() { return 1; }; sleep() { :; }
+  id() { if [[ "${1:-}" == "-u" ]]; then grep -qxF -- "${2:-}" "$_rn/users"; else command id "$@"; fi; }
+  getent() { if [[ "${1:-}" == "group" ]]; then grep -qxF -- "${2:-}" "$_rn/groups"; else return 2; fi; }
+  usermod() {
+    printf "usermod %s\n" "$*" >>"$_rn/calls"
+    if [[ -e "$_rn/usermod-d-fails" && " $* " == *" -d "* ]]; then return 1; fi
+    if [[ "$1" == "-l" ]]; then sed -i "s/^$3\$/$2/" "$_rn/users"; fi
+    return 0
+  }
+  groupmod() { printf "groupmod %s\n" "$*" >>"$_rn/calls"; if [[ "$1" == "-n" ]]; then sed -i "s/^$3\$/$2/" "$_rn/groups"; fi; return 0; }
+  # the two listeners a server has, and its catch-all virtual host
+  _rn_conf() {
+    [[ ! -f "$LSWS_CONF" ]] || return 0
+    printf "listener %s {\n  address                 *:80\n  secure                  0\n  map                     %s *\n}\n\nlistener %s {\n  address                 *:443\n  secure                  1\n  map                     %s *\n}\n" \
+      "$OLS_LISTENER_HTTP" "$OLS_DEFAULT_VHOST" "$OLS_LISTENER_HTTPS" "$OLS_DEFAULT_VHOST" >"$LSWS_CONF"
+  }
+  # what "rename" calls of the rest of lomp: a record of the call, and the trace it leaves
+  _rn_flow() {
+    lib_backup_domain() {
+      printf "backup %s\n" "$*" >>"$_rn/calls"
+      if [[ -e "$_rn/backup-fails" ]]; then BK_ERROR="disk full"; return 1; fi
+      BK_LAST_FILE="$BACKUP_ROOT/$1/$1-pre-rename-20260101-000000.tar.gz"; : >"$BK_LAST_FILE"
+    }
+    lib_ols_vhost_purge() { printf "purge %s\n" "$*" >>"$_rn/calls"; rm -rf "${LSWS_VHOSTS_DIR:?}/$1"; }
+    # a configuration OpenLiteSpeed rejects: the snapshot that is put back has no block for the
+    # new name, and the directory its vhconf was written into is still there
+    lib_ols_conf_block_exists() { [[ -d "$LSWS_VHOSTS_DIR/$2" && ! -e "$_rn/apply-fails" ]]; }
+    lib_domain_apply_config() {
+      printf "apply %s user=%s home=%s ssl=%s\n" "$D_DOMAIN" "$D_USER" "$D_HOME" "$D_SSL" >>"$_rn/calls"; mkdir -p "$LSWS_VHOSTS_DIR/$D_DOMAIN"
+      if [[ -e "$_rn/apply-fails" && "$D_DOMAIN" == beta.example ]]; then lib_die "OpenLiteSpeed configuration test failed"; fi
+    }
+    lib_domain_php_probe() { [[ ! -e "$_rn/php-fails" ]]; }
+    lib_domain_add_ssl() { printf "add-ssl %s\n" "$D_DOMAIN" >>"$_rn/calls"; }
+    lib_redirect_apply() { printf "redirect-apply %s\n" "$*" >>"$_rn/calls"; [[ ! -e "$_rn/redirect-fails" ]]; }
+    lib_domain_logs_link() { printf "logs-link %s\n" "$D_HOME" >>"$_rn/calls"; }
+    lib_domain_logrotate_regen() { printf "logrotate\n" >>"$_rn/calls"; }
+    lib_domain_fail2ban_regen() { :; }
+    lib_ols_htaccess_watch_ensure() { :; }
+  }
+  _rn_rename() { _rn_flow; lib_domain_rename_main "$@"; }
+  _rn_rename_asked() { OPT_YES=0; _rn_flow; lib_domain_rename_main "$@"; }
+  _rn_rename_dry() { OPT_DRY_RUN=1; _rn_flow; lib_domain_rename_main "$@"; }
+  _rn_blocker() { lib_domain_state_load "$1"; _domain_rename_blocker "$1" "$2"; }
+  _rn_redirect() { _rn_conf; lib_redirect_main "$@"; }
+  _rn_vhconf() { lib_redirect_load "$1"; lib_redirect_render_vhconf; }
+  _rn_sync() { _rn_conf; lib_redirect_sync_target "$1"; }
+  _rn_ssl() {
+    lib_ssl_lineage_check() { printf "%s\n" "$*" >>"$_rn/calls"; cat "$_rn/lineage" 2>/dev/null || printf "NONE||0|no certificate"; printf "\n"; }
+    lib_have() { return 1; }
+    lib_ssl_status_main
+  }
+  _rn_quiet() {
+    pkill() { printf "pkill %s\n" "$*" >>"$_rn/calls"; }
+    pgrep() { local n=0; n="$(cat "$_rn/running" 2>/dev/null || printf 0)"; (( n > 0 )) || return 1; printf "%s" "$((n - 1))" >"$_rn/running"; return 0; }
+    _domain_rename_quiet_user "$1"
+  }
+  _rn_doctor() {
+    _doc_add() { printf "%s|%s|%s\n" "$1" "$2" "$3"; }
+    lib_ols_conf_vhosts() { printf "%s\n" _default alpha.example old.example stray.example; }
+    lib_ols_conf_block_exists() { [[ "$2" != gone.example ]]; }
+    lib_ols_conf_map_get() { printf "x"; }
+    lib_http_code() { cat "$_rn/http-code" 2>/dev/null || printf 301; }
+    lib_php_installed_versions() { :; }
+    lib_domains_list() { :; }
+    _doc_check_domains
+  }
+'
+_rn_case() {   # command... -> $_rn/out, with its exit status as the last line
+  local rc=0 prev=""
+  prev="$(trap -p ERR || true)"
+  trap - ERR
+  set +e
+  (
+    trap - EXIT
+    STATE_DIR="$_rn/state"; SITES_ROOT="$_rn/home"; SITES_LOG_ROOT="$_rn/sitelogs"; LSWS_HOME="$_rn/lsws"; LOG_FILE="$_rn/log"
+    BACKUP_ROOT="$_rn/backups"; SSL_DEPLOY_DIR="$_rn/ssl"; CRON_FILE="$_rn/cron"; ACME_ROOT="$_rn/acme"
+    OPT_QUIET=0; OPT_YES=1; OPT_DRY_RUN=0; OPT_NON_INTERACTIVE=1
+    for _m in $_rn_mods; do
+      # shellcheck source=/dev/null
+      source "$ROOT/lib/$_m.sh"
+    done
+    trap - EXIT
+    eval "$_rn_stubs"
+    set -Eeuo pipefail; shopt -s lastpipe
+    "$@"
+  ) >"$_rn/out" 2>&1
+  rc=$?
+  set -e
+  [[ -z "$prev" ]] || eval "$prev"
+  printf 'rc=%s\n' "$rc" >>"$_rn/out"
+}
+_rn_out()   { cat "$_rn/out"; }
+_rn_calls() { cat "$_rn/calls" 2>/dev/null || true; }
+_rn_site() {   # domain ident [mode]
+  local d="$1" i="$2"
+  mkdir -p "$_rn/state/domains/$d" "$_rn/home/$d/public_html" "$_rn/home/$d/private" "$_rn/sitelogs/$d" "$_rn/backups/$d" "$_rn/phpini/$d" "$_rn/ssl/$d" "$_rn/lsws/conf/vhosts/$d"
+  jq -n --arg d "$d" --arg i "$i" --arg h "$_rn/home/$d" --arg m "${3:-php}" \
+    '{domain:$d, ident:$i, user:$i, group:$i, home:$h, mode:$m, php:{version:"8.3", children:"4", memory_limit:"256M", upload_max:"64M"},
+      www:true, www_primary:false, ssl:{enabled:true, wanted:true, expires:"soon", cert_name:$d}, email:"a@b.example",
+      status:"active", db:{name:"alpha_db", user:"alpha_user"}, backup:{last:"yesterday", last_file:"/x"}, security:{php_exec:"blocked"}}' \
+    >"$_rn/state/domains/$d/domain.json"
+  printf 'DB_NAME=alpha_db\nDB_USER=alpha_user\nDB_PASS=secret\n' >"$_rn/state/domains/$d/db.info"
+  printf 'CERT_NAME=%s\n' "$d" >"$_rn/state/domains/$d/ssl.info"
+  printf 'c' >"$_rn/ssl/$d/fullchain.pem"; printf 'k' >"$_rn/ssl/$d/privkey.pem"
+  printf '%s\nwww.%s\n' "$d" "$d" >"$_rn/covers-$d"
+  printf '<?php // the site\n' >"$_rn/home/$d/public_html/index.php"
+  printf 'line\n' >"$_rn/sitelogs/$d/access.log"
+  printf 'archive\n' >"$_rn/backups/$d/$d-20260101-000000.tar.gz"
+  printf 'ini\n' >"$_rn/phpini/$d/90-lomp.ini"
+  printf '%s\n' "$i" >>"$_rn/users"; printf '%s\n' "$i" >>"$_rn/groups"
+}
+_rn_fresh() {
+  rm -rf "$_rn"; mkdir -p "$_rn/state/domains" "$_rn/home" "$_rn/sitelogs" "$_rn/lsws/conf/vhosts" "$_rn/lsws/_default/html" "$_rn/backups" "$_rn/ssl" "$_rn/phpini"
+  : >"$_rn/calls"; : >"$_rn/log"; printf 'root\n' >"$_rn/users"; printf 'root\n' >"$_rn/groups"
+  printf '#!/bin/sh\nprintf "wp %%s\\n" "$*" >>"%s/calls"\n' "$_rn" >"$_rn/wp"; chmod +x "$_rn/wp"
+  _rn_site alpha.example alpha_example
+  printf '%s\n' "*/5 * * * * alpha_example cd $_rn/home/alpha.example/public_html && wp cron # server-setup:wpcron:alpha.example" >"$_rn/cron"
+}
+_rn_tree() { ( cd "$_rn" && find state/domains home sitelogs phpini ssl -mindepth 1 -maxdepth 2 | sort ); }
+_rn_json() { jq -r "$2" "$_rn/state/domains/$1/domain.json" 2>/dev/null || true; }
+
+# ---- a redirect is a record, and no site -------------------------------------------
+_rn_fresh
+_rn_case lib_redirect_save old.example alpha.example 1
+assert_has   "a redirect is saved" "rc=0" "$(_rn_out)"
+assert_eq    "with where it leads and whether www comes along" "redirect alpha.example true" "$(jq -r '"\(.kind) \(.target) \(.www)"' "$_rn/state/domains/old.example/redirect.json")"
+assert_false "no domain.json is made beside it" test -e "$_rn/state/domains/old.example/domain.json"
+_rn_case lib_redirect_exists old.example;        assert_has "it exists"                        "rc=0" "$(_rn_out)"
+_rn_case lib_redirect_exists alpha.example;      assert_has "a site is no redirect"            "rc=1" "$(_rn_out)"
+_rn_case lib_redirect_exists ../domains/old.example; assert_has "a path is no redirect either" "rc=1" "$(_rn_out)"
+_rn_case lib_domain_registered old.example;      assert_has "and a redirect is no site"        "rc=1" "$(_rn_out)"
+_rn_case lib_domains_list;                       assert_eq  "the sites are listed without it"  "alpha.example rc=0" "$(_rn_out | tr '\n' ' ' | sed 's/ $//')"
+_rn_case lib_redirects_list;                     assert_eq  "the redirects without the site"   "old.example rc=0" "$(_rn_out | tr '\n' ' ' | sed 's/ $//')"
+_rn_case lib_redirect_save other.example elsewhere.example 0
+_rn_case lib_redirects_to alpha.example;         assert_eq  "the redirects that lead to a name" "old.example rc=0" "$(_rn_out | tr '\n' ' ' | sed 's/ $//')"
+_rn_case lib_redirect_load nosuch.example;       assert_has "one that is not there does not load" "rc=1" "$(_rn_out)"
+
+# ---- where it sends its visitors -----------------------------------------------------
+_rn_case lib_redirect_target_url alpha.example;     assert_eq  "a site with a certificate: https" "https://alpha.examplerc=0" "$(_rn_out)"
+jq '.ssl.enabled = false' "$_rn/state/domains/alpha.example/domain.json" >"$_rn/t" && cp "$_rn/t" "$_rn/state/domains/alpha.example/domain.json"
+_rn_case lib_redirect_target_url alpha.example;     assert_eq  "a site without one: http" "http://alpha.examplerc=0" "$(_rn_out)"
+jq '.ssl.enabled = true | .www_primary = true' "$_rn/state/domains/alpha.example/domain.json" >"$_rn/t" && cp "$_rn/t" "$_rn/state/domains/alpha.example/domain.json"
+_rn_case lib_redirect_target_url alpha.example;     assert_eq  "a site whose main name is www" "https://www.alpha.examplerc=0" "$(_rn_out)"
+_rn_case lib_redirect_target_url elsewhere.example; assert_eq  "a name that is no site here: https" "https://elsewhere.examplerc=0" "$(_rn_out)"
+
+# ---- the virtual host -----------------------------------------------------------------
+_rn_fresh
+_rn_case lib_redirect_save old.example alpha.example 1
+_rn_case _rn_vhconf old.example
+_o="$(_rn_out)"
+assert_has   "everything goes on with a 301, path kept" 'RewriteRule ^(.*)$ https://alpha.example$1 [R=301,L]' "$_o"
+assert_has   "but the ACME challenge, which renews its certificate" 'RewriteCond %{REQUEST_URI} !^/\.well-known/acme-challenge/' "$_o"
+assert_true  "the exception comes before the rule" bash -c 'a="$(grep -n "acme-challenge/$" "$1" | tail -n 1 | cut -d: -f1)"; b="$(grep -n "R=301" "$1" | cut -d: -f1)"; [ "$a" -lt "$b" ]' _ "$_rn/out"
+assert_has   "the challenge directory is served" "location                $_rn/acme/.well-known/acme-challenge/" "$_o"
+assert_has   "www comes along" "vhAliases                 www.old.example" "$_o"
+assert_lacks "no certificate, no vhssl" "vhssl" "$_o"
+assert_lacks "no script handler: it runs nothing" "scripthandler" "$_o"
+mkdir -p "$_rn/ssl/old.example"; printf c >"$_rn/ssl/old.example/fullchain.pem"; printf k >"$_rn/ssl/old.example/privkey.pem"
+_rn_case lib_redirect_save old.example alpha.example 0
+_rn_case _rn_vhconf old.example
+_o="$(_rn_out)"
+assert_has   "with its certificate deployed it answers HTTPS" "keyFile                 $_rn/ssl/old.example/privkey.pem" "$_o"
+assert_lacks "without --www no alias" "vhAliases" "$_o"
+
+_rn_case _rn_redirect add old.example alpha.example --www --no-ssl
+_o="$(_rn_out)"; _c="$(cat "$_rn/lsws/conf/httpd_config.conf")"
+assert_has "redirect add succeeds" "rc=0" "$_o"
+assert_has "its virtual host is in the configuration" "virtualhost old.example {" "$_c"
+assert_has "rooted where no site's files are" "vhRoot                  $_rn/lsws/_default/" "$_c"
+assert_has "and runs no script" "enableScript            0" "$_c"
+assert_eq  "both listeners map the name and www to it" 2 "$(grep -c 'map                     old.example old.example, www.old.example' <<<"$_c")"
+assert_true "its vhconf is written" test -s "$_rn/lsws/conf/vhosts/old.example/vhconf.conf"
+assert_has "one change set, reloaded" "commit pending=1 redirect old.example -> alpha.example" "$(_rn_calls)"
+assert_lacks "--no-ssl asks for no certificate" "obtain" "$(_rn_calls)"
+: >"$_rn/calls"
+_rn_case _rn_sync alpha.example
+assert_lacks "nothing changed for the target: its redirects are left alone" "commit" "$(_rn_calls)"
+jq '.ssl.enabled = false' "$_rn/state/domains/alpha.example/domain.json" >"$_rn/t" && cp "$_rn/t" "$_rn/state/domains/alpha.example/domain.json"
+_rn_case _rn_sync alpha.example
+assert_has "the target lost its certificate: the redirect follows" "commit pending=1 redirect old.example" "$(_rn_calls)"
+assert_has "to http" 'RewriteRule ^(.*)$ http://alpha.example$1 [R=301,L]' "$(cat "$_rn/lsws/conf/vhosts/old.example/vhconf.conf")"
+: >"$_rn/calls"
+_rn_case lib_redirect_save other.example elsewhere.example 0
+_rn_case _rn_sync alpha.example
+assert_lacks "a redirect to another name is not touched by it" "other.example" "$(_rn_calls)$(ls "$_rn/lsws/conf/vhosts")"
+assert_has  "applying a site's configuration is what makes them follow" "lib_redirect_sync_target" "$(sed -n '/^lib_domain_apply_config() {/,/^}/p' "$ROOT/lib/domain.sh")"
+
+# ---- redirect add: the certificate ----------------------------------------------------
+_rn_fresh
+: >"$_rn/calls"
+_rn_case _rn_redirect add old.example alpha.example --www
+assert_has "no certificate could be had: it still redirects" "rc=0" "$(_rn_out)"
+assert_has "and says so" "No certificate for old.example: certbot said no" "$(_rn_out)"
+assert_has "with the command that tries again" "setup.sh redirect add old.example alpha.example --www" "$(_rn_out)"
+assert_has "it asked for both names under the name's own lineage" "obtain old.example old.example www.old.example" "$(_rn_calls)"
+printf 1 >"$_rn/dns-rc"; : >"$_rn/calls"
+_rn_case _rn_redirect add old.example alpha.example --www
+assert_lacks "DNS that points elsewhere: certbot is not asked" "obtain" "$(_rn_calls)"
+assert_has "and that is the reason given" "its DNS does not point to this server" "$(_rn_out)"
+rm -f "$_rn/dns-rc"; : >"$_rn/certbot-works"; : >"$_rn/calls"
+_rn_case _rn_redirect add old.example alpha.example --www
+assert_has "with a certificate the virtual host gets it" "keyFile" "$(cat "$_rn/lsws/conf/vhosts/old.example/vhconf.conf")"
+assert_has "and says HTTPS too" "(HTTPS too)" "$(_rn_out)"
+printf 'old.example\nwww.old.example\n' >"$_rn/covers-old.example"; : >"$_rn/calls"
+_rn_case _rn_redirect add old.example alpha.example --www
+assert_lacks "a certificate that covers the names is not asked for again" "obtain" "$(_rn_calls)"
+printf 'old.example\n' >"$_rn/covers-old.example"; : >"$_rn/calls"
+_rn_case _rn_redirect add old.example alpha.example --www
+assert_has "one that lacks www is" "obtain old.example old.example www.old.example" "$(_rn_calls)"
+assert_eq  "and OpenLiteSpeed is reloaded though no file changed: the certificate did" "pending=0 pending=1" "$(_rn_calls | grep '^commit' | awk '{print $2}' | tr '\n' ' ' | sed 's/ $//')"
+
+# ---- redirect add / del: what is refused ----------------------------------------------
+_rn_fresh
+_rn_case _rn_redirect add alpha.example new.example;   assert_has "a site cannot be made a redirect" "alpha.example is a site of this server" "$(_rn_out)"
+assert_has   "rename is what moves it" "setup.sh rename alpha.example new.example" "$(_rn_out)"
+assert_false "and it was not"  test -e "$_rn/state/domains/alpha.example/redirect.json"
+_rn_case _rn_redirect add old.example old.example;     assert_has "not to itself" "cannot redirect to itself" "$(_rn_out)"
+_rn_case _rn_redirect add old.example www.old.example; assert_has "nor to its own www" "cannot redirect to itself" "$(_rn_out)"
+_rn_case _rn_redirect add www.old.example alpha.example; assert_has "a www name is --www" "redirect add old.example alpha.example --www" "$(_rn_out)"
+_rn_case _rn_redirect add ../alpha.example new.example; assert_has "a path is no name" "Invalid domain name" "$(_rn_out)"
+_rn_case _rn_redirect add old.example http://x.example; assert_has "nor is an address a target" "Invalid domain name" "$(_rn_out)"
+_rn_case _rn_redirect add old.example;                  assert_has "two names are needed" "Two names are needed" "$(_rn_out)"
+_rn_case _rn_redirect add old.example alpha.example --bogus; assert_has "an unknown option is refused" "Unknown option for redirect add" "$(_rn_out)"
+assert_false "none of these left a record" test -e "$_rn/state/domains/old.example"
+_rn_case _rn_redirect add old.example alpha.example --no-ssl
+_rn_case _rn_redirect add third.example old.example --no-ssl; assert_has "a redirect to a redirect is refused" "itself only a redirect" "$(_rn_out)"
+_rn_case _rn_redirect list
+assert_has "list shows where it leads" "https://alpha.example" "$(_rn_out)"
+assert_has "and what leads there" "old.example" "$(_rn_out)"
+_rn_case _rn_redirect del ../domains/alpha.example;     assert_has "del takes a name, not a path" "Invalid domain name" "$(_rn_out)"
+_rn_case _rn_redirect del alpha.example;                assert_has "a site is no redirect to delete" "No redirect called alpha.example" "$(_rn_out)"
+assert_true  "the site's state is untouched" test -s "$_rn/state/domains/alpha.example/domain.json"
+assert_true  "and its certificate" test -s "$_rn/ssl/alpha.example/fullchain.pem"
+mkdir -p "$_rn/ssl/old.example"; printf c >"$_rn/ssl/old.example/fullchain.pem"; printf 'x\n' >"$_rn/state/domains/old.example/ssl.info"
+_rn_case _rn_redirect del old.example
+assert_has   "redirect del succeeds" "rc=0" "$(_rn_out)"
+assert_false "its state directory is gone" test -e "$_rn/state/domains/old.example"
+assert_false "its virtual host directory" test -e "$_rn/lsws/conf/vhosts/old.example"
+assert_lacks "its virtual host" "virtualhost old.example" "$(cat "$_rn/lsws/conf/httpd_config.conf")"
+assert_lacks "its listener maps" "old.example" "$(cat "$_rn/lsws/conf/httpd_config.conf")"
+assert_false "and its certificate" test -e "$_rn/ssl/old.example"
+_rn_case _rn_redirect add old.example alpha.example --no-ssl
+mkdir -p "$_rn/ssl/old.example"; printf c >"$_rn/ssl/old.example/fullchain.pem"
+_rn_case _rn_redirect del old.example --keep-ssl
+assert_true  "--keep-ssl keeps the certificate" test -s "$_rn/ssl/old.example/fullchain.pem"
+
+# ---- the name is taken ----------------------------------------------------------------
+_rn_fresh
+_rn_case lib_redirect_save old.example alpha.example 0
+_rn_case lib_domain_add_main old.example --no-ssl
+assert_has   "add refuses a name that redirects" "old.example only redirects to alpha.example" "$(_rn_out)"
+assert_has   "and says how to free it" "setup.sh redirect del old.example" "$(_rn_out)"
+assert_false "no site was started under it" test -e "$_rn/home/old.example"
+assert_false "nor a state file" test -e "$_rn/state/domains/old.example/domain.json"
+assert_true  "the redirect is still there" test -s "$_rn/state/domains/old.example/redirect.json"
+assert_has   "restore refuses it the same way" 'lib_redirect_exists "$domain"' "$(sed -n '/^lib_restore_main() {/,/^}/p' "$ROOT/lib/backup.sh")"
+_rn_case _rn_doctor
+_o="$(_rn_out)"
+assert_lacks "doctor does not call a redirect's virtual host unmanaged" "unmanaged vhost old.example" "$_o"
+assert_has   "one that belongs to nothing still is" "WARN|unmanaged vhost stray.example" "$_o"
+assert_has   "the redirect is checked for the 301 it is there for" "OK|redirect old.example|sends its visitors on to https://alpha.example" "$_o"
+assert_has   "and for the certificate it lacks" "WARN|redirect old.example: ssl" "$_o"
+printf 403 >"$_rn/http-code"
+_rn_case _rn_doctor
+assert_has   "any other answer is a failure" "FAIL|redirect old.example|HTTP 403 instead of a 301" "$(_rn_out)"
+_rn_case lib_redirect_save gone.example alpha.example 0
+_rn_case _rn_doctor
+assert_has   "and so is one whose virtual host is missing" "FAIL|redirect gone.example|virtualhost block missing" "$(_rn_out)"
+: >"$_rn/calls"
+_rn_case _rn_ssl
+_o="$(_rn_out)"
+assert_has   "ssl status lists the redirects" "Redirects" "$_o"
+assert_has   "as having none" "none" "$(grep '^  old.example' <<<"$_o")"
+# the site without its certificate and the renewal nothing runs are the problems; the two
+# redirects without one are warnings: they still redirect, over HTTP
+assert_has   "which is a warning, not a failure" "2 problem(s), 2 warning(s)" "$_o"
+assert_has   "with the command that fetches it" " redirect add old.example alpha.example    # once its DNS points here" "$_o"
+assert_has   "the certificate is looked up under the name itself" "old.example old.example" "$(_rn_calls)"
+_rn_case lib_redirect_save old.example alpha.example 1
+: >"$_rn/calls"; printf 'FAIL|3|1|renewal is not getting through' >"$_rn/lineage"
+_rn_case _rn_ssl
+assert_has   "with www it has to cover www" "old.example old.example www.old.example" "$(_rn_calls)"
+assert_has   "one that does not renew is a failure" "4 problem(s), 0 warning(s)" "$(_rn_out)"
+assert_has   "and the command takes www along" " redirect add old.example alpha.example --www    # once" "$(_rn_out)"
+rm -f "$_rn/lineage"
+_rn_case lib_redirect_save old.example alpha.example 0
+_rn_case lib_domain_list_main
+assert_has   "list shows the redirect below the sites" "-> alpha.example" "$(_rn_out)"
+assert_has   "as what it is" "redirect" "$(_rn_out | grep '^old.example')"
+
+# ---- rename: what stands in the way ---------------------------------------------------
+_rn_fresh
+_rn_case _rn_blocker alpha.example beta.example
+assert_eq "nothing in the way: nothing is said" "rc=0" "$(_rn_out)"
+_rn_site gamma.example gamma_example
+_rn_case _rn_blocker alpha.example gamma.example;  assert_has "a site of that name" "gamma.example is a site of this server already" "$(_rn_out)"
+_rn_case lib_redirect_save red.example alpha.example 0
+_rn_case _rn_blocker alpha.example red.example;    assert_has "a redirect of that name" "red.example only redirects to alpha.example" "$(_rn_out)"
+mkdir -p "$_rn/home/left.example"
+_rn_case _rn_blocker alpha.example left.example;   assert_has "a home left behind under that name" "$_rn/home/left.example is in the way" "$(_rn_out)"
+mkdir -p "$_rn/sitelogs/logs.example"
+_rn_case _rn_blocker alpha.example logs.example;   assert_has "a log directory" "$_rn/sitelogs/logs.example is in the way" "$(_rn_out)"
+mkdir -p "$_rn/lsws/conf/vhosts/vh.example"
+_rn_case _rn_blocker alpha.example vh.example;     assert_has "a virtual host directory" "conf/vhosts/vh.example is in the way" "$(_rn_out)"
+mkdir -p "$_rn/state/domains/st.example"
+_rn_case _rn_blocker alpha.example st.example;     assert_has "a state directory" "state/domains/st.example is in the way" "$(_rn_out)"
+printf 'beta_example\n' >>"$_rn/users"
+_rn_case _rn_blocker alpha.example beta.example;   assert_has "a Linux user of the new name" "a Linux user called beta_example exists already" "$(_rn_out)"
+sed -i '/^beta_example$/d' "$_rn/users"; printf 'beta_example\n' >>"$_rn/groups"
+_rn_case _rn_blocker alpha.example beta.example;   assert_has "or a group" "a Linux group called beta_example exists already" "$(_rn_out)"
+sed -i '/^beta_example$/d' "$_rn/groups"
+# two long names can share the 28 characters a user name is cut to: then no user changes
+_rn_long="averyveryveryverylongdomainname"
+_rn_site "${_rn_long}.example" "$(lib_domain_ident "${_rn_long}.example")"
+_rn_case _rn_blocker "${_rn_long}.example" "${_rn_long}.exampleb"; assert_eq "a new name with the same user name is not blocked by that user" "rc=0" "$(_rn_out)"
+jq '.app = {port: 3000}' "$_rn/state/domains/alpha.example/domain.json" >"$_rn/t" && cp "$_rn/t" "$_rn/state/domains/alpha.example/domain.json"
+_rn_case _rn_blocker alpha.example beta.example;   assert_has "a Node.js application" "runs a Node.js application" "$(_rn_out)"
+jq 'del(.app)' "$_rn/state/domains/alpha.example/domain.json" >"$_rn/t" && cp "$_rn/t" "$_rn/state/domains/alpha.example/domain.json"
+: >"$_rn/mail-installed"; : >"$_rn/mail-traces-alpha.example"
+_rn_case _rn_blocker alpha.example beta.example;   assert_has "mail that belongs to the site" "mailboxes cannot change their domain" "$(_rn_out)"
+: >"$_rn/mail-own-alpha.example"
+_rn_case _rn_blocker alpha.example beta.example;   assert_eq  "mail that is a mail domain of its own stays where it is" "rc=0" "$(_rn_out)"
+rm -f "$_rn"/mail-*
+jq '.user = "someone"' "$_rn/state/domains/alpha.example/domain.json" >"$_rn/t" && cp "$_rn/t" "$_rn/state/domains/alpha.example/domain.json"
+_rn_case _rn_blocker alpha.example beta.example;   assert_has "a site that runs as another user than its own" "runs as someone:alpha_example" "$(_rn_out)"
+
+# ---- rename: the arguments ------------------------------------------------------------
+_rn_fresh
+_rn_site gamma.example gamma_example
+_rn_before="$(_rn_tree)"
+_rn_case _rn_rename alpha.example gamma.example
+assert_has "what stands in the way stops the command" "alpha.example cannot be renamed to gamma.example" "$(_rn_out)"
+assert_has "with the reason" "gamma.example is a site of this server already" "$(_rn_out)"
+_rn_case _rn_rename alpha.example;                    assert_has "two names are needed" "Two names are needed" "$(_rn_out)"
+_rn_case _rn_rename alpha.example alpha.example;      assert_has "not to its own name" "is called that already" "$(_rn_out)"
+_rn_case _rn_rename alpha.example www.beta.example;   assert_has "not to a www name" "Use the bare name instead of www.beta.example" "$(_rn_out)"
+_rn_case _rn_rename alpha.example ../beta.example;    assert_has "not to a path" "Invalid domain name" "$(_rn_out)"
+_rn_case _rn_rename ../alpha.example beta.example;    assert_has "not from a path" "Invalid domain name" "$(_rn_out)"
+_rn_case _rn_rename nosuch.example beta.example;      assert_has "not a site that is not there" "Site nosuch.example is not registered" "$(_rn_out)"
+_rn_case _rn_rename alpha.example beta.example --bogus; assert_has "an unknown option is refused" "Unknown option for rename" "$(_rn_out)"
+_rn_case _rn_rename --help;                           assert_has "help is help" "Usage: setup.sh rename" "$(_rn_out)"
+_rn_case _rn_rename_asked alpha.example beta.example; assert_has "without a yes nothing happens" "Rename cancelled" "$(_rn_out)"
+_rn_case _rn_rename_dry alpha.example beta.example
+assert_has "a dry run says what would happen" "becomes $_rn/home/beta.example" "$(_rn_out)"
+assert_has "and that nothing did" "nothing was changed" "$(_rn_out)"
+: >"$_rn/backup-fails"
+_rn_case _rn_rename alpha.example beta.example;       assert_has "no safety backup, no rename" "The safety backup failed, so nothing was changed" "$(_rn_out)"
+rm -f "$_rn/backup-fails"
+assert_eq    "after all of these the site is where it was" "$_rn_before" "$(_rn_tree)"
+assert_lacks "and nobody was renamed" "usermod" "$(_rn_calls)"
+assert_lacks "nor taken off the air" "purge" "$(_rn_calls)"
+
+# ---- rename: the move -----------------------------------------------------------------
+_rn_fresh
+printf '<?php // wp\n' >"$_rn/home/alpha.example/public_html/wp-config.php"
+printf "define('X', '%s/home/alpha.example/public_html/x');\n" "$_rn" >>"$_rn/home/alpha.example/public_html/wp-config.php"
+printf 'WP_URL=https://alpha.example\nWP_PATH=%s/home/alpha.example/public_html\n' "$_rn" >"$_rn/state/domains/alpha.example/wp.info"
+printf 1 >"$_rn/dns-rc"
+_rn_case lib_redirect_save early.example alpha.example 1
+_rn_case _rn_rename alpha.example beta.example
+_o="$(_rn_out)"; _c="$(_rn_calls)"
+assert_has   "the rename succeeds" "rc=0" "$_o"
+assert_has   "and says so" "Renamed alpha.example to beta.example" "$_o"
+assert_has   "DNS that is not here yet is said before anything moves" "The DNS of beta.example does not point to this server yet" "$_o"
+assert_true  "the home has the new name" test -s "$_rn/home/beta.example/public_html/index.php"
+assert_false "and not the old one" test -e "$_rn/home/alpha.example"
+assert_true  "the logs moved, history included" test -s "$_rn/sitelogs/beta.example/access.log"
+assert_false "none stay behind" test -e "$_rn/sitelogs/alpha.example"
+assert_eq    "the state says who the site is now" "beta.example beta_example beta_example beta_example $_rn/home/beta.example" "$(_rn_json beta.example '"\(.domain) \(.ident) \(.user) \(.group) \(.home)"')"
+assert_eq    "and where it came from" "alpha.example" "$(_rn_json beta.example '.renamed_from')"
+assert_eq    "the certificate was the old name's" "false null null" "$(_rn_json beta.example '"\(.ssl.enabled) \(.ssl.expires) \(.ssl.cert_name)"')"
+assert_eq    "it still wants one" "true" "$(_rn_json beta.example '.ssl.wanted')"
+assert_eq    "everything else is kept: the database" "alpha_db alpha_user" "$(_rn_json beta.example '"\(.db.name) \(.db.user)"')"
+assert_eq    "the PHP settings and the hardening" "8.3 256M blocked true" "$(_rn_json beta.example '"\(.php.version) \(.php.memory_limit) \(.security.php_exec) \(.www)"')"
+assert_true  "the database login moved with the state" grep -q '^DB_PASS=secret$' "$_rn/state/domains/beta.example/db.info"
+assert_false "the old certificate's note did not" test -e "$_rn/state/domains/beta.example/ssl.info"
+assert_has   "the group is renamed" "groupmod -n beta_example alpha_example" "$_c"
+assert_has   "the user is renamed" "usermod -l beta_example alpha_example" "$_c"
+assert_has   "and pointed at the new home" "usermod -d $_rn/home/beta.example -c site beta.example beta_example" "$_c"
+assert_eq    "the virtual host goes before the user is renamed, the new one comes after" "in order" \
+  "$(awk '/^purge alpha.example/{p=NR} /^usermod -l/{u=NR} /^apply beta.example/{a=NR} END{ if (p && u && a && p < u && u < a) print "in order"; else print p, u, a }' "$_rn/calls")"
+assert_has   "a safety backup comes first" "backup alpha.example --tag pre-rename --keep 0 --no-mail" "$(head -n 1 "$_rn/calls")"
+assert_has   "the new virtual host is rendered for the new user in the new home, without HTTPS yet" "apply beta.example user=beta_example home=$_rn/home/beta.example ssl=0" "$_c"
+assert_has   "the site is asked whether it answers" "smoke beta.example" "$_c"
+assert_has   "a certificate is asked for under the new name" "add-ssl beta.example" "$_c"
+assert_false "PHP's ini directory of the old name is gone" test -e "$_rn/phpini/alpha.example"
+assert_has   "logs/ in the home is linked again" "logs-link $_rn/home/beta.example" "$_c"
+assert_has   "logrotate is told" "logrotate" "$_c"
+# the old name
+assert_eq    "the old name is a redirect to the new one, www as the site had it" "beta.example true" "$(jq -r '"\(.target) \(.www)"' "$_rn/state/domains/alpha.example/redirect.json")"
+assert_eq    "and nothing else" "redirect.json" "$(ls "$_rn/state/domains/alpha.example" | tr '\n' ' ' | sed 's/ $//')"
+assert_has   "its virtual host is applied" "redirect-apply alpha.example" "$_c"
+assert_true  "it keeps its certificate" test -s "$_rn/ssl/alpha.example/fullchain.pem"
+assert_lacks "which nobody deletes" "ssl-delete" "$_c"
+assert_true  "the redirect is in place before the certificate is asked for" bash -c 'r="$(grep -n "^redirect-apply alpha.example" "$1" | cut -d: -f1)"; s="$(grep -n "^add-ssl" "$1" | cut -d: -f1)"; [ "$r" -lt "$s" ]' _ "$_rn/calls"
+assert_eq    "a name that led to the old one now leads to the new one" "beta.example true" "$(jq -r '"\(.target) \(.www)"' "$_rn/state/domains/early.example/redirect.json")"
+assert_has   "and is applied" "redirect-apply early.example" "$_c"
+# what still said the old name
+assert_has   "WordPress: addresses, www first" "search-replace //www.alpha.example //www.beta.example --all-tables-with-prefix --skip-columns=guid" "$_c"
+assert_has   "the bare name" "search-replace //alpha.example //beta.example " "$_c"
+assert_has   "the form JSON keeps them in" 'search-replace \/\/alpha.example \/\/beta.example ' "$_c"
+assert_has   "and the home directory" "search-replace $_rn/home/alpha.example/ $_rn/home/beta.example/ " "$_c"
+assert_true  "the www form is rewritten before the bare one" bash -c 'w="$(grep -n "search-replace //www.alpha" "$1" | cut -d: -f1)"; b="$(grep -n "search-replace //alpha" "$1" | cut -d: -f1)"; [ "$w" -lt "$b" ]' _ "$_rn/calls"
+assert_lacks "never the bare word: a mail address stays" "search-replace alpha.example" "$_c"
+assert_has   "it runs as the renamed user" "-u beta_example -- env HOME=$_rn/home/beta.example" "$(grep 'search-replace' "$_rn/runuser.log" | tail -n 1)"
+assert_eq    "the note with the admin login follows" "WP_URL=https://beta.example WP_PATH=$_rn/home/beta.example/public_html" "$(tr '\n' ' ' <"$_rn/state/domains/beta.example/wp.info" | sed 's/ $//')"
+assert_has   "the scheduled events run as the new user in the new home" "beta_example cd $_rn/home/beta.example/public_html" "$(grep 'wpcron:beta.example' "$_rn/cron")"
+assert_lacks "and no line is left for the old name" "alpha.example" "$(cat "$_rn/cron")"
+assert_true  "the archives follow the site, the safety one among them" test -e "$_rn/backups/beta.example/alpha.example-pre-rename-20260101-000000.tar.gz"
+assert_false "none stay under the old name" test -e "$_rn/backups/alpha.example"
+assert_has   "a file that still names the old home is pointed out" "$_rn/home/beta.example/public_html/wp-config.php" "$_o"
+assert_has   "the certificate that is still missing is said at the end" "No certificate yet: point the DNS of beta.example here" "$_o"
+
+# ---- rename: the options --------------------------------------------------------------
+_rn_fresh
+printf '<?php // wp\n' >"$_rn/home/alpha.example/public_html/wp-config.php"
+_rn_case _rn_rename alpha.example beta.example --no-redirect --no-ssl --no-search-replace
+_c="$(_rn_calls)"
+assert_has   "it succeeds" "rc=0" "$(_rn_out)"
+assert_false "--no-redirect: the old name leaves no record" test -e "$_rn/state/domains/alpha.example"
+assert_has   "and its certificate goes" "ssl-delete alpha.example" "$_c"
+assert_lacks "no redirect is applied" "redirect-apply" "$_c"
+assert_lacks "--no-ssl: no certificate is asked for" "add-ssl" "$_c"
+assert_lacks "--no-search-replace: the database is left alone" "search-replace" "$_c"
+_rn_fresh
+jq '.ssl.wanted = false | .ssl.enabled = false | .www = false' "$_rn/state/domains/alpha.example/domain.json" >"$_rn/t" && cp "$_rn/t" "$_rn/state/domains/alpha.example/domain.json"
+printf '<?php // wp\n' >"$_rn/home/alpha.example/public_html/wp-config.php"
+_rn_case _rn_rename alpha.example beta.example
+_c="$(_rn_calls)"
+assert_lacks "a site that wanted no certificate is not given one" "add-ssl" "$_c"
+assert_has   "without www, the www form goes to the bare name" "search-replace //www.alpha.example //beta.example " "$_c"
+assert_eq    "and the redirect takes no www along" "false" "$(jq -r .www "$_rn/state/domains/alpha.example/redirect.json")"
+_rn_fresh
+: >"$_rn/mail-installed"; : >"$_rn/mail-traces-alpha.example"; : >"$_rn/mail-own-alpha.example"
+_rn_case _rn_rename alpha.example beta.example
+assert_has   "a mail domain of its own does not stop the rename" "rc=0" "$(_rn_out)"
+assert_true  "but its archives stay under its name" test -e "$_rn/backups/alpha.example/alpha.example-20260101-000000.tar.gz"
+_rn_fresh
+: >"$_rn/redirect-fails"
+_rn_case _rn_rename alpha.example beta.example
+assert_has   "a redirect that cannot be set up does not undo the rename" "rc=0" "$(_rn_out)"
+assert_has   "it is said, with the command for later" "setup.sh redirect add alpha.example beta.example --www" "$(_rn_out)"
+assert_true  "the site is under its new name" test -s "$_rn/state/domains/beta.example/domain.json"
+_rn_fresh
+_rn_site "${_rn_long}.example" "$(lib_domain_ident "${_rn_long}.example")"
+: >"$_rn/calls"
+_rn_case _rn_rename "${_rn_long}.example" "${_rn_long}.exampleb"
+assert_has   "two names with one user name: the rename succeeds" "rc=0" "$(_rn_out)"
+assert_lacks "and renames no user" "usermod -l" "$(_rn_calls)"
+assert_lacks "nor a group" "groupmod" "$(_rn_calls)"
+assert_has   "but points it at the new home" "usermod -d $_rn/home/${_rn_long}.exampleb" "$(_rn_calls)"
+
+# ---- rename: a failure half way puts the site back ------------------------------------
+for _rn_fail in usermod-d-fails apply-fails smoke-fails php-fails; do
+  _rn_fresh
+  _rn_before="$(_rn_tree)"; _rn_state_before="$(jq -S 'del(.updated_at)' "$_rn/state/domains/alpha.example/domain.json")"
+  : >"$_rn/$_rn_fail"
+  _rn_case _rn_rename alpha.example beta.example
+  assert_has   "${_rn_fail}: the rename fails" "rc=1" "$(_rn_out)"
+  assert_has   "${_rn_fail}: and rolls back" "Rolling back" "$(_rn_out)"
+  assert_eq    "${_rn_fail}: every directory is where it was" "$(grep -v '^phpini' <<<"$_rn_before")" "$(_rn_tree | grep -v '^phpini')"
+  assert_eq    "${_rn_fail}: the state is what it was" "$_rn_state_before" "$(jq -S 'del(.updated_at)' "$_rn/state/domains/alpha.example/domain.json")"
+  assert_eq    "${_rn_fail}: the user has its old name" "root alpha_example" "$(tr '\n' ' ' <"$_rn/users" | sed 's/ $//')"
+  assert_eq    "${_rn_fail}: the group too" "root alpha_example" "$(tr '\n' ' ' <"$_rn/groups" | sed 's/ $//')"
+  assert_has   "${_rn_fail}: it is pointed back at its home" "usermod -d $_rn/home/alpha.example -c site alpha.example alpha_example" "$(_rn_calls | tail -n 8)"
+  assert_has   "${_rn_fail}: the old virtual host is applied again, with its certificate" "apply alpha.example user=alpha_example home=$_rn/home/alpha.example ssl=1" "$(_rn_calls | tail -n 6)"
+  assert_has   "${_rn_fail}: the scheduled events are back" "alpha_example cd $_rn/home/alpha.example/public_html" "$(grep 'wpcron:alpha.example' "$_rn/cron")"
+  if [[ "$_rn_fail" == smoke-fails || "$_rn_fail" == php-fails ]]; then
+    assert_has "${_rn_fail}: the virtual host of the new name is taken out of the configuration" "purge beta.example 0" "$(_rn_calls)"
+  fi
+  assert_false "${_rn_fail}: no redirect was left" test -e "$_rn/state/domains/alpha.example/redirect.json"
+  assert_false "${_rn_fail}: no virtual host directory under the new name" test -e "$_rn/lsws/conf/vhosts/beta.example"
+  rm -f "$_rn/$_rn_fail"
+  _rn_case _rn_rename alpha.example beta.example
+  assert_has   "${_rn_fail}: and the same rename then goes through" "rc=0" "$(_rn_out)"
+done
+
+# ---- the helpers ------------------------------------------------------------------------
+_rn_fresh
+_rn_case _domain_rename_wp_pairs a.example b.example 1
+assert_eq "the pairs, with www" "//www.a.example>//www.b.example|//a.example>//b.example|\\/\\/www.a.example>\\/\\/www.b.example|\\/\\/a.example>\\/\\/b.example|$_rn/home/a.example/>$_rn/home/b.example/|rc=0" "$(_rn_out | tr '\t\n' '>|' | sed 's/|$//')"
+_rn_case _domain_rename_wp_pairs a.example b.example 0
+assert_has "without www every form ends at the bare name" "//www.a.example>//b.example|" "$(_rn_out | tr '\t\n' '>|')"
+
+# usermod and userdel refuse a user something still runs as
+: >"$_rn/calls"
+_rn_case _rn_quiet alpha_example
+assert_eq  "nothing runs as the user: asked once to stop, and done" "pkill -u alpha_example|rc=0" "$(_rn_calls | tr '\n' '|')$(_rn_out)"
+: >"$_rn/calls"; printf 3 >"$_rn/running"
+_rn_case _rn_quiet alpha_example
+assert_eq  "processes that take a moment to end are waited for" "rc=0" "$(_rn_out)"
+assert_lacks "and not killed" "KILL" "$(_rn_calls)"
+: >"$_rn/calls"; printf 999 >"$_rn/running"
+_rn_case _rn_quiet alpha_example
+assert_has "ones that do not end are killed" "pkill -KILL -u alpha_example" "$(_rn_calls)"
+assert_has "and if even that does not help, it says so" "rc=1" "$(_rn_out)"
+: >"$_rn/calls"; rm -f "$_rn/running"
+_rn_case _rn_quiet nosuch_user
+assert_eq  "a user that is not there is nobody to stop" "rc=0" "$(_rn_calls)$(_rn_out)"
+assert_has "remove waits the same way before userdel" '_domain_rename_quiet_user "$D_USER" || true' "$(sed -n '/^lib_domain_remove_main() {/,/^}/p' "$ROOT/lib/domain.sh")"
+
+# ---- the command line and the menu ------------------------------------------------------
+_rn_setup="$(cat "$ROOT/setup.sh")"
+assert_has  "setup.sh loads the module" " rename menu; do" "$_rn_setup"
+assert_has  "and knows the command" 'rename)         lib_domain_rename_main "${rest[@]}" ;;' "$_rn_setup"
+assert_has  "and redirect" 'redirect)       lib_redirect_main "${rest[@]}" ;;' "$_rn_setup"
+assert_has  "listing the redirects takes no lock; changing them does" 'redirect) case "${rest[0]:-list}" in list|--list|help|-h|--help) ;; *) lib_lock ;; esac ;;' "$_rn_setup"
+assert_lacks "rename is not among the commands that run without the lock" "rename" "$(grep -n 'list|status|doctor|credentials|logs|menu|scan) ;;' "$ROOT/setup.sh")"
+_rn_usage="$(lib_usage)"
+assert_has  "help has rename" "rename <old> <new>" "$_rn_usage"
+assert_has  "and redirect" "redirect add <from> <to>" "$_rn_usage"
+_rn_menu="$(declare -f lib_menu_main)"
+assert_has  "the menu offers the rename" "Rename a site" "$_rn_menu"
+assert_has  "and runs it" "26) _menu_rename_site" "$(tr -s ' \n' ' ' <<<"$_rn_menu")"
+assert_has  "and the redirects" "27) _menu_redirects" "$(tr -s ' \n' ' ' <<<"$_rn_menu")"
+_rn_menu_fn="$(declare -f _menu_rename_site)"
+assert_has  "from the menu the old name stays a redirect unless that is declined" '--no-redirect' "$_rn_menu_fn"
+assert_has  "and the name typed is checked before the command runs" 'lib_domain_valid' "$_rn_menu_fn"
+unset -f _rn_case _rn_out _rn_calls _rn_site _rn_fresh _rn_tree _rn_json
 
 # =============================================================================
 section "two domains never share the name their certificate and webmail go by"

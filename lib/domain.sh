@@ -286,6 +286,11 @@ lib_domain_add_main() {
   fi
   local domain="$D_DOMAIN" total=6 http_expect="200|301|302" rc="" why=""
   lib_domain_registered "$domain" && lib_die "Site ${domain} already exists" "registered in $(lib_domain_state_dir "$domain")" "use 'setup.sh remove ${domain}' first, or 'renew-ssl' / 'db' to change it"
+  # the name is taken: its virtual host and its certificate are the redirect's
+  if lib_redirect_exists "$domain"; then
+    lib_die "${domain} only redirects to $(lib_json_get "$(lib_redirect_file "$domain")" '.target') on this server" \
+      "a site of that name would take the redirect's place" "setup.sh redirect del ${domain}   (then add the site)"
+  fi
   lib_ols_is_installed || lib_die "OpenLiteSpeed is not installed" "run install first" "sudo ./setup.sh install"
   (( D_SSL_WANTED )) && total=$((total + 1))
   (( DOM_OPT_WITH_DB )) && total=$((total + 1))
@@ -615,6 +620,8 @@ lib_domain_apply_config() {   # [description]
   lib_ols_change_commit "$desc"
   # the ports a site may reach on this machine follow its proxy targets
   lib_sitefw_regen
+  # and the names that only redirect to this one follow its address (https or not, www or not)
+  lib_redirect_sync_target "$D_DOMAIN"
 }
 
 # Drop a tiny PHP probe into the docroot, fetch it, remove it.
@@ -994,9 +1001,16 @@ define('FS_METHOD', 'direct');" || lib_die "wp config create failed" "database c
   lib_domain_as_user find "$docroot" -type f -exec chmod 0644 {} + 2>/dev/null || true
   [[ -f "${docroot}/wp-config.php" ]] && lib_domain_as_user chmod 0640 "${docroot}/wp-config.php"
   lib_mkdir "${OLS_CACHE_DIR}/${D_DOMAIN}" 0750 "$(lib_ols_user):$(lib_ols_group)"
-  lib_cron_set "wpcron:${D_DOMAIN}" "*/5 * * * * ${D_USER} cd ${docroot} && WP_CLI_PHP=$(lib_php_cli "$D_PHP") ${WPCLI_BIN} --path=${docroot} cron event run --due-now --quiet >/dev/null 2>&1"
+  lib_domain_wpcron_set
   D_WP=1
   lib_domain_state_save
+}
+
+# WordPress's scheduled events, run every five minutes as the site in D_*. The line names the
+# site's user and its document root, so "rename" writes it again.
+lib_domain_wpcron_set() {
+  local docroot="${D_HOME}/public_html"
+  lib_cron_set "wpcron:${D_DOMAIN}" "*/5 * * * * ${D_USER} cd ${docroot} && WP_CLI_PHP=$(lib_php_cli "$D_PHP") ${WPCLI_BIN} --path=${docroot} cron event run --due-now --quiet >/dev/null 2>&1"
 }
 
 # =============================================================================
@@ -1382,6 +1396,13 @@ lib_domain_list_main() {
     rows+=("$d")
   done < <(lib_domains_list)
   ((${#rows[@]} == 0)) && printf '(no sites yet - add one with: setup.sh add example.com)\n'
+  # names that are no site and only send their visitors on to one
+  while read -r d; do
+    [[ -n "$d" ]] || continue
+    lib_redirect_load "$d" || continue
+    ssl="$(lib_ssl_deployed "$d" && lib_ssl_status_line "$d" || printf -- '-')"
+    printf '%-28s %-10s %-5s %-24s %-22s %s\n' "$d" "redirect" "-" "${ssl:0:24}" "-" "-> ${R_TARGET}"
+  done < <(lib_redirects_list)
   printf '\n%s%d site(s); files under %s/<domain>/public_html%s\n' "$C_DIM" "${#rows[@]}" "$SITES_ROOT" "$C_RST"
 }
 
@@ -1805,7 +1826,9 @@ lib_domain_remove_main() {
     lib_rm "$D_HOME" "$(lib_domain_log_dir "$domain")" "$(lib_harden_php_ini_dir "$domain")"
     lib_rm "${OLS_CACHE_DIR}/${domain}"
     if (( ! OPT_DRY_RUN )) && id -u "$D_USER" >/dev/null 2>&1; then
-      pkill -u "$D_USER" >/dev/null 2>&1 || true
+      # until they are gone: userdel refuses a user something still runs as, and the account
+      # left behind then stands in the way of a new site of that name
+      _domain_rename_quiet_user "$D_USER" || true
       lib_run userdel "$D_USER" || lib_warn "userdel ${D_USER} failed"
       getent group "$D_GROUP" >/dev/null 2>&1 && { lib_run groupdel "$D_GROUP" || true; }
     fi
@@ -1822,4 +1845,8 @@ lib_domain_remove_main() {
   lib_sitefw_regen
   lib_manifest_set '.updated_at' "$(lib_iso_now)"
   printf '\n%s%sRemoved %s%s  (state archived in %s/archive/domains/, backup in %s/%s/)\n\n' "$C_BLD" "$C_GRN" "$domain" "$C_RST" "$STATE_DIR" "$BACKUP_ROOT" "$domain"
+  while read -r a; do
+    [[ -n "$a" ]] && lib_warn "${a} still redirects to ${domain}, which is no longer here: setup.sh redirect del ${a}"
+  done < <(lib_redirects_to "$domain")
+  return 0
 }

@@ -251,6 +251,9 @@ sudo lomp update                                    # safe package update, order
                                                     # what a newer release changes (scheduled
                                                     # tasks, site homes and logs)
 sudo lomp remove old.example.com --keep-db          # remove a site, keep its database
+sudo lomp rename example.com example.net            # the site under another domain name; the old
+                                                    # one sends everything on with a 301
+sudo lomp redirect add old-name.com example.net --www   # a name that only redirects, no site
 ```
 
 Global flags work everywhere: `--yes`, `--dry-run`, `--quiet`, `--verbose`, `--no-color`,
@@ -289,6 +292,56 @@ not a git checkout) shows `1.0.x`.
 | `--no-db` | Skip the database. Every site otherwise gets its own MariaDB database and user — `example.com` becomes `example_db` / `example_user` with a 32-character random password, printed once when the site is created and available afterwards from `credentials` |
 | `--wildcard` | Also request `*.<domain>` over DNS-01 (needs a stored Cloudflare API token) |
 | `--staging` | Use the Let's Encrypt staging CA while you are testing |
+
+### Moving a site to another domain name
+
+```bash
+sudo lomp rename example.com example.net     # item 26 in the menu does the same
+```
+
+A site is its name here: its home, its Linux user, its log directory and its certificate are
+all called after it. `rename` moves the site to the new name as it is and leaves the old name
+behind as a redirect:
+
+- `/home/example.com` becomes `/home/example.net` - renamed in place, nothing is copied - and
+  the user `example_com` becomes `example_net` with the same uid, so no file changes its owner.
+  Logs, PHP settings, hardening, path proxies and backups follow.
+- The database keeps its name, its user and its password: nothing in `wp-config.php` or in an
+  application's own configuration has to change for it.
+- `example.net` gets a certificate of its own. Point its DNS at the server **before** the
+  rename and it is there right away; otherwise the site answers over HTTP only until
+  `lomp renew-ssl example.net`, which a WordPress that expects HTTPS does not take well.
+- A WordPress has the addresses in its database rewritten (`wp search-replace`, serialized data
+  included): `//example.com` and `//www.example.com`, and the old home directory where a plugin
+  stored it as a path. Mail addresses at the old domain are left alone. `--no-search-replace`
+  skips this.
+- `example.com` (and `www.` if the site had it) keeps its certificate and answers every request
+  with a `301` to the same path on the new name, over HTTP and HTTPS. Keep its DNS pointing at
+  the server for as long as that should work. `--no-redirect` drops the old name instead.
+
+A safety backup is written first, and the site is away for about a minute. If anything fails
+before the site answers under its new name, everything is put back under the old one. At the
+end the command lists the configuration files in the document root that still mention the old
+name (an address or the old path in `wp-config.php`, `.htaccess`, `.env`, ...): those are yours
+to look at.
+
+Not moved by `rename`: a site that runs a Node.js application (its PM2 service and builds carry
+the old paths), and a site whose mail is switched on for the site itself - mailboxes cannot
+change their domain. Both are refused before anything is touched.
+
+A redirect is also available on its own, for a name that never was a site here:
+
+```bash
+sudo lomp redirect add old-name.com example.net --www   # 301, path and query string kept
+sudo lomp redirect list
+sudo lomp redirect del old-name.com
+```
+
+It gets no Linux user and no files - only a virtual host and, once its DNS points here, a
+certificate (run `redirect add` again to fetch it). It follows its target: `https://` once the
+target has a certificate, `www.` in front when that is the target's main name. `lomp list`,
+`lomp ssl` and `lomp doctor` show redirects next to the sites, and `add` refuses a name that
+redirects until `redirect del` frees it.
 
 ### WordPress into a site that is already there
 
@@ -1026,6 +1079,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
 | `lib/cloudflare.sh` | Trusted proxy ranges, real client IP, API token, edge bans |
 | `lib/backup.sh` | Backup, restore, retention, encryption, remotes, scheduling |
 | `lib/monitor.sh` | `status`, `doctor`, health check, notifications |
+| `lib/rename.sh` | `rename`: a site under another domain name; `redirect`: a name that only sends its visitors on |
 | `lib/menu.sh` | Command reference and the interactive menu |
 
 ---

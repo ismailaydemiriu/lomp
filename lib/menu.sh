@@ -147,6 +147,14 @@ COMMANDS
                                 Send outgoing mail through another server where port 25
                                 is blocked; the password is read from stdin
   remove <domain> [opts]        Remove a site  (--keep-db --keep-files --keep-ssl; alias: delete)
+  rename <old> <new> [opts]     Move a site to another domain name: files, user, logs and
+                                settings follow, the database stays, the new name gets its
+                                certificate, a WordPress has its addresses rewritten, and the
+                                old name sends everything on with a 301
+                                (--no-redirect --no-ssl --no-search-replace)
+  redirect add <from> <to>      A name that is no site and only sends its visitors on to
+                                another one (301, path kept; --www --no-ssl)
+  redirect list | del <from>    The redirects; stop answering for one (--keep-ssl)
   list                          Table of sites (--json)
   status                        Services, versions, resources, sites (--json)
   doctor                        Deep health check (--json, --quiet)
@@ -385,6 +393,8 @@ lib_menu_main() {
     _menu_item  5 "Databases"
     _menu_item  6 "Node.js apps (PM2) and proxies (a domain or a path -> an app's port)"
     _menu_item  7 "Remove a site"
+    _menu_item 26 "Rename a site (new domain name; the old one redirects to it)"
+    _menu_item 27 "Redirects (a domain that only sends visitors on to another)"
     _menu_item 20 "Mail: domains, mailboxes, DNS"
     _menu_item 21 "Fix file ownership (after uploading as root)"
     _menu_item 23 "Harden sites against PHP shells"
@@ -417,6 +427,8 @@ lib_menu_main() {
       5) _menu_databases ;;
       6) _menu_apps ;;
       7) _menu_remove_site ;;
+      26) _menu_rename_site ;;
+      27) _menu_redirects ;;
       20) _menu_mail ;;
       21) _menu_fix_owner ;;
       23) _menu_harden ;;
@@ -786,6 +798,48 @@ _menu_remove_site() {
   _menu_ask keep "Keep the files? (y/n)" "n"
   [[ "${keep,,}" == y* ]] && args+=(--keep-files)
   _menu_run remove "${args[@]}"
+}
+
+# A site under another domain name. The command says what it is about to do and asks once more.
+_menu_rename_site() {
+  local domain="" new="" keep=""
+  local -a args=()
+  domain="$(_menu_pick_domain)" || { _menu_pause; return 0; }
+  printf '\n  %s\n  %s\n' "The site moves to the new name as it is: files, settings, database. Nothing is copied." \
+    "Point the DNS of the new name to this server first, so that it gets its certificate right away."
+  _menu_ask new "New domain for ${domain} (without www, e.g. example.net)"
+  [[ -n "$new" ]] || return 0
+  if ! lib_domain_valid "${new,,}"; then
+    printf '%s"%s" is not a valid domain name.%s\n' "$C_YEL" "$new" "$C_RST"
+    _menu_pause; return 0
+  fi
+  args=("$domain" "${new,,}")
+  _menu_ask keep "Keep ${domain} as a redirect (301) to ${new,,}? (y/n)" "y"
+  [[ "${keep,,}" == y* ]] || args+=(--no-redirect)
+  _menu_run rename "${args[@]}"
+}
+
+# Names that are no site here and only send their visitors on to another one.
+_menu_redirects() {
+  local what="" from="" to="" www=""
+  local -a args=()
+  printf '\n  1) List the redirects\n  2) Add one (or fetch the certificate of one whose DNS points here now)\n  3) Remove one\n'
+  _menu_ask what "Choice" "1"
+  case "$what" in
+    2) _menu_ask from "Domain that redirects (without www, e.g. old-name.com)"
+       [[ -n "$from" ]] || return 0
+       _menu_ask to "Where to (a site here, or any other domain)"
+       [[ -n "$to" ]] || return 0
+       args=("$from" "$to")
+       _menu_ask www "Also redirect www.${from}? (y/n)" "y"
+       [[ "${www,,}" == y* ]] && args+=(--www)
+       _menu_run redirect add "${args[@]}" ;;
+    3) _menu_run redirect list
+       _menu_ask from "Which one (its name, empty to cancel)"
+       [[ -n "$from" ]] || return 0
+       _menu_run redirect del "$from" ;;
+    *) _menu_run redirect list ;;
+  esac
 }
 
 # Files uploaded as root (WinSCP, scp) stay root's, and PHP, which runs as the site's own

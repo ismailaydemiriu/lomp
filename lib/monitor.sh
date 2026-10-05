@@ -623,7 +623,24 @@ _doc_check_domains() {
     # a webmail vhost belongs to a domain, not to a site of its own: it is named _wm_<ident>,
     # which lib_domain_valid refuses, so it can only have come from here
     [[ "$d" == _wm_* ]] && continue
+    # nor is a redirect a site: its record is a redirect.json, checked below
+    lib_redirect_exists "$d" && continue
     lib_domain_registered "$d" || _doc_add WARN "unmanaged vhost ${d}" "present in httpd_config.conf but not in state"
+  done
+  for d in $(lib_redirects_list); do
+    lib_redirect_load "$d" || { _doc_add FAIL "redirect ${d}" "redirect.json unreadable"; continue; }
+    if ! lib_ols_conf_block_exists virtualhost "$d"; then
+      _doc_add FAIL "redirect ${d}" "virtualhost block missing in httpd_config.conf (setup.sh redirect add ${d} ${R_TARGET})"; continue
+    fi
+    code="$(lib_http_code "http://127.0.0.1/" -H "Host: ${d}")"
+    if [[ "$code" == "301" ]]; then _doc_add OK "redirect ${d}" "sends its visitors on to $(lib_redirect_target_url "$R_TARGET")"
+    else _doc_add FAIL "redirect ${d}" "HTTP ${code} instead of a 301 to ${R_TARGET}"; fi
+    if lib_ssl_deployed "$d"; then
+      days="$(lib_ssl_days_left "$d")"
+      if [[ -n "$days" ]] && (( days < 7 )); then _doc_add WARN "redirect ${d}: ssl" "its certificate expires in ${days} days: does its DNS still point here?"; fi
+    else
+      _doc_add WARN "redirect ${d}: ssl" "no certificate, so https://${d}/ is not redirected (setup.sh redirect add ${d} ${R_TARGET})"
+    fi
   done
   for ver in $(lib_php_installed_versions); do
     lib_ols_conf_block_exists extprocessor "lsphp${ver//./}" || _doc_add WARN "php ${ver}" "no server-level extprocessor (run optimize)"
