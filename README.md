@@ -233,6 +233,10 @@ sudo lomp fix-owner --all                           # files uploaded as root to 
 sudo lomp backup --all --encrypt                    # back up every site
 sudo lomp restore shop.example.com --file /var/backups/server-setup/shop.example.com/....tar.gz
 sudo lomp renew-ssl --all                           # renew every certificate
+sudo lomp ssl                                       # which certificates exist, days left, and
+                                                    # whether renewal is automatic (changes nothing)
+sudo lomp ssl test                                  # rehearse the renewals (certbot renew --dry-run)
+sudo lomp ssl fix                                   # switch automatic renewal back on
 sudo lomp panel                                     # open the WebAdmin panel for your address
 sudo lomp self-update                               # pull the latest code and apply what it
                                                     # changes on the server (no packages)
@@ -580,7 +584,8 @@ server can read it.
 The token needs `Zone → DNS → Edit` and `Account → Firewall Access Rules → Edit`, and is
 stored with mode 0600. It never reaches a command line afterwards either: API calls get it
 through curl's configuration on stdin, and Fail2ban's ban action reads it from a 0600 header
-file. Set your Cloudflare SSL mode to **Full (strict)** once certificates are issued.
+file. Set your Cloudflare SSL mode to **Full (strict)** once certificates are issued:
+`sudo lomp ssl` lists every site's certificate and says when that is safe.
 
 ### Closing the origin
 

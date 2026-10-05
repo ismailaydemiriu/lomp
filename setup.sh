@@ -188,6 +188,8 @@ main() {
     # restarts a service. "box list", "alias list" and "domain list" only read, and "dns"
     # only prints unless --apply, which writes into Cloudflare and into the domain's own state.
     firewall) case "${rest[0]:-status}" in status|--status|"") ;; *) lib_lock ;; esac ;;
+    # "test" is certbot's own rehearsal, under certbot's own lock
+    ssl)    case "${rest[0]:-status}" in fix) lib_lock ;; *) ;; esac ;;
     webmail) case "${rest[0]:-status}" in status|--status|help|-h|--help|"") ;; *) lib_lock ;; esac ;;
     mail)   case "${rest[0]:-status}" in
               # --replace-mx implies --apply inside the command, so it has to imply the lock
@@ -238,6 +240,7 @@ main() {
     backup)         lib_backup_main "${rest[@]}" ;;
     restore)        lib_restore_main "${rest[@]}" ;;
     renew-ssl)      lib_ssl_renew_main "${rest[@]}" ;;
+    ssl)            lib_ssl_main "${rest[@]}" || exit 1 ;;
     update)         lib_update_main "${rest[@]}" ;;
     update-cf-ips)  lib_cf_update_main "${rest[@]}" || exit 1 ;;
     notify)         lib_notify_main "${rest[@]}" ;;

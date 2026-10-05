@@ -4,6 +4,9 @@
 
 CF_INI="${STATE_DIR}/cloudflare.ini"          # certbot dns-cloudflare credentials (0600)
 LE_LIVE="/etc/letsencrypt/live"
+LE_RENEWAL="/etc/letsencrypt/renewal"         # one <lineage>.conf per certificate certbot renews
+LE_LOG="/var/log/letsencrypt/letsencrypt.log"
+SSL_RENEW_CRON="17 3,15 * * * root certbot -q renew"
 SSL_LAST_ERROR=""
 
 # =============================================================================
@@ -16,19 +19,33 @@ lib_ssl_install() {
   fi
   lib_mkdir "${ACME_ROOT}/.well-known/acme-challenge" 0755 root:root
   lib_ssl_hook_install
+  lib_ssl_renewal_ensure
+  lib_manifest_set '.components.certbot' "$(lib_pkg_version certbot)"
+  lib_ok "certbot ready (webroot ${ACME_ROOT}, deploy hook ${CERTBOT_DEPLOY_HOOK})"
+}
+
+# What runs "certbot renew" twice a day: the package's systemd timer, and a cron entry of ours
+# where there is no timer or it will not start. Never both. install sets it up, and "ssl fix"
+# puts it back on a server where it has since been switched off.
+lib_ssl_renewal_ensure() {
   if lib_service_exists certbot; then
     lib_systemctl enable --now certbot.timer >/dev/null 2>&1 || true
     if (( ! OPT_DRY_RUN )) && ! lib_service_active certbot.timer; then
       lib_warn "certbot.timer is not active; adding a cron fallback"
-      lib_cron_set certbot-renew "17 3,15 * * * root certbot -q renew"
+      lib_cron_set certbot-renew "$SSL_RENEW_CRON"
     else
       lib_cron_remove certbot-renew
     fi
   else
-    lib_cron_set certbot-renew "17 3,15 * * * root certbot -q renew"
+    lib_cron_set certbot-renew "$SSL_RENEW_CRON"
   fi
-  lib_manifest_set '.components.certbot' "$(lib_pkg_version certbot)"
-  lib_ok "certbot ready (webroot ${ACME_ROOT}, deploy hook ${CERTBOT_DEPLOY_HOOK})"
+}
+
+lib_ssl_renewal_how() {   # -> "timer", "cron", or nothing when no one runs certbot renew
+  if lib_service_active certbot.timer; then printf 'timer'
+  elif lib_cron_has certbot-renew && { lib_service_active cron || lib_service_active crond; }; then printf 'cron'
+  fi
+  return 0
 }
 
 lib_ssl_hook_render() {
@@ -395,4 +412,226 @@ lib_ssl_renew_main() {
   lib_domain_apply_config "enable SSL for ${domain}"
   lib_ols_smoke_test "$domain" "$(lib_domain_expected_codes lenient)" https || lib_warn "HTTPS smoke test failed for ${domain} (${OLS_TEST_OUTPUT})"
   lib_ok "SSL active for ${domain}: $(lib_ssl_status_line "$domain")"
+}
+
+# =============================================================================
+#  ssl command: which certificates there are, and whether they renew by themselves
+# =============================================================================
+# One certificate, judged the way a browser - or Cloudflare in Full (strict) - judges it, and
+# then the way certbot's next run will. Prints "LEVEL|days|trusted|text": LEVEL is
+# OK, WARN, FAIL or NONE (there is none), trusted is 1 when a client accepts it today for
+# every name given. The copy in the deploy directory is the one read: the servers present
+# that one, whatever certbot holds.
+lib_ssl_lineage_check() {   # cert-name [name...]
+  local cert="$1"; shift
+  local f="${SSL_DEPLOY_DIR}/${cert}/fullchain.pem" live="${LE_LIVE}/${cert}/fullchain.pem"
+  local days="" issuer="" n="" missing="" e_live="" e_dep=""
+  if [[ ! -s "$f" ]]; then
+    if [[ -s "$live" ]]; then printf 'FAIL||0|issued, but never copied to where the servers read it\n'
+    else printf 'NONE||0|no certificate\n'; fi
+    return 0
+  fi
+  days="$(lib_ssl_days_left "$cert")"
+  if [[ -z "$days" ]]; then printf 'FAIL||0|the certificate file cannot be read\n'; return 0; fi
+  if (( days < 0 )); then printf 'FAIL|%s|0|expired %s day(s) ago\n' "$days" "$(( -days ))"; return 0; fi
+  if [[ "$(openssl x509 -noout -issuer_hash -in "$f" 2>/dev/null)" == "$(openssl x509 -noout -subject_hash -in "$f" 2>/dev/null)" ]]; then
+    printf 'FAIL|%s|0|self-signed: a temporary one, no client trusts it\n' "$days"; return 0
+  fi
+  issuer="$(lib_ssl_issuer "$cert")"
+  if [[ "${issuer^^}" == *STAGING* ]]; then
+    printf "FAIL|%s|0|a Let's Encrypt staging (test) certificate, no client trusts it\n" "$days"; return 0
+  fi
+  for n in "$@"; do lib_ssl_cert_covers "$cert" "$n" || missing+="${missing:+, }${n}"; done
+  if [[ -n "$missing" ]]; then printf 'FAIL|%s|0|does not cover %s\n' "$days" "$missing"; return 0; fi
+  # trusted today; what follows is about tomorrow
+  if [[ ! -s "${LE_RENEWAL}/${cert}.conf" ]]; then
+    printf 'FAIL|%s|1|certbot has no renewal file for it: it will not renew by itself\n' "$days"; return 0
+  fi
+  if (( days < 7 )); then printf 'FAIL|%s|1|renewal is not getting through\n' "$days"; return 0; fi
+  if [[ -s "$live" ]]; then
+    e_live="$(lib_ssl_expiry_epoch "$live")"; e_dep="$(lib_ssl_expiry_epoch "$f")"
+    if [[ -n "$e_live" && -n "$e_dep" ]] && (( e_live > e_dep )); then
+      printf 'WARN|%s|1|renewed, but the servers still use the older copy\n' "$days"; return 0
+    fi
+  fi
+  # certbot renews at 30 days left, so a certificate below that has missed at least one run
+  if (( days < 30 )); then printf 'WARN|%s|1|renewal is overdue\n' "$days"; return 0; fi
+  printf 'OK|%s|1|%s\n' "$days" "${issuer:-unknown issuer}"
+}
+
+_ssl_row() {   # label level days text
+  local colour="$C_GRN" word="ok" left="-"
+  case "$2" in
+    WARN) colour="$C_YEL"; word="warn" ;;
+    FAIL) colour="$C_RED"; word="FAIL" ;;
+    NONE) colour="$C_DIM"; word="none" ;;
+  esac
+  [[ -n "$3" ]] && left="${3} days"
+  printf '  %-32s %s%-5s%s %-10s %s\n' "$1" "$colour" "$word" "$C_RST" "$left" "$4"
+}
+
+lib_ssl_usage() {
+  cat <<'EOF'
+ssl [status]   Every certificate (sites and mail): whether there is one, how long it has,
+               and whether it renews by itself - the timer or cron entry that runs certbot,
+               the deploy hook, certbot's renewal file for each. Changes nothing.
+               Exit status 1 when something needs putting right.
+ssl test       Rehearse the renewal of every certificate against Let's Encrypt's staging
+               server (certbot renew --dry-run). No certificate is replaced.
+ssl fix        Put automatic renewal back: the deploy hook, and the timer (or cron entry).
+EOF
+}
+
+lib_ssl_main() {
+  local sub="${1:-status}"
+  (($# > 0)) && shift
+  case "$sub" in
+    status|--status) lib_ssl_status_main "$@" ;;
+    test)            lib_ssl_test_main "$@" ;;
+    fix)             lib_ssl_fix_main "$@" ;;
+    help|-h|--help)  lib_ssl_usage ;;
+    *)               lib_die "Unknown ssl subcommand: ${sub}" "" "ssl status | ssl test | ssl fix" ;;
+  esac
+}
+
+lib_ssl_status_main() {
+  (($# == 0)) || lib_die "Unknown option for ssl status: ${1}" "" "ssl status"
+  lib_require_tools
+  lib_require_installed
+  local d="" cert="" level="" days="" trusted="" text="" how="" me=""
+  local -i sites=0 untrusted=0 fails=0 warns=0 auto_ok=1
+  local -a names=() fixes=()
+  me="$(lib_self_cmd)"
+
+  _ssl_count() {   # level fix-hint
+    case "$1" in
+      FAIL) fails+=1; fixes+=("$2") ;;
+      WARN) warns+=1; fixes+=("$2") ;;
+    esac
+    return 0
+  }
+
+  printf '\n %sCERTIFICATES%s\n' "$C_BLD" "$C_RST"
+  if ! lib_server_mail_only; then
+    printf '  %sSites%s\n' "$C_DIM" "$C_RST"
+    while read -r d; do
+      [[ -n "$d" ]] || continue
+      lib_domain_state_load "$d" || continue
+      sites+=1
+      if (( ! D_SSL )); then
+        untrusted+=1
+        if (( D_SSL_WANTED )); then
+          _ssl_row "$d" FAIL "" "asked for, never issued"
+          _ssl_count FAIL "${me} renew-ssl ${d}    # once its DNS points here"
+        else
+          _ssl_row "$d" NONE "" "not requested: the site answers on HTTP only (${me} renew-ssl ${d})"
+        fi
+        continue
+      fi
+      # a wildcard carries www without naming it
+      names=("$d"); (( D_WWW && ! D_SSL_WILDCARD )) && names+=("www.${d}")
+      IFS='|' read -r level days trusted text < <(lib_ssl_lineage_check "$d" "${names[@]}")
+      [[ "$trusted" == "1" ]] || untrusted+=1
+      _ssl_row "$d" "$level" "$days" "$text"
+      # a site whose state says SSL is on has a vhost that points at the file: none is a failure
+      [[ "$level" == "NONE" ]] && level="FAIL"
+      _ssl_count "$level" "${me} renew-ssl ${d}"
+    done < <(lib_domains_list)
+    (( sites > 0 )) || printf '  (no sites yet)\n'
+  fi
+  if lib_mail_installed; then
+    printf '  %sMail%s\n' "$C_DIM" "$C_RST"
+    IFS='|' read -r level days trusted text < <(lib_ssl_lineage_check "$MAIL_CERT_NAME" "$(lib_mail_host)")
+    # the mail host starts on a self-signed certificate and asks for the real one every six
+    # hours by itself: clients warn meanwhile, which is a warning here as it is in doctor
+    [[ "$text" == self-signed* ]] && level="WARN"
+    _ssl_row "$(lib_mail_host)" "$level" "$days" "$text"
+    [[ "$level" == "NONE" ]] && level="WARN"
+    _ssl_count "$level" "${me} mail cert"
+    while read -r d; do
+      [[ -n "$d" ]] || continue
+      names=("mail.${d}")
+      [[ "$(lib_json_get "$(lib_mail_json "$d")" '.mail.webmail')" == "true" ]] && names+=("$(lib_webmail_host "$d")")
+      IFS='|' read -r level days trusted text < <(lib_ssl_lineage_check "$(lib_mail_cert_name "$d")" "${names[@]}")
+      _ssl_row "mail.${d}" "$level" "$days" "$text"
+      [[ "$level" == "NONE" ]] && level="WARN"
+      _ssl_count "$level" "${me} mail cert ${d}"
+    done < <(lib_mail_domains)
+  fi
+
+  printf '\n %sAUTOMATIC RENEWAL%s\n' "$C_BLD" "$C_RST"
+  how="$(lib_ssl_renewal_how)"
+  if ! lib_have certbot; then
+    auto_ok=0; lib_print_kv "Runs certbot" "${C_RED}certbot is not installed${C_RST}"
+  elif [[ "$how" == "timer" ]]; then
+    text="$(systemctl show certbot.timer -p NextElapseUSecRealtime --value 2>/dev/null || true)"
+    lib_print_kv "Runs certbot" "${C_GRN}certbot.timer${C_RST} (systemd, twice a day)${text:+; next run ${text}}"
+  elif [[ "$how" == "cron" ]]; then
+    lib_print_kv "Runs certbot" "${C_GRN}cron${C_RST} (${CRON_FILE}: ${SSL_RENEW_CRON%% root *})"
+  else
+    auto_ok=0; lib_print_kv "Runs certbot" "${C_RED}nothing${C_RST}: no active certbot.timer and no cron entry"
+  fi
+  if [[ -x "$CERTBOT_DEPLOY_HOOK" ]]; then
+    lib_print_kv "Deploy hook" "${C_GRN}installed${C_RST} (hands a renewed certificate to the servers)"
+  else
+    auto_ok=0; lib_print_kv "Deploy hook" "${C_RED}missing${C_RST}: a renewed certificate would never reach the servers"
+  fi
+  if [[ -f "$LE_LOG" ]]; then
+    lib_print_kv "certbot last ran" "$(date -r "$LE_LOG" '+%Y-%m-%d %H:%M' 2>/dev/null || printf 'unknown')"
+  else
+    lib_print_kv "certbot last ran" "never (no ${LE_LOG})"
+  fi
+  if (( ! auto_ok )); then fails+=1; fixes+=("${me} ssl fix"); fi
+
+  printf '\n'
+  if (( fails + warns == 0 )); then
+    lib_ok "Nothing to put right: every certificate is valid and renews by itself"
+  else
+    lib_warn "${fails} problem(s), ${warns} warning(s). To put right:"
+    printf '%s\n' "${fixes[@]}" | awk '!seen[$0]++ { print "        " $0 }' >&2
+  fi
+  if (( sites > 0 )); then
+    if (( untrusted == 0 && auto_ok )); then
+      lib_note "Cloudflare: every site has a certificate it accepts, so SSL/TLS mode Full (strict) is safe."
+    elif (( untrusted == 0 )); then
+      lib_note "Cloudflare: every site has a certificate it accepts today, but nothing renews them. Put that right before Full (strict)."
+    else
+      lib_note "Cloudflare: ${untrusted} of ${sites} site(s) would answer 526 under Full (strict). Stay on Full until this list is clean."
+    fi
+  fi
+  lib_note "To rehearse a renewal without replacing anything: ${me} ssl test"
+  unset -f _ssl_count
+  (( fails == 0 ))
+}
+
+lib_ssl_test_main() {
+  (($# == 0)) || lib_die "Unknown option for ssl test: ${1}" "" "ssl test"
+  lib_require_installed
+  lib_have certbot || lib_die "certbot is not installed" "" "$(lib_self_cmd) install"
+  if ! compgen -G "${LE_RENEWAL}/*.conf" >/dev/null 2>&1; then
+    lib_info "No certificate to renew yet"
+    return 0
+  fi
+  lib_info "Rehearsing the renewal of every certificate (certbot renew --dry-run); nothing is replaced"
+  if certbot renew --dry-run --no-random-sleep-on-renew; then
+    lib_ok "Every certificate would renew"
+  else
+    lib_die "At least one certificate would not renew" "see certbot's lines above and ${LE_LOG}" "fix what it names (DNS, port 80, the Cloudflare token), then: $(lib_self_cmd) ssl test"
+  fi
+}
+
+lib_ssl_fix_main() {
+  (($# == 0)) || lib_die "Unknown option for ssl fix: ${1}" "" "ssl fix"
+  lib_require_tools
+  lib_require_installed
+  lib_have certbot || lib_die "certbot is not installed" "" "$(lib_self_cmd) install"
+  (( OPT_DRY_RUN )) && lib_info "[dry-run] would write ${CERTBOT_DEPLOY_HOOK} and enable certbot.timer (a cron entry where it will not start)"
+  lib_ssl_hook_install
+  lib_ssl_renewal_ensure
+  (( OPT_DRY_RUN )) && return 0
+  case "$(lib_ssl_renewal_how)" in
+    timer) lib_ok "Automatic renewal is on: certbot.timer runs certbot twice a day" ;;
+    cron)  lib_ok "Automatic renewal is on: cron runs certbot twice a day (${CRON_FILE})" ;;
+    *)     lib_die "Automatic renewal could not be switched on" "certbot.timer does not start and cron is not running" "systemctl status certbot.timer cron" ;;
+  esac
 }

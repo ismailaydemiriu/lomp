@@ -420,7 +420,7 @@ _doc_check_resources() {
 }
 
 _doc_check_ssl_infra() {
-  if lib_service_active certbot.timer || lib_cron_has certbot-renew; then _doc_add OK "certbot renewal" "timer/cron active"; else _doc_add WARN "certbot renewal" "certbot.timer inactive and no cron fallback"; fi
+  if lib_service_active certbot.timer || lib_cron_has certbot-renew; then _doc_add OK "certbot renewal" "timer/cron active"; else _doc_add WARN "certbot renewal" "certbot.timer inactive and no cron fallback: certificates will expire (setup.sh ssl fix)"; fi
   if [[ ! -x "$CERTBOT_DEPLOY_HOOK" ]]; then
     _doc_add FAIL "certbot deploy hook" "${CERTBOT_DEPLOY_HOOK} missing"
   elif compgen -G "${LSWS_VHOSTS_DIR}/_wm_*" >/dev/null 2>&1 && ! grep -q '_wm_' "$CERTBOT_DEPLOY_HOOK" 2>/dev/null; then

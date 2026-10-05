@@ -6749,6 +6749,185 @@ fi
 eval "$_da_saved_vars"; eval "$_da_saved_fn"
 unset -f _da_do _da_said _da_fresh _da_snap
 
+section "ssl: which certificates there are, and whether they renew by themselves"
+# "Is there a certificate" has three answers that look alike from outside and are not: one a
+# client accepts, one it refuses (self-signed, staging, the wrong names, expired), and one it
+# accepts today that nothing will renew. Cloudflare's Full (strict) turns the second into a 526.
+_sc="$TMP/sslcheck"; mkdir -p "$_sc"
+_sc_saved_vars="$(declare -p SSL_DEPLOY_DIR LE_LIVE LE_RENEWAL LE_LOG CRON_FILE CERTBOT_DEPLOY_HOOK OPT_QUIET)"
+_sc_saved_fn="$(declare -f systemctl lib_domains_list lib_domain_state_load lib_mail_installed lib_server_mail_only \
+  lib_require_tools lib_require_installed lib_have lib_ssl_days_left lib_systemctl lib_service_active lib_service_exists || true)"
+SSL_DEPLOY_DIR="$_sc/deploy"; LE_LIVE="$_sc/live"; LE_RENEWAL="$_sc/renewal"; LE_LOG="$_sc/letsencrypt.log"
+CRON_FILE="$_sc/cron"; CERTBOT_DEPLOY_HOOK="$_sc/hook.sh"; OPT_QUIET=0
+mkdir -p "$SSL_DEPLOY_DIR" "$LE_LIVE" "$LE_RENEWAL"
+
+# a CA of the given organisation signs a certificate for the names, as Let's Encrypt would
+_sc_mk() {   # dir issuer-org days name...
+  local dir="$1" org="$2" days="$3" san="" n=""
+  shift 3
+  for n in "$@"; do san+="${san:+,}DNS:${n}"; done
+  mkdir -p "$dir"
+  MSYS2_ARG_CONV_EXCL='/O=' openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 365 \
+    -keyout "$_sc/ca.key" -out "$_sc/ca.pem" -subj "/O=${org}/CN=Test CA" >/dev/null 2>&1
+  MSYS2_ARG_CONV_EXCL='/CN=' openssl req -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
+    -keyout "$dir/privkey.pem" -out "$_sc/leaf.csr" -subj "/CN=${1}" >/dev/null 2>&1
+  printf 'subjectAltName=%s\n' "$san" >"$_sc/ext.cnf"
+  openssl x509 -req -in "$_sc/leaf.csr" -CA "$_sc/ca.pem" -CAkey "$_sc/ca.key" -CAcreateserial \
+    -days "$days" -extfile "$_sc/ext.cnf" -out "$dir/fullchain.pem" >/dev/null 2>&1
+}
+_sc_tee() { "$@" >"$_sc/out" 2>&1; }
+
+if lib_have openssl; then
+  _sc_mk "$SSL_DEPLOY_DIR/a.test" "Let's Encrypt" 60 a.test www.a.test
+  : >"$LE_RENEWAL/a.test.conf"; printf 'x\n' >"$LE_RENEWAL/a.test.conf"
+  _r="$(lib_ssl_lineage_check a.test a.test www.a.test)"
+  assert_has  "a certificate a CA signed, with a renewal file, is fine"   "OK|" "$_r"
+  assert_has  "it is trusted, and the issuer is named"                   "|1|Let's Encrypt" "$_r"
+  assert_has  "a name it lacks is a failure"                             "FAIL|" "$(lib_ssl_lineage_check a.test a.test mail.a.test)"
+  assert_has  "which names the name, and is not trusted"                 "|0|does not cover mail.a.test" "$(lib_ssl_lineage_check a.test a.test mail.a.test)"
+  rm -f "$LE_RENEWAL/a.test.conf"
+  _r="$(lib_ssl_lineage_check a.test a.test)"
+  assert_has  "without certbot's renewal file it will not renew"         "FAIL|" "$_r"
+  assert_has  "though a client accepts it today"                         "|1|certbot has no renewal file" "$_r"
+  printf 'x\n' >"$LE_RENEWAL/a.test.conf"
+
+  _sc_mk "$SSL_DEPLOY_DIR/stg.test" "(STAGING) Let's Encrypt" 60 stg.test
+  printf 'x\n' >"$LE_RENEWAL/stg.test.conf"
+  assert_has  "a staging certificate is one nobody trusts"               "|0|a Let's Encrypt staging" "$(lib_ssl_lineage_check stg.test stg.test)"
+
+  mkdir -p "$SSL_DEPLOY_DIR/self.test"
+  MSYS2_ARG_CONV_EXCL='/CN=' openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 60 \
+    -keyout "$SSL_DEPLOY_DIR/self.test/privkey.pem" -out "$SSL_DEPLOY_DIR/self.test/fullchain.pem" \
+    -subj "/CN=self.test" -addext "subjectAltName=DNS:self.test" >/dev/null 2>&1
+  printf 'x\n' >"$LE_RENEWAL/self.test.conf"
+  assert_has  "nor a self-signed one"                                    "FAIL|" "$(lib_ssl_lineage_check self.test self.test)"
+  assert_has  "and it says which"                                        "|0|self-signed" "$(lib_ssl_lineage_check self.test self.test)"
+
+  assert_eq   "no file anywhere is no certificate"                       "NONE||0|no certificate" "$(lib_ssl_lineage_check gone.test gone.test)"
+  _sc_mk "$LE_LIVE/live.test" "Let's Encrypt" 60 live.test
+  assert_has  "one certbot holds and the servers never got is a failure" "FAIL||0|issued, but never copied" "$(lib_ssl_lineage_check live.test live.test)"
+
+  # the servers present the deployed copy: a renewal the hook could not copy is not finished
+  _sc_mk "$LE_LIVE/a.test" "Let's Encrypt" 85 a.test www.a.test
+  assert_has  "a newer one at certbot than at the servers is a warning"  "WARN|" "$(lib_ssl_lineage_check a.test a.test)"
+  assert_has  "which says what happened"                                 "the servers still use the older copy" "$(lib_ssl_lineage_check a.test a.test)"
+  cp "$SSL_DEPLOY_DIR/a.test/fullchain.pem" "$LE_LIVE/a.test/fullchain.pem"
+  assert_has  "the same one at both is fine"                             "OK|" "$(lib_ssl_lineage_check a.test a.test)"
+
+  # the days, without waiting for them
+  _sc_days=""; eval 'lib_ssl_days_left() { printf "%s" "$_sc_days"; }'
+  _sc_days=-3; assert_eq  "expired"                                       "FAIL|-3|0|expired 3 day(s) ago" "$(lib_ssl_lineage_check a.test a.test)"
+  _sc_days=5;  assert_eq  "a week left means renewal is failing"          "FAIL|5|1|renewal is not getting through" "$(lib_ssl_lineage_check a.test a.test)"
+  _sc_days=20; assert_eq  "under thirty days it has missed a run"         "WARN|20|1|renewal is overdue" "$(lib_ssl_lineage_check a.test a.test)"
+  _sc_days=30; assert_has "thirty is on time"                             "OK|30|1|" "$(lib_ssl_lineage_check a.test a.test)"
+  _sc_days="";  assert_eq "a file openssl cannot read"                    "FAIL||0|the certificate file cannot be read" "$(lib_ssl_lineage_check a.test a.test)"
+  eval "$(sed -n '/^lib_ssl_days_left() {/,/^}/p' "$ROOT/lib/ssl.sh")"
+
+  # ---- what runs certbot ----
+  _sc_timer=0; _sc_cron=0; _sc_unit=1; _sc_start=1
+  eval 'systemctl() {
+    case "$*" in
+      "is-active --quiet certbot.timer") (( _sc_timer )) ;;
+      "is-active --quiet cron")          (( _sc_cron )) ;;
+      "list-unit-files certbot.service") if (( _sc_unit )); then printf "certbot.service enabled\n"; fi ;;
+      "enable --now certbot.timer")      if (( _sc_start )); then _sc_timer=1; fi ;;
+      show*)                             printf "Tue 2026-10-06 03:12:00 UTC\n" ;;
+      *) return 1 ;;
+    esac
+  }'
+  eval 'lib_systemctl() { systemctl "$@"; }'
+  # the real ones, whatever an earlier section left in their place
+  eval "$(grep -E '^lib_service_(active|exists)\(\)' "$ROOT/lib/common.sh")"
+  rm -f "$CRON_FILE"
+  assert_eq   "no timer and no cron entry: nothing renews"               "" "$(lib_ssl_renewal_how)"
+  _sc_timer=1
+  assert_eq   "the timer"                                                "timer" "$(lib_ssl_renewal_how)"
+  _sc_timer=0; lib_cron_set certbot-renew "$SSL_RENEW_CRON"
+  assert_eq   "a cron entry with cron stopped renews nothing"            "" "$(lib_ssl_renewal_how)"
+  _sc_cron=1
+  assert_eq   "a cron entry with cron running"                           "cron" "$(lib_ssl_renewal_how)"
+
+  lib_ssl_renewal_ensure >/dev/null 2>&1
+  assert_eq   "ensure starts the timer"                                  1 "$_sc_timer"
+  assert_false "and takes the cron entry away: never both"               lib_cron_has certbot-renew
+  _sc_timer=0; _sc_start=0
+  lib_ssl_renewal_ensure >/dev/null 2>&1
+  assert_true "a timer that will not start leaves cron to do it"         lib_cron_has certbot-renew
+  lib_cron_remove certbot-renew; _sc_unit=0
+  lib_ssl_renewal_ensure >/dev/null 2>&1
+  assert_true "and so does a machine with no timer at all"               lib_cron_has certbot-renew
+  assert_has  "install sets it up through the same function"             'lib_ssl_renewal_ensure' "$(declare -f lib_ssl_install)"
+
+  # ---- the report ----
+  _sc_sites="a.test"
+  eval 'lib_domains_list() { printf "%s\n" $_sc_sites; }'
+  eval 'lib_domain_state_load() {
+    D_WWW=0; D_SSL_WILDCARD=0
+    case "$1" in
+      a.test) D_SSL=1; D_SSL_WANTED=1; D_WWW=1 ;;
+      b.test) D_SSL=0; D_SSL_WANTED=0 ;;
+      c.test) D_SSL=0; D_SSL_WANTED=1 ;;
+      d.test) D_SSL=1; D_SSL_WANTED=1 ;;
+      *) return 1 ;;
+    esac
+  }'
+  eval 'lib_mail_installed() { return 1; }'
+  eval 'lib_server_mail_only() { return 1; }'
+  eval 'lib_require_tools() { :; }'
+  eval 'lib_require_installed() { :; }'
+  eval 'lib_have() { [[ "$1" == certbot ]] || command -v "$1" >/dev/null 2>&1; }'
+  printf '#!/bin/sh\n' >"$CERTBOT_DEPLOY_HOOK"; chmod +x "$CERTBOT_DEPLOY_HOOK"
+  lib_cron_remove certbot-renew; _sc_timer=1; _sc_unit=1
+
+  assert_eq   "every site covered and the timer running: status 0"       0 "$(run_isolated _sc_tee lib_ssl_status_main)"
+  _o="$(cat "$_sc/out")"
+  assert_has  "the site is listed"                                       "a.test" "$_o"
+  assert_has  "what runs certbot is named"                               "certbot.timer" "$_o"
+  assert_has  "with its next run"                                        "next run Tue 2026-10-06" "$_o"
+  assert_has  "and Cloudflare may go strict"                             "Full (strict) is safe" "$_o"
+  assert_has  "the rehearsal is offered"                                 "ssl test" "$_o"
+
+  _sc_sites="a.test b.test"
+  assert_eq   "a site that never asked for one is no failure"            0 "$(run_isolated _sc_tee lib_ssl_status_main)"
+  _o="$(cat "$_sc/out")"
+  assert_has  "but it is said to answer on HTTP only"                    "not requested" "$_o"
+  assert_has  "and it keeps Cloudflare off strict"                       "1 of 2 site(s) would answer 526" "$_o"
+  assert_lacks "which is then not called safe"                           "is safe" "$_o"
+
+  _sc_sites="a.test c.test"
+  assert_eq   "a site that asked and got none is a failure"              1 "$(run_isolated _sc_tee lib_ssl_status_main)"
+  assert_has  "with the command that gets it one"                        "renew-ssl c.test" "$(cat "$_sc/out")"
+
+  _sc_sites="a.test d.test"
+  assert_eq   "SSL on in the state and no file is a failure"             1 "$(run_isolated _sc_tee lib_ssl_status_main)"
+  assert_has  "named with its fix"                                       "renew-ssl d.test" "$(cat "$_sc/out")"
+
+  _sc_sites="a.test"; _sc_timer=0
+  assert_eq   "valid certificates that nothing renews: a failure"        1 "$(run_isolated _sc_tee lib_ssl_status_main)"
+  _o="$(cat "$_sc/out")"
+  assert_has  "it says nothing runs certbot"                             "no active certbot.timer and no cron entry" "$_o"
+  assert_has  "how to switch it on"                                      "ssl fix" "$_o"
+  assert_has  "and not to go strict yet"                                 "nothing renews them" "$_o"
+  _sc_timer=1; rm -f "$CERTBOT_DEPLOY_HOOK"
+  assert_eq   "no deploy hook: a failure too"                            1 "$(run_isolated _sc_tee lib_ssl_status_main)"
+  assert_has  "a renewed certificate would never arrive"                 "would never reach the servers" "$(cat "$_sc/out")"
+  assert_eq   "an argument it does not know is refused"                  1 "$(run_isolated _sc_tee lib_ssl_main status --all)"
+  assert_eq   "and so is a subcommand"                                   1 "$(run_isolated _sc_tee lib_ssl_main renew)"
+fi
+
+# ---- reaching it ----
+_body="$(awk '/^_menu_certificates\(\)/{f=1} f{print} f && /^[}]/{exit}' "$ROOT/lib/menu.sh")"
+assert_has  "the certificates menu starts with the check"              '1) _menu_run ssl status ;;' "$_body"
+assert_has  "the rehearsal is in it"                                   '_menu_run ssl test ;;' "$_body"
+assert_has  "and so is switching renewal back on"                      '_menu_run ssl fix ;;' "$_body"
+assert_has  "a mail-only server reaches the check from its own menu"   '11) _menu_run ssl status ;;' "$(awk '/^_menu_mail_server\(\)/{f=1} f{print} f && /^[}]/{exit}' "$ROOT/lib/menu.sh")"
+assert_has  "the command is dispatched"                                'lib_ssl_main "${rest[@]}" || exit 1' "$(cat "$ROOT/setup.sh")"
+assert_has  "only fix takes the lock"                                  'ssl)    case "${rest[0]:-status}" in fix) lib_lock ;;' "$(cat "$ROOT/setup.sh")"
+assert_has  "and it is in the command reference"                       "ssl [status]" "$(lib_usage)"
+
+eval "$_sc_saved_vars"; eval "$_sc_saved_fn"
+unset -f _sc_mk _sc_tee
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 if (( FAIL > 0 )); then exit 1; fi
 exit 0

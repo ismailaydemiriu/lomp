@@ -180,6 +180,12 @@ COMMANDS
                                 The mail comes from the newest mail archive next to it, with
                                 the same mailbox passwords and the same DKIM key
   renew-ssl [domain] [opts]     --force --all --staging --wildcard
+  ssl [status]                  Every certificate, sites and mail: whether there is one, how
+                                long it has, and whether it renews by itself (what runs
+                                certbot, the deploy hook, each renewal file). Changes nothing;
+                                it also says when Cloudflare can go to Full (strict)
+  ssl test                      Rehearse every renewal (certbot renew --dry-run)
+  ssl fix                       Put automatic renewal back: the timer or cron entry, the hook
   update                        Safe package update + ordered service restarts; also applies
                                 what a newer lompstack changes (scheduled tasks, site homes, logs)
   self-update [--from DIR]      Pull the latest lompstack and refresh the installed
@@ -379,7 +385,7 @@ lib_menu_main() {
     _menu_item  8 "Status"
     _menu_item  9 "Health check"
     _menu_item 10 "Open WebAdmin panel"
-    _menu_item 11 "Certificates (a new site's first one, renewals)"
+    _menu_item 11 "Certificates (which exist, automatic renewal, a site's first one)"
     _menu_item 12 "Back up sites (now, or automatically)"
     _menu_item 13 "Restore a site"
     _menu_group "MAINTENANCE"
@@ -514,20 +520,26 @@ _menu_databases() {
 }
 
 # A site added without a certificate is not asking for one, so "renew-ssl --all" passes it
-# over. Item 1 is how such a site gets its first certificate once its DNS points here.
+# over. Item 2 is how such a site gets its first certificate once its DNS points here.
 _menu_certificates() {
   local choice="" domain=""
   while true; do
-    printf '\n %sCERTIFICATES%s\n' "$C_BLD" "$C_RST"
+    printf '\n %sCERTIFICATES%s   renewal is automatic; item 1 shows whether it is working\n' "$C_BLD" "$C_RST"
     _menu_rule
-    _menu_item 1 "Get a certificate for a site (its DNS must point here)"
-    _menu_item 2 "Renew every certificate"
+    _menu_item 1 "Check: which certificates exist, days left, is renewal automatic"
+    _menu_item 2 "Get a certificate for a site (its DNS must point here)"
+    _menu_item 3 "Renew every certificate now"
+    _menu_item 4 "Rehearse the automatic renewal (replaces nothing)"
+    _menu_item 5 "Switch automatic renewal back on (timer or cron, deploy hook)"
     _menu_item 0 "Back"
     printf '\n%sChoice: %s' "$C_BLD" "$C_RST"
     read -r choice </dev/tty || return 0
     case "$choice" in
-      1) domain="$(_menu_pick_domain)" && _menu_run renew-ssl "$domain" || _menu_pause ;;
-      2) _menu_run renew-ssl --all ;;
+      1) _menu_run ssl status ;;
+      2) domain="$(_menu_pick_domain)" && _menu_run renew-ssl "$domain" || _menu_pause ;;
+      3) _menu_run renew-ssl --all ;;
+      4) _menu_run ssl test ;;
+      5) _menu_run ssl fix ;;
       0|q|Q|"") return 0 ;;
       *) printf '%sPick a number from the list.%s\n' "$C_YEL" "$C_RST" ;;
     esac
@@ -1006,6 +1018,7 @@ _menu_mail_server() {
     _menu_item  8 "Notifications"
     _menu_item  9 "Open WebAdmin panel"
     _menu_item 10 "Command reference"
+    _menu_item 11 "Certificates: which exist, is renewal automatic"
     _menu_item  0 "Back"
     printf '\n%sChoice: %s' "$C_BLD" "$C_RST"
     read -r choice </dev/tty || return 0
@@ -1020,6 +1033,7 @@ _menu_mail_server() {
       8) _menu_run notify --show ;;
       9) _menu_run panel ;;
       10) lib_usage | ${PAGER:-less} 2>/dev/null || lib_usage; _menu_pause ;;
+      11) _menu_run ssl status ;;
       0|q|Q|"") return 0 ;;
       *) printf '%sPick a number from the list.%s\n' "$C_YEL" "$C_RST" ;;
     esac
