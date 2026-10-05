@@ -7698,6 +7698,12 @@ _id_stubs='lib_mail_installed() { return 0; }
   }
   certbot() { return 1; }
   lib_webmail_installed() { return 0; }
+  _wm_mail_stack_current() { return 0; }
+  lib_webmail_dirs_ensure() { return 0; }
+  lib_mail_pw_helper_apply() { return 0; }
+  lib_webmail_config_apply() { return 0; }
+  lib_webmail_identities_apply() { return 0; }
+  lib_webmail_fail2ban_apply() { return 0; }
   lib_webmail_render_extprocessor() { printf "x\n"; }
   lib_ols_is_installed() { return 0; }
   lib_ols_change_begin() { return 0; }
@@ -7768,7 +7774,7 @@ _id_things() {
     grep " ${v} " "$_id/maps" 2>/dev/null || true; } | LC_ALL=C sort | cksum
 }
 _id_record() { cksum <"$(lib_mail_json "$1")"; }
-_id_doc() { DOC_RESULTS=(); DOC_FAIL=0; DOC_WARN=0; DOC_OK=0; _doc_mail_shared_names; printf '%s\n' "${DOC_RESULTS[@]-}"; }
+_id_doc() { DOC_RESULTS=(); DOC_FAIL=0; DOC_WARN=0; DOC_OK=0; "${1:-_doc_mail_shared_names}"; printf '%s\n' "${DOC_RESULTS[@]-}"; }
 
 if (( _id_ok )) && lib_have openssl; then
   # ---- a domain on its own goes by what it always went by ---------------------
@@ -7924,16 +7930,27 @@ if (( _id_ok )) && lib_have openssl; then
   assert_has   "it names the one"                                           "a-b.example" "$_id_dr"
   assert_has   "and the other"                                              "a.b.example" "$_id_dr"
   assert_has   "the name they share"                                        "(a_b_example)" "$_id_dr"
-  assert_has   "and the command that takes them apart"                      "lomp mail cert " "$_id_dr"
+  # The one whose host the certificate does not carry is the one that moves, and it is named
+  # first: it takes its own virtual host along, and only then is the name the other one's alone.
+  assert_has   "and the commands that take them apart, the one that moves first" "(lomp mail cert a.b.example, then lomp mail cert a-b.example)" "$_id_dr"
+  # a domain whose mail is off is given no certificate: "mail cert" refuses it
   lib_json_set "$(lib_mail_json a.b.example)" '.mail.enabled = false'
-  assert_eq    "it says so too while the mail of one of them is switched off" 1 "$(_id_doc | grep -c '^WARN|mail: ' || true)"
+  _id_dr="$(_id_doc)"
+  assert_eq    "it says so too while the mail of one of them is switched off" 1 "$(grep -c '^WARN|mail: ' <<<"$_id_dr" || true)"
+  assert_has   "and then names the command that switches it on, for when that is wanted" "when the mail of a.b.example is switched on again: lomp mail enable a.b.example" "$_id_dr"
+  assert_lacks "not one that would be refused"                              "lomp mail cert a.b.example" "$_id_dr"
   lib_json_set "$(lib_mail_json a.b.example)" '.mail.enabled = true'
+  lib_json_set "$(lib_mail_json a-b.example)" '.mail.enabled = false'
+  _id_dr="$(_id_doc)"
+  assert_has   "with the mail of the one that stays switched off, the mover's command is all" "(lomp mail cert a.b.example)" "$_id_dr"
+  lib_json_set "$(lib_mail_json a-b.example)" '.mail.enabled = true'
   # the webmail of the one that has none is switched on: not over the other one's
   lib_json_set "$(lib_mail_json a.b.example)" '.mail.webmail = true'
-  _id_run lib_webmail_vhost_apply a.b.example
-  assert_eq    "a virtual host is not written over another domain's"        "$_id_t1" "$(_id_things a-b.example)"
-  assert_has   "it says whose it is"                                        "is the webmail of a-b.example" "$(_id_said)"
-  assert_has   "and how the two are taken apart"                            "lomp mail cert a-b.example   and then: lomp mail cert a.b.example" "$(_id_said)"
+  assert_eq    "a virtual host is not written over another domain's: that is a failure" 1 "$(run_isolated _id_do lib_webmail_vhost_apply a.b.example)"
+  assert_eq    "and the other one's is as it was"                           "$_id_t1" "$(_id_things a-b.example)"
+  assert_has   "doctor says nothing answers for the webmail on record"      "WARN|webmail: webmail.a.b.example|" "$(_id_doc _doc_webmail_unserved)"
+  assert_lacks "and nothing of the kind about the one that is served"       "webmail.a-b.example" "$(_id_doc _doc_webmail_unserved)"
+  assert_has   "it is the webmail check that asks"                          "_doc_webmail_unserved" "$(declare -f _doc_check_webmail)"
   assert_eq    "its webmail is switched off again"                          0 "$(run_isolated _id_do lib_mail_main webmail off a.b.example)"
   assert_eq    "which takes the flag down"                                  "" "$(jq -r '.mail.webmail // ""' "$(lib_mail_json a.b.example)")"
   assert_eq    "and not the other one's virtual host"                       "$_id_t1" "$(_id_things a-b.example)"
@@ -7994,6 +8011,33 @@ if (( _id_ok )) && lib_have openssl; then
   assert_false "the virtual host has left the shared name all the same"     test -e "$LSWS_VHOSTS_DIR/_wm_a_b_example"
   assert_eq    "and is there under its own: a webmail without its certificate, not none" "webmail.a.b.example" "$(_wm_vhost_host a.b.example)"
   rm -f "$_id/certbot.refuses"
+
+  # the certificate under the shared name is one domain's and the virtual host the other's:
+  # the second was added after the first one's webmail was switched on
+  _id_fresh
+  _id_old_mail a.b.example true
+  _id_run lib_webmail_vhost_apply a.b.example
+  _id_old_mail a-b.example
+  _id_issue _mail_a_b_example mail.a-b.example
+  _id_t2="$(_id_things a.b.example)"
+  assert_eq    "a webmail for the one that has the certificate and not the virtual host" 1 "$(run_isolated _id_do lib_mail_main webmail on a-b.example)"
+  assert_has   "is refused with whose the virtual host is"                  "is the webmail of a.b.example" "$(_id_said)"
+  assert_has   "and with the command that gives that one a name of its own" "lomp mail cert a.b.example" "$(_id_said)"
+  assert_lacks "it does not end by saying there is a webmail"               "Webmail for a-b.example" "$(_id_said)"
+  assert_eq    "nor leave the record saying so"                             "" "$(jq -r '.mail.webmail // ""' "$(lib_mail_json a-b.example)")"
+  assert_eq    "the other one's virtual host answers for it as before"      "webmail.a.b.example" "$(_wm_vhost_host a.b.example)"
+  assert_has   "doctor names the one the certificate does not carry first"  "(lomp mail cert a.b.example, then lomp mail cert a-b.example)" "$(_id_doc)"
+  _id_run lib_mail_main cert a.b.example
+  assert_true  "that command moves it, virtual host and all"                test -n "$(_id_rec a.b.example)"
+  assert_eq    "under its own name it answers for its own webmail"          "webmail.a.b.example" "$(_wm_vhost_host a.b.example)"
+  assert_eq    "and now the first can have its webmail"                     0 "$(run_isolated _id_do lib_mail_main webmail on a-b.example)"
+  assert_eq    "under the name that is its alone"                           "webmail.a-b.example" "$(_wm_vhost_host a-b.example)"
+  assert_eq    "doctor has nothing left to say about either"                "" "$(_id_doc)$(_id_doc _doc_webmail_unserved)"
+  # the usual shape the other way round: the certificate carries the second one's host
+  _id_fresh
+  _id_old_mail a-b.example; _id_old_mail a.b.example
+  _id_issue _mail_a_b_example mail.a.b.example
+  assert_has   "where the certificate carries the other one's host, the hint turns round" "(lomp mail cert a-b.example, then lomp mail cert a.b.example)" "$(_id_doc)"
 
   # ---- a site that never had mail, under a mail domain's name -----------------
   _id_fresh

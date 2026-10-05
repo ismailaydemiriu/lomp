@@ -792,18 +792,30 @@ _doc_mail_rbl() {   # -> listed|clean|unknown
 # .com.tr: what one of the two set up, the other lost. No pair is made any more, and one that
 # exists is taken apart the next time either of them is given a certificate - which nothing
 # does unasked for a domain whose certificate is in place.
+#
+# The one that moves is the one whose host the certificate under the shared name does not
+# carry, and it is named first: it takes its own virtual host along, and only then can the
+# other one have the name to itself. In the other order the second command finds nothing
+# left to do, and a webmail that was waiting for the name stays without a virtual host. A
+# domain whose mail is switched off is given no certificate - "mail cert" refuses it - so
+# for that one the command is the one that switches it on, when that day comes.
 _doc_mail_shared_names() {
-  local d="" n=""
+  local d="" n="" mover="" stay="" how=""
   local -A first=()
   while read -r d; do
     [[ -n "$d" ]] || continue
     _mail_domain_listed "$d" || continue
     n="$(lib_mail_ident "$d")"
-    if [[ -n "${first[$n]:-}" ]]; then
-      _doc_add WARN "mail: ${d}" "its certificate and webmail go by the same name as those of ${first[$n]} (${n}): what one sets up, the other loses (lomp mail cert ${first[$n]}, then lomp mail cert ${d})"
+    if [[ -z "${first[$n]:-}" ]]; then first[$n]="$d"; continue; fi
+    if lib_ssl_cert_covers "_mail_${n}" "mail.${first[$n]}"; then mover="$d"; stay="${first[$n]}"
+    else mover="${first[$n]}"; stay="$d"; fi
+    if lib_mail_domain_enabled "$mover"; then
+      how="lomp mail cert ${mover}"
+      if lib_mail_domain_enabled "$stay"; then how+=", then lomp mail cert ${stay}"; fi
     else
-      first[$n]="$d"
+      how="they are taken apart when the mail of ${mover} is switched on again: lomp mail enable ${mover}"
     fi
+    _doc_add WARN "mail: ${d}" "its certificate and webmail go by the same name as those of ${first[$n]} (${n}): what one sets up, the other loses (${how})"
   done < <(lib_mail_domains_known)
   return 0
 }
@@ -953,6 +965,19 @@ _doc_check_mail() {
   return 0
 }
 
+# The other way round from a virtual host with no domain behind it: a domain on record with a
+# webmail, and no virtual host that answers for it - none at all, or under its name one that
+# is another domain's. Nobody is served, and nothing else here would say so.
+_doc_webmail_unserved() {
+  local d=""
+  while read -r d; do
+    [[ -n "$d" ]] || continue
+    lib_webmail_vhost_mine "$d" \
+      || _doc_add WARN "webmail: $(lib_webmail_host "$d")" "on record with a webmail, and no virtual host answers for it (lomp mail webmail on ${d})"
+  done < <(lib_webmail_domains)
+  return 0
+}
+
 # What the webmail still keeps for a mailbox that is gone. Deleting a mailbox takes its webmail
 # user along, but one deleted by a release that did not do that yet, or while the database was
 # down, left it behind - and the next mailbox made under that address signs in to it. Nothing
@@ -1037,6 +1062,7 @@ _doc_check_webmail() {
       _doc_add WARN "webmail: ${d}" "a virtual host with no domain behind it (lomp mail webmail off <domain>)"
     fi
   done
+  _doc_webmail_unserved
   _doc_webmail_gone
   return 0
 }

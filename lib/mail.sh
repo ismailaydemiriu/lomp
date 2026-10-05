@@ -1726,7 +1726,7 @@ lib_mail_ident_claim() {   # domain
   if lib_webmail_vhost_mine "$d"; then lib_webmail_vhost_remove "$d"; had=1; fi
   lib_json_set "$f" '.mail.ident = $id' --arg id "$id"
   lib_info "The certificate and the webmail of ${d} go by ${id}: ${cur} is ${other}'s"
-  if (( had )); then lib_webmail_vhost_apply "$d"; fi
+  if (( had )); then lib_webmail_vhost_apply "$d" || lib_warn "the webmail virtual host of ${d} could not be written under its new name: ${WM_LAST_ERROR}"; fi
   return 0
 }
 

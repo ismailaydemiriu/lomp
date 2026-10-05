@@ -789,11 +789,12 @@ lib_webmail_vhost_apply() {   # domain
   host="$(lib_webmail_host "$d")"
   # Never over another domain's. Two records an older release wrote can go by one name, and
   # writing this domain's host into the other's virtual host is how the other lost its webmail.
+  # It is not written, and that is a failure the caller hears of: "mail webmail on" used to
+  # end with "Webmail for <domain>: https://..." under a warning that there was none.
   if [[ -d "$dir" ]] && ! lib_webmail_vhost_mine "$d"; then
     other="$(_wm_vhost_host "$d")"; other="${other#webmail.}"
-    lib_warn "the virtual host ${name} is the webmail of ${other} and was left as it is"
-    lib_note "they are taken apart with: lomp mail cert ${other}   and then: lomp mail cert ${d}"
-    return 0
+    WM_LAST_ERROR="the virtual host ${name} is the webmail of ${other}; 'lomp mail cert ${other}' gives that one a name of its own, and then this is run again"
+    return 1
   fi
   lib_ols_change_begin
   lib_mkdir "$dir" 0750 lsadm:lsadm
@@ -879,7 +880,7 @@ lib_webmail_domain_enable() {   # domain
   fi
   lib_webmail_config_apply || { WM_LAST_ERROR="the webmail configuration could not be written"; return 1; }
   lib_webmail_cert_ensure "$d"
-  lib_webmail_vhost_apply "$d"
+  lib_webmail_vhost_apply "$d" || return 1
   # the addresses each mailbox may send as: the list is otherwise written when the mail tables
   # change, and a webmail switched on after the last alias was made would start without one
   lib_webmail_identities_apply || lib_warn "the webmail's list of sender addresses was not written: ${WM_LAST_ERROR}"
