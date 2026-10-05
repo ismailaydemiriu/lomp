@@ -1254,7 +1254,8 @@ lib_domain_summary() {
     if (( D_SSL_WANTED )); then sslline="not active (run: setup.sh renew-ssl ${D_DOMAIN})"
     else sslline="not requested (once DNS points here: setup.sh renew-ssl ${D_DOMAIN})"; fi
   fi
-  printf '\n%s%sSite %s is ready%s\n' "$C_BLD" "$C_GRN" "$D_DOMAIN" "$C_RST"
+  lib_tr "Site ${D_DOMAIN} is ready"
+  printf '\n%s%s%s%s\n' "$C_BLD" "$C_GRN" "$LIB_TR" "$C_RST"
   lib_print_kv "URL"         "$( (( D_SSL )) && printf 'https' || printf 'http')://${D_DOMAIN}/$( (( D_WWW )) && printf '  (+ www)')"
   lib_print_kv "Mode"        "${D_MODE}${D_PROXY:+ -> $D_PROXY}"
   if lib_app_state_load "$D_DOMAIN"; then
@@ -1803,7 +1804,8 @@ lib_domain_remove_main() {
     lib_ok "The record of ${domain} is put away (${STATE_DIR}/archive/domains/); ${D_USER} and the site it belongs to are as they were"
     return 0
   fi
-  printf '\n%sThis will remove %s%s\n' "$C_BLD" "$domain" "$C_RST"
+  lib_tr "This will remove ${domain}"
+  printf '\n%s%s%s\n' "$C_BLD" "$LIB_TR" "$C_RST"
   lib_note "vhost + listener maps (archived), $( (( keep_files )) && printf 'files KEPT' || printf "files ${D_HOME} and logs $(lib_domain_log_dir "$domain") DELETED"), $( (( keep_db )) && printf 'database KEPT' || printf 'database DROPPED'), $( (( keep_ssl )) && printf 'certificate KEPT' || printf 'certificate deleted')"
   lib_note "a safety backup (files + database) is written to ${BACKUP_ROOT}/${domain}/ first"
   if lib_mail_installed && lib_mail_domain_standalone "$domain"; then
@@ -1894,7 +1896,10 @@ lib_domain_remove_main() {
   lib_domain_fail2ban_regen
   lib_sitefw_regen
   lib_manifest_set '.updated_at' "$(lib_iso_now)"
-  printf '\n%s%sRemoved %s%s  (state archived in %s/archive/domains/, backup in %s/%s/)\n\n' "$C_BLD" "$C_GRN" "$domain" "$C_RST" "$STATE_DIR" "$BACKUP_ROOT" "$domain"
+  lib_tr "Removed ${domain}"
+  printf '\n%s%s%s%s  ' "$C_BLD" "$C_GRN" "$LIB_TR" "$C_RST"
+  lib_tr "(state archived in ${STATE_DIR}/archive/domains/, backup in ${BACKUP_ROOT}/${domain}/)"
+  printf '%s\n\n' "$LIB_TR"
   while read -r a; do
     [[ -n "$a" ]] && lib_warn "${a} still redirects to ${domain}, which is no longer here: setup.sh redirect del ${a}"
   done < <(lib_redirects_to "$domain")

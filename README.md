@@ -146,13 +146,18 @@ entry just runs the corresponding command, so nothing is hidden from you. Piped 
 `--non-interactive` it prints the command reference instead, so scripts and cron are
 unaffected.
 
-The menu speaks English and Turkish. Out of the box every entry, question and explanation
-shows both (`Add a site / Site ekle`); **28 → Menu language** in the menu switches to Turkish
-alone, English alone or back, and the server remembers it. `LOMP_MENU_LANG=tr|en|both` does the
-same for one run. Only the menu is translated: the commands it runs, their output and the
-command reference stay in English. The Turkish texts are the `MENU_TR` table at the end of
-`lib/menu.sh`, one line per text; a text added to the menu without a line there fails the unit
-suite.
+lompstack speaks Turkish and English. The first time `install` or the menu runs on a
+terminal it asks which one, once, and keeps the answer in `/root/.server-setup/lang`; **28 →
+Language** in the menu changes it (and offers a third view of the menu with both side by
+side). The menu follows it, and so does what the commands print on a terminal - as far as the
+messages have been translated: adding and removing a site, Node.js applications and proxies so
+far; everything else still comes in English. `LOMP_LANG=tr|en` sets it for one run.
+
+What a script reads never changes: piped or redirected output, `--json`, cron mails and
+`/var/log/server_setup.log` are always English. The Turkish texts are two tables, one line per
+text: `MENU_TR` at the end of `lib/menu.sh` (a menu text without a line there fails the unit
+suite) and `LIB_TR_PAIRS` in `lib/lang.sh` (a message without a line there, or one whose
+English wording changed, is simply shown in English).
 
 After installation the script is available system-wide as `lomp` (or the longer
 `lompstack`), so you do not need to stay in the clone directory.

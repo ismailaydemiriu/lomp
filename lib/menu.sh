@@ -225,7 +225,7 @@ COMMANDS
                                 shuts it immediately. Built for dynamic IPs.
   logs <domain> [--access|--error] [-n LINES]
   menu                          Interactive menu (also what a bare "lomp" opens); in
-                                English and Turkish, item 28 or LOMP_MENU_LANG=tr|en|both
+                                Turkish or English: asked once, item 28 changes it
   help                          This text
 
 GLOBAL FLAGS
@@ -258,16 +258,17 @@ _menu_rule() { printf '%s%s%s\n' "$C_DIM" "-------------------------------------
 # The menu's texts are written in English where they are used, and MENU_TR at the end of this
 # file holds the Turkish for each of them, keyed by the English text exactly as written. A
 # text with no entry there is shown in English alone. MENU_LANG says what is shown:
-#   both  English with the Turkish next to it (the default)      tr  Turkish      en  English
-# from LOMP_MENU_LANG, else from the manifest (.menu.lang, set by "Menu language" in the menu).
-# Commands, their output and the command reference are not translated.
+#   tr  Turkish      en  English      both  English with the Turkish next to it
+# It is the language chosen for the server (lib/lang.sh: asked once, at the first install or
+# the first time the menu opens, changed with "Menu language"); LOMP_MENU_LANG overrides it for
+# one run. The command reference is not translated; what the commands print is lib/lang.sh's.
 MENU_LANG=""            # "" = not read yet
 MENU_TXT="" MENU_ALT="" # what _menu_pair found: the text to show, and its other language
 
 _menu_lang_load() {
-  local v="${LOMP_MENU_LANG:-}"
-  if [[ -z "$v" && -s "${STATE_DIR}/manifest.json" ]]; then v="$(lib_manifest_get '.menu.lang' 2>/dev/null || true)"; fi
-  case "$v" in tr|en|both) MENU_LANG="$v" ;; *) MENU_LANG="both" ;; esac
+  local v="${LOMP_MENU_LANG:-${LIB_LANG_SESSION:-}}"
+  [[ -n "$v" ]] || v="$(lib_lang_stored)"
+  case "$v" in tr|en|both) MENU_LANG="$v" ;; *) MENU_LANG="en" ;; esac
 }
 
 _menu_pair() {   # English text -> MENU_TXT, MENU_ALT
@@ -347,8 +348,8 @@ _menu_prompt() { printf '%s%s: %s' "$C_BLD" "$(_menu_t "$1")" "$C_RST"; }   # En
 _menu_language() {
   local what="" new=""
   [[ -n "$MENU_LANG" ]] || _menu_lang_load
-  _menu_printf '\n  The menu speaks Turkish, English, or both at once. Now: %s\n' "$MENU_LANG"
-  printf '  1) Türkçe\n  2) English\n  3) English + Türkçe\n'
+  _menu_printf '\n  Turkish or English, for the menu and for what the commands print. Now: %s\n' "$MENU_LANG"
+  printf '  1) Türkçe\n  2) English\n  3) English + Türkçe (menu; commands print Türkçe)\n'
   _menu_ask what "Choice"
   case "$what" in
     1) new="tr" ;;
@@ -356,10 +357,9 @@ _menu_language() {
     3) new="both" ;;
     *) return 0 ;;
   esac
-  MENU_LANG="$new"
-  # kept for the next time the menu opens; before the server is installed there is nowhere to
-  # keep it, and it lasts as long as this menu
-  if lib_installed; then lib_manifest_set '.menu.lang' "$new" || true; fi
+  # the commands this menu runs read it from where it is kept
+  MENU_LANG="$new"; LIB_LANG_SESSION="$new"
+  lib_lang_store "$new"
   return 0
 }
 
@@ -471,7 +471,7 @@ _menu_not_installed() {
     _menu_item 2 "Show what the installation would do, changing nothing (dry run)"
     _menu_item 3 "Command reference"
     _menu_item 4 "Install a mail-only server (mail and webmail for your domains, no web sites)"
-    _menu_item 5 "Menu language: Türkçe, English, or both"
+    _menu_item 5 "Language: Türkçe or English"
     _menu_item 0 "Exit"
     printf '\n'; _menu_prompt "Choice"
     read -r choice </dev/tty || return 0
@@ -536,7 +536,7 @@ lib_menu_main() {
     _menu_item 18 "Optional components (Node.js, Python, Netdata, Mail)"
     _menu_item 22 "Remove extra PHP packages (after apt install lsphp83*)"
     _menu_item 19 "Command reference"
-    _menu_item 28 "Menu language: Türkçe, English, or both"
+    _menu_item 28 "Language: Türkçe or English"
     _menu_item  0 "Exit"
     printf '\n'; _menu_prompt "Choice"
     read -r choice </dev/tty || return 0
@@ -1188,7 +1188,7 @@ _menu_mail() {   # [top]
     _menu_item 10 "Turn mail off for a domain, or remove a mail domain"
     if [[ -n "$top" ]]; then
       _menu_item 11 "Server: status, health check, backups, updates"
-      _menu_item 12 "Menu language: Türkçe, English, or both"
+      _menu_item 12 "Language: Türkçe or English"
       _menu_item  0 "Exit"
     else
       _menu_item  0 "Back"
@@ -1455,7 +1455,7 @@ _menu_restore() {
 # its %s and \n, in the same order), and the Turkish for it. A text that is missing here is
 # shown in English alone; tests/unit.sh fails when one is missing or has other placeholders.
 declare -gA MENU_TR=()
-MENU_TR['\n  The menu speaks Turkish, English, or both at once. Now: %s\n']='\n  Menü Türkçe, İngilizce ya da ikisi birden gösterilebilir. Şimdi: %s\n'
+MENU_TR['\n  Turkish or English, for the menu and for what the commands print. Now: %s\n']='\n  Menü ve komut çıktıları için Türkçe ya da İngilizce. Şimdi: %s\n'
 MENU_TR['Choice']='Seçim'
 MENU_TR['Press Enter to go back to the menu...']='Menüye dönmek için Enter'\''a basın...'
 MENU_TR['\n%sStopped.%s\n']='\n%sDurduruldu.%s\n'
@@ -1471,7 +1471,7 @@ MENU_TR['Install the server (OpenLiteSpeed, PHP, MariaDB, Redis, firewall)']='Su
 MENU_TR['Show what the installation would do, changing nothing (dry run)']='Kurulumun ne yapacağını göster, hiçbir şeyi değiştirmeden (deneme)'
 MENU_TR['Command reference']='Komut başvurusu'
 MENU_TR['Install a mail-only server (mail and webmail for your domains, no web sites)']='Yalnızca posta sunucusu kur (alan adlarınız için posta ve webmail, web sitesi yok)'
-MENU_TR['Menu language: Türkçe, English, or both']='Menü dili: Türkçe, English ya da ikisi birden'
+MENU_TR['Language: Türkçe or English']='Dil: Türkçe ya da English'
 MENU_TR['Exit']='Çıkış'
 MENU_TR['E-mail for Let'\''s Encrypt and alerts']='Let'\''s Encrypt ve uyarılar için e-posta'
 MENU_TR['%sPick a number from the list.%s\n']='%sListeden bir numara seçin.%s\n'

@@ -100,7 +100,7 @@ _ss_load_module() {
   # shellcheck source=/dev/null
   source "$file"
 }
-for _m in common system ols php db ssl domain harden scan proxy app mail webmail cloudflare backup monitor install rename menu; do
+for _m in common lang system ols php db ssl domain harden scan proxy app mail webmail cloudflare backup monitor install rename menu; do
   _ss_load_module "$_m"
 done
 unset _m
@@ -167,6 +167,7 @@ main() {
   esac
 
   lib_common_init_colors
+  lib_lang_load "$cmd"
   lib_require_root
   lib_check_os
   lib_log_file_init

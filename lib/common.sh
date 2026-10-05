@@ -89,23 +89,37 @@ lib_log_file_init() {
   chmod 0600 "$LOG_FILE" 2>/dev/null || true
 }
 
-lib_info()  { (( OPT_QUIET )) || printf '%s[info]%s  %s\n' "$C_BLU" "$C_RST" "$*"; lib_log_write INFO "$*"; }
-lib_ok()    { (( OPT_QUIET )) || printf '%s[ ok ]%s  %s\n' "$C_GRN" "$C_RST" "$*"; lib_log_write OK "$*"; }
-lib_warn()  { printf '%s[warn]%s  %s\n' "$C_YEL" "$C_RST" "$*" >&2; lib_log_write WARN "$*"; }
-lib_error() { printf '%s[fail]%s  %s\n' "$C_RED" "$C_RST" "$*" >&2; lib_log_write ERROR "$*"; }
+# What a person reads goes through lib_tr first: lib/lang.sh turns it into Turkish when that
+# is the language of this run. Here it hands the text back as it is, and the log always gets
+# the English text.
+LIB_LANG="en"; LIB_TR=""
+lib_tr() { LIB_TR="${1:-}"; }
+lib_info()  { (( OPT_QUIET )) || { lib_tr "$*"; printf '%s[info]%s  %s\n' "$C_BLU" "$C_RST" "$LIB_TR"; }; lib_log_write INFO "$*"; }
+lib_ok()    { (( OPT_QUIET )) || { lib_tr "$*"; printf '%s[ ok ]%s  %s\n' "$C_GRN" "$C_RST" "$LIB_TR"; }; lib_log_write OK "$*"; }
+lib_warn()  { lib_tr "$*"; printf '%s[warn]%s  %s\n' "$C_YEL" "$C_RST" "$LIB_TR" >&2; lib_log_write WARN "$*"; }
+lib_error() { lib_tr "$*"; printf '%s[fail]%s  %s\n' "$C_RED" "$C_RST" "$LIB_TR" >&2; lib_log_write ERROR "$*"; }
 lib_debug() { (( OPT_VERBOSE )) && printf '%s[dbg ]  %s%s\n' "$C_DIM" "$*" "$C_RST"; lib_log_write DEBUG "$*"; return 0; }
-lib_note()  { (( OPT_QUIET )) || printf '        %s\n' "$*"; }
-lib_heading() { (( OPT_QUIET )) || printf '\n%s%s== %s ==%s\n' "$C_BLD" "$C_CYN" "$*" "$C_RST"; lib_log_write INFO "== $* =="; }
+lib_note()  { (( OPT_QUIET )) || { lib_tr "$*"; printf '        %s\n' "$LIB_TR"; }; }
+lib_heading() { (( OPT_QUIET )) || { lib_tr "$*"; printf '\n%s%s== %s ==%s\n' "$C_BLD" "$C_CYN" "$LIB_TR" "$C_RST"; }; lib_log_write INFO "== $* =="; }
 
 # Step counter: lib_steps_begin 14; lib_step "Installing X"  ->  [3/14] Installing X
 lib_steps_begin() { LIB_STEP_TOTAL="$1"; LIB_STEP_CURRENT=0; }
 lib_step() {
   LIB_STEP_CURRENT=$((LIB_STEP_CURRENT + 1))
-  (( OPT_QUIET )) || printf '\n%s%s[%d/%d]%s %s%s%s\n' "$C_BLD" "$C_CYN" "$LIB_STEP_CURRENT" "$LIB_STEP_TOTAL" "$C_RST" "$C_BLD" "$*" "$C_RST"
+  (( OPT_QUIET )) || { lib_tr "$*"; printf '\n%s%s[%d/%d]%s %s%s%s\n' "$C_BLD" "$C_CYN" "$LIB_STEP_CURRENT" "$LIB_STEP_TOTAL" "$C_RST" "$C_BLD" "$LIB_TR" "$C_RST"; }
   lib_log_write STEP "[${LIB_STEP_CURRENT}/${LIB_STEP_TOTAL}] $*"
 }
 
-lib_print_kv() { printf '  %s%-26s%s %s\n' "$C_DIM" "$1" "$C_RST" "$2"; }
+lib_print_kv() {
+  local label=""
+  lib_tr "$1"; label="$LIB_TR"
+  lib_tr "${2:-}"
+  if [[ "$LIB_LANG" == "en" ]]; then printf '  %s%-26s%s %s\n' "$C_DIM" "$label" "$C_RST" "$LIB_TR"; return 0; fi
+  # printf pads by bytes, and a Turkish label has letters of two: count characters instead
+  local LC_ALL=C.UTF-8 pad=0
+  pad=$(( 26 - ${#label} )); (( pad > 0 )) || pad=0
+  printf '  %s%s%*s%s %s\n' "$C_DIM" "$label" "$pad" "" "$C_RST" "$LIB_TR"
+}
 
 lib_log_line_no() {
   if [[ -f "${LOG_FILE:-}" ]]; then wc -l < "$LOG_FILE" | tr -d ' '; else printf '0'; fi
@@ -168,10 +182,17 @@ lib_die() {
   lineno="$(lib_log_line_no)"
   lib_log_write ERROR "$what${cause:+ | cause: $cause}${fix:+ | fix: $fix}"
   {
-    printf '\n%s%s✖ FAILED:%s %s\n' "$C_BLD" "$C_RED" "$C_RST" "$what"
-    [[ -n "$cause" ]] && printf '  %sProbable cause:%s %s\n' "$C_YEL" "$C_RST" "$cause"
-    [[ -n "$fix" ]]   && printf '  %sSuggested fix :%s %s\n' "$C_YEL" "$C_RST" "$fix"
-    printf '  %sLog           :%s %s (around line %s)\n' "$C_YEL" "$C_RST" "$LOG_FILE" "$lineno"
+    if [[ "$LIB_LANG" == "tr" ]]; then
+      lib_tr "$what";  printf '\n%s%s✖ BAŞARISIZ:%s %s\n' "$C_BLD" "$C_RED" "$C_RST" "$LIB_TR"
+      lib_tr "$cause"; [[ -n "$cause" ]] && printf '  %sOlası neden   :%s %s\n' "$C_YEL" "$C_RST" "$LIB_TR"
+      lib_tr "$fix";   [[ -n "$fix" ]]   && printf '  %sÖnerilen çözüm:%s %s\n' "$C_YEL" "$C_RST" "$LIB_TR"
+      printf '  %sLog           :%s %s (%s. satır civarı)\n' "$C_YEL" "$C_RST" "$LOG_FILE" "$lineno"
+    else
+      printf '\n%s%s✖ FAILED:%s %s\n' "$C_BLD" "$C_RED" "$C_RST" "$what"
+      [[ -n "$cause" ]] && printf '  %sProbable cause:%s %s\n' "$C_YEL" "$C_RST" "$cause"
+      [[ -n "$fix" ]]   && printf '  %sSuggested fix :%s %s\n' "$C_YEL" "$C_RST" "$fix"
+      printf '  %sLog           :%s %s (around line %s)\n' "$C_YEL" "$C_RST" "$LOG_FILE" "$lineno"
+    fi
     lib_suggest_doctor
   } >&2
   LIB_ERR_HANDLING=1
@@ -277,8 +298,8 @@ lib_lock() {
   if ! flock -n 200; then
     # most often the minute-by-minute .htaccess check reloading OpenLiteSpeed, which takes
     # seconds: wait for it instead of failing at once
-    (( OPT_QUIET )) || printf '%sAnother lompstack command is running; waiting for it (up to %s s)...%s\n' \
-      "$C_DIM" "${LIB_LOCK_WAIT:-90}" "$C_RST" >&2
+    (( OPT_QUIET )) || { lib_tr "Another lompstack command is running; waiting for it (up to ${LIB_LOCK_WAIT:-90} s)..."
+      printf '%s%s%s\n' "$C_DIM" "$LIB_TR" "$C_RST" >&2; }
     if ! flock -w "${LIB_LOCK_WAIT:-90}" 200; then
       lib_die "Another setup.sh instance is already running" \
         "lock ${LOCK_FILE} is held by another process" \
@@ -319,7 +340,8 @@ lib_confirm() {
     return
   fi
   local hint="[y/N]"; [[ "$def" == "y" ]] && hint="[Y/n]"
-  printf '%s%s%s %s ' "$C_BLD" "$q" "$C_RST" "$hint"
+  lib_tr "$q"
+  printf '%s%s%s %s ' "$C_BLD" "$LIB_TR" "$C_RST" "$hint"
   read -r ans || ans=""
   ans="${ans:-$def}"
   [[ "${ans,,}" == y* ]]

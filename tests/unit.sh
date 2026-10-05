@@ -23,7 +23,7 @@ INSTALL_DIR="$TMP/install"; BIN_LINK="$TMP/lompstack"; BIN_SHORT="$TMP/lomp"; LO
 OPT_YES=1 OPT_DRY_RUN=0 OPT_QUIET=1 OPT_VERBOSE=0 OPT_NO_COLOR=1 OPT_JSON=0 OPT_NON_INTERACTIVE=1
 SCRIPT_PATH="$ROOT/setup.sh"; SCRIPT_DIR="$ROOT"
 export TMPDIR="$TMP"
-for m in common system ols php db ssl domain harden scan proxy app mail webmail cloudflare backup monitor install rename menu; do
+for m in common lang system ols php db ssl domain harden scan proxy app mail webmail cloudflare backup monitor install rename menu; do
   # shellcheck source=/dev/null
   source "$ROOT/lib/$m.sh"
 done
@@ -8510,35 +8510,149 @@ assert_eq "or Turkish alone"                      "  ${_ml_h1tr}" "$(_ml tr _men
 assert_eq "or English alone"                      "  ${_ml_h1}"   "$(_ml en _menu_hint "$_ml_h1")"
 assert_eq "one with no Turkish is not lost in Turkish" "  only english" "$(_ml tr _menu_note "only english")"
 
-# which language: LOMP_MENU_LANG, else the manifest, else both
-_ml_load() {   # LOMP_MENU_LANG value, manifest value
-  ( MENU_LANG=""; LOMP_MENU_LANG="$1"
-    : >"$TMP/ml-manifest"; STATE_DIR="$TMP/ml-state"; mkdir -p "$STATE_DIR"; printf '{}' >"$STATE_DIR/manifest.json"
-    eval 'lib_manifest_get() { printf "%s" "'"$2"'"; }'
+# which language: LOMP_MENU_LANG, else what this run's question was answered, else what is
+# kept for the server, else English
+_ml_load() {   # LOMP_MENU_LANG, this run's answer, what is kept
+  ( MENU_LANG=""; LOMP_MENU_LANG="$1"; LIB_LANG_SESSION="$2"
+    STATE_DIR="$TMP/ml-state"; rm -rf "$STATE_DIR"; mkdir -p "$STATE_DIR"
+    [[ -z "$3" ]] || printf '%s\n' "$3" >"$STATE_DIR/lang"
     _menu_lang_load; printf '%s' "$MENU_LANG" )
 }
-assert_eq "both when nothing says otherwise"      "both" "$(_ml_load "" "")"
-assert_eq "what the manifest holds"               "tr"   "$(_ml_load "" tr)"
-assert_eq "the environment before the manifest"   "en"   "$(_ml_load en tr)"
-assert_eq "a value that is no language is both"   "both" "$(_ml_load "" deutsch)"
+assert_eq "English while nobody chose"            "en"   "$(_ml_load "" "" "")"
+assert_eq "what is kept for the server"           "tr"   "$(_ml_load "" "" tr)"
+assert_eq "both is a choice too"                  "both" "$(_ml_load "" "" both)"
+assert_eq "this run's answer before what is kept" "tr"   "$(_ml_load "" tr en)"
+assert_eq "the environment before both"           "en"   "$(_ml_load en tr tr)"
+assert_eq "a file that holds no language is English" "en" "$(_ml_load "" "" deutsch)"
 
-# "Menu language" in the menu: applies at once, and is kept when there is a server to keep it on
-_ml_pick() {   # answer, installed 0|1 -> "language|what was stored"
-  ( MENU_LANG="both"; : >"$TMP/ml-set"
-    eval '_menu_ask() { local -n _o="$1"; _o="'"$1"'"; }
-          lib_installed() { return '"$(( $2 ? 0 : 1 ))"'; }
-          lib_manifest_set() { printf "%s=%s" "$1" "$2" >"$TMP/ml-set"; }'
+# the language item of the menu: applies at once, and is kept - also before the installation
+_ml_pick() {   # answer -> "language|what is kept"
+  ( MENU_LANG="both"; STATE_DIR="$TMP/ml-pick/state"; rm -rf "$TMP/ml-pick"
+    eval '_menu_ask() { local -n _o="$1"; _o="'"$1"'"; }'
     _menu_language >/dev/null 2>&1
-    printf '%s|%s' "$MENU_LANG" "$(cat "$TMP/ml-set")" )
+    printf '%s|%s' "$MENU_LANG" "$(lib_lang_stored)" )
 }
-assert_eq "1 is Turkish, and it is stored"        "tr|.menu.lang=tr"     "$(_ml_pick 1 1)"
-assert_eq "2 is English"                          "en|.menu.lang=en"     "$(_ml_pick 2 1)"
-assert_eq "3 is both"                             "both|.menu.lang=both" "$(_ml_pick 3 1)"
-assert_eq "anything else changes nothing"         "both|"                "$(_ml_pick "" 1)"
-assert_eq "before the install it lasts for this menu only" "tr|"         "$(_ml_pick 1 0)"
+assert_eq "1 is Turkish, and it is kept"          "tr|tr"     "$(_ml_pick 1)"
+assert_eq "2 is English"                          "en|en"     "$(_ml_pick 2)"
+assert_eq "3 is both"                             "both|both" "$(_ml_pick 3)"
+assert_eq "anything else changes nothing"         "both|"     "$(_ml_pick "")"
+if (( CAN_CHMOD )); then
+  ( STATE_DIR="$TMP/ml-mode/state"; rm -rf "$TMP/ml-mode"; lib_lang_store tr )
+  assert_eq "a state directory made for it is private" "700" "$(stat -c %a "$TMP/ml-mode/state")"
+fi
 _menu_block="$(awk '/_menu_group "SITES"/{f=1} f{print} f && /^[[:space:]]*esac/{exit}' "$ROOT/lib/menu.sh")"
 assert_has "it is item 28 of the main menu"       '28) _menu_language ;;' "$_menu_block"
 unset -f _ml _ml_load _ml_pick
+
+# =============================================================================
+section "output language: Turkish for a person, English for everything else"
+# Messages are written in English and looked up in lib/lang.sh's table just before they are
+# shown. The log, --json and whatever is piped stay English; so does this suite, which never
+# loads a language - every other assertion on a message in this file depends on that.
+assert_eq "no language is loaded here"            "en" "$LIB_LANG"
+lib_tr "Site a.example is not registered"
+assert_eq "so a text comes back as it is"         "Site a.example is not registered" "$LIB_TR"
+
+# the table: pairs, the same values on both sides
+assert_eq "the table holds pairs"                 0 "$(( ${#LIB_TR_PAIRS[@]} % 2 ))"
+assert_true "and a few hundred of them"           test "${#LIB_TR_PAIRS[@]}" -ge 600
+_lt_bad=""
+for (( _lt_i = 0; _lt_i + 1 < ${#LIB_TR_PAIRS[@]}; _lt_i += 2 )); do
+  _lt_en="${LIB_TR_PAIRS[_lt_i]}"; _lt_tr="${LIB_TR_PAIRS[_lt_i + 1]}"
+  [[ -n "$_lt_tr" && "$_lt_en" != "$_lt_tr" ]] || _lt_bad+="[${_lt_en}] "
+  for _lt_k in 1 2 3 4 5 6 7 8 9; do
+    if [[ "$_lt_en" == *"{${_lt_k}}"* ]]; then
+      [[ "$_lt_tr" == *"{${_lt_k}}"* ]] || _lt_bad+="[${_lt_en}] "
+      (( _lt_k == 1 )) || [[ "${_lt_en%%"{${_lt_k}}"*}" == *"{$((_lt_k - 1))}"* ]] || _lt_bad+="[order: ${_lt_en}] "
+    else
+      [[ "$_lt_tr" != *"{${_lt_k}}"* ]] || _lt_bad+="[${_lt_en}] "
+    fi
+  done
+done
+assert_eq "every Turkish text has the values of its English one" "" "$_lt_bad"
+
+_lt() {   # text -> its Turkish
+  ( LIB_LANG="tr"; lib_lang_build; lib_tr "$1"; printf '%s' "$LIB_TR" )
+}
+assert_eq "a message without values"              "Düzenleme işleri tamam" "$(_lt "Housekeeping done")"
+assert_eq "one with a value"                      "a.example sitesi kayıtlı değil" "$(_lt "Site a.example is not registered")"
+assert_eq "values may change places" \
+  "b.example sitesinin queue worker'ı durdurulmuş" "$(_lt "Worker queue of b.example is stopped")"
+assert_eq "braces of the text itself are no value" \
+  "Dizinler hazır: /home/a.example/{public_html,logs,private,backups}" \
+  "$(_lt "Directories ready: /home/a.example/{public_html,logs,private,backups}")"
+assert_eq "regex characters of the text are plain text" \
+  "127.0.0.1:3000 (uygulamaya PORT olarak verilir)" "$(_lt "127.0.0.1:3000 (given to the app as PORT)")"
+assert_eq "and are no pattern either"             "127x0x0x1:3000 (given to the app as PORTX" "$(_lt "127x0x0x1:3000 (given to the app as PORTX")"
+assert_eq "site: message - the message is looked up" \
+  "a.example: 127.0.0.1:3000 adresinde çalışıyor" "$(_lt "a.example: running on 127.0.0.1:3000")"
+assert_eq "a message inside a message inside a message" \
+  "a.example: uygulama çalışmıyor: PM2 kurulu değil (setup.sh install --with-node)" \
+  "$(_lt "a.example: the application is not running: PM2 is not installed (setup.sh install --with-node)")"
+assert_eq "a value with an ampersand or a backslash stays as it is" \
+  'Geçersiz --start '"'"'a && b\c'"'" "$(_lt "Invalid --start 'a && b\\c'")"
+assert_eq "what nobody translated is shown in English" "zz nobody translated this" "$(_lt "zz nobody translated this")"
+assert_eq "an empty text is an empty text"        "" "$(_lt "")"
+assert_eq "a command is left alone"               "setup.sh app list" "$(_lt "setup.sh app list")"
+
+# the output functions: Turkish on the screen, English in the log
+: >"$LOG_FILE"
+_lt_out="$( ( LIB_LANG="tr"; lib_lang_build; OPT_QUIET=0
+             lib_ok "Housekeeping done"; lib_info "Cloning https://h/o/r.git"; lib_warn "the mail tables could not be rebuilt: x"
+             lib_note "this site had no mail"; lib_steps_begin 2; lib_step "Scheduled tasks"
+             lib_print_kv "Document root" "/home/a.example/public_html"; lib_print_kv "Port" "127.0.0.1:3000 (given to the app as PORT)" ) 2>&1 )"
+assert_has "lib_ok"                               "[ ok ]  Düzenleme işleri tamam" "$_lt_out"
+assert_has "lib_info"                             "[info]  https://h/o/r.git klonlanıyor" "$_lt_out"
+assert_has "lib_warn"                             "[warn]  posta tabloları yeniden oluşturulamadı: x" "$_lt_out"
+assert_has "lib_note"                             "        bu sitenin postası yoktu" "$_lt_out"
+assert_has "lib_step"                             "[1/2] Zamanlanmış görevler" "$_lt_out"
+assert_has "a label"                              "  Belge kökü " "$_lt_out"
+assert_has "and a value"                          "127.0.0.1:3000 (uygulamaya PORT olarak verilir)" "$_lt_out"
+assert_has "the log has the English text"         "Housekeeping done" "$(cat "$LOG_FILE")"
+assert_has "of every line"                        "Cloning https://h/o/r.git" "$(cat "$LOG_FILE")"
+assert_lacks "and no Turkish"                     "Düzenleme" "$(cat "$LOG_FILE")"
+: >"$LOG_FILE"
+_lt_out="$( ( LIB_LANG="tr"; lib_lang_build; lib_die "Site a.example is not registered" "registered in /x" "setup.sh list" ) 2>&1 || true )"
+assert_has "a failure: what"                      "✖ BAŞARISIZ: a.example sitesi kayıtlı değil" "$_lt_out"
+assert_has "why"                                  "Olası neden   : /x içinde kayıtlı" "$_lt_out"
+assert_has "and what to do, a command, as it is"  "Önerilen çözüm: setup.sh list" "$_lt_out"
+assert_has "the log keeps it in English"          "Site a.example is not registered | cause: registered in /x | fix: setup.sh list" "$(cat "$LOG_FILE")"
+_lt_out="$( ( lib_die "Site a.example is not registered" "registered in /x" "setup.sh list" ) 2>&1 || true )"
+assert_has "without a language a failure reads as before" "✖ FAILED: Site a.example is not registered" "$_lt_out"
+assert_has "all of it"                            "Probable cause: registered in /x" "$_lt_out"
+
+# which language a run gets. Inside $( ) standard output is a pipe, which is the case of a
+# script reading the output: only LOMP_LANG changes the language there.
+_lt_load() {   # LOMP_LANG, LOMP_MENU_LANG, what is kept, OPT_JSON, command
+  ( LOMP_LANG="$1"; LOMP_MENU_LANG="$2"; OPT_JSON="${4:-0}"
+    STATE_DIR="$TMP/lt-state"; rm -rf "$STATE_DIR"; mkdir -p "$STATE_DIR"
+    [[ -z "$3" ]] || printf '%s\n' "$3" >"$STATE_DIR/lang"
+    lib_lang_ask() { printf 'ASKED'; LIB_LANG_ANSWER="tr"; }
+    lib_lang_load "${5:-add}"; printf '%s' "$LIB_LANG" )
+}
+assert_eq "LOMP_LANG=tr is Turkish, piped or not"  "tr" "$(_lt_load tr "" "")"
+assert_eq "LOMP_LANG=both too"                     "tr" "$(_lt_load both "" "")"
+assert_eq "LOMP_LANG=en is English"                "en" "$(_lt_load en tr tr)"
+assert_eq "piped output is English whatever the menu speaks" "en" "$(_lt_load "" tr tr)"
+assert_eq "and so is --json"                       "en" "$(_lt_load "" tr tr 1)"
+assert_eq "a value that is no language is English" "en" "$(_lt_load deutsch "" "")"
+assert_eq "a pipe is never asked, not even by install" "en" "$(_lt_load "" "" "" 0 install)"
+assert_eq "nor is the menu's first run"            "en" "$(_lt_load "" "" "" 0 menu)"
+assert_has "the question is asked by install and by the menu only" \
+  '"$cmd" == "install" || "$cmd" == "menu"' "$(declare -f lib_lang_load)"
+assert_has "on a terminal, of root, and not with --non-interactive" \
+  'OPT_NON_INTERACTIVE' "$(declare -f lib_lang_load)"
+assert_has "a dry run asks but keeps nothing"      'OPT_DRY_RUN:-0} )) || lib_lang_store' "$(declare -f lib_lang_load)"
+assert_has "setup.sh hands it the command"         'lib_lang_load "$cmd"' "$(cat "$ROOT/setup.sh")"
+_lt_kept() { ( STATE_DIR="$TMP/lt-kept"; rm -rf "$STATE_DIR"; "$@"; lib_lang_stored ) }
+assert_eq "nothing is kept at first"               ""     "$(_lt_kept true)"
+assert_eq "what is stored is what is read"         "tr"   "$(_lt_kept lib_lang_store tr)"
+assert_eq "the menu's two-language view as well"   "both" "$(_lt_kept lib_lang_store both)"
+assert_eq "a file with anything else counts as nothing" "" "$(_lt_kept lib_lang_store deutsch)"
+unset -f _lt_kept
+assert_has "setup.sh decides it before the first check can fail" "lib_lang_load" \
+  "$(grep -B2 '^  lib_require_root$' "$ROOT/setup.sh")"
+unset -f _lt _lt_load
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 if (( FAIL > 0 )); then exit 1; fi
