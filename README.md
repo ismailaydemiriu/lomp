@@ -414,7 +414,7 @@ application's connections all come from OpenLiteSpeed, so the peer address it se
 |---|---|
 | `X-Forwarded-For` | The visitor's address as the **last** entry. Anything the client sent under that name stays in front of it, so the first entry is whatever the client likes. With Cloudflare mode on, the last entry of a request that came through Cloudflare is the visitor Cloudflare names, not Cloudflare's own address. |
 | `X-Forwarded-Proto` | `https` when the connection to OpenLiteSpeed is TLS; over plain HTTP nothing is added. A value the client sent stays in front here too (`https, https`, or `http, https`). |
-| `X-Forwarded-Host` | The requested host name, after anything the client sent under that name. |
+| `X-Forwarded-Host` | The requested host name, after anything the client sent under that name. Not sent with a WebSocket upgrade. |
 | `Host` | The site's name, as requested. |
 | `X-Real-IP`, `Forwarded`, `CF-Connecting-IP` | Never set by OpenLiteSpeed and passed on as the client sent them. |
 
@@ -431,6 +431,8 @@ What follows from it:
   certificate sends plain HTTP to HTTPS before the application is asked, except for requests
   that carry `X-Forwarded-Proto: https` (that is how Cloudflare's "Flexible" mode gets
   through). Build links from `Host` or from a name you configure, not from `X-Forwarded-Host`.
+- A WebSocket upgrade (`ws://` and `wss://`, on the site and on a path proxy) carries the
+  same `X-Forwarded-For` and `X-Forwarded-Proto` as any other request.
 - OpenLiteSpeed has no setting that removes or replaces these headers on the way to the
   application (tried on 1.9.2), so the rules above are the application's to keep.
 - A request made on the server itself (`curl -H 'Host: example.com' http://127.0.0.1/`) arrives
