@@ -71,10 +71,11 @@ lib_mail_installed() { [[ -n "$(lib_manifest_get '.components.mail.postfix')" ]]
 # through it, so it stays the same when sites come and go.
 lib_mail_host() { lib_manifest_get '.mail.hostname'; }
 
-# The certbot lineage holding mail.<domain> (and webmail.<domain>) for one site. The leading
-# underscore is what keeps it apart from the site's own lineage: lib_domain_valid refuses a
-# name starting with one, so no site can ever claim it.
-lib_mail_cert_name() { printf '_mail_%s' "$(lib_domain_ident "$1")"; }
+# The certbot lineage holding mail.<domain> (and webmail.<domain>) for one domain. The leading
+# underscore is what keeps it apart from a site's own lineage: lib_domain_valid refuses a
+# name starting with one, so no site can ever claim it. What follows the prefix is the name
+# this domain's mail goes by (lib_mail_ident), which is never another domain's.
+lib_mail_cert_name() { printf '_mail_%s' "$(lib_mail_ident "$1")"; }
 
 # The part of an address before the @. Checked before it reaches a map, a file name or a path.
 # No "+": Postfix delivers user+anything@domain to user@domain (recipient_delimiter), so a
@@ -1643,6 +1644,92 @@ lib_mail_json() {   # domain -> path
 # A domain this server could carry mail for: a site it hosts, or a mail domain added on its own.
 lib_mail_domain_known() { lib_mail_domain_standalone "$1" || lib_domain_registered "$1"; }
 
+# The name a domain's mail goes by wherever a name may hold no dots: the certbot lineage of
+# mail.<domain> (_mail_<name>) and the webmail's virtual host (_wm_<name>).
+#
+# It is the site identifier - example.com -> example_com - unless that one is another domain's.
+# And it can be: the identifier turns every separator into "_" and stops at 28 characters, so
+# a-b.example and a.b.example come out the same, and so does a name of 25 letters under .com
+# and under .com.tr. Two sites never share one (they would share a Linux user, and "add"
+# refuses the second), but a mail domain has no Linux user and nothing refused it. The second
+# domain's certificate request then put its names on the first one's lineage in place of the
+# first one's, its webmail took over the first one's virtual host, and switching off or
+# removing either of them took both away.
+#
+# A domain whose plain identifier is taken gets a name of its own, recorded as .mail.ident
+# (lib_mail_ident_claim). A record without one means the plain identifier, which is what every
+# domain set up before this goes by: nothing on a server in use is renamed.
+declare -gA MAIL_IDENT_PLANNED=()    # what a dry run would have put on record: it writes none
+lib_mail_ident() {   # domain
+  local id=""
+  id="$(lib_json_get "$(lib_mail_json "$1")" '.mail.ident')"
+  [[ -n "$id" ]] || id="${MAIL_IDENT_PLANNED[$1]:-}"
+  # it becomes part of a directory's name and of a certificate's
+  [[ "$id" =~ ^[a-z][a-z0-9_]{0,27}$ ]] || id=""
+  printf '%s' "${id:-$(lib_domain_ident "$1")}"
+}
+
+# Has it any, whatever its state says: switched on, or switched off with something still here.
+_mail_has_mail() { lib_mail_domain_enabled "$1" || lib_mail_domain_has_traces "$1"; }
+
+# Another domain of this server that goes by this name, or nothing. Every domain counts: one
+# whose mail is switched off still has its certificate, and a site that never had mail would
+# go by the name the day it gets some. Of several, one that has mail is the one named.
+_mail_ident_owner() {   # name  the-domain-that-asks
+  local x="" first=""
+  while read -r x; do
+    [[ -n "$x" && "$x" != "$2" ]] || continue
+    [[ "$(lib_mail_ident "$x")" == "$1" ]] || continue
+    if _mail_has_mail "$x"; then printf '%s' "$x"; return 0; fi
+    [[ -n "$first" ]] || first="$x"
+  done < <(lib_mail_domains_known)
+  printf '%s' "$first"
+  return 0
+}
+
+# Make sure the name this domain's mail goes by is nobody else's, and give it one of its own
+# when it is. Asked when a domain's record is made, and again before anything is created under
+# the name (lib_mail_domain_cert_ensure). The second is where two records that an older
+# release wrote under one name are taken apart: the domain whose host the certificate under
+# that name does not carry moves, the other one keeps the name and everything under it. Only
+# this domain's own record is ever written.
+lib_mail_ident_claim() {   # domain
+  local d="$1" f="" cur="" other="" plain="" h="" n=0 id="" had=0
+  f="$(lib_mail_json "$d")"
+  (( OPT_DRY_RUN )) || [[ -s "$f" ]] || return 0      # no record to keep it in
+  cur="$(lib_mail_ident "$d")"
+  other="$(_mail_ident_owner "$cur" "$d")"
+  [[ -n "$other" ]] || return 0
+  # the certificate under the shared name says whose it is: it stays with the domain it names
+  if lib_ssl_cert_covers "_mail_${cur}" "mail.${d}"; then return 0; fi
+  # nor does a domain whose mail is on give way to one that has none
+  if lib_mail_domain_enabled "$d" && ! _mail_has_mail "$other"; then return 0; fi
+  # The plain identifier, cut to leave room, and a few digits of a hash of the domain: the
+  # same domain gets the same name wherever and whenever it is set up.
+  plain="$(lib_domain_ident "$d")"
+  h="$(printf '%s' "$d" | sha256sum 2>/dev/null | cut -c1-16 || true)"
+  [[ "$h" =~ ^[0-9a-f]{16}$ ]] || h="$(printf '%s' "$d" | cksum | awk '{ printf "%016x", $1 }')"
+  for n in 6 8 12 16; do
+    id="${plain:0:$((27 - n))}"; id="${id%_}_${h:0:n}"
+    [[ -z "$(_mail_ident_owner "$id" "$d")" ]] && break
+    id=""
+  done
+  if [[ -z "$id" ]]; then MAIL_LAST_ERROR="no name is free for the certificate and the webmail of ${d}"; return 1; fi
+  if (( OPT_DRY_RUN )); then
+    # nothing is written; the rest of this run describes what would be done under that name
+    MAIL_IDENT_PLANNED[$d]="$id"
+    lib_info "[dry-run] the certificate and the webmail of ${d} would go by ${id}: ${cur} is ${other}'s"
+    return 0
+  fi
+  # A webmail virtual host under the old name that is this domain's comes along. Left where
+  # it is, it would answer for the same host as the one made under the new name.
+  if lib_webmail_vhost_mine "$d"; then lib_webmail_vhost_remove "$d"; had=1; fi
+  lib_json_set "$f" '.mail.ident = $id' --arg id "$id"
+  lib_info "The certificate and the webmail of ${d} go by ${id}: ${cur} is ${other}'s"
+  if (( had )); then lib_webmail_vhost_apply "$d"; fi
+  return 0
+}
+
 # Does this domain still have mail on this server, whatever domain.json says? A mailbox line
 # is a live login on its own - Dovecot's user store has no per-domain switch - so "is mail
 # enabled" is the wrong question to ask before taking things away.
@@ -1658,8 +1745,10 @@ lib_mail_domain_has_traces() {   # domain
   [[ -d "${MAIL_VMAIL_HOME}/${d}" ]] && return 0
   compgen -G "${MAIL_DKIM_DIR}/${d}.*.key" >/dev/null 2>&1 && return 0
   # a webmail is a trace too: its virtual host would otherwise outlive the site it belongs to,
-  # naming a certificate that has just been deleted
-  [[ -d "${LSWS_VHOSTS_DIR}/$(lib_webmail_vhost_name "$d")" ]] && return 0
+  # naming a certificate that has just been deleted. This domain's, that is - the directory's
+  # name alone does not say whose it is (lib_webmail_vhost_mine), and a site that never had
+  # mail was found to have some because a mail domain's webmail lay under the same name.
+  lib_webmail_vhost_mine "$d" && return 0
   return 1
 }
 
@@ -2099,6 +2188,13 @@ _mail_webmail_vhost_refresh() {   # domain
 lib_mail_domain_cert_ensure() {   # domain
   local d="$1" cert="" name=""
   local -a names=()
+  # Before anything is asked for under the name. certbot, given the name of a lineage that
+  # exists and another set of names, re-issues that lineage for the new names without a
+  # question: a lineage that was another domain's would lose its own.
+  if ! lib_mail_ident_claim "$d"; then
+    lib_warn "No certificate is asked for ${d}: ${MAIL_LAST_ERROR}"
+    return 0
+  fi
   cert="$(lib_mail_cert_name "$d")"
   name="mail.${d}"
   names=("$name")
@@ -2474,7 +2570,15 @@ lib_mail_domain_purge() {   # domain
   fi
   lib_cron_remove "mail-cert:${d}"
   lib_cron_remove "mail-dkim:${d}"
-  lib_ssl_delete "$(lib_mail_cert_name "$d")" 2>/dev/null || true
+  # The certificate is deleted by its name, and two records an older release wrote can have
+  # one name between them. Unless it carries this domain's host, it is then the other one's -
+  # as long as that one has any mail for it to serve.
+  a="$(_mail_ident_owner "$(lib_mail_ident "$d")" "$d")"
+  if [[ -n "$a" ]] && ! lib_ssl_cert_covers "$(lib_mail_cert_name "$d")" "mail.${d}" && _mail_has_mail "$a"; then
+    lib_warn "the certificate $(lib_mail_cert_name "$d") is ${a}'s as well and was left where it is"
+  else
+    lib_ssl_delete "$(lib_mail_cert_name "$d")" 2>/dev/null || true
+  fi
   return 0
 }
 
@@ -2910,6 +3014,8 @@ lib_mail_domain_register() {   # domain
     '{domain:$d, kind:"mail", created_at:$ts}
      + (if ($used | length) > 0 then {mail:{selectors_used:$used}} else {} end)' \
     | lib_write_file "$f" 0600 root:root
+  # the name its certificate and its webmail will go by: the plain one may be another domain's
+  lib_mail_ident_claim "$d" || lib_warn "${MAIL_LAST_ERROR}"
   return 0
 }
 
@@ -4058,8 +4164,13 @@ lib_mail_restore_domain() {   # domain [archive]
   # The archived block, but not at the cost of a webmail switched on since: that one has a
   # virtual host and a certificate name in the world, and dropping the flag would leave both
   # of them behind with nothing pointing at them.
+  # Nor at the cost of the name this domain's certificate and webmail go by on THIS server:
+  # the archive's is the one it had where the archive was made - free there, and maybe another
+  # domain's here - so it is never taken over, and the one in place stays.
   if [[ -s "${work}/mail/state.json" ]]; then
-    lib_json_set "$(lib_mail_json "$d")"       '.mail = ($m + ((.mail // {}) | {webmail, webmail_host} | with_entries(select(.value != null))))'       --argjson m "$(cat "${work}/mail/state.json")"
+    lib_json_set "$(lib_mail_json "$d")" \
+      '.mail = (($m | del(.ident)) + ((.mail // {}) | {webmail, webmail_host, ident} | with_entries(select(.value != null))))' \
+      --argjson m "$(cat "${work}/mail/state.json")"
   fi
   # The archive decides which mailboxes this domain has. Whatever is live goes first - a line
   # added since the backup is not in the archive, and leaving it would make it outlive a

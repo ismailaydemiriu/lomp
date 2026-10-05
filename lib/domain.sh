@@ -319,6 +319,9 @@ lib_domain_add_main() {
   fi
   (( OPT_DRY_RUN )) || lib_rollback_push "rm -rf '$(lib_domain_state_dir "$domain")'"
   lib_domain_state_save
+  # The name its mail would go by, should it ever get some. Two sites never share an
+  # identifier, but a mail domain that was here first may have this one's (lib_mail_ident).
+  if lib_mail_installed; then lib_mail_ident_claim "$domain" || lib_warn "${MAIL_LAST_ERROR}"; fi
   lib_ok "Preflight OK (user ${D_USER}, home ${D_HOME})"
 
   # ---- 2 user + directories ------------------------------------------------

@@ -770,6 +770,27 @@ _doc_mail_rbl() {   # -> listed|clean|unknown
   printf 'unknown'
 }
 
+# Two domains whose certificate and webmail go by one name. A release before this one gave
+# a-b.example and a.b.example the same one, and a long name the same one under .com and under
+# .com.tr: what one of the two set up, the other lost. No pair is made any more, and one that
+# exists is taken apart the next time either of them is given a certificate - which nothing
+# does unasked for a domain whose certificate is in place.
+_doc_mail_shared_names() {
+  local d="" n=""
+  local -A first=()
+  while read -r d; do
+    [[ -n "$d" ]] || continue
+    _mail_domain_listed "$d" || continue
+    n="$(lib_mail_ident "$d")"
+    if [[ -n "${first[$n]:-}" ]]; then
+      _doc_add WARN "mail: ${d}" "its certificate and webmail go by the same name as those of ${first[$n]} (${n}): what one sets up, the other loses (lomp mail cert ${first[$n]}, then lomp mail cert ${d})"
+    else
+      first[$n]="$d"
+    fi
+  done < <(lib_mail_domains_known)
+  return 0
+}
+
 _doc_check_mail() {
   local s="" days="" mode="" issuer="" p="" q="" ver="" d=""
   lib_mail_installed || return 0
@@ -896,6 +917,7 @@ _doc_check_mail() {
     open)    _doc_add OK "mail: port 25 out" "open" ;;
     *)       ;;
   esac
+  _doc_mail_shared_names
 
   # What DNS actually says about each domain - the lowest MX, one SPF and not two, the DKIM
   # record carrying this server's key, _dmarc, and a mail name that is not behind Cloudflare's

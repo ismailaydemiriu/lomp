@@ -422,7 +422,9 @@ lib_restore_main() {
     [[ -s "${work}/x/state/domain.json" ]] || lib_die "Site ${domain} is not registered and the archive carries no state" "" "add the site first: setup.sh add ${domain}"
     lib_info "Site ${domain} is not registered; recreating it from the archived state"
     local recreated="${work}/domain-restored.json"
-    jq --arg d "$domain" '.domain = $d | .ssl.enabled = false | .status = "restoring" | del(.db) | del(.backup)' "${work}/x/state/domain.json" >"$recreated"
+    # (.mail.ident: the name its mail went by on the server the archive was made on. Here that
+    # name may be another domain's, so this server gives it one itself - lib_mail_ident)
+    jq --arg d "$domain" '.domain = $d | .ssl.enabled = false | .status = "restoring" | del(.db) | del(.backup) | del(.mail.ident)' "${work}/x/state/domain.json" >"$recreated"
     if (( OPT_DRY_RUN )); then
       # A dry run writes no state file, so the steps below read the state it would have
       # written straight out of the archive. Asking for the site's own domain.json here found
@@ -433,6 +435,7 @@ lib_restore_main() {
       mkdir -p "$(lib_domain_state_dir "$domain")" && chmod 0700 "$(lib_domain_state_dir "$domain")"
       cp -f "$recreated" "$(lib_domain_json "$domain")"
       chmod 0600 "$(lib_domain_json "$domain")"
+      if lib_mail_installed; then lib_mail_ident_claim "$domain" || lib_warn "${MAIL_LAST_ERROR}"; fi
       lib_domain_state_load "$domain" || lib_domain_state_load "$adomain" || true
     fi
     D_DOMAIN="$domain"; D_HOME="$(lib_domain_home "$domain")"; D_SSL=0; D_STATUS="restoring"

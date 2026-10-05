@@ -54,7 +54,23 @@ lib_webmail_host() { printf 'webmail.%s' "$1"; }
 
 # The OpenLiteSpeed names. The leading underscore keeps them out of reach of a site: a domain
 # may not start with one, so a site can never be created that collides with a webmail vhost.
-lib_webmail_vhost_name() { printf '_wm_%s' "$(lib_domain_ident "$1")"; }
+# What follows it is the name the domain's mail goes by (lib_mail_ident), never another one's.
+lib_webmail_vhost_name() { printf '_wm_%s' "$(lib_mail_ident "$1")"; }
+
+_wm_vhost_host() {   # domain -> the host the virtual host under its name answers for, or nothing
+  awk '$1 == "vhDomain" { print tolower($2); exit }' \
+    "${LSWS_VHOSTS_DIR}/$(lib_webmail_vhost_name "$1")/vhconf.conf" 2>/dev/null || true
+}
+# Is the webmail virtual host under this domain's name this domain's? For two records that an
+# older release wrote the name does not say: it gave a-b.example and a.b.example the same one.
+# The virtual host itself names the host it answers for.
+lib_webmail_vhost_mine() {   # domain
+  local host=""
+  [[ -d "${LSWS_VHOSTS_DIR}/$(lib_webmail_vhost_name "$1")" ]] || return 1
+  host="$(_wm_vhost_host "$1")"
+  # a directory whose file is not written yet belongs to the name it lies under
+  [[ -z "$host" || "$host" == "$(lib_webmail_host "$1")" ]]
+}
 
 # The PHP this webmail may run on: the server default when it is in range, otherwise the
 # newest installed version that is.
@@ -766,11 +782,19 @@ EOF
 }
 
 lib_webmail_vhost_apply() {   # domain
-  local d="$1" name="" dir="" host=""
+  local d="$1" name="" dir="" host="" other=""
   lib_ols_is_installed || return 0
   name="$(lib_webmail_vhost_name "$d")"
   dir="${LSWS_VHOSTS_DIR}/${name}"
   host="$(lib_webmail_host "$d")"
+  # Never over another domain's. Two records an older release wrote can go by one name, and
+  # writing this domain's host into the other's virtual host is how the other lost its webmail.
+  if [[ -d "$dir" ]] && ! lib_webmail_vhost_mine "$d"; then
+    other="$(_wm_vhost_host "$d")"; other="${other#webmail.}"
+    lib_warn "the virtual host ${name} is the webmail of ${other} and was left as it is"
+    lib_note "they are taken apart with: lomp mail cert ${other}   and then: lomp mail cert ${d}"
+    return 0
+  fi
   lib_ols_change_begin
   lib_mkdir "$dir" 0750 lsadm:lsadm
   lib_webmail_render_vhconf "$d" | lib_write_file "${dir}/vhconf.conf" 0640 lsadm:lsadm
@@ -790,6 +814,8 @@ lib_webmail_vhost_remove() {   # domain
   lib_ols_is_installed || return 0
   name="$(lib_webmail_vhost_name "$d")"
   dir="${LSWS_VHOSTS_DIR}/${name}"
+  # what lies under the name may be another domain's (lib_webmail_vhost_mine): it stays
+  if [[ -d "$dir" ]] && ! lib_webmail_vhost_mine "$d"; then return 0; fi
   lib_ols_change_begin
   lib_ols_tx_begin
   lib_ols_tx_map_del "$OLS_LISTENER_HTTP"  "$name"
@@ -892,9 +918,10 @@ lib_webmail_domain_disable() {   # domain
   local d="$1"
   # a domain that never had one, or a machine with no webmail at all, is not a failure. The
   # virtual host counts as much as the flag: whichever is there has to go, or a removal would
-  # leave one of them behind for the next domain of that name to inherit.
-  if [[ "$(lib_json_get "$(lib_mail_json "$d")" '.mail.webmail')" != "true" \
-        && ! -d "${LSWS_VHOSTS_DIR}/$(lib_webmail_vhost_name "$d")" ]]; then
+  # leave one of them behind for the next domain of that name to inherit. The virtual host
+  # that is this domain's, that is: a site that never had a webmail is not asked to give up
+  # the one a mail domain has under the same name.
+  if [[ "$(lib_json_get "$(lib_mail_json "$d")" '.mail.webmail')" != "true" ]] && ! lib_webmail_vhost_mine "$d"; then
     return 0
   fi
   # The record goes BEFORE the flag does. What lompstack published for a domain is worked out

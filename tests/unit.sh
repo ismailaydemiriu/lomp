@@ -6993,6 +6993,461 @@ assert_has  "and it is in the command reference"                       "ssl [sta
 eval "$_sc_saved_vars"; eval "$_sc_saved_fn"
 unset -f _sc_mk _sc_tee
 
+# =============================================================================
+section "two domains never share the name their certificate and webmail go by"
+# The certbot lineage of mail.<domain> and the webmail's virtual host are named after the
+# site identifier, and that one turns every separator into "_" and stops at 28 characters:
+# a-b.example and a.b.example come out the same, and so does a long name under .com and under
+# .com.tr. Two sites cannot share one - they would share a Linux user - but nothing stopped a
+# mail domain. certbot, given the name of a lineage that exists and other names, re-issues it
+# for the new ones; the second webmail was written into the first one's virtual host; and
+# switching off or removing either of the two took both away.
+#
+# certbot is stood in for by something that does what certbot does: a certificate for exactly
+# the names asked for, under the lineage named, in place of whatever was there.
+_id="$TMP/ident"; rm -rf "$_id"; mkdir -p "$_id"
+_id_saved_fn="$(declare -f lib_domains_list)"
+eval "$(sed -n '/^lib_domains_list() {/,/^}/p' "$ROOT/lib/common.sh")"
+_id_vars="STATE_DIR CRON_FILE MAIL_STATE_DIR MAIL_ALIAS_DIR MAIL_DISABLED_DIR MAIL_DOMAINS_DIR MAIL_DOMAINS_GONE_DIR MAIL_VMAIL_HOME MAIL_PASSWD_FILE MAIL_DKIM_DIR MAIL_DOVECOT_DIR MAIL_PW_HELPER MAIL_PW_SUDOERS BACKUP_ROOT BACKUP_KEY_FILE WM_ROOT WM_RELEASES WM_CURRENT WM_ETC WM_CONF WM_VAR WM_LOG_DIR WM_INFO WM_IDENT_MAP LE_LIVE SSL_DEPLOY_DIR LSWS_VHOSTS_DIR"
+# shellcheck disable=SC2086
+_id_saved_vars="$(declare -p $_id_vars INS_ROLE OPT_DRY_RUN)"
+STATE_DIR="$_id/root/.server-setup"; CRON_FILE="$_id/etc/cron.d/lomp"
+MAIL_STATE_DIR="$STATE_DIR/mail"; MAIL_ALIAS_DIR="$MAIL_STATE_DIR/aliases"; MAIL_DISABLED_DIR="$MAIL_STATE_DIR/disabled"
+MAIL_DOMAINS_DIR="$MAIL_STATE_DIR/domains"; MAIL_DOMAINS_GONE_DIR="$STATE_DIR/archive/mail-domains"
+MAIL_VMAIL_HOME="$_id/var/vmail"; MAIL_DKIM_DIR="$_id/var/dkim"
+MAIL_DOVECOT_DIR="$_id/etc/dovecot"; MAIL_PASSWD_FILE="$MAIL_DOVECOT_DIR/passwd"
+MAIL_PW_HELPER="$_id/etc/webmail-passwd"; MAIL_PW_SUDOERS="$_id/etc/sudoers-webmail"
+BACKUP_ROOT="$_id/var/backups"; BACKUP_KEY_FILE="$STATE_DIR/backup.key"
+WM_ROOT="$_id/var/webmail"; WM_RELEASES="$WM_ROOT/releases"; WM_CURRENT="$WM_ROOT/current"
+WM_ETC="$_id/etc/webmail"; WM_CONF="$WM_ETC/config.inc.php"; WM_IDENT_MAP="$WM_ETC/identities.map"
+WM_VAR="$_id/var/webmail-var"; WM_LOG_DIR="$_id/var/webmail-log"; WM_INFO="$STATE_DIR/webmail.info"
+LE_LIVE="$_id/etc/live"; SSL_DEPLOY_DIR="$_id/var/ssl"; LSWS_VHOSTS_DIR="$_id/var/vhosts"; INS_ROLE=""; OPT_DRY_RUN=0
+_id_ok=1
+for _v in $_id_vars LOG_FILE SITES_ROOT SITES_LOG_ROOT TMPDIR; do
+  if [[ "${!_v}" != "$TMP" && "${!_v}" != "$TMP"/* ]]; then _id_ok=0; fail "this section would work outside its directory: ${_v}=${!_v}"; fi
+done
+assert_eq "everything these commands can touch is inside the test directory" 1 "$_id_ok"
+
+# a certificate for exactly these names, under this lineage, in place of what was there
+_id_issue() {   # lineage name...
+  local cert="$1" san="" n=""
+  shift
+  for n in "$@"; do san+="${san:+,}DNS:${n}"; done
+  mkdir -p "$SSL_DEPLOY_DIR/$cert"
+  MSYS2_ARG_CONV_EXCL='/CN=' openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 30 \
+    -keyout "$SSL_DEPLOY_DIR/$cert/privkey.pem" -out "$SSL_DEPLOY_DIR/$cert/fullchain.pem" \
+    -subj "/CN=${1}" -addext "subjectAltName=${san}" >/dev/null 2>&1
+}
+# What reaches outside this process is stood in for; what decides, records and removes is real.
+_id_stubs='lib_mail_installed() { return 0; }
+  lib_require_tools() { return 0; }
+  lib_mail_tables_apply() { return 0; }
+  lib_mail_dkim_ensure() { return 0; }
+  lib_mail_dns_print() { return 0; }
+  _mail_webmail_forget() { return 0; }
+  lib_cf_token() { printf ""; }
+  lib_ssl_deploy_files() { return 0; }
+  lib_ssl_obtain_names() {
+    local c="$1"; shift
+    if (( OPT_DRY_RUN )); then printf "would request %s for %s\n" "$c" "$*"; return 0; fi
+    printf "%s %s\n" "$c" "$*" >>"$_id/certbot.log"
+    if [[ -e "$_id/certbot.refuses" ]]; then SSL_LAST_ERROR="the name does not point here yet"; return 1; fi
+    _id_issue "$c" "$@"
+  }
+  certbot() { return 1; }
+  lib_webmail_installed() { return 0; }
+  lib_webmail_render_extprocessor() { printf "x\n"; }
+  lib_ols_is_installed() { return 0; }
+  lib_ols_change_begin() { return 0; }
+  lib_ols_change_commit() { return 0; }
+  lib_ols_tx_begin() { return 0; }
+  lib_ols_tx_commit() { return 0; }
+  lib_ols_tx_block_put() { cat >/dev/null; }
+  lib_ols_tx_block_exists() { return 1; }
+  lib_ols_tx_block_remove() { return 0; }
+  _id_maps_drop() { [[ -s "$_id/maps" ]] || return 0; awk -v l="$1" -v n="$2" "!(\$1 == l && \$2 == n)" "$_id/maps" >"$_id/maps.new" || true; mv -f "$_id/maps.new" "$_id/maps"; }
+  lib_ols_tx_map_set() { _id_maps_drop "$1" "$2"; printf "%s %s %s\n" "$1" "$2" "$3" >>"$_id/maps"; }
+  lib_ols_tx_map_del() { _id_maps_drop "$1" "$2"; }
+  systemctl() { return 1; }
+  pkill() { return 0; }
+  doveadm() { return 1; }
+  postqueue() { return 1; }
+  sleep() { return 0; }
+  lib_have() { case "$1" in jq|awk|sed|grep|openssl|tar|realpath|sha256sum|cksum) command -v "$1" >/dev/null 2>&1 ;; *) return 1 ;; esac; }
+  rm() {
+    local a="" real=""
+    for a in "$@"; do
+      case "$a" in -*) continue ;; esac
+      real="$(realpath -m -- "$a" 2>/dev/null || true)"
+      if [[ -z "$real" || ( "$real" != "$TMP" && "$real" != "$TMP"/* ) ]]; then printf "%s\n" "$a" >>"$_id/rm-refused.log"; return 0; fi
+    done
+    command rm "$@"
+  }'
+# under run_isolated the status is the answer; what the command said is kept for the next line
+_id_do()   { eval "$_id_stubs"; OPT_YES=1; OPT_QUIET=0; "$@" >"$_id/said.txt" 2>&1 </dev/null; }
+_id_run()  { ( _id_do "$@" ) || true; }
+_id_said() { cat "$_id/said.txt" 2>/dev/null || true; }
+_id_asked() { LC_ALL=C sort "$_id/certbot.log" 2>/dev/null | tr '\n' '|' || true; }
+_id_rec()  { jq -r '.mail.ident // ""' "$(lib_mail_json "$1")" 2>/dev/null || true; }   # what is on record, if anything
+_id_is_name() { [[ "$1" =~ ^[a-z][a-z0-9_]{1,27}$ ]]; }
+_id_hash() { printf '%s' "$1" | sha256sum | cut -c1-6; }
+# an empty server
+_id_fresh() {
+  rm -rf "$_id/root" "$_id/var" "$_id/etc" "$_id/certbot.log" "$_id/certbot.refuses" "$_id/maps"
+  mkdir -p "$STATE_DIR/domains" "$MAIL_DOMAINS_DIR" "$MAIL_ALIAS_DIR" "$MAIL_DKIM_DIR" "$MAIL_VMAIL_HOME" "$MAIL_DOVECOT_DIR" \
+           "$BACKUP_ROOT" "$SSL_DEPLOY_DIR" "$LE_LIVE" "$LSWS_VHOSTS_DIR"
+  printf '{"installed_at":"2026-01-01T00:00:00Z","components":{"mail":{"postfix":"3.8"}},"mail":{"hostname":"mail.host.example"},"params":{}}\n' >"$STATE_DIR/manifest.json"
+  : >"$MAIL_PASSWD_FILE"
+}
+# a mail domain's record the way a release before this one wrote it: nothing in it about a name
+_id_old_mail() {   # domain [true = with a webmail]
+  mkdir -p "$MAIL_DOMAINS_DIR/$1"
+  jq -n --arg d "$1" --argjson w "${2:-false}" \
+    '{domain:$d, kind:"mail", mail:({enabled:true, selector:"lomp202601"} + (if $w then {webmail:true, webmail_host:("webmail." + $d)} else {} end))}' \
+    >"$(lib_mail_domain_file "$1")"
+}
+_id_old_site() {   # domain   (a site that never had mail)
+  mkdir -p "$STATE_DIR/domains/$1"
+  printf '{"domain":"%s","mode":"php","user":"%s"}\n' "$1" "$(lib_domain_ident "$1")" >"$(lib_domain_json "$1")"
+}
+_id_vhost() {   # the domain whose name it lies under, the host it answers for
+  local v=""; v="$(lib_webmail_vhost_name "$1")"
+  mkdir -p "$LSWS_VHOSTS_DIR/$v"
+  printf 'docRoot                   $VH_ROOT/current/public_html/\nvhDomain                  %s\n' "$2" >"$LSWS_VHOSTS_DIR/$v/vhconf.conf"
+  printf 'HTTP %s %s\nHTTPS %s %s\n' "$v" "$2" "$v" "$2" >>"$_id/maps"
+}
+# everything that is one domain's - its certificate, its virtual host, its lines in the listener
+# maps - and, apart from that, its record: a write into another domain's record is to show as
+# that, not as damage
+_id_things() {
+  local c="" v=""
+  c="$(lib_mail_cert_name "$1")"; v="$(lib_webmail_vhost_name "$1")"
+  { cksum "$SSL_DEPLOY_DIR/$c/fullchain.pem" "$SSL_DEPLOY_DIR/$c/privkey.pem" "$LSWS_VHOSTS_DIR/$v/vhconf.conf" 2>&1 || true
+    grep " ${v} " "$_id/maps" 2>/dev/null || true; } | LC_ALL=C sort | cksum
+}
+_id_record() { cksum <"$(lib_mail_json "$1")"; }
+_id_doc() { DOC_RESULTS=(); DOC_FAIL=0; DOC_WARN=0; DOC_OK=0; _doc_mail_shared_names; printf '%s\n' "${DOC_RESULTS[@]-}"; }
+
+if (( _id_ok )) && lib_have openssl; then
+  # ---- a domain on its own goes by what it always went by ---------------------
+  _id_fresh
+  _id_run lib_mail_domain_add_main solo.example
+  assert_true  "a mail domain is added"                                     lib_mail_domain_enabled solo.example
+  assert_eq    "its certificate goes by the identifier, as it always did"   "_mail_solo_example" "$(lib_mail_cert_name solo.example)"
+  assert_eq    "and so does its webmail's virtual host"                     "_wm_solo_example" "$(lib_webmail_vhost_name solo.example)"
+  assert_eq    "nothing is put on record for it"                            "" "$(_id_rec solo.example)"
+  assert_eq    "its certificate was asked for under that name"              "_mail_solo_example mail.solo.example|" "$(_id_asked)"
+
+  # ---- the second of two that would share one ---------------------------------
+  _id_fresh
+  _id_run lib_mail_domain_add_main a-b.example
+  _id_r1="$(_id_record a-b.example)"
+  _id_run lib_mail_domain_add_main a.b.example
+  _id_n2="$(_id_rec a.b.example)"
+  assert_eq    "a-b.example and a.b.example have one identifier between them" "$(lib_domain_ident a-b.example)" "$(lib_domain_ident a.b.example)"
+  assert_eq    "the one that was here first keeps it"                       "_mail_a_b_example" "$(lib_mail_cert_name a-b.example)"
+  assert_eq    "and has nothing on record"                                  "" "$(_id_rec a-b.example)"
+  assert_eq    "its record is not written to when the second arrives"       "$_id_r1" "$(_id_record a-b.example)"
+  assert_true  "the second has a name of its own on record"                 test -n "$_id_n2"
+  assert_true  "not the first one's"                                        test "$_id_n2" != "a_b_example"
+  assert_true  "a name: a letter, then letters, digits, underscores, 28 at most" _id_is_name "$_id_n2"
+  assert_eq    "the identifier and a few digits of a hash of the domain"    "a_b_example_$(_id_hash a.b.example)" "$_id_n2"
+  assert_eq    "its certificate goes by it"                                 "_mail_${_id_n2}" "$(lib_mail_cert_name a.b.example)"
+  assert_eq    "and so does its webmail"                                    "_wm_${_id_n2}" "$(lib_webmail_vhost_name a.b.example)"
+  assert_eq    "certbot was asked for each under its own name, once"        "_mail_a_b_example mail.a-b.example|_mail_${_id_n2} mail.a.b.example|" "$(_id_asked)"
+  assert_true  "the first one's certificate names the first one's host"     lib_ssl_cert_covers _mail_a_b_example mail.a-b.example
+  assert_false "and not the second one's"                                   lib_ssl_cert_covers _mail_a_b_example mail.a.b.example
+  assert_true  "the second one's names its own"                             lib_ssl_cert_covers "_mail_${_id_n2}" mail.a.b.example
+  : >"$_id/certbot.log"
+  for _d in a-b.example a.b.example a-b.example a.b.example; do _id_run lib_mail_main cert "$_d"; done
+  assert_eq    "asked for a certificate again, in turn: nothing is requested" "" "$(_id_asked)"
+  assert_eq    "and the second one's name is what it was"                   "$_id_n2" "$(_id_rec a.b.example)"
+
+  # ---- a webmail each ---------------------------------------------------------
+  for _d in a-b.example a.b.example; do
+    lib_json_set "$(lib_mail_json "$_d")" '.mail.webmail = true | .mail.webmail_host = $h' --arg h "webmail.${_d}"
+    _id_run lib_webmail_vhost_apply "$_d"
+  done
+  assert_eq    "the first one's virtual host answers for the first one's host" "webmail.a-b.example" "$(_wm_vhost_host a-b.example)"
+  assert_eq    "the second one's for the second one's"                      "webmail.a.b.example" "$(_wm_vhost_host a.b.example)"
+  assert_eq    "two virtual hosts, not one"                                 2 "$(find "$LSWS_VHOSTS_DIR" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')"
+  assert_eq    "and both listeners send each host to its own" \
+    "HTTP _wm_a_b_example webmail.a-b.example|HTTP _wm_${_id_n2} webmail.a.b.example|HTTPS _wm_a_b_example webmail.a-b.example|HTTPS _wm_${_id_n2} webmail.a.b.example|" \
+    "$(LC_ALL=C sort "$_id/maps" | tr '\n' '|')"
+
+  # ---- what is done to the second leaves the first as it was -------------------
+  _id_t1="$(_id_things a-b.example)"; _id_r1="$(_id_record a-b.example)"
+  assert_eq    "the second one's webmail is switched off"                   0 "$(run_isolated _id_do lib_mail_main webmail off a.b.example)"
+  assert_false "its virtual host is gone"                                   test -e "$LSWS_VHOSTS_DIR/_wm_${_id_n2}"
+  assert_eq    "the first one's certificate, virtual host and maps are as they were" "$_id_t1" "$(_id_things a-b.example)"
+  assert_eq    "the second one's mail is deleted"                           0 "$(run_isolated _id_do lib_mail_main disable a.b.example --delete-data)"
+  assert_false "its certificate is gone"                                    test -e "$SSL_DEPLOY_DIR/_mail_${_id_n2}"
+  assert_eq    "the first one's are as they were"                           "$_id_t1" "$(_id_things a-b.example)"
+  assert_eq    "it keeps its name while its mail is off"                    "$_id_n2" "$(_id_rec a.b.example)"
+  : >"$_id/certbot.log"
+  _id_run lib_mail_main enable a.b.example
+  assert_eq    "and when it is switched on again"                           "$_id_n2" "$(_id_rec a.b.example)"
+  assert_eq    "its certificate is asked for under it"                      "_mail_${_id_n2} mail.a.b.example|" "$(_id_asked)"
+  assert_eq    "the second is removed"                                      0 "$(run_isolated _id_do lib_mail_main domain del a.b.example --no-backup)"
+  assert_false "with its certificate"                                       test -e "$SSL_DEPLOY_DIR/_mail_${_id_n2}"
+  assert_eq    "the first one's are as they were, still"                    "$_id_t1" "$(_id_things a-b.example)"
+  assert_eq    "and nothing was written into the first one's record all along" "$_id_r1" "$(_id_record a-b.example)"
+  assert_true  "whose mail is on"                                           lib_mail_domain_enabled a-b.example
+  _id_run lib_mail_domain_add_main a.b.example
+  assert_eq    "added again, the second gets the name it had"               "$_id_n2" "$(_id_rec a.b.example)"
+  # the other way round: the one that kept the plain name goes, the other one stays what it is
+  _id_t2="$(_id_things a.b.example)"
+  assert_eq    "the first is removed"                                       0 "$(run_isolated _id_do lib_mail_main domain del a-b.example --no-backup)"
+  assert_eq    "the second keeps the name it was given"                     "$_id_n2" "$(lib_mail_ident a.b.example)"
+  assert_eq    "and everything under it"                                    "$_id_t2" "$(_id_things a.b.example)"
+  _id_run lib_mail_main cert a.b.example
+  assert_eq    "it is not renamed back when it is given a certificate"      "$_id_n2" "$(_id_rec a.b.example)"
+  _id_run lib_mail_domain_add_main a-b.example
+  assert_eq    "the first, added again, takes the plain name: it is free"   "_mail_a_b_example" "$(lib_mail_cert_name a-b.example)"
+
+  # ---- every way two names come out the same ----------------------------------
+  _id_fresh
+  for _p in "averyveryverylongcompanyname.com averyveryverylongcompanyname.com.tr" "123.example s-123.example" "xn--abc.example xn-abc.example"; do
+    read -r _a _b <<<"$_p"
+    _id_run lib_mail_domain_add_main "$_a"; _id_run lib_mail_domain_add_main "$_b"
+    assert_eq    "one identifier for ${_a} and ${_b}"                       "$(lib_domain_ident "$_a")" "$(lib_domain_ident "$_b")"
+    assert_eq    "${_a} goes by it"                                         "$(lib_domain_ident "$_a")" "$(lib_mail_ident "$_a")"
+    assert_true  "${_b} does not"                                           test "$(lib_mail_ident "$_a")" != "$(lib_mail_ident "$_b")"
+    assert_true  "and what it goes by is a name"                            _id_is_name "$(lib_mail_ident "$_b")"
+    assert_true  "certbot was asked for ${_b} under it"                     grep -qxF "$(lib_mail_cert_name "$_b") mail.${_b}" "$_id/certbot.log"
+  done
+  for _d in a-b-c.example a.b-c.example a-b.c.example; do _id_run lib_mail_domain_add_main "$_d"; done
+  assert_eq    "three of one identifier get three names"                    3 "$(for _d in a-b-c.example a.b-c.example a-b.c.example; do lib_mail_ident "$_d"; printf '\n'; done | LC_ALL=C sort -u | grep -c . || true)"
+  assert_eq    "and nobody was asked for under another one's"               "$(wc -l <"$_id/certbot.log" | tr -d ' ')" "$(cut -d' ' -f1 "$_id/certbot.log" | LC_ALL=C sort -u | grep -c . || true)"
+
+  # ---- what is on record is believed only when it is a name -------------------
+  _id_fresh; _id_old_mail solo.example
+  for _v in "../../x" "Upper_case" "has space" "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "_leading" "9digit"; do
+    lib_json_set "$(lib_mail_json solo.example)" '.mail.ident = $v' --arg v "$_v"
+    assert_eq  "on record but no name, so not believed: ${_v:0:14}"         "_mail_solo_example" "$(lib_mail_cert_name solo.example)"
+  done
+  lib_json_set "$(lib_mail_json solo.example)" '.mail.ident = "solo_1a2b3c"'
+  assert_eq    "one that is a name is what the domain goes by"              "_wm_solo_1a2b3c" "$(lib_webmail_vhost_name solo.example)"
+
+  # ---- the name is given when the record is made ------------------------------
+  _id_fresh; _id_old_mail a-b.example
+  _id_run lib_mail_domain_register a.b.example
+  assert_eq    "a record made under an identifier that is taken has its name from the start" "a_b_example_$(_id_hash a.b.example)" "$(_id_rec a.b.example)"
+  # should that very name be somebody's already, a longer one is tried
+  _id_fresh; _id_old_mail a-b.example; _id_old_mail zz.example
+  lib_json_set "$(lib_mail_json zz.example)" '.mail.ident = $v' --arg v "a_b_example_$(_id_hash a.b.example)"
+  _id_run lib_mail_domain_register a.b.example
+  assert_eq    "a name that is taken as well is not given a second time"    "a_b_example_$(printf '%s' a.b.example | sha256sum | cut -c1-8)" "$(_id_rec a.b.example)"
+
+  # ---- a name is somebody's whether their mail is on or not --------------------
+  _id_fresh; _id_old_mail a-b.example
+  _id_issue _mail_a_b_example mail.a-b.example
+  _id_run lib_mail_main disable a-b.example
+  assert_false "the first one's mail is switched off"                       lib_mail_domain_enabled a-b.example
+  _id_t1="$(_id_things a-b.example)"
+  _id_run lib_mail_domain_add_main a.b.example
+  assert_eq    "its name is still its own: the second does not get it"      "a_b_example_$(_id_hash a.b.example)" "$(_id_rec a.b.example)"
+  assert_eq    "and its certificate, kept for when it is switched on again, is as it was" "$_id_t1" "$(_id_things a-b.example)"
+  _id_run lib_mail_main enable a-b.example
+  assert_eq    "switched on again, it goes by what it went by"              "_mail_a_b_example" "$(lib_mail_cert_name a-b.example)"
+
+  # ---- a dry run says it and writes nothing ------------------------------------
+  _id_fresh; _id_old_mail a-b.example
+  _id_r1="$(_id_record a-b.example)"
+  OPT_DRY_RUN=1 _id_run lib_mail_domain_add_main a.b.example
+  assert_has   "a dry run says the second would get a name of its own"     "would go by a_b_example_$(_id_hash a.b.example)" "$(_id_said)"
+  assert_has   "and describes the request it would make under that name"   "would request _mail_a_b_example_$(_id_hash a.b.example) for mail.a.b.example" "$(_id_said)"
+  assert_eq    "saying so once"                                             1 "$(grep -c 'would go by' "$_id/said.txt" || true)"
+  assert_lacks "and not that it was done"                                   "of a.b.example go by" "$(_id_said)"
+  assert_false "and makes no record"                                        test -e "$MAIL_DOMAINS_DIR/a.b.example"
+  assert_eq    "nor asks certbot for anything"                              "" "$(_id_asked)"
+  assert_eq    "nor touches the first"                                      "$_id_r1" "$(_id_record a-b.example)"
+
+  # ---- two records an older release wrote under one name ----------------------
+  # a-b.example with the certificate and the webmail, a.b.example beside it with neither
+  _id_pair() {
+    _id_fresh
+    _id_old_mail a-b.example true
+    _id_issue _mail_a_b_example mail.a-b.example webmail.a-b.example
+    _id_run lib_webmail_vhost_apply a-b.example
+    _id_old_mail a.b.example
+    _id_t1="$(_id_things a-b.example)"; _id_r1="$(_id_record a-b.example)"
+  }
+  _id_pair
+  assert_eq    "a record with nothing in it about a name means the identifier" "_mail_a_b_example" "$(lib_mail_cert_name a.b.example)"
+  assert_true  "the virtual host under the name is the one's it answers for" lib_webmail_vhost_mine a-b.example
+  assert_false "and not the other one's"                                    lib_webmail_vhost_mine a.b.example
+  _id_dr="$(_id_doc)"
+  assert_eq    "doctor says the two share a name, once"                     1 "$(grep -c '^WARN|mail: ' <<<"$_id_dr" || true)"
+  assert_has   "it names the one"                                           "a-b.example" "$_id_dr"
+  assert_has   "and the other"                                              "a.b.example" "$_id_dr"
+  assert_has   "the name they share"                                        "(a_b_example)" "$_id_dr"
+  assert_has   "and the command that takes them apart"                      "lomp mail cert " "$_id_dr"
+  lib_json_set "$(lib_mail_json a.b.example)" '.mail.enabled = false'
+  assert_eq    "it says so too while the mail of one of them is switched off" 1 "$(_id_doc | grep -c '^WARN|mail: ' || true)"
+  lib_json_set "$(lib_mail_json a.b.example)" '.mail.enabled = true'
+  # the webmail of the one that has none is switched on: not over the other one's
+  lib_json_set "$(lib_mail_json a.b.example)" '.mail.webmail = true'
+  _id_run lib_webmail_vhost_apply a.b.example
+  assert_eq    "a virtual host is not written over another domain's"        "$_id_t1" "$(_id_things a-b.example)"
+  assert_has   "it says whose it is"                                        "is the webmail of a-b.example" "$(_id_said)"
+  assert_has   "and how the two are taken apart"                            "lomp mail cert a-b.example   and then: lomp mail cert a.b.example" "$(_id_said)"
+  assert_eq    "its webmail is switched off again"                          0 "$(run_isolated _id_do lib_mail_main webmail off a.b.example)"
+  assert_eq    "which takes the flag down"                                  "" "$(jq -r '.mail.webmail // ""' "$(lib_mail_json a.b.example)")"
+  assert_eq    "and not the other one's virtual host"                       "$_id_t1" "$(_id_things a-b.example)"
+  _id_run lib_webmail_vhost_remove a.b.example
+  assert_eq    "nor does a removal asked for by name"                       "$_id_t1" "$(_id_things a-b.example)"
+  # removed: what lies under the shared name is the other one's, and stays
+  assert_eq    "the one that has nothing under the name is removed"         0 "$(run_isolated _id_do lib_mail_main domain del a.b.example --no-backup)"
+  assert_eq    "the other one's certificate, virtual host and maps are as they were" "$_id_t1" "$(_id_things a-b.example)"
+  assert_has   "it says the certificate was left, and whose it is"          "is a-b.example's as well" "$(_id_said)"
+  assert_eq    "and its record was never written to"                        "$_id_r1" "$(_id_record a-b.example)"
+  _id_pair
+  assert_eq    "its mail deleted instead: the same"                         0 "$(run_isolated _id_do lib_mail_main disable a.b.example --delete-data)"
+  assert_eq    "nothing of the other one's is touched"                      "$_id_t1" "$(_id_things a-b.example)"
+  # the one whose certificate it is goes: then it goes
+  _id_pair
+  _id_r2="$(_id_record a.b.example)"
+  assert_eq    "the one the certificate names is removed"                   0 "$(run_isolated _id_do lib_mail_main domain del a-b.example --no-backup)"
+  assert_false "its certificate goes with it"                               test -e "$SSL_DEPLOY_DIR/_mail_a_b_example"
+  assert_false "and its virtual host"                                       test -e "$LSWS_VHOSTS_DIR/_wm_a_b_example"
+  assert_eq    "the other one's record is not written to"                   "$_id_r2" "$(_id_record a.b.example)"
+
+  # taken apart: the one the certificate does not name moves, whichever is asked first
+  _id_pair
+  _id_run lib_mail_main cert a-b.example
+  assert_eq    "a certificate for the one that has it: nothing is asked for" "" "$(_id_asked)"
+  assert_eq    "and it is not renamed"                                      "" "$(_id_rec a-b.example)"
+  assert_eq    "everything of it is as it was"                              "$_id_t1" "$(_id_things a-b.example)"
+  _id_run lib_mail_main cert a.b.example
+  _id_n2="$(_id_rec a.b.example)"
+  assert_eq    "a certificate for the other one: it gets a name of its own first" "a_b_example_$(_id_hash a.b.example)" "$_id_n2"
+  assert_eq    "and is asked for under that, with its own host"             "_mail_${_id_n2} mail.a.b.example|" "$(_id_asked)"
+  assert_has   "it says why"                                                "a_b_example is a-b.example's" "$(_id_said)"
+  assert_eq    "the first one's certificate still names the first one"      "$_id_t1" "$(_id_things a-b.example)"
+  assert_eq    "and its record was not written to"                          "$_id_r1" "$(_id_record a-b.example)"
+  assert_eq    "doctor has nothing left to say"                             "" "$(_id_doc)"
+  _id_pair
+  _id_run lib_mail_main cert a.b.example
+  assert_eq    "asked the other way round, it is the same one that moves"   "a_b_example_$(_id_hash a.b.example)" "$(_id_rec a.b.example)"
+  assert_eq    "and the one the certificate names stays"                    "" "$(_id_rec a-b.example)"
+  # nothing issued yet, and the virtual host under the shared name is the mover's own: it
+  # comes along instead of answering for one host under two names
+  _id_fresh
+  _id_old_mail a-b.example; _id_old_mail a.b.example true
+  _id_vhost a.b.example webmail.a.b.example
+  _id_run lib_mail_main cert a.b.example
+  _id_n2="$(_id_rec a.b.example)"
+  assert_true  "with no certificate under the name yet, the one that asks first moves" test -n "$_id_n2"
+  assert_false "its virtual host is no longer under the name they shared"   test -e "$LSWS_VHOSTS_DIR/_wm_a_b_example"
+  assert_eq    "it is under its own, answering for its own host"            "webmail.a.b.example" "$(_wm_vhost_host a.b.example)"
+  assert_eq    "and the listeners know it by that name alone"               "HTTP _wm_${_id_n2} webmail.a.b.example|HTTPS _wm_${_id_n2} webmail.a.b.example|" "$(LC_ALL=C sort "$_id/maps" | tr '\n' '|')"
+  assert_eq    "its certificate is asked for with both of its hosts"        "_mail_${_id_n2} mail.a.b.example webmail.a.b.example|" "$(_id_asked)"
+  _id_fresh
+  _id_old_mail a-b.example; _id_old_mail a.b.example true
+  _id_vhost a.b.example webmail.a.b.example
+  : >"$_id/certbot.refuses"
+  _id_run lib_mail_main cert a.b.example
+  assert_has   "certbot refuses this time"                                  "does not point here yet" "$(_id_said)"
+  assert_false "the virtual host has left the shared name all the same"     test -e "$LSWS_VHOSTS_DIR/_wm_a_b_example"
+  assert_eq    "and is there under its own: a webmail without its certificate, not none" "webmail.a.b.example" "$(_wm_vhost_host a.b.example)"
+  rm -f "$_id/certbot.refuses"
+
+  # ---- a site that never had mail, under a mail domain's name -----------------
+  _id_fresh
+  _id_old_mail a-b.example true; _id_old_site a.b.example
+  _id_issue _mail_a_b_example mail.a-b.example webmail.a-b.example
+  _id_vhost a-b.example webmail.a-b.example
+  _id_t1="$(_id_things a-b.example)"; _id_r1="$(_id_record a-b.example)"
+  assert_false "the mail domain's webmail is no trace of mail of the site's" lib_mail_domain_has_traces a.b.example
+  assert_false "which is not listed among the domains with mail"            _mail_domain_listed a.b.example
+  _id_rs="$(cksum <"$(lib_domain_json a.b.example)")"
+  assert_eq    "its webmail is switched off: there is none"                 0 "$(run_isolated _id_do lib_mail_main webmail off a.b.example)"
+  assert_eq    "and the mail domain's is as it was"                         "$_id_t1" "$(_id_things a-b.example)"
+  assert_eq    "nothing is written into the site's own state for it"        "$_id_rs" "$(cksum <"$(lib_domain_json a.b.example)")"
+  assert_eq    "its mail is deleted: there is none"                         0 "$(run_isolated _id_do lib_mail_main disable a.b.example --delete-data)"
+  assert_has   "which is what it says"                                      "already off" "$(_id_said)"
+  assert_eq    "the mail domain's is as it was, again"                      "$_id_t1" "$(_id_things a-b.example)"
+  # what "remove" of the site runs when it finds traces - asked here though there are none
+  _id_run lib_mail_domain_purge a.b.example
+  assert_eq    "even a purge of the site's mail leaves the mail domain's"   "$_id_t1" "$(_id_things a-b.example)"
+  assert_eq    "and its record"                                             "$_id_r1" "$(_id_record a-b.example)"
+  assert_eq    "doctor has nothing to say about a site without mail"        "" "$(_id_doc)"
+  assert_has   "it is the mail check that asks"                             "_doc_mail_shared_names" "$(declare -f _doc_check_mail)"
+  # the day the site gets mail it gets a name of its own, in the site's own state
+  _id_run lib_mail_ident_claim a.b.example
+  assert_eq    "the site is given a name for its mail"                      "a_b_example_$(_id_hash a.b.example)" "$(jq -r '.mail.ident' "$(lib_domain_json a.b.example)")"
+  assert_eq    "its state is otherwise what it was"                         "a.b.example php a_b_example" "$(jq -r '[.domain, .mode, .user] | join(" ")' "$(lib_domain_json a.b.example)")"
+  # and the mail domain goes while only a site without mail shares its name: nothing is left over
+  _id_fresh
+  _id_old_mail a-b.example; _id_old_site a.b.example
+  _id_issue _mail_a_b_example mail.something-else.example
+  assert_eq    "a mail domain whose name only a site without mail shares is removed" 0 "$(run_isolated _id_do lib_mail_main domain del a-b.example --no-backup)"
+  assert_false "and its certificate is not left behind for nobody"          test -e "$SSL_DEPLOY_DIR/_mail_a_b_example"
+  # a mail domain with no certificate yet, and a site without mail under the same name
+  _id_fresh
+  _id_old_mail a-b.example; _id_old_site a.b.example
+  _id_run lib_mail_main cert a-b.example
+  assert_eq    "a domain whose mail is on does not give way to one that has none" "" "$(_id_rec a-b.example)"
+  assert_eq    "its certificate is asked for under the name it has"         "_mail_a_b_example mail.a-b.example|" "$(_id_asked)"
+  # three under one name: a site without mail, and two mail domains of which one has the certificate
+  _id_fresh
+  _id_old_site a--b.example; _id_old_mail a-b.example; _id_old_mail a.b.example
+  _id_issue _mail_a_b_example mail.a.b.example
+  _id_t2="$(_id_things a.b.example)"
+  assert_eq    "three share an identifier, and the one that goes is not the certificate's" 0 "$(run_isolated _id_do lib_mail_main domain del a-b.example --no-backup)"
+  assert_eq    "it is left for the one that has mail, though a site without any is listed first" "$_id_t2" "$(_id_things a.b.example)"
+  _id_add="$(declare -f lib_domain_add_main)"
+  _id_l1="$(grep -n 'lib_domain_state_save' <<<"$_id_add" | head -n 1 | cut -d: -f1 || true)"
+  _id_l2="$(grep -n 'lib_mail_ident_claim' <<<"$_id_add" | head -n 1 | cut -d: -f1 || true)"
+  _id_l3="$(grep -n 'lib_domain_user_ensure' <<<"$_id_add" | head -n 1 | cut -d: -f1 || true)"
+  assert_true  "a new site is given its name once its state is written"     test "${_id_l2:-0}" -gt "${_id_l1:-999999}"
+  assert_true  "before anything else of it is made"                         test "${_id_l2:-999999}" -lt "${_id_l3:-0}"
+
+  # ---- a restore brings back the mail, not the name it went by elsewhere ------
+  _id_ar() {   # domain, the .mail block in the archive -> the archive
+    local w="$_id/ar"
+    rm -rf "$w"; mkdir -p "$w/mail" "$BACKUP_ROOT/$1"
+    printf '{"format":1,"kind":"mail","domain":"%s","created_at":"2026-01-01T00:00:00Z","maildirs":"doveadm"}\n' "$1" >"$w/manifest.json"
+    printf '%s\n' "$2" >"$w/mail/state.json"
+    tar -C "$w" -czf "$BACKUP_ROOT/$1/$1-mail-20260101-000000.tar.gz" .
+    printf '%s' "$BACKUP_ROOT/$1/$1-mail-20260101-000000.tar.gz"
+  }
+  _id_fresh
+  _id_old_mail a-b.example
+  _id_issue _mail_a_b_example mail.a-b.example
+  _id_t1="$(_id_things a-b.example)"; _id_r1="$(_id_record a-b.example)"
+  # on the server the archive was made on, a.b.example was alone and went by the identifier
+  _id_f="$(_id_ar a.b.example '{"enabled":true,"selector":"lomp202603","selectors_used":["lomp202603"],"ident":"a_b_example"}')"
+  _id_run lib_mail_restore_domain a.b.example "$_id_f"
+  assert_true  "a domain nobody here knew is restored as a mail domain"     lib_mail_domain_enabled a.b.example
+  assert_eq    "under a name this server gives it, not the archive's"       "a_b_example_$(_id_hash a.b.example)" "$(_id_rec a.b.example)"
+  assert_eq    "its certificate is asked for under that"                    "_mail_a_b_example_$(_id_hash a.b.example) mail.a.b.example|" "$(_id_asked)"
+  assert_eq    "the domain that was here is as it was"                      "$_id_t1" "$(_id_things a-b.example)"
+  assert_eq    "its record too"                                             "$_id_r1" "$(_id_record a-b.example)"
+  # restored over itself, from an archive that carries another server's name for it
+  _id_f="$(_id_ar a.b.example '{"enabled":true,"selector":"lomp202603","selectors_used":["lomp202603"],"ident":"somebody_elses"}')"
+  _id_run lib_mail_restore_domain a.b.example "$_id_f"
+  assert_eq    "restored again, it keeps the name it has here"              "a_b_example_$(_id_hash a.b.example)" "$(_id_rec a.b.example)"
+  _id_run lib_mail_main domain del a-b.example --no-backup
+  _id_f="$(_id_ar a.b.example '{"enabled":true,"selector":"lomp202603","selectors_used":["lomp202603"]}')"
+  _id_run lib_mail_restore_domain a.b.example "$_id_f"
+  assert_eq    "and when the other domain is long gone, and the archive says nothing" "a_b_example_$(_id_hash a.b.example)" "$(_id_rec a.b.example)"
+  _id_fresh
+  _id_f="$(_id_ar solo.example '{"enabled":true,"selector":"lomp202603","selectors_used":["lomp202603"],"ident":"somebody_elses"}')"
+  _id_run lib_mail_restore_domain solo.example "$_id_f"
+  assert_true  "a domain that shares its identifier with nobody is restored" lib_mail_domain_enabled solo.example
+  assert_eq    "with no name on record at all"                              "" "$(_id_rec solo.example)"
+  assert_eq    "so it goes by the identifier"                               "_mail_solo_example mail.solo.example|" "$(_id_asked)"
+  _id_rs="$(declare -f lib_restore_main)"
+  assert_has   "a site's archive does not bring a name along either"        'del(.mail.ident)' "$_id_rs"
+  assert_has   "the site is given one here"                                 'lib_mail_ident_claim "$domain"' "$_id_rs"
+  assert_false "no removal ever reached outside the test directory"         test -e "$_id/rm-refused.log"
+fi
+
+eval "$_id_saved_vars"; eval "$_id_saved_fn"
+unset -f _id_issue _id_do _id_run _id_said _id_asked _id_rec _id_is_name _id_hash _id_fresh _id_old_mail _id_old_site _id_vhost _id_things _id_record _id_doc _id_pair _id_ar
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 if (( FAIL > 0 )); then exit 1; fi
 exit 0
