@@ -155,6 +155,12 @@ COMMANDS
   redirect add <from> <to>      A name that is no site and only sends its visitors on to
                                 another one (301, path kept; --www --no-ssl)
   redirect list | del <from>    The redirects; stop answering for one (--keep-ssl)
+  import <[user@]host> [opts]   Bring sites from another server over SSH: lists what it serves,
+                                asks which ones, adds the sites that are not here yet, copies
+                                the files and the database of a WordPress, and points
+                                wp-config.php at the database here. The other server is only
+                                read (--list --all --only a.com,b.com --no-create --port N
+                                --key FILE --password-file FILE --path DIR --as DOMAIN --db NAME)
   list                          Table of sites (--json)
   status                        Services, versions, resources, sites (--json)
   doctor                        Deep health check (--json, --quiet)
@@ -516,6 +522,7 @@ lib_menu_main() {
     _menu_item  7 "Remove a site"
     _menu_item 26 "Rename a site (new domain name; the old one redirects to it)"
     _menu_item 27 "Redirects (a domain that only sends visitors on to another)"
+    _menu_item 29 "Import sites from another server (files and databases, over SSH)"
     _menu_item 20 "Mail: domains, mailboxes, DNS"
     _menu_item 21 "Fix file ownership (after uploading as root)"
     _menu_item 23 "Harden sites against PHP shells"
@@ -551,6 +558,7 @@ lib_menu_main() {
       7) _menu_remove_site ;;
       26) _menu_rename_site ;;
       27) _menu_redirects ;;
+      29) _menu_import ;;
       20) _menu_mail ;;
       21) _menu_fix_owner ;;
       23) _menu_harden ;;
@@ -950,6 +958,19 @@ _menu_rename_site() {
 }
 
 # Names that are no site here and only send their visitors on to another one.
+# Sites of another server. The command lists what is there and asks which ones; ssh asks for
+# the password itself.
+_menu_import() {
+  local host="" port=""
+  printf '\n'; _menu_note "Looks at what another server serves and asks which sites to bring here: their files, and the" \
+    "database of a WordPress. A site that is not here yet is added first. The other server is only read." \
+    "You are asked for its SSH password once. Certificates come after the DNS points here."
+  _menu_ask host "The other server (user@address, e.g. root@203.0.113.10)"
+  [[ -n "$host" ]] || return 0
+  _menu_ask port "Its SSH port" "22"
+  _menu_run import "$host" --port "$port"
+}
+
 _menu_redirects() {
   local what="" from="" to="" www=""
   local -a args=()
@@ -1711,4 +1732,10 @@ MENU_TR['One site, now']='Tek site, şimdi'
 MENU_TR['\n%sAvailable archives for %s:%s\n']='\n%s%s için mevcut arşivler:%s\n'
 MENU_TR['  (none found under %s)\n']='  (%s altında bulunamadı)\n'
 MENU_TR['Full path of the archive to restore']='Geri yüklenecek arşivin tam yolu'
+MENU_TR['Import sites from another server (files and databases, over SSH)']='Başka bir sunucudan site aktar (dosyalar ve veritabanları, SSH ile)'
+MENU_TR['Looks at what another server serves and asks which sites to bring here: their files, and the']='Başka bir sunucunun yayınladığı sitelere bakar ve hangilerinin buraya getirileceğini sorar: dosyaları ve'
+MENU_TR['database of a WordPress. A site that is not here yet is added first. The other server is only read.']='WordPress veritabanı. Burada henüz olmayan site önce eklenir. Diğer sunucu yalnızca okunur.'
+MENU_TR['You are asked for its SSH password once. Certificates come after the DNS points here.']='SSH şifresi bir kez sorulur. Sertifikalar, DNS buraya yönlendikten sonra alınır.'
+MENU_TR['The other server (user@address, e.g. root@203.0.113.10)']='Diğer sunucu (kullanıcı@adres, örn. root@203.0.113.10)'
+MENU_TR['Its SSH port']='SSH portu'
 # MENU_TR-END

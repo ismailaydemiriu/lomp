@@ -23,7 +23,7 @@ INSTALL_DIR="$TMP/install"; BIN_LINK="$TMP/lompstack"; BIN_SHORT="$TMP/lomp"; LO
 OPT_YES=1 OPT_DRY_RUN=0 OPT_QUIET=1 OPT_VERBOSE=0 OPT_NO_COLOR=1 OPT_JSON=0 OPT_NON_INTERACTIVE=1
 SCRIPT_PATH="$ROOT/setup.sh"; SCRIPT_DIR="$ROOT"
 export TMPDIR="$TMP"
-for m in common lang system ols php db ssl domain harden scan proxy app mail webmail cloudflare backup monitor install rename menu; do
+for m in common lang system ols php db ssl domain harden scan proxy app mail webmail cloudflare backup monitor install import rename menu; do
   # shellcheck source=/dev/null
   source "$ROOT/lib/$m.sh"
 done
@@ -9351,6 +9351,297 @@ done
 assert_eq   "a line that starts with a value has at least two words of its own" "" "$_dt_gen"
 [[ -z "$_dt_fn" ]] || eval "$_dt_fn"
 unset -f _dt _dt_plain _dt_run _st
+
+section "import: the sites of another server, brought here over SSH"
+# The other server is a directory tree under $TMP, and what would run there through ssh runs
+# here through sh: the listing, tar and the dump script are the real ones. mysqldump and the
+# client are stand-ins that say how they were called.
+_im_saved="$(declare -p STATE_DIR OPT_DRY_RUN)"
+_im_orig="$(declare -f _domain_fix_owner_ids lib_require_tools lib_require_installed lib_server_mail_only lib_backup_domain \
+  lib_db_create_for_domain lib_db_restore_domain lib_db_sql lib_domain_apply_config lib_ols_htaccess_reload \
+  lib_import_connect _import_ssh _import_add)"
+STATE_DIR="$TMP/im-state"; mkdir -p "$STATE_DIR"
+_im_r="$TMP/im-remote"; _im_l="$_im_r/usr/local/lsws"; _im_bin="$TMP/im-bin"; _im_log="$TMP/im.log"; _im_out="$TMP/im.out"
+_im_shop="$_im_r/home/shop.example/public_html"
+mkdir -p "$_im_l/conf/vhosts/Example" "$_im_l/conf/vhosts/shop.example" "$_im_l/Example/html" \
+  "$_im_shop/wp-content/cache" "$_im_shop/wp-content/uploads" "$_im_r/home/blog.example/public_html" \
+  "$_im_r/home/bob/public_html" "$_im_r/var/www/html" "$_im_r/www/wwwroot/WWW.Panel.Example" \
+  "$_im_r/home/odd name.example/public_html" "$_im_r/home/empty.example" "$_im_bin"
+cat >"$_im_l/conf/httpd_config.conf" <<EOF
+serverName                lsws
+virtualhost Example {
+  vhRoot                  Example/
+  configFile              conf/vhosts/Example/vhconf.conf
+}
+virtualhost shop.example {
+  vhRoot                  $_im_r/home/\$VH_NAME
+  configFile              \$SERVER_ROOT/conf/vhosts/\$VH_NAME/vhconf.conf
+}
+listener Default {
+  address                 *:80
+  map                     Example *
+  map                     shop.example shop.example, WWW.shop.example
+}
+EOF
+printf 'docRoot                   $VH_ROOT/html/\n' >"$_im_l/conf/vhosts/Example/vhconf.conf"
+printf 'docRoot                   $VH_ROOT/public_html\n' >"$_im_l/conf/vhosts/shop.example/vhconf.conf"
+cat >"$_im_shop/wp-config.php" <<'EOF'
+<?php
+define( 'DB_NAME', 'shopdb' );
+define("DB_USER", "shopuser");
+define( 'DB_PASSWORD', 'p\'a"s\\x' ); // the old one
+define( 'DB_HOST', 'localhost:/run/mysqld/old.sock' );
+$table_prefix = 'wx_';
+require_once ABSPATH . 'wp-settings.php';
+EOF
+printf '<?php // shop\n' >"$_im_shop/index.php"
+printf 'RewriteEngine On\n' >"$_im_shop/.htaccess"
+printf 'cached\n' >"$_im_shop/wp-content/cache/page.html"
+printf 'upload\n' >"$_im_shop/wp-content/uploads/a.txt"
+printf 'the blog\n' >"$_im_r/home/blog.example/public_html/index.html"
+printf 'bob\n' >"$_im_r/home/bob/public_html/index.html"
+printf '<?php // default\n' >"$_im_r/var/www/html/index.php"
+printf '<?php // panel\n' >"$_im_r/www/wwwroot/WWW.Panel.Example/index.php"
+printf 'odd\n' >"$_im_r/home/odd name.example/public_html/index.html"
+printf 'example page\n' >"$_im_l/Example/html/index.html"
+cat >"$_im_bin/mysqldump" <<'EOF'
+#!/bin/sh
+for a in "$@"; do case "$a" in --defaults-extra-file=*) echo "-- LOGIN"; cat "${a#*=}" ;; esac; done
+echo "-- ARGS $*"
+[ "${IM_DUMP_MODE:-}" != fail ] || exit 2
+echo "CREATE TABLE t (c text) COLLATE=utf8mb4_0900_ai_ci;"
+[ "${IM_DUMP_MODE:-}" = cut ] || echo "-- Dump completed on 2026-10-05"
+EOF
+printf '#!/bin/sh\nexit "${IM_CLIENT_RC:-1}"\n' >"$_im_bin/mysql"
+cp "$_im_bin/mysqldump" "$_im_bin/mariadb-dump"; cp "$_im_bin/mysql" "$_im_bin/mariadb"
+chmod +x "$_im_bin"/*
+
+# ---- the listing, as the other server writes it ------------------------------
+_im_scan="$(lib_import_remote_scan | LOMP_IMPORT_ROOT="$_im_r" sh -s)"
+_im_row() { awk -F'\t' -v d="$1" '$1 == "S" && $2 == d { print $3 "|" $5 "|" $6 "|" $7 "|" $8 "|" $9; exit }' <<<"$_im_scan"; }
+assert_has "the listing says who it ran as"                    $'U\t' "$_im_scan"
+assert_eq  "a virtual host goes by the names its listener maps to it" \
+  "$_im_shop|wordpress|shopdb|1|$_im_shop/wp-config.php|ols" "$(_im_row shop.example)"
+assert_eq  "a directory named after a domain is a site"        "$_im_r/home/blog.example/public_html|static|-|0|-|dir" "$(_im_row blog.example)"
+assert_eq  "its name without www and in small letters"         "$_im_r/www/wwwroot/WWW.Panel.Example|php|-|0|-|dir" "$(_im_row panel.example)"
+assert_has "a virtual host mapped to * has no name"            $'S\t-\t'"$_im_l/Example/html"$'\t' "$_im_scan"
+assert_has "nor has a user's public_html"                      $'S\t-\t'"$_im_r/home/bob/public_html"$'\t' "$_im_scan"
+assert_lacks "a directory that serves nothing is not listed"   "empty.example" "$_im_scan"
+assert_eq  "one directory on request"  "S|-|$_im_l/Example/html|static|path" \
+  "$(lib_import_remote_scan | LOMP_IMPORT_ONLY="$_im_l/Example/html" sh -s | awk -F'\t' '$1 == "S" { print $1 "|" $2 "|" $3 "|" $5 "|" $9 }')"
+
+lib_import_scan_parse <<<"$_im_scan"
+assert_eq  "each site once, the virtual hosts first"           "shop.example blog.example panel.example" "${IMP_DOMAIN[*]}"
+assert_eq  "with what it is"                                   "wordpress static php" "${IMP_KIND[*]}"
+assert_eq  "its database"                                      "shopdb - -" "${IMP_DB[*]}"
+assert_eq  "and whether www is served"                         "1 0 0" "${IMP_WWW[*]}"
+assert_eq  "the directories without a name are kept apart"     "3" "${#IMP_NAMELESS[@]}"
+assert_lacks "a path with a blank in it is not taken"          "odd" "${IMP_NAMELESS[*]} ${IMP_ROOT[*]}"
+assert_eq  "the user it ran as"                                "$(id -un)" "$IMP_REMOTE_USER"
+# the listing is another machine's output
+printf '%s\n' $'S\t$(id).example\t/srv/a\t1\tphp\t-\t0\t-\tdir' $'S\tquote.example\t/srv/it\'s\t1\tphp\t-\t0\t-\tdir' \
+  $'S\tup.example\t/srv/../etc\t1\tphp\t-\t0\t-\tdir' $'S\tkind.example\t/srv/k\t1\tperl\t-\t0\t-\tdir' \
+  $'S\tdb.example\t/srv/db\tmany\tphp\ta\';b\t7\t/srv/c onf\tdir' $'U\troot;id' $'X\tjunk' | lib_import_scan_parse
+assert_eq  "a line counts only when its fields are what they should be" "db.example" "${IMP_DOMAIN[*]}"
+assert_eq  "a database name with a quote in it is no database" "-|0|0|-" "${IMP_DB[0]}|${IMP_KB[0]}|${IMP_WWW[0]}|${IMP_CONF[0]}"
+assert_eq  "a name that is no domain name names no site"       "/srv/a" "${IMP_NAMELESS[*]}"
+assert_eq  "nor is that a user name"                           "" "$IMP_REMOTE_USER"
+
+# ---- the choice ----------------------------------------------------------------
+assert_eq  "numbers"                    "0 2"   "$(lib_import_pick "1,3" 3 | tr '\n' ' ' | sed 's/ $//')"
+assert_eq  "a range, and each once"     "1 2 0" "$(lib_import_pick "2-3 1 2" 3 | tr '\n' ' ' | sed 's/ $//')"
+assert_eq  "all"                        "0 1 2" "$(lib_import_pick "ALL" 3 | tr '\n' ' ' | sed 's/ $//')"
+assert_false "a number that is not in the list" lib_import_pick "4" 3
+assert_false "zero"                     lib_import_pick "0" 3
+assert_false "a word"                   lib_import_pick "shop" 3
+assert_false "nothing"                  lib_import_pick " " 3
+assert_false "a range that goes backwards" lib_import_pick "3-1" 3
+
+# ---- wp-config.php ---------------------------------------------------------------
+_im_cfg="$(lib_import_wpconfig_rewrite newdb newuser NewPass123 <"$_im_shop/wp-config.php")"
+assert_has "the database name of this server"  "define( 'DB_NAME', 'newdb' );" "$_im_cfg"
+assert_has "its user, whatever quotes the line had" "define( 'DB_USER', 'newuser' );" "$_im_cfg"
+assert_has "its password"                      "define( 'DB_PASSWORD', 'NewPass123' );" "$_im_cfg"
+assert_has "and the host"                      "define( 'DB_HOST', 'localhost' );" "$_im_cfg"
+assert_lacks "the old login is gone"           "shopuser" "$_im_cfg"
+assert_lacks "with its socket"                 "old.sock" "$_im_cfg"
+assert_has "every other line stays"            "\$table_prefix = 'wx_';" "$_im_cfg"
+assert_eq  "as many lines as before"           "7" "$(wc -l <<<"$_im_cfg" | tr -d ' ')"
+assert_eq  "a file without the login lines is said to be one" "3" \
+  "$(printf '<?php\ndefine( "DB_NAME", "x" );\n' | lib_import_wpconfig_rewrite a b c >/dev/null && printf 0 || printf '%s' "$?")"
+
+# ---- the dump, on the other server -------------------------------------------------
+_im_dump() {   # database wp-config client-status
+  lib_import_remote_dump | env PATH="$_im_bin:$PATH" DB="$1" CONF="$2" IM_CLIENT_RC="$3" bash -s 2>/dev/null | gzip -dc 2>/dev/null || true
+}
+_im_d="$(_im_dump shopdb "$_im_shop/wp-config.php" 1)"
+assert_has "an account that cannot open the database borrows WordPress's login" 'user="shopuser"' "$_im_d"
+assert_has "the password as PHP reads it, quoted for the option file" 'password="p'"'"'a\"s\\x"' "$_im_d"
+assert_has "the socket DB_HOST names"          'socket="/run/mysqld/old.sock"' "$_im_d"
+assert_has "the login is in a file, first on the command line" "-- ARGS --defaults-extra-file=" "$_im_d"
+assert_lacks "no password among the arguments" "p'a" "$(grep -- '-- ARGS' <<<"$_im_d")"
+assert_lacks "a borrowed login is not asked for the routines" "--routines" "$_im_d"
+assert_has "the dump ends the way a dump ends" "-- Dump completed" "$_im_d"
+_im_d="$(_im_dump shopdb "$_im_shop/wp-config.php" 0)"
+assert_lacks "an account that can open it needs no login" "LOGIN" "$_im_d"
+assert_has "and brings the routines too"       "--routines shopdb" "$_im_d"
+assert_eq  "no access and no wp-config.php is an error of its own" "4" \
+  "$(lib_import_remote_dump | env PATH="$_im_bin:$PATH" DB=shopdb CONF= IM_CLIENT_RC=1 bash -s >/dev/null 2>&1 && printf 0 || printf '%s' "$?")"
+
+# ---- the command -----------------------------------------------------------------
+_im_home="https://www.shop.example"; _im_add_ok=1; _im_dump_mode=""
+_im_site() {   # domain mode
+  lib_domain_state_reset
+  D_DOMAIN="$1"; D_IDENT="$(lib_domain_ident "$1")"; D_USER="$D_IDENT"; D_GROUP="$D_IDENT"
+  D_HOME="$SITES_ROOT/$1"; D_MODE="$2"; D_PHP="8.3"; D_STATUS="active"
+  lib_domain_state_save
+  mkdir -p "$D_HOME/public_html" "$D_HOME/private/tmp"
+  printf '<body><p>This site was %s.</p></body>\n' "$DOMAIN_PLACEHOLDER_MARK" >"$D_HOME/public_html/index.html"
+}
+eval '_import_ssh() { env PATH="$_im_bin:$PATH" LOMP_IMPORT_ROOT="$_im_r" IM_CLIENT_RC=1 IM_DUMP_MODE="$_im_dump_mode" sh -c "$1"; }
+      lib_import_connect() { IMP_SSH_OPTS=(); printf "connect %s port=%s key=%s pw=%s\n" "$IMP_SSH_TARGET" "$1" "$2" "$3" >>"$_im_log"; }
+      lib_require_tools() { return 0; }
+      lib_require_installed() { return 0; }
+      lib_server_mail_only() { return 1; }
+      lib_ols_htaccess_reload() { printf "reload\n" >>"$_im_log"; }
+      lib_domain_apply_config() { printf "apply %s www=%s primary=%s db=%s\n" "$D_DOMAIN" "$D_WWW" "$D_WWW_PRIMARY" "$D_DB_NAME" >>"$_im_log"; }
+      lib_backup_domain() { printf "backup %s\n" "$*" >>"$_im_log"; }
+      lib_db_create_for_domain() {
+        printf "DB_NAME=%s_db\nDB_USER=%s_user\nDB_PASS=LocalPass9\n" "${1%%.*}" "${1%%.*}" >"$(lib_db_info_file "$1")"
+        lib_json_set "$(lib_domain_json "$1")" ".db = {name:\$n, user:\$u}" --arg n "${1%%.*}_db" --arg u "${1%%.*}_user"
+        printf "dbcreate %s\n" "$1" >>"$_im_log"
+        lib_db_info_load "$1"
+      }
+      lib_db_restore_domain() { lib_db_info_load "$1" || return 1; gzip -dc "$2" >"$TMP/im-restored-$1.sql"; }
+      lib_db_sql() { printf "%s\n" "$_im_home"; }
+      _domain_fix_owner_ids() { printf "%s" "$_im_ids"; }
+      _import_add() {
+        printf "add %s\n" "$*" >>"$_im_log"
+        (( _im_add_ok )) || return 1
+        if [[ " $* " == *" --static "* ]]; then _im_site "$1" static; else _im_site "$1" php; fi
+      }'
+mkdir -p "$SITES_ROOT/im-probe"; read -r _im_u _im_g < <(stat -c '%u %g' "$SITES_ROOT/im-probe"); _im_ids="${_im_u} ${_im_g}"
+_imf() {   # the command the way setup.sh runs it; prints the status, the output goes to $_im_out
+  local rc=0 prev=""
+  prev="$(trap -p ERR || true)"
+  trap - ERR
+  set +e
+  ( set -Eeuo pipefail; shopt -s lastpipe; OPT_QUIET=0; lib_import_main "$@" ) >"$_im_out" 2>&1 </dev/null
+  rc=$?
+  set -e
+  [[ -z "$prev" ]] || eval "$prev"
+  printf '%s' "$rc"
+}
+: >"$_im_log"
+assert_eq  "--list shows what is there"                 "0" "$(_imf old.example --port 2222 --list)"
+assert_has "a host alone is root's"                     "connect root@old.example port=2222" "$(cat "$_im_log")"
+assert_has "the site, what it is and its database"      "shop.example" "$(grep 'wordpress' "$_im_out")"
+assert_has "that it would be new here"                  "new" "$(grep 'blog.example' "$_im_out")"
+assert_has "and what has no name, with the way to bring it" "--path <directory> --as <domain>" "$(cat "$_im_out")"
+assert_lacks "and adds nothing"                         "add " "$(cat "$_im_log")"
+assert_eq  "with nobody to ask, the sites have to be named" "1" "$(_imf old.example)"
+assert_has "which the refusal says"                     "--all or --only" "$(cat "$_im_out")"
+assert_eq  "a site that is not there is refused"        "1" "$(_imf old.example --only nope.example)"
+assert_has "by name"                                    "nope.example was not found" "$(cat "$_im_out")"
+
+: >"$_im_log"; : >"$RUNUSER_LOG"
+_im_d1="$SITES_ROOT/shop.example/public_html"; _im_d2="$SITES_ROOT/blog.example/public_html"
+assert_eq  "two sites that are not here yet"            "0" "$(_imf user@old.example --only shop.example,blog.example)"
+assert_has "the WordPress is added without a certificate, with www" "add shop.example --no-ssl --www" "$(cat "$_im_log")"
+assert_has "the static one without PHP or a database"   "add blog.example --no-ssl --static --no-db" "$(cat "$_im_log")"
+assert_true "the files are in its document root"        test -f "$_im_d1/index.php"
+assert_true "the hidden ones too"                       test -f "$_im_d1/.htaccess"
+assert_true "and the uploads"                           test -f "$_im_d1/wp-content/uploads/a.txt"
+assert_false "the page cache stays behind"              test -e "$_im_d1/wp-content/cache/page.html"
+assert_false "the page a new site starts with is gone"  test -e "$_im_d1/index.html"
+assert_has "they are unpacked by the site's user, not by root" \
+  "-u $(lib_domain_ident shop.example) -- env -C / tar -C $_im_d1 --no-overwrite-dir -xzpf -" "$(cat "$RUNUSER_LOG")"
+assert_has "the database goes into the site's own"      "dbcreate shop.example" "$(cat "$_im_log")"
+_im_sql="$(cat "$TMP/im-restored-shop.example.sql" 2>/dev/null || true)"
+assert_has "what was imported is the dump"              "CREATE TABLE t" "$_im_sql"
+assert_has "MySQL 8's collation becomes one MariaDB has" "COLLATE=utf8mb4_unicode_520_ci" "$_im_sql"
+assert_lacks "and is nowhere left"                      "utf8mb4_0900_ai_ci" "$_im_sql"
+assert_has "wp-config.php names the database here"      "define( 'DB_NAME', 'shop_db' );" "$(cat "$_im_d1/wp-config.php")"
+assert_has "and its password"                           "define( 'DB_PASSWORD', 'LocalPass9' );" "$(cat "$_im_d1/wp-config.php")"
+assert_has "a WordPress that lives at www gets the site to answer there, its database still on record" \
+  "apply shop.example www=1 primary=1 db=shop_db" "$(cat "$_im_log")"
+assert_eq  "which is kept"                              "true" "$(jq -r '.www_primary' "$(lib_domain_json shop.example)")"
+assert_eq  "the static site has the other server's page" "the blog" "$(cat "$_im_d2/index.html")"
+assert_lacks "and no database"                          "dbcreate blog.example" "$(cat "$_im_log")"
+assert_lacks "a new site needs no backup first"         "backup " "$(cat "$_im_log")"
+assert_has "OpenLiteSpeed reads the .htaccess files that came" "reload" "$(cat "$_im_log")"
+assert_has "the count is said"                          "2 site(s) imported" "$(cat "$_im_out")"
+assert_has "and what comes next"                        "renew-ssl" "$(cat "$_im_out")"
+
+: >"$_im_log"
+printf 'changed there\n' >"$_im_shop/wp-content/uploads/a.txt"; printf 'mine\n' >"$_im_d1/kept.txt"
+assert_eq  "a site that is here already"                "0" "$(_imf old.example --only shop.example)"
+assert_lacks "is not added again"                       "add " "$(cat "$_im_log")"
+assert_has "is backed up as it is first"                "backup shop.example --tag pre-import --keep 0 --no-mail" "$(cat "$_im_log")"
+assert_has "which the plan says"                        "A backup is taken first" "$(cat "$_im_out")"
+assert_eq  "a file of the same name is replaced"        "changed there" "$(cat "$_im_d1/wp-content/uploads/a.txt")"
+assert_eq  "one that is only here stays"                "mine" "$(cat "$_im_d1/kept.txt")"
+assert_lacks "its settings are left alone"              "apply " "$(cat "$_im_log")"
+
+: >"$_im_log"
+assert_eq  "--no-create leaves out what is not here"    "0" "$(_imf old.example --only panel.example --no-create)"
+assert_has "and says so"                                "panel.example: left out" "$(cat "$_im_out")"
+assert_lacks "without adding it"                        "add " "$(cat "$_im_log")"
+OPT_DRY_RUN=1
+assert_eq  "a dry run"                                  "0" "$(_imf old.example --all)"
+OPT_DRY_RUN=0
+assert_has "says what it would bring"                   "[dry-run] would import 3 site(s)" "$(cat "$_im_out")"
+assert_lacks "and brings nothing"                       "add " "$(cat "$_im_log")"
+
+: >"$_im_log"
+assert_eq  "a directory without a name, as a domain"    "0" "$(_imf old.example --path "$_im_l/Example/html" --as EX.example)"
+assert_has "is a site of that name"                     "add ex.example --no-ssl --static --no-db" "$(cat "$_im_log")"
+assert_eq  "with its page"                              "example page" "$(cat "$SITES_ROOT/ex.example/public_html/index.html")"
+assert_eq  "a directory that is not there"              "1" "$(_imf old.example --path /nowhere/at/all --as none.example)"
+assert_has "is said to be none"                         "is not a directory on root@old.example" "$(cat "$_im_out")"
+: >"$_im_log"
+assert_eq  "--db names the database of a site that is no WordPress" "1" "$(_imf old.example --path "$_im_r/var/www/html" --as app.example --db appdb)"
+assert_has "which an account that cannot open it cannot bring" "this account cannot open the database appdb" "$(cat "$_im_out")"
+assert_true "its files are in place all the same"       test -f "$SITES_ROOT/app.example/public_html/index.php"
+assert_has "and the run ends by naming it"              "Not imported: app.example" "$(cat "$_im_out")"
+
+# what goes wrong
+: >"$_im_log"; _im_add_ok=0
+assert_eq  "a site that cannot be added fails"          "1" "$(_imf old.example --only panel.example)"
+assert_has "by name, with the way to try again"         "Not imported: panel.example" "$(cat "$_im_out")"
+_im_add_ok=1; _im_dump_mode="fail"; rm -f "$TMP/im-restored-shop.example.sql"
+assert_eq  "a dump that fails"                          "1" "$(_imf old.example --only shop.example)"
+assert_has "is said to"                                 "The database shopdb could not be fetched" "$(cat "$_im_out")"
+assert_false "and nothing is imported"                  test -e "$TMP/im-restored-shop.example.sql"
+_im_dump_mode="cut"
+assert_eq  "a dump that stops half way"                 "1" "$(_imf old.example --only shop.example)"
+assert_has "is not complete"                            "is not complete" "$(cat "$_im_out")"
+assert_false "and is not imported either"               test -e "$TMP/im-restored-shop.example.sql"
+_im_dump_mode=""
+_im_site prox.example proxy
+assert_eq  "a proxy site here takes no files"           "0" "$(_imf old.example --path "$_im_r/var/www/html" --as prox.example)"
+assert_has "and is left out"                            "prox.example: left out, it is a proxy site here" "$(cat "$_im_out")"
+
+# what is refused before anything is asked of the other server
+: >"$_im_log"
+assert_eq  "a server name with a command in it"         "1" "$(_imf 'root@old.example;id' --list)"
+assert_has "is no server"                               "Invalid server" "$(cat "$_im_out")"
+assert_eq  "nor is an option of ssh"                    "1" "$(_imf -oProxyCommand=id --list)"
+assert_eq  "a path with a blank"                        "1" "$(_imf old.example --path '/a b' --as x.example)"
+assert_has "is refused as one"                          "Invalid --path" "$(cat "$_im_out")"
+assert_eq  "a path that climbs"                         "1" "$(_imf old.example --path /srv/../etc --as x.example)"
+assert_eq  "--as without --path"                        "1" "$(_imf old.example --as x.example)"
+assert_eq  "--db without --path"                        "1" "$(_imf old.example --db x)"
+assert_eq  "a database name with a quote"               "1" "$(_imf old.example --path /srv/x --as x.example --db "a';b")"
+assert_eq  "a name that is no domain"                   "1" "$(_imf old.example --path /srv/x --as 'x y')"
+assert_eq  "nothing to bring"                           "1" "$(_imf old.example --all --no-db --no-files)"
+assert_eq  "no server at all"                           "1" "$(_imf --all)"
+assert_eq  "none of them reached the other server"      "" "$(cat "$_im_log")"
+assert_has "the command is in the reference"            "import <[user@]host>" "$(lib_usage)"
+assert_has "setup.sh knows it"                          'import)         lib_import_main' "$(cat "$ROOT/setup.sh")"
+
+eval "$_im_orig"; eval "$_im_saved"
+unset -f _im_row _im_dump _im_site _imf
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 if (( FAIL > 0 )); then exit 1; fi

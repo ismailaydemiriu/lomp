@@ -100,7 +100,7 @@ _ss_load_module() {
   # shellcheck source=/dev/null
   source "$file"
 }
-for _m in common lang system ols php db ssl domain harden scan proxy app mail webmail cloudflare backup monitor install rename menu; do
+for _m in common lang system ols php db ssl domain harden scan proxy app mail webmail cloudflare backup monitor install import rename menu; do
   _ss_load_module "$_m"
 done
 unset _m
@@ -186,6 +186,8 @@ main() {
     notify) [[ " ${rest[*]:-} " == *" --send "* ]] || lib_lock ;;
     proxy)  if [[ "${rest[0]:-list}" != "list" && "${rest[0]:-list}" != "help" ]]; then lib_lock; fi ;;
     redirect) case "${rest[0]:-list}" in list|--list|help|-h|--help) ;; *) lib_lock ;; esac ;;
+    # looking at what another server has changes nothing here
+    import) [[ " ${rest[*]:-} " == *" --list "* ]] || lib_lock ;;
     # reading the mail stack's state changes nothing; everything else writes a table or
     # restarts a service. "box list", "alias list" and "domain list" only read, and "dns"
     # only prints unless --apply, which writes into Cloudflare and into the domain's own state.
@@ -243,6 +245,7 @@ main() {
     scan)           lib_scan_main "${rest[@]}" || exit 1 ;;
     backup)         lib_backup_main "${rest[@]}" ;;
     restore)        lib_restore_main "${rest[@]}" ;;
+    import)         lib_import_main "${rest[@]}" ;;
     renew-ssl)      lib_ssl_renew_main "${rest[@]}" ;;
     ssl)            lib_ssl_main "${rest[@]}" || exit 1 ;;
     update)         lib_update_main "${rest[@]}" ;;

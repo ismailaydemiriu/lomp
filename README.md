@@ -381,6 +381,49 @@ target has a certificate, `www.` in front when that is the target's main name. `
 `lomp ssl` and `lomp doctor` show redirects next to the sites, and `add` refuses a name that
 redirects until `redirect del` frees it.
 
+### Bringing sites from another server
+
+```bash
+sudo lomp import root@203.0.113.10                 # item 29 in the menu does the same
+sudo lomp import root@203.0.113.10 --list          # only show what is there
+sudo lomp import root@203.0.113.10 --only example.com,shop.example.com
+sudo lomp import root@203.0.113.10 --all --no-create      # only the sites that already exist here
+sudo lomp import root@203.0.113.10 --path /usr/local/lsws/Example/html --as example.com
+```
+
+`import` logs in to the other server over SSH - ssh asks for the password itself, once; `--key
+FILE`, `--password-file FILE` and `--port N` are there for the rest - and looks at what it
+serves: the virtual hosts of an OpenLiteSpeed (lomp, CyberPanel, a plain install), by the names
+its listeners map to them, and the directories under `/home`, `/var/www`, `/www/wwwroot` and
+`/var/www/vhosts` that are named after a domain. It lists them with their size, what they are
+(static, PHP, WordPress), the database a WordPress names and whether a site of that name is
+here already, and asks which ones to bring. Then, for each:
+
+- a site that is not here yet is added, without a certificate - the DNS still points to the
+  other server. With `--no-create` such a site is left out instead: add the ones you want
+  yourself first, the way you want them, and only those are filled;
+- a site that is here already is backed up first (`pre-import` in its backups); files with the
+  same name are replaced, the others stay;
+- the files are packed there and unpacked into `public_html` here by the site's own user, so
+  nothing arrives owned by root. A WordPress page cache (`wp-content/cache`) is left behind;
+- the database of a WordPress is dumped there - as the account you logged in with, or with the
+  login in its `wp-config.php` when that account cannot open it - checked for being complete,
+  and imported into the site's database here; `wp-config.php` then gets the name, user and
+  password of the database on this server. Tables in MySQL 8's `utf8mb4_0900_ai_ci` become
+  `utf8mb4_unicode_520_ci`, which MariaDB has;
+- a WordPress whose own address is `www.<domain>` gets a site that answers there.
+
+A directory that is served under no name - `/usr/local/lsws/Example/html`, `/var/www/html`, a
+user's `public_html` - is listed apart; `--path DIR --as DOMAIN` brings it as that domain, and
+`--db NAME` with it the database of an application that is no WordPress (its own configuration
+file is yours to point at the new database: `lomp credentials <domain>`).
+
+The other server is only read. Mail, certificates and cron jobs are not copied, and neither is
+anything outside a site's document root. The sites answer over HTTP here until the DNS of a
+domain points to this server; then `sudo lomp renew-ssl <domain>` gets its certificate. Running
+the import again for a site brings what changed in the meantime - worth doing once more just
+before the DNS moves.
+
 ### WordPress into a site that is already there
 
 `add --wordpress` installs WordPress whole. To do the installation yourself in the browser, add
@@ -1182,6 +1225,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
 | `lib/backup.sh` | Backup, restore, retention, encryption, remotes, scheduling |
 | `lib/monitor.sh` | `status`, `doctor`, health check, notifications |
 | `lib/rename.sh` | `rename`: a site under another domain name; `redirect`: a name that only sends its visitors on |
+| `lib/import.sh` | `import`: the sites of another server, brought here over SSH |
 | `lib/menu.sh` | Command reference and the interactive menu |
 
 ---
