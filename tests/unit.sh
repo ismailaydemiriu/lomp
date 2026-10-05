@@ -5674,6 +5674,7 @@ _md_stubs='lib_mail_installed() { return 0; }
   lib_cf_token() { printf ""; }
   lib_require_tools() { return 0; }
   sleep() { return 0; }
+  lib_webmail_user_forget() { return 0; }
   _mail_sendas_current() { printf "x\n" >>"$_md/sendas.log"; return 0; }
   lib_mail_backup_domain() { printf "%s\n" "$*" >>"$_md/backup.log"; MAIL_LAST_ERROR="no room"; return "${_md_backup_rc:-0}"; }'
 _md_do()  { eval "$_md_stubs"; "$@"; }                    # under run_isolated: the status is the answer
@@ -6050,6 +6051,313 @@ assert_eq "what the picker offers: the domains whose mail is on" "all.example co
 
 eval "$_md_saved_vars"; eval "$_md_saved_fn"
 unset -f _md_do _md_run _md_sendas _mmail
+
+# =============================================================================
+section "the webmail forgets a mailbox that is gone, and only one that is gone"
+# Roundcube keeps a user of its own for every address that has signed in - the address book,
+# the identities, the settings - and finds it by the address alone. A mailbox deleted and made
+# again under the same name, for somebody else, signed in to the previous owner's contacts. So
+# the webmail's user goes with a mailbox that is removed for good, and with no other: one that
+# "mail disable" puts aside comes back with everything it had.
+_wf="$TMP/wmforget"; rm -rf "$_wf"; mkdir -p "$_wf"
+_wf_saved_fn="$(declare -f lib_domains_list)"
+eval "$(sed -n '/^lib_domains_list() {/,/^}/p' "$ROOT/lib/common.sh")"
+_wf_saved_vars="$(declare -p STATE_DIR MAIL_STATE_DIR MAIL_DOMAINS_DIR MAIL_DOMAINS_GONE_DIR MAIL_ALIAS_DIR MAIL_DISABLED_DIR MAIL_PASSWD_FILE MAIL_DKIM_DIR MAIL_VMAIL_HOME BACKUP_ROOT WM_CURRENT WM_INFO)"
+STATE_DIR="$_wf/state"; mkdir -p "$STATE_DIR/domains"
+lib_state_init
+MAIL_STATE_DIR="$_wf/mailstate"; MAIL_DOMAINS_DIR="$MAIL_STATE_DIR/domains"; MAIL_DOMAINS_GONE_DIR="$_wf/gone"
+MAIL_ALIAS_DIR="$MAIL_STATE_DIR/aliases"; MAIL_DISABLED_DIR="$MAIL_STATE_DIR/disabled"
+MAIL_PASSWD_FILE="$_wf/passwd"; MAIL_DKIM_DIR="$_wf/dkim"; MAIL_VMAIL_HOME="$_wf/vmail"; BACKUP_ROOT="$_wf/backups"
+mkdir -p "$MAIL_ALIAS_DIR" "$MAIL_DKIM_DIR" "$MAIL_VMAIL_HOME" "$BACKUP_ROOT"
+_wf_hash='{BLF-CRYPT}$2y$05$abcdefghijklmnopqrstuv'
+# A webmail that is installed: a release, "current" pointing at it, and the file that says
+# there is a database. Where the filesystem has no links the release itself stands in for it.
+mkdir -p "$_wf/wm/releases/1.7.4/bin"; printf '<?php\n' >"$_wf/wm/releases/1.7.4/bin/deluser.sh"
+if (( CAN_SYMLINK )); then ln -sfn "$_wf/wm/releases/1.7.4" "$_wf/wm/current"; WM_CURRENT="$_wf/wm/current"
+else WM_CURRENT="$_wf/wm/releases/1.7.4"; fi
+WM_INFO="$_wf/webmail.info"
+printf 'WM_DB_NAME=lomp_webmail\nWM_DB_USER=lomp_webmail\nWM_DB_PASS=x\nWM_DES_KEY=y\n' >"$WM_INFO"
+# Roundcube's table of users is a file here: one "name<TAB>host" line each. The stand-in for
+# PHP takes a line out of it the way bin/deluser.sh deletes that one row, and writes down where
+# it was started and with what.
+cat >"$_wf/php" <<'WF_PHP'
+#!/usr/bin/env bash
+here="$(cd "$(dirname "$0")" && pwd)"
+printf '%s|%s\n' "${PWD##*/}" "$*" >>"$here/php.log"
+if [[ -e "$here/php.fail" ]]; then echo "No DB connection" >&2; exit 1; fi
+if [[ -e "$here/php.deaf" ]]; then echo "User not found."; exit 0; fi
+[[ $# -eq 3 && "$1" == "bin/deluser.sh" && "$2" == --host=* ]] || exit 1
+awk -F'\t' -v n="$3" -v h="${2#--host=}" '!($1 == n && $2 == h)' "$here/users.tsv" >"$here/users.new"
+mv "$here/users.new" "$here/users.tsv"
+echo "Successfully deleted user 1"
+WF_PHP
+chmod +x "$_wf/php"
+# What needs a mail server, a database or PHP to be there is stood in for; what decides who is
+# forgotten and when is the real code. The table answers the questions the code asks of it,
+# and nothing else: a statement of another shape is a failure.
+_wf_stubs="$(cat <<'WF_STUBS'
+lib_mail_installed() { return 0; }
+lib_mail_dkim_ensure() { return 0; }
+lib_mail_tables_apply() { return 0; }
+lib_mail_domain_cert_ensure() { return 0; }
+lib_mail_dns_print() { return 0; }
+lib_mail_backup_domain() { return 0; }
+lib_cf_token() { printf ""; }
+lib_require_tools() { return 0; }
+sleep() { return 0; }
+doveadm() { return 0; }
+postqueue() { return 0; }
+lib_webmail_installed() { [[ ! -e "$_wf/wm.off" ]]; }
+lib_webmail_php_version() { printf "8.3"; }
+lib_php_cli() { printf "%s" "$_wf/php"; }
+lib_db_sql() {
+  local v=""
+  printf "%s\n" "$1" >>"$_wf/sql.log"
+  [[ ! -e "$_wf/db.down" ]] || return 1
+  v="$(sed -n "s/.* = '\([^']*\)' ORDER BY user_id\$/\1/p" <<<"$1")"
+  case "$1" in
+    *"users WHERE LOWER(SUBSTRING_INDEX(username, '@', -1)) = '"*)
+      awk -F'\t' -v v="$v" '{ n = split($1, p, "@"); if (tolower(p[n]) == v) print }' "$_wf/users.tsv" ;;
+    *"users WHERE LOWER(username) = '"*) awk -F'\t' -v v="$v" 'tolower($1) == v' "$_wf/users.tsv" ;;
+    *"users WHERE username = '"*)        awk -F'\t' -v v="$v" '$1 == v' "$_wf/users.tsv" ;;
+    *) return 1 ;;
+  esac
+}
+WF_STUBS
+)"
+_wf_do()    { eval "$_wf_stubs"; "$@"; }                               # under run_isolated: the status is the answer
+_wf_run()   { ( _wf_do "$@" ) >/dev/null 2>&1 || true; }               # where it is expected to work
+# How it ended and what it printed, run the way the installer runs it: with errexit armed, so
+# a helper that hands a failure back to its caller ends the command here as it would there.
+_wf_tee()   { "$@" >"$_wf/say.out" 2>&1; }
+_wf_say()   { : >"$_wf/say.out"; printf 'rc=%s\n' "$(OPT_QUIET=0 run_isolated _wf_tee _wf_do "$@")"; cat "$_wf/say.out"; }
+_wf_users() { : >"$_wf/users.tsv"; if (($# > 0)); then printf '%s\t127.0.0.1\n' "$@" >"$_wf/users.tsv"; fi; : >"$_wf/php.log"; : >"$_wf/sql.log"; : >"$RUNUSER_LOG"; }
+_wf_has()   { grep -qxF "${1}"$'\t127.0.0.1' "$_wf/users.tsv"; }
+_wf_left()  { cut -f1 "$_wf/users.tsv" | tr '\n' ' ' | sed 's/ $//'; }
+_wf_asked() { cat "$_wf/sql.log" "$_wf/php.log"; }
+
+# ---- one user, by the address ------------------------------------------------
+_wf_users gone@shop.example other@shop.example far@elsewhere.example
+assert_eq    "the webmail forgets an address it has a user for"     0 "$(run_isolated _wf_do lib_webmail_user_forget gone@shop.example)"
+assert_false "the user is out of Roundcube's table"                 _wf_has gone@shop.example
+assert_eq    "and nobody else is"                                   "other@shop.example far@elsewhere.example" "$(_wf_left)"
+assert_eq    "Roundcube's own script did it, once, in the release that runs" \
+  "1.7.4|bin/deluser.sh --host=127.0.0.1 gone@shop.example" "$(cat "$_wf/php.log")"
+assert_eq    "as the webmail's own user, not as root" \
+  "-u ${WM_USER} -- ${_wf}/php bin/deluser.sh --host=127.0.0.1 gone@shop.example" "$(cat "$RUNUSER_LOG")"
+assert_has   "the table was asked for that one address"             "users WHERE LOWER(username) = 'gone@shop.example' ORDER BY" "$(cat "$_wf/sql.log")"
+_wf_users other@shop.example
+assert_eq    "an address that never signed in is no failure"        0 "$(run_isolated _wf_do lib_webmail_user_forget never@shop.example)"
+assert_eq    "and PHP is not started for it"                        "" "$(cat "$_wf/php.log")"
+assert_eq    "how many went is counted"                             "1 0" \
+  "$( ( _wf_do lib_webmail_user_forget other@shop.example; printf '%s ' "$WM_FORGOT"; _wf_do lib_webmail_user_forget other@shop.example; printf '%s' "$WM_FORGOT" ) 2>/dev/null )"
+# Dovecot lowers a login and Roundcube does by default, but that is a default of theirs: a
+# user stored in another case is this mailbox's all the same, and the script is told the name
+# as it is stored - the column is compared byte for byte
+_wf_users Info@Shop.Example
+_wf_run lib_webmail_user_forget INFO@shop.example
+assert_eq    "a user stored in another case is found, and named as stored" \
+  "1.7.4|bin/deluser.sh --host=127.0.0.1 Info@Shop.Example" "$(cat "$_wf/php.log")"
+assert_eq    "and is gone"                                          "" "$(_wf_left)"
+printf 'old@shop.example\tlocalhost\n' >"$_wf/users.tsv"; : >"$_wf/php.log"
+_wf_run lib_webmail_user_forget old@shop.example
+assert_eq    "the host is the one stored with the user, so the row found is the row removed" \
+  "1.7.4|bin/deluser.sh --host=localhost old@shop.example" "$(cat "$_wf/php.log")"
+
+# ---- a domain's worth: @domain, the way a catch-all is named -----------------
+_wf_users a@shop.example B@Shop.Example c@myshop.example d@shop.example.tr
+assert_eq    "@domain is every user of that domain"                 2 "$( ( _wf_do lib_webmail_user_forget @Shop.Example; printf '%s' "$WM_FORGOT" ) 2>/dev/null )"
+assert_eq    "and of no domain whose name only ends or begins the same" "c@myshop.example d@shop.example.tr" "$(_wf_left)"
+assert_has   "the domain is what follows the last @"                "users WHERE LOWER(SUBSTRING_INDEX(username, '@', -1)) = 'shop.example' ORDER BY" "$(cat "$_wf/sql.log")"
+# what comes back from a table is text, and here it becomes an argument: Roundcube's option
+# parser would read a name that starts with a dash as an option
+_wf_users --age=1@shop.example ok@shop.example
+assert_eq    "a stored name that is no address is left, and that is not success" 1 "$(run_isolated _wf_do lib_webmail_user_forget @shop.example)"
+assert_eq    "it never became an argument"                          "1.7.4|bin/deluser.sh --host=127.0.0.1 ok@shop.example" "$(cat "$_wf/php.log")"
+printf 'odd@shop.example\t127.0.0.1 --age=1\n' >"$_wf/users.tsv"; : >"$_wf/php.log"
+assert_eq    "nor does a host that no host name looks like"         "1:" "$(run_isolated _wf_do lib_webmail_user_forget odd@shop.example):$(cat "$_wf/php.log")"
+# and nothing reaches the statement that could end its string
+_wf_users gone@shop.example
+assert_eq    "a name with a quote in it is refused"                 1 "$(run_isolated _wf_do lib_webmail_user_forget "x' OR '1'='1")"
+assert_eq    "so is a domain with one"                              1 "$(run_isolated _wf_do lib_webmail_user_forget "@shop.example' OR 1=1 -- ")"
+assert_eq    "and the lookup refuses them by itself"                1 "$(run_isolated _wf_do _wm_users "x'y@shop.example")"
+assert_eq    "none of them reached the database"                    "" "$(_wf_asked)"
+
+# ---- what it must not do, and what counts as not done ------------------------
+_wf_out="$(OPT_DRY_RUN=1 _wf_say lib_webmail_user_forget gone@shop.example)"
+assert_has   "a dry run says what would go"                         "would remove what the webmail keeps for gone@shop.example" "$_wf_out"
+assert_has   "and succeeds"                                         "rc=0" "$_wf_out"
+assert_true  "without removing it"                                  _wf_has gone@shop.example
+assert_eq    "or asking anything of the database or of PHP"         "" "$(_wf_asked)"
+: >"$_wf/php.fail"
+assert_eq    "a script that fails is a removal that failed"         1 "$(run_isolated _wf_do lib_webmail_user_forget gone@shop.example)"
+assert_true  "and the user is where it was"                         _wf_has gone@shop.example
+rm -f "$_wf/php.fail"; : >"$_wf/php.deaf"
+# "User not found." is exit status 0 in Roundcube's script, and so is a removal a plugin called off
+assert_eq    "so is one that exits 0 and removes nothing"           1 "$(run_isolated _wf_do lib_webmail_user_forget gone@shop.example)"
+rm -f "$_wf/php.deaf"; : >"$_wf/db.down"; : >"$_wf/php.log"
+assert_eq    "and a database that does not answer"                  1 "$(run_isolated _wf_do lib_webmail_user_forget gone@shop.example)"
+assert_eq    "PHP is not started on a guess"                        "" "$(cat "$_wf/php.log")"
+rm -f "$_wf/db.down"; : >"$_wf/wm.off"
+# uninstalled with its database kept: the user is still in it, and no script is there to run
+assert_eq    "a webmail that is not installed cannot remove its user" 1 "$(run_isolated _wf_do lib_webmail_user_forget gone@shop.example)"
+assert_eq    "but an address it has nothing for is still no failure"  0 "$(run_isolated _wf_do lib_webmail_user_forget never@shop.example)"
+rm -f "$_wf/wm.off"; : >"$_wf/sql.log"
+assert_eq    "a server with no webmail database has nothing to forget" "0:" \
+  "$(WM_INFO="$_wf/no-such.info" run_isolated _wf_do lib_webmail_user_forget gone@shop.example):$(cat "$_wf/sql.log")"
+
+# ---- deleting a mailbox ------------------------------------------------------
+mkdir -p "$STATE_DIR/domains/shop.example"
+printf '{"domain":"shop.example","mail":{"enabled":true,"selector":"lomp202601"}}\n' >"$(lib_domain_json shop.example)"
+lib_mail_passwd_set "info@shop.example" "$_wf_hash" "1G"
+lib_mail_passwd_set "sales@shop.example" "$_wf_hash" "1G"
+lib_mail_passwd_set "quiet@shop.example" "$_wf_hash" "1G"
+_wf_users info@shop.example sales@shop.example me@other.example
+_wf_out="$(_wf_say lib_mail_box_del_main info@shop.example)"
+assert_has   "a mailbox is deleted"                                 "rc=0" "$_wf_out"
+assert_false "its line is gone"                                     lib_mail_box_exists info@shop.example
+assert_false "and so is what the webmail kept for it"               _wf_has info@shop.example
+assert_eq    "the mailbox beside it keeps its own"                  "sales@shop.example me@other.example" "$(_wf_left)"
+# no archive brings an address book back, so its going is not left for the log alone to say
+assert_has   "what went with it is said"                            "What the webmail kept for info@shop.example is gone too" "$_wf_out"
+_wf_out="$(_wf_say lib_mail_box_del_main quiet@shop.example)"
+assert_has   "a mailbox that never signed in is deleted like any other" "rc=0" "$_wf_out"
+assert_lacks "with nothing said about a webmail it never used"      "webmail" "$_wf_out"
+# never a reason to stop: by then the mailbox is gone, and a command that failed there would
+# leave an operator with a deleted mailbox and no word on what is left
+lib_mail_passwd_set "info@shop.example" "$_wf_hash" "1G"
+_wf_users info@shop.example sales@shop.example; : >"$_wf/php.fail"
+_wf_out="$(_wf_say lib_mail_box_del_main info@shop.example)"
+rm -f "$_wf/php.fail"
+assert_has   "a mailbox goes even when the webmail could not follow" "rc=0" "$_wf_out"
+assert_false "its line is gone all the same"                        lib_mail_box_exists info@shop.example
+assert_has   "what is left is said"                                 "The webmail still holds what info@shop.example kept there" "$_wf_out"
+assert_has   "with the reason"                                      "left 1 of 1 user(s) in place" "$_wf_out"
+assert_has   "and the command that finishes it"                     "lomp webmail forget info@shop.example" "$_wf_out"
+lib_mail_passwd_set "dry@shop.example" "$_wf_hash" "1G"
+_wf_users dry@shop.example sales@shop.example
+( OPT_DRY_RUN=1; _wf_do lib_mail_box_del_main dry@shop.example ) >/dev/null 2>&1 || true
+assert_true  "a dry run deletes no mailbox"                         lib_mail_box_exists dry@shop.example
+assert_true  "and no webmail user"                                  _wf_has dry@shop.example
+assert_eq    "and starts nothing"                                   "" "$(_wf_asked)"
+
+# ---- turning mail off is not deleting it -------------------------------------
+_wf_run lib_mail_disable_main shop.example
+assert_false "a domain whose mail is off has no login"              lib_mail_box_exists sales@shop.example
+assert_true  "its mailboxes are put aside"                          lib_mail_box_parked sales@shop.example
+assert_false "which is not what a mailbox of another domain is"     lib_mail_box_parked sales@other.example
+assert_false "nor an address nobody ever had"                       lib_mail_box_parked nobody@shop.example
+assert_eq    "and the webmail keeps what was theirs"                "dry@shop.example sales@shop.example" "$(_wf_left)"
+assert_eq    "it was not even asked"                                "" "$(_wf_asked)"
+_wf_run lib_mail_enable_main shop.example
+assert_true  "the mailbox comes back"                               lib_mail_box_exists sales@shop.example
+assert_false "and is not put aside any more"                        lib_mail_box_parked sales@shop.example
+assert_eq    "to the address book it left"                          "dry@shop.example sales@shop.example" "$(_wf_left)"
+assert_eq    "with nothing asked on the way back either"            "" "$(_wf_asked)"
+assert_lacks "putting mailboxes aside never names the webmail"      "webmail" "$(declare -f lib_mail_boxes_park)"
+
+# ---- deleting a domain's mail ------------------------------------------------
+# The mailboxes that were put aside are not in the live file, so no loop over the mailboxes
+# ever meets them - and theirs is exactly what the next owner of the name must not be handed.
+_wf_run lib_mail_disable_main shop.example
+_wf_users dry@shop.example sales@shop.example old@shop.example me@other.example x@myshop.example
+_wf_run lib_mail_disable_main shop.example --delete-data
+assert_false "deleting a domain's mail takes the lines that were put aside" test -s "${MAIL_DISABLED_DIR}/shop.example.passwd"
+assert_false "and what the webmail kept for those mailboxes"        _wf_has sales@shop.example
+assert_false "every one of them"                                    _wf_has dry@shop.example
+# old@ has no line anywhere: a mailbox deleted by a release that left its webmail user behind
+assert_false "a user left behind long ago goes with the domain"     _wf_has old@shop.example
+assert_eq    "another domain's users are not this domain's"         "me@other.example x@myshop.example" "$(_wf_left)"
+lib_mail_domain_register own.example
+lib_json_set "$(lib_mail_json own.example)" '.mail.enabled = true | .mail.selector = "lomp202602"'
+lib_mail_passwd_set "a@own.example" "$_wf_hash" "1G"
+lib_mail_passwd_set "b@own.example" "$_wf_hash" "1G"
+_wf_users a@own.example b@own.example me@other.example
+_wf_out="$(_wf_say lib_mail_domain_del_main own.example --no-backup)"
+assert_false "a mail domain that is removed has no mailbox"         lib_mail_box_exists a@own.example
+assert_eq    "and nobody in the webmail"                            "me@other.example" "$(_wf_left)"
+# the one thing a removal takes that no archive brings back, so it is said before the question
+assert_has   "the operator is told what no backup holds"            "and that is in no backup" "$_wf_out"
+assert_has   "removing a site goes down the same road"              "lib_mail_domain_purge" "$(declare -f lib_domain_remove_main)"
+_wf_pg="$(declare -f lib_mail_domain_purge)"
+_wf_ln_box="$(grep -n 'lib_mail_box_remove' <<<"$_wf_pg" | head -1 | cut -d: -f1 || true)"
+_wf_ln_parked="$(grep -n 'MAIL_DISABLED_DIR' <<<"$_wf_pg" | head -1 | cut -d: -f1 || true)"
+_wf_ln_forget="$(grep -n '_mail_webmail_forget' <<<"$_wf_pg" | head -1 | cut -d: -f1 || true)"
+assert_true  "the webmail is asked once no line of the domain is left to sign in with" \
+  test "${_wf_ln_box:-0}" -gt 0 -a "${_wf_ln_box:-0}" -lt "${_wf_ln_parked:-0}" -a "${_wf_ln_parked:-0}" -lt "${_wf_ln_forget:-0}"
+lib_mail_domain_register fail.example
+lib_json_set "$(lib_mail_json fail.example)" '.mail.enabled = true | .mail.selector = "lomp202602"'
+lib_mail_passwd_set "a@fail.example" "$_wf_hash" "1G"
+_wf_users a@fail.example; : >"$_wf/db.down"
+_wf_out="$(_wf_say lib_mail_domain_del_main fail.example --no-backup)"
+rm -f "$_wf/db.down"
+assert_has   "a domain goes even when the webmail could not follow" "rc=0" "$_wf_out"
+assert_false "all of it"                                            lib_mail_domain_standalone fail.example
+assert_has   "what is left is said, for the domain"                 "The webmail still holds what the mailboxes of fail.example kept there" "$_wf_out"
+assert_has   "once, with the command that finishes it"              "lomp webmail forget @fail.example" "$_wf_out"
+assert_eq    "and not once for each mailbox"                        1 "$(grep -c 'The webmail still holds' <<<"$_wf_out" || true)"
+
+# ---- a restore takes logins away, not mailboxes ------------------------------
+# The archive decides which lines a domain has, so one made after the backup is dropped. Its
+# mail is not deleted by that, and neither is what the webmail keeps: nearly every line that is
+# dropped comes straight back, to an owner who expects the address book where it was.
+_wf_ar="$_wf/ar"; mkdir -p "$_wf_ar/mail" "$BACKUP_ROOT/rs.example"
+printf '{"format":1,"kind":"mail","domain":"rs.example","created_at":"2026-01-01T00:00:00Z","maildirs":"doveadm"}\n' >"$_wf_ar/manifest.json"
+printf '{"enabled":true,"selector":"lomp202603","selectors_used":["lomp202603"]}\n' >"$_wf_ar/mail/state.json"
+printf 'kept@rs.example:%s::::::userdb_quota_rule=*:storage=1G\n' "$_wf_hash" >"$_wf_ar/mail/passwd"
+tar -C "$_wf_ar" -czf "$BACKUP_ROOT/rs.example/rs.example-mail-20260101-000000.tar.gz" .
+lib_mail_domain_register rs.example
+lib_json_set "$(lib_mail_json rs.example)" '.mail.enabled = true | .mail.selector = "lomp202603"'
+lib_mail_passwd_set "kept@rs.example" "$_wf_hash" "1G"
+lib_mail_passwd_set "late@rs.example" "$_wf_hash" "1G"
+_wf_users kept@rs.example late@rs.example
+_wf_run lib_mail_restore_domain rs.example "$BACKUP_ROOT/rs.example/rs.example-mail-20260101-000000.tar.gz"
+assert_true  "a restore brings back the mailboxes of the archive"   lib_mail_box_exists kept@rs.example
+assert_false "and drops the line of one made since"                 lib_mail_box_exists late@rs.example
+assert_eq    "but the webmail forgets nobody"                       "kept@rs.example late@rs.example" "$(_wf_left)"
+assert_eq    "and is not asked to"                                  "" "$(_wf_asked)"
+assert_lacks "dropping the lines never names the webmail"           "webmail" "$(declare -f _mail_lines_drop)"
+
+# ---- lomp webmail forget -----------------------------------------------------
+# For what a release before this one left behind, and for a removal that could not finish.
+# What the webmail keeps for a mailbox that exists is its owner's, whether the mailbox is live
+# or only switched off.
+mkdir -p "$STATE_DIR/domains/cmd.example" "$STATE_DIR/domains/off.example"
+printf '{"domain":"cmd.example","mail":{"enabled":true,"selector":"lomp202601"}}\n' >"$(lib_domain_json cmd.example)"
+printf '{"domain":"off.example","mail":{"enabled":true,"selector":"lomp202601"}}\n' >"$(lib_domain_json off.example)"
+lib_mail_passwd_set "live@cmd.example" "$_wf_hash" "1G"
+lib_mail_passwd_set "p@off.example" "$_wf_hash" "1G"
+_wf_run lib_mail_disable_main off.example
+_wf_users live@cmd.example p@off.example gone@cmd.example x@nomail.example y@nomail.example
+assert_eq    "forget refuses a mailbox that exists"                 1 "$(run_isolated _wf_do lib_webmail_forget_main live@cmd.example)"
+assert_eq    "and one that is only switched off"                    1 "$(run_isolated _wf_do lib_webmail_forget_main p@off.example)"
+assert_eq    "a domain that still has mailboxes"                    1 "$(run_isolated _wf_do lib_webmail_forget_main @cmd.example)"
+assert_eq    "or has them put aside"                                1 "$(run_isolated _wf_do lib_webmail_forget_main @off.example)"
+assert_eq    "a word that names nobody"                             1 "$(run_isolated _wf_do lib_webmail_forget_main "not an address")"
+assert_eq    "and nothing at all"                                   1 "$(run_isolated _wf_do lib_webmail_forget_main)"
+assert_eq    "none of which asked the webmail anything"             "" "$(_wf_asked)"
+assert_has   "a live mailbox is pointed at the command that deletes it" "lomp mail box del live@cmd.example" "$(_wf_say lib_webmail_forget_main live@cmd.example)"
+assert_has   "one that is switched off at the command that brings it back" "lomp mail enable off.example" "$(_wf_say lib_webmail_forget_main p@off.example)"
+_wf_out="$(_wf_say lib_webmail_forget_main Gone@Cmd.Example)"
+assert_false "a mailbox that is gone is forgotten"                  _wf_has gone@cmd.example
+assert_has   "and the command says so"                              "The webmail has forgotten gone@cmd.example: 1 user(s)" "$_wf_out"
+assert_has   "asked again, it says there is nothing"                "The webmail keeps nothing for gone@cmd.example" "$(_wf_say lib_webmail_forget_main gone@cmd.example)"
+assert_eq    "@domain, for a domain with no mailbox left"           0 "$(run_isolated _wf_do lib_webmail_forget_main @nomail.example)"
+assert_eq    "takes every user of it and no other"                  "live@cmd.example p@off.example" "$(_wf_left)"
+_wf_users gone@cmd.example
+_wf_out="$(OPT_DRY_RUN=1 _wf_say lib_webmail_forget_main gone@cmd.example)"
+assert_has   "a dry run of it says what would go"                   "would remove what the webmail keeps for gone@cmd.example" "$_wf_out"
+assert_lacks "and does not claim it went"                           "has forgotten" "$_wf_out"
+assert_lacks "nor that there was nothing to go"                     "keeps nothing" "$_wf_out"
+assert_true  "because it is still there"                            _wf_has gone@cmd.example
+: >"$_wf/php.fail"
+assert_eq    "a removal that fails is a failed command"             1 "$(run_isolated _wf_do lib_webmail_forget_main gone@cmd.example)"
+rm -f "$_wf/php.fail"
+assert_has   "the command is in the reference"                      "webmail forget <user@domain>|@<domain>" "$(lib_usage)"
+assert_has   "and the dispatcher knows it"                          'lib_webmail_forget_main "${1:-}"' "$(declare -f lib_webmail_main)"
+
+eval "$_wf_saved_vars"; eval "$_wf_saved_fn"
+unset -f _wf_do _wf_run _wf_tee _wf_say _wf_users _wf_has _wf_left _wf_asked
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 if (( FAIL > 0 )); then exit 1; fi

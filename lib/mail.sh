@@ -1718,6 +1718,16 @@ lib_mail_boxes() {   # [domain]
 
 lib_mail_box_exists() { lib_mail_boxes | grep -qxF "${1,,}"; }
 
+# ...or one that is only put aside: "mail disable" takes a domain's lines out of the live file
+# and keeps them, hashes and all, for "mail enable" to bring back. Such a mailbox is off, not
+# gone, and nothing of it may be treated as left over.
+lib_mail_box_parked() {   # address
+  local a="${1,,}" f=""
+  f="${MAIL_DISABLED_DIR}/${a#*@}.passwd"
+  [[ -s "$f" ]] || return 1
+  awk -F: -v u="$a" '$1 == u { found = 1 } END { exit !found }' "$f"
+}
+
 lib_mail_box_quota() {   # address -> the quota rule's size, or the default
   local a="${1,,}" v=""
   [[ -s "$MAIL_PASSWD_FILE" ]] || { printf '%s' "$MAIL_QUOTA_DEFAULT"; return 0; }
@@ -2412,6 +2422,12 @@ lib_mail_domain_purge() {   # domain
   # "mail enable" merges them straight back in. A domain removed and later hosted for
   # somebody else would otherwise come up with the previous owner's logins working.
   lib_rm "${MAIL_DISABLED_DIR}/${d}.passwd"
+  # ...and what the webmail kept for all of them, now that no line of this domain is left to
+  # sign in with. Asked by domain, not address by address in the loop above: the mailboxes
+  # that were put aside never pass through that loop, and theirs is exactly the address book
+  # the next owner of this name must not be handed. It also takes what a release before this
+  # one left behind for a mailbox of this domain that was deleted long ago.
+  _mail_webmail_forget "@${d}"
   # every key of this domain, not only the one it signs with: a rotation may have a second
   # one waiting for its record, and a finished one keeps the retired key for a week
   lib_rm "${MAIL_DKIM_DIR}/${d}.${sel}.key"
@@ -2581,6 +2597,8 @@ lib_mail_box_quota_main() {   # address quota
 # The line goes first: from that moment no new session can start. Only then is what is still
 # open closed, and only then does the mail go - otherwise a client with a saved password
 # reconnects in the gap and recreates the mailbox under the directory just deleted.
+# What the webmail kept for the address is the caller's to remove (_mail_webmail_forget): one
+# mailbox by its address, a domain's worth in one go.
 lib_mail_box_remove() {   # address   (no questions; the callers ask)
   local a="${1,,}" d="" loc=""
   d="${a#*@}"; loc="${a%%@*}"
@@ -2594,6 +2612,26 @@ lib_mail_box_remove() {   # address   (no questions; the callers ask)
   return 0
 }
 
+# What the webmail kept for a mailbox that is gone for good. Roundcube finds its user by the
+# address alone, so the next mailbox made under that address would sign in to the previous
+# owner's address book, identities and settings (lib/webmail.sh has the whole of it). Called
+# where a mailbox is deleted and never where it is only put aside: "mail disable" keeps
+# everything, so that "mail enable" brings the mailbox back as it was.
+# Never a reason to stop, either. By the time this runs the mailbox itself is gone, so what
+# could not be removed is said out loud, with the command that removes it later.
+_mail_webmail_forget() {   # address | @domain
+  local key="$1" whose="$1"
+  if [[ "$key" == @* ]]; then whose="the mailboxes of ${key#@}"; fi
+  if lib_webmail_user_forget "$key"; then
+    # said when there was something, because no archive brings it back
+    if (( WM_FORGOT > 0 )); then lib_note "What the webmail kept for ${whose} is gone too (address book, identities, settings)"; fi
+    return 0
+  fi
+  lib_warn "The webmail still holds what ${whose} kept there (address book, identities, settings): ${WM_LAST_ERROR:-see the log}"
+  lib_note "A mailbox made under the same address later would be shown them. Once that is put right: lomp webmail forget ${key}"
+  return 0
+}
+
 lib_mail_box_del_main() {   # address
   local a="${1:-}"
   a="${a,,}"
@@ -2601,6 +2639,7 @@ lib_mail_box_del_main() {   # address
   lib_mail_box_exists "$a" || lib_die "No such mailbox: ${a}" "" "lomp mail box list"
   lib_confirm "Delete ${a} and every message in it?" n || lib_die "Nothing was deleted" "" ""
   lib_mail_box_remove "$a"
+  _mail_webmail_forget "$a"
   lib_mail_alias_forget_everywhere "$a"
   lib_mail_tables_apply || lib_warn "the mail tables could not be rebuilt: ${MAIL_LAST_ERROR}"
   lib_ok "${a} is gone"
@@ -2881,6 +2920,8 @@ lib_mail_domain_del_main() {   # domain [--dns-cleanup] [--no-backup]
   lib_note "$((boxes + parked)) mailbox(es) and every message in them, its aliases, its DKIM key and its certificate"
   if (( backup )); then lib_note "a last backup of all of it is written to ${BACKUP_ROOT}/${d}/ first"
   else lib_note "no backup is taken first (--no-backup)"; fi
+  # said before the question: it is the one thing here that no archive can bring back
+  if lib_webmail_installed; then lib_note "what its mailboxes kept in the webmail goes too (address books, identities, settings), and that is in no backup"; fi
   _elsewhere="$(_mail_alias_targets_elsewhere "$d")"
   if [[ -n "$_elsewhere" ]]; then
     lib_warn "These aliases in other domains are delivered into ${d}; what points at a mailbox that goes, goes with it:"
@@ -3981,6 +4022,11 @@ lib_mail_restore_domain() {   # domain [archive]
   # carries no live lines at all, so without this the state would say "off" while Dovecot went
   # on letting those addresses in. The mail on disk is not touched here; the archive's copy of
   # it is put back further down.
+  # Nor is what the webmail keeps for them: these are logins taken away, not mailboxes deleted.
+  # Nearly every one comes back from the archive a few lines down, to an owner who expects the
+  # address book to be where it was. One made after the backup does not; the webmail goes on
+  # keeping what was that one's until its domain's mail is deleted or "lomp webmail forget" is
+  # asked - a restore removes nothing it was not asked to put back.
   _mail_lines_drop "$d"
   # the mailbox lines, with the passwords they had: a restore nobody can log in to is not one
   if [[ -s "${work}/mail/passwd" ]]; then

@@ -812,6 +812,22 @@ Roundcube's own login limit counts per account and ignores the address a request
 failed logins go to the journal and fail2ban bans by IP - through Cloudflare's API when the
 site is proxied, so the ban happens at the edge.
 
+Roundcube keeps things of its own for every mailbox that has signed in - the address book, the
+identities and their signatures, saved searches, settings - in its own database, under the
+mailbox's address. They go when the mailbox does: `mail box del`, `mail disable --delete-data`,
+`mail domain del` and `remove` take them along, so a mailbox made later under the same address
+starts empty instead of with the previous owner's contacts. `mail disable` on its own keeps
+them with everything else, for `mail enable` to bring back, and a `mail restore` removes none.
+They are in no backup: a mailbox that is deleted and then restored from an archive has its mail
+again, and an empty address book.
+
+```bash
+sudo lomp webmail forget info@example.com   # a mailbox that went before lomp did this by
+sudo lomp webmail forget @example.com       # itself, or while the database was down
+```
+
+`forget` refuses an address that still has a mailbox, live or switched off.
+
 ### Rotating a DKIM key
 
 A signing key is published in DNS, so it cannot simply be replaced: the moment a new key signs

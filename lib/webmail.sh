@@ -1049,10 +1049,11 @@ lib_webmail_main() {
     install)        lib_webmail_install "${1:-}" ;;
     update)         lib_webmail_update "${1:-}" ;;
     maintain)       lib_webmail_maintain ;;
+    forget)         lib_webmail_forget_main "${1:-}" ;;
     uninstall)      lib_webmail_uninstall ;;
     purge)          lib_webmail_uninstall; lib_webmail_purge_db ;;
     help|-h|--help) lib_usage | grep -A 8 '^  webmail ' || lib_usage ;;
-    *) lib_die "Unknown webmail command: ${a}" "" "lomp webmail status|update|uninstall" ;;
+    *) lib_die "Unknown webmail command: ${a}" "" "lomp webmail status|update|forget|uninstall" ;;
   esac
   return 0
 }
@@ -1239,6 +1240,127 @@ lib_webmail_identities_apply() {
   # configuration that has it may still be one that was rendered before the release had the plugin
   if ! grep -q "'${WM_IDENT_PLUGIN}'" "$WM_CONF" 2>/dev/null; then
     lib_webmail_config_apply || { WM_LAST_ERROR="the webmail configuration could not be rewritten"; return 1; }
+  fi
+  return 0
+}
+
+# =============================================================================
+#  What the webmail keeps for a mailbox, and when it goes
+# =============================================================================
+# Roundcube has a database of its own, and in it a user for every address that has ever signed
+# in: the address book, the identities and their signatures, the saved searches, the settings.
+# It finds that user by the address and by nothing else. So when a mailbox was deleted and one
+# of the same name was made later - for somebody else - its new owner signed in and was shown
+# the previous owner's contacts. A mailbox that is removed for good therefore takes its webmail
+# user with it (lib/mail.sh: "mail box del", and everything that deletes a domain's mail). One
+# that is only put aside - "mail disable" without --delete-data - keeps it, like everything
+# else of that mailbox, for "mail enable" to bring back.
+WM_FORGOT=0     # how many users the last lib_webmail_user_forget removed
+
+# The users themselves, read from the table as root over the socket: that needs no Roundcube
+# on the disk, so a webmail that was uninstalled with its database kept still answers. Named
+# the way an alias is: an address, or "@domain" for every address of that domain. Compared in
+# lower case on both sides - Dovecot lowers a login and so does Roundcube, but the second is a
+# default of theirs (login_lc), and a user stored as "Info@" is as much that mailbox's as one
+# stored as "info@".
+_wm_users() {   # address | @domain -> "username<TAB>mail_host" lines; 1 when it cannot be asked
+  local key="${1,,}" where=""
+  # nothing gets into the statement that has not passed the check a mailbox name passes:
+  # letters, digits, dots, dashes and underscores, and so no quote to end the string with
+  lib_mail_alias_key_valid "$key" || return 1
+  [[ -n "${WM_DB_NAME:-}" ]] || _wm_info_load || return 1
+  if [[ "$key" == @* ]]; then where="LOWER(SUBSTRING_INDEX(username, '@', -1)) = '${key#@}'"
+  else where="LOWER(username) = '${key}'"; fi
+  lib_db_sql "SELECT username, mail_host FROM \`${WM_DB_NAME}\`.users WHERE ${where} ORDER BY user_id" 2>/dev/null
+}
+
+# Remove them, with everything that hangs on them. Roundcube's own script does it: it knows
+# what belongs to a user in the release that is running - the tables that follow by themselves
+# and whatever a plugin keeps somewhere else - where a DELETE written here would only know what
+# the schema looked like on the day it was written.
+# 0: nothing of it is left (WM_FORGOT says how many users went). 1: something may be, and
+# WM_LAST_ERROR says why. The callers decide what that is worth; for a mailbox that has just
+# been deleted it is a warning, never a reason to stop.
+lib_webmail_user_forget() {   # address | @domain
+  local key="${1,,}" rows="" left="" name="" host="" rel="" php="" had=0 n=0
+  WM_FORGOT=0
+  lib_mail_alias_key_valid "$key" || { WM_LAST_ERROR="'${key}' is neither an address nor @domain"; return 1; }
+  # no database, no users: a server that never had a webmail, or one whose database was dropped
+  _wm_info_load || return 0
+  if (( OPT_DRY_RUN )); then
+    lib_info "[dry-run] would remove what the webmail keeps for ${key} (address book, identities, settings)"
+    return 0
+  fi
+  rows="$(_wm_users "$key")" || { WM_LAST_ERROR="the webmail's database did not answer (is MariaDB running?)"; return 1; }
+  # most mailboxes never sign in to the webmail, and for those there is nothing to start PHP for
+  [[ -n "$rows" ]] || return 0
+  had="$(wc -l <<<"$rows" | tr -d ' ')"
+  if ! lib_webmail_installed; then
+    WM_LAST_ERROR="the webmail is not installed, and it is Roundcube's own script that removes a user (its database was kept: 'lomp webmail purge' drops all of it)"
+    return 1
+  fi
+  rel="$(readlink -f "$WM_CURRENT")"
+  php="$(lib_php_cli "$(lib_webmail_php_version)")"
+  if [[ ! -x "$php" || ! -s "${rel}/bin/deluser.sh" ]]; then
+    WM_LAST_ERROR="no PHP command line binary for the webmail, or no bin/deluser.sh in ${rel}"
+    return 1
+  fi
+  while IFS=$'\t' read -r name host; do
+    [[ -n "$name" ]] || continue
+    # what a table hands back is text like any other, and here it becomes an argument: a name
+    # that is not an address, or a host with something in it no host name has, is left where
+    # it is and counted below as still there
+    lib_mail_address_valid "$name" || continue
+    [[ "$host" =~ ^[A-Za-z0-9._:-]+$ ]] || continue
+    # As the webmail's own user, in the release that is running: the script needs the database
+    # and the configuration that user already reads, and nothing that only root has. The host
+    # is the one stored with the user, so the row that was found is the row that is removed.
+    ( cd "$rel" && lib_run runuser -u "$WM_USER" -- "$php" bin/deluser.sh "--host=${host}" "$name" ) || true
+  done <<<"$rows"
+  # The script's exit status is not the answer: it says "User not found." with status 0, and
+  # ends the same way when a plugin calls the removal off. The table is.
+  left="$(_wm_users "$key")" || { WM_LAST_ERROR="the webmail's database stopped answering before the removal could be checked"; return 1; }
+  if [[ -n "$left" ]]; then
+    n="$(wc -l <<<"$left" | tr -d ' ')"
+    WM_FORGOT=$(( had - n ))
+    WM_LAST_ERROR="Roundcube's bin/deluser.sh left ${n} of ${had} user(s) in place (see ${LOG_FILE})"
+    return 1
+  fi
+  WM_FORGOT="$had"
+  lib_log_write INFO "webmail: ${had} user(s) of ${key} removed, with what they kept there"
+  return 0
+}
+
+# "lomp webmail forget <address>|@<domain>": the same removal, asked for by hand. It is for
+# what a release before this one left behind, and for a removal that could not finish because
+# the database was down that minute. A mailbox that exists is refused, whether it is live or
+# only put aside by "mail disable": what the webmail keeps for that one is its owner's.
+lib_webmail_forget_main() {   # address | @domain
+  local key="${1:-}" d=""
+  key="${key,,}"
+  lib_mail_alias_key_valid "$key" || lib_die "Whose? '${key:-nothing}' is neither an address nor @domain" \
+    "an address names one mailbox that is gone, @domain every mailbox a domain used to have" \
+    "lomp webmail forget info@example.com   or   lomp webmail forget @example.com"
+  d="${key#*@}"
+  if [[ "$key" == @* ]]; then
+    if [[ -n "$(lib_mail_boxes "$d")" || -s "${MAIL_DISABLED_DIR}/${d}.passwd" ]]; then
+      lib_die "${d} still has mailboxes" "what the webmail keeps for a mailbox that exists is its owner's" \
+        "name the one that is gone: lomp webmail forget <address>   (lomp mail box list ${d})"
+    fi
+  elif lib_mail_box_exists "$key"; then
+    lib_die "${key} is a mailbox of this server" "what the webmail keeps for it is its owner's, and goes when the mailbox does" \
+      "lomp mail box del ${key}"
+  elif lib_mail_box_parked "$key"; then
+    lib_die "${key} is a mailbox that is only switched off" "\"lomp mail enable ${d}\" brings it back, with what the webmail keeps for it" \
+      "to delete the mail of ${d} for good: lomp mail disable ${d} --delete-data"
+  fi
+  lib_webmail_user_forget "$key" \
+    || lib_die "The webmail still holds what was kept there for ${key}" "${WM_LAST_ERROR}" "lomp doctor"
+  if (( OPT_DRY_RUN )); then return 0; fi
+  if (( WM_FORGOT > 0 )); then
+    lib_ok "The webmail has forgotten ${key}: ${WM_FORGOT} user(s), with address book, identities and settings"
+  else
+    lib_info "The webmail keeps nothing for ${key}"
   fi
   return 0
 }
