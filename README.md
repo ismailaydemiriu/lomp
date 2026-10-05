@@ -235,6 +235,7 @@ sudo lomp restore shop.example.com --file /var/backups/server-setup/shop.example
 sudo lomp renew-ssl --all                           # renew every certificate
 sudo lomp ssl                                       # which certificates exist, days left, and
                                                     # whether renewal is automatic (changes nothing)
+sudo lomp renew-ssl --missing                       # a certificate for every site that has none
 sudo lomp ssl test                                  # rehearse the renewals (certbot renew --dry-run)
 sudo lomp ssl fix                                   # switch automatic renewal back on
 sudo lomp panel                                     # open the WebAdmin panel for your address

@@ -180,6 +180,9 @@ COMMANDS
                                 The mail comes from the newest mail archive next to it, with
                                 the same mailbox passwords and the same DKIM key
   renew-ssl [domain] [opts]     --force --all --staging --wildcard
+  renew-ssl --missing           A certificate for every site that has none (its DNS must point
+                                here, directly or through Cloudflare); one that fails does not
+                                stop the others
   ssl [status]                  Every certificate, sites and mail: whether there is one, how
                                 long it has, and whether it renews by itself (what runs
                                 certbot, the deploy hook, each renewal file). Changes nothing;
@@ -531,6 +534,7 @@ _menu_certificates() {
     _menu_item 3 "Renew every certificate now"
     _menu_item 4 "Rehearse the automatic renewal (replaces nothing)"
     _menu_item 5 "Switch automatic renewal back on (timer or cron, deploy hook)"
+    _menu_item 6 "Get a certificate for every site that has none"
     _menu_item 0 "Back"
     printf '\n%sChoice: %s' "$C_BLD" "$C_RST"
     read -r choice </dev/tty || return 0
@@ -540,6 +544,7 @@ _menu_certificates() {
       3) _menu_run renew-ssl --all ;;
       4) _menu_run ssl test ;;
       5) _menu_run ssl fix ;;
+      6) _menu_run renew-ssl --missing ;;
       0|q|Q|"") return 0 ;;
       *) printf '%sPick a number from the list.%s\n' "$C_YEL" "$C_RST" ;;
     esac

@@ -6756,7 +6756,7 @@ section "ssl: which certificates there are, and whether they renew by themselves
 _sc="$TMP/sslcheck"; mkdir -p "$_sc"
 _sc_saved_vars="$(declare -p SSL_DEPLOY_DIR LE_LIVE LE_RENEWAL LE_LOG CRON_FILE CERTBOT_DEPLOY_HOOK OPT_QUIET)"
 _sc_saved_fn="$(declare -f systemctl lib_domains_list lib_domain_state_load lib_mail_installed lib_server_mail_only \
-  lib_require_tools lib_require_installed lib_have lib_ssl_days_left lib_systemctl lib_service_active lib_service_exists || true)"
+  lib_require_tools lib_require_installed lib_have lib_ssl_days_left lib_systemctl lib_service_active lib_service_exists lib_notify_send || true)"
 SSL_DEPLOY_DIR="$_sc/deploy"; LE_LIVE="$_sc/live"; LE_RENEWAL="$_sc/renewal"; LE_LOG="$_sc/letsencrypt.log"
 CRON_FILE="$_sc/cron"; CERTBOT_DEPLOY_HOOK="$_sc/hook.sh"; OPT_QUIET=0
 mkdir -p "$SSL_DEPLOY_DIR" "$LE_LIVE" "$LE_RENEWAL"
@@ -6886,6 +6886,16 @@ if lib_have openssl; then
   assert_has  "with its next run"                                        "next run Tue 2026-10-06" "$_o"
   assert_has  "and Cloudflare may go strict"                             "Full (strict) is safe" "$_o"
   assert_has  "the rehearsal is offered"                                 "ssl test" "$_o"
+  assert_lacks "and nothing is said to be missing"                       "renew-ssl --missing" "$_o"
+
+  # seventeen sites and not one certificate is not "every certificate is valid"
+  _sc_sites="b.test"
+  assert_eq   "no certificate anywhere is still no failure"              0 "$(run_isolated _sc_tee lib_ssl_status_main)"
+  _o="$(cat "$_sc/out")"
+  assert_lacks "but it is not called valid"                              "every certificate is valid" "$_o"
+  assert_has  "it is called what it is"                                  "no certificate on this server yet" "$_o"
+  assert_has  "with the way to get them all"                             "renew-ssl --missing" "$_o"
+  assert_lacks "and no rehearsal of nothing"                             "ssl test" "$_o"
 
   _sc_sites="a.test b.test"
   assert_eq   "a site that never asked for one is no failure"            0 "$(run_isolated _sc_tee lib_ssl_status_main)"
@@ -6915,11 +6925,50 @@ if lib_have openssl; then
   assert_eq   "and so is a subcommand"                                   1 "$(run_isolated _sc_tee lib_ssl_main renew)"
 fi
 
+# ---- a certificate for every site that has none ----
+_sc_state="$STATE_DIR"; STATE_DIR="$_sc/state"
+_sc_script="$SCRIPT_PATH"; SCRIPT_PATH="$_sc/child.sh"
+# the child every site is handed to: it records its arguments and fails for bad.test
+{
+  printf '%s\n' '#!/usr/bin/env bash'
+  printf 'printf "%%s\\n" "$*" >>"%s"\n' "$_sc/child.log"
+  printf '%s\n' '[[ "$2" != bad.test ]]'
+} >"$SCRIPT_PATH"
+chmod +x "$SCRIPT_PATH"
+eval 'lib_domains_list() { printf "%s\n" has.test asked.test never.test bad.test; }'
+eval 'lib_require_tools() { :; }'; eval 'lib_require_installed() { :; }'; eval 'lib_notify_send() { :; }'
+for _d in has.test asked.test never.test bad.test; do mkdir -p "$(dirname "$(lib_domain_json "$_d")")"; done
+printf '{"ssl":{"enabled":true,"wanted":true}}\n'   >"$(lib_domain_json has.test)"
+printf '{"ssl":{"enabled":false,"wanted":true}}\n'  >"$(lib_domain_json asked.test)"
+printf '{"ssl":{"enabled":false,"wanted":false}}\n' >"$(lib_domain_json never.test)"
+printf '{"ssl":{"enabled":false,"wanted":false}}\n' >"$(lib_domain_json bad.test)"
+: >"$_sc/child.log"
+assert_eq   "one that fails makes the whole run fail"                  1 "$(run_isolated _sc_tee lib_ssl_renew_main --missing)"
+_o="$(cat "$_sc/child.log")"
+assert_lacks "a site that has one is left alone"                       "has.test" "$_o"
+assert_has  "one that asked and got none is tried"                     "renew-ssl asked.test --yes" "$_o"
+assert_has  "and so is one that never asked"                           "renew-ssl never.test --yes" "$_o"
+assert_has  "the failure did not stop the run before the last"         "renew-ssl bad.test --yes" "$_o"
+assert_lacks "nothing is forced"                                       "--force" "$_o"
+assert_has  "the one that failed is named"                             "failed for: bad.test" "$(cat "$_sc/out")"
+assert_has  "and how many are done"                                    "the 2 of 3 that got one are done" "$(cat "$_sc/out")"
+: >"$_sc/child.log"
+assert_eq   "--all still passes over the ones that never asked"        0 "$(run_isolated _sc_tee lib_ssl_renew_main --all)"
+assert_eq   "and renews the ones that did"                             "renew-ssl has.test --yes
+renew-ssl asked.test --yes" "$(cat "$_sc/child.log")"
+assert_eq   "--missing with a domain is refused"                       1 "$(run_isolated _sc_tee lib_ssl_renew_main --missing has.test)"
+for _d in asked.test never.test bad.test; do printf '{"ssl":{"enabled":true}}\n' >"$(lib_domain_json "$_d")"; done
+: >"$_sc/child.log"
+assert_eq   "nothing missing is no failure"                            0 "$(run_isolated _sc_tee lib_ssl_renew_main --missing)"
+assert_eq   "and nothing is asked for"                                 "" "$(cat "$_sc/child.log")"
+STATE_DIR="$_sc_state"; SCRIPT_PATH="$_sc_script"
+
 # ---- reaching it ----
 _body="$(awk '/^_menu_certificates\(\)/{f=1} f{print} f && /^[}]/{exit}' "$ROOT/lib/menu.sh")"
 assert_has  "the certificates menu starts with the check"              '1) _menu_run ssl status ;;' "$_body"
 assert_has  "the rehearsal is in it"                                   '_menu_run ssl test ;;' "$_body"
 assert_has  "and so is switching renewal back on"                      '_menu_run ssl fix ;;' "$_body"
+assert_has  "and a certificate for every site that has none"           '_menu_run renew-ssl --missing ;;' "$_body"
 assert_has  "a mail-only server reaches the check from its own menu"   '11) _menu_run ssl status ;;' "$(awk '/^_menu_mail_server\(\)/{f=1} f{print} f && /^[}]/{exit}' "$ROOT/lib/menu.sh")"
 assert_has  "the command is dispatched"                                'lib_ssl_main "${rest[@]}" || exit 1' "$(cat "$ROOT/setup.sh")"
 assert_has  "only fix takes the lock"                                  'ssl)    case "${rest[0]:-status}" in fix) lib_lock ;;' "$(cat "$ROOT/setup.sh")"

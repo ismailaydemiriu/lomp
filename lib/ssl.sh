@@ -347,36 +347,49 @@ lib_ssl_status_line() {   # domain -> "42 days (Let's Encrypt)" / "none"
 #  renew-ssl command
 # =============================================================================
 lib_ssl_renew_main() {
-  local domain="" force=0 all=0 staging=0 wildcard=0 a=""
+  local domain="" force=0 all=0 missing=0 staging=0 wildcard=0 a=""
   while (($# > 0)); do
     a="$1"; shift
     case "$a" in
       --force)    force=1 ;;
       --all)      all=1 ;;
+      --missing)  missing=1 ;;
       --staging)  staging=1 ;;
       --wildcard) wildcard=1 ;;
-      -*)         lib_die "Unknown option for renew-ssl: ${a}" "" "renew-ssl [domain] [--force] [--all] [--staging] [--wildcard]" ;;
+      -*)         lib_die "Unknown option for renew-ssl: ${a}" "" "renew-ssl [domain] [--force] [--all] [--missing] [--staging] [--wildcard]" ;;
       *)          domain="${a,,}" ;;
     esac
   done
   lib_require_tools
   lib_require_installed
-  if (( all )) || [[ -z "$domain" ]]; then
+  if (( missing )) && [[ -n "$domain" ]]; then
+    lib_die "--missing takes no domain" "it is every site that has no certificate" "renew-ssl --missing   or   renew-ssl ${domain}"
+  fi
+  if (( all )) || (( missing )) || [[ -z "$domain" ]]; then
     local d="" failed=() n=0
     while read -r d; do
       [[ -n "$d" ]] || continue
-      # lib_json_get would turn a literal false into "" (jq's // treats false like null)
-      [[ "$(lib_json_get_raw "$(lib_domain_json "$d")" '.ssl.wanted')" == "false" ]] && continue
+      if (( missing )); then
+        # every site that has none, the ones added with --no-ssl included: asking for all of
+        # them at once is the operator saying they are wanted now
+        [[ "$(lib_json_get_raw "$(lib_domain_json "$d")" '.ssl.enabled')" == "true" ]] && continue
+      else
+        # lib_json_get would turn a literal false into "" (jq's // treats false like null)
+        [[ "$(lib_json_get_raw "$(lib_domain_json "$d")" '.ssl.wanted')" == "false" ]] && continue
+      fi
       n=$((n + 1))
       lib_heading "renew-ssl ${d}"
       if ! SERVER_SETUP_LOCKED=1 "$SCRIPT_PATH" renew-ssl "$d" --yes $( (( force )) && printf -- '--force') $( (( staging )) && printf -- '--staging') $( (( OPT_QUIET )) && printf -- '--quiet'); then
         failed+=("$d")
       fi
     done < <(lib_domains_list)
-    (( n == 0 )) && { lib_info "No sites with SSL enabled"; return 0; }
+    if (( n == 0 )); then
+      if (( missing )); then lib_info "Every site already has a certificate"; else lib_info "No sites with SSL enabled"; fi
+      return 0
+    fi
     if ((${#failed[@]} > 0)); then
       lib_notify_send "SSL renewal failed on $(hostname)" "renew-ssl failed for: ${failed[*]}. See ${LOG_FILE}." || true
-      lib_die "SSL renewal failed for: ${failed[*]}" "see the per-domain errors above" "fix DNS / certbot problems and re-run"
+      lib_die "SSL renewal failed for: ${failed[*]}" "see the per-domain errors above" "fix DNS / certbot problems and re-run$( (( missing )) && printf ' (the %s of %s that got one are done; --missing asks only for the rest)' "$(( n - ${#failed[@]} ))" "$n")"
     fi
     lib_ok "SSL renewal finished for ${n} site(s)"
     return 0
@@ -499,7 +512,7 @@ lib_ssl_status_main() {
   lib_require_tools
   lib_require_installed
   local d="" cert="" level="" days="" trusted="" text="" how="" me=""
-  local -i sites=0 untrusted=0 fails=0 warns=0 auto_ok=1
+  local -i sites=0 untrusted=0 fails=0 warns=0 auto_ok=1 have=0 without=0
   local -a names=() fixes=()
   me="$(lib_self_cmd)"
 
@@ -519,7 +532,7 @@ lib_ssl_status_main() {
       lib_domain_state_load "$d" || continue
       sites+=1
       if (( ! D_SSL )); then
-        untrusted+=1
+        untrusted+=1; without+=1
         if (( D_SSL_WANTED )); then
           _ssl_row "$d" FAIL "" "asked for, never issued"
           _ssl_count FAIL "${me} renew-ssl ${d}    # once its DNS points here"
@@ -532,6 +545,7 @@ lib_ssl_status_main() {
       names=("$d"); (( D_WWW && ! D_SSL_WILDCARD )) && names+=("www.${d}")
       IFS='|' read -r level days trusted text < <(lib_ssl_lineage_check "$d" "${names[@]}")
       [[ "$trusted" == "1" ]] || untrusted+=1
+      [[ "$level" == "NONE" ]] || have+=1
       _ssl_row "$d" "$level" "$days" "$text"
       # a site whose state says SSL is on has a vhost that points at the file: none is a failure
       [[ "$level" == "NONE" ]] && level="FAIL"
@@ -546,6 +560,7 @@ lib_ssl_status_main() {
     # hours by itself: clients warn meanwhile, which is a warning here as it is in doctor
     [[ "$text" == self-signed* ]] && level="WARN"
     _ssl_row "$(lib_mail_host)" "$level" "$days" "$text"
+    [[ "$level" == "NONE" ]] || have+=1
     [[ "$level" == "NONE" ]] && level="WARN"
     _ssl_count "$level" "${me} mail cert"
     while read -r d; do
@@ -554,6 +569,7 @@ lib_ssl_status_main() {
       [[ "$(lib_json_get "$(lib_mail_json "$d")" '.mail.webmail')" == "true" ]] && names+=("$(lib_webmail_host "$d")")
       IFS='|' read -r level days trusted text < <(lib_ssl_lineage_check "$(lib_mail_cert_name "$d")" "${names[@]}")
       _ssl_row "mail.${d}" "$level" "$days" "$text"
+      [[ "$level" == "NONE" ]] || have+=1
       [[ "$level" == "NONE" ]] && level="WARN"
       _ssl_count "$level" "${me} mail cert ${d}"
     done < <(lib_mail_domains)
@@ -584,7 +600,9 @@ lib_ssl_status_main() {
   if (( ! auto_ok )); then fails+=1; fixes+=("${me} ssl fix"); fi
 
   printf '\n'
-  if (( fails + warns == 0 )); then
+  if (( fails + warns == 0 && have == 0 )); then
+    lib_info "There is no certificate on this server yet. Renewal is set up and will look after the ones that come."
+  elif (( fails + warns == 0 )); then
     lib_ok "Nothing to put right: every certificate is valid and renews by itself"
   else
     lib_warn "${fails} problem(s), ${warns} warning(s). To put right:"
@@ -599,7 +617,10 @@ lib_ssl_status_main() {
       lib_note "Cloudflare: ${untrusted} of ${sites} site(s) would answer 526 under Full (strict). Stay on Full until this list is clean."
     fi
   fi
-  lib_note "To rehearse a renewal without replacing anything: ${me} ssl test"
+  if (( without > 0 )); then
+    lib_note "A certificate for every site that has none, in one go: ${me} renew-ssl --missing"
+  fi
+  (( have == 0 )) || lib_note "To rehearse a renewal without replacing anything: ${me} ssl test"
   unset -f _ssl_count
   (( fails == 0 ))
 }
