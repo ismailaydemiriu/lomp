@@ -2226,7 +2226,7 @@ lib_mail_domain_cert_ensure() {   # domain
 # =============================================================================
 lib_mail_enable_main() {   # domain [--mailbox NAME] [--quota Q] | [--to ADDRESS [--address NAME[,NAME]] [--catch-all]]
   local d="" box="" quota="$MAIL_QUOTA_DEFAULT" a="" _first_box="" _sel="" _used=""
-  local to="" addrs="" catchall=0 n="" into=""
+  local to="" addrs="" catchall=0 n="" into="" no_dns=0
   local -a locals=()
   d="${1:-}"; shift || true
   lib_domain_valid "${d,,}" || lib_die "Invalid domain '${d:-none}'" "" "lomp mail enable example.com"
@@ -2239,6 +2239,7 @@ lib_mail_enable_main() {   # domain [--mailbox NAME] [--quota Q] | [--to ADDRESS
       --to)        to="${1:-}"; shift || true ;;
       --address|--addresses) addrs="${1:-}"; shift || true ;;
       --catch-all) catchall=1 ;;
+      --no-dns)    no_dns=1 ;;
       --yes)       OPT_YES=1 ;;
       *) lib_die "Unknown option for 'mail enable': ${a}" "" "lomp mail help" ;;
     esac
@@ -2365,8 +2366,12 @@ lib_mail_enable_main() {   # domain [--mailbox NAME] [--quota Q] | [--to ADDRESS
     lib_note "Make one: lomp mail box add info@${d}"
   fi
   # with a token stored, the records go in by themselves - that is what the token is for -
-  # and anything lompstack refuses to touch is printed for the operator
-  if [[ -n "$(lib_cf_token)" ]]; then
+  # and anything lompstack refuses to touch is printed for the operator.
+  # --no-dns: the domain's mail is still received somewhere else - it is being brought here by
+  # "import" - and the records, the MX first of all, move when the operator says so
+  if (( no_dns )); then
+    lib_note "The DNS records of ${d} were left as they are; when its mail is to arrive here: lomp mail dns ${d}"
+  elif [[ -n "$(lib_cf_token)" ]]; then
     lib_mail_dns_apply "$d" || lib_mail_dns_print "$d"
   else
     lib_mail_dns_print "$d"
@@ -3660,7 +3665,7 @@ Kullanım: lomp mail <command>
   domain del <domain> [--dns-cleanup] [--no-backup]
                          bir posta alan adını ve tüm postasını, son bir yedekten sonra kaldırır
 
-  enable <domain> [--mailbox info] [--quota 2G]
+  enable <domain> [--mailbox info] [--quota 2G] [--no-dns]
                          bir siteye kendi postasını verir: DKIM anahtarı, sertifika, eklenecek
                          DNS kayıtları (--to, --address ve --catch-all burada da çalışır)
   disable <domain> [--delete-data] [--dns-cleanup]
@@ -3717,7 +3722,7 @@ Usage: lomp mail <command>
   domain del <domain> [--dns-cleanup] [--no-backup]
                          remove a mail domain and all of its mail, after a last backup
 
-  enable <domain> [--mailbox info] [--quota 2G]
+  enable <domain> [--mailbox info] [--quota 2G] [--no-dns]
                          give a site its own mail: DKIM key, certificate, DNS to add
                          (--to, --address and --catch-all work here as well)
   disable <domain> [--delete-data] [--dns-cleanup]

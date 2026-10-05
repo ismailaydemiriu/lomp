@@ -427,11 +427,45 @@ user's `public_html` - is listed apart; `--path DIR --as DOMAIN` brings it as th
 `--db NAME` with it the database of an application that is no WordPress (its own configuration
 file is yours to point at the new database: `lomp credentials <domain>`).
 
-The other server is only read. Mail, certificates and cron jobs are not copied, and neither is
+**The mailboxes of a domain come with it** when this server runs mail (`install --with-mail`)
+and you logged in there as root:
+
+```bash
+sudo lomp import root@203.0.113.10 --only example.com               # the site and its mailboxes
+sudo lomp import root@203.0.113.10 --only example.com --only-mail   # the mailboxes alone
+sudo lomp import root@203.0.113.10 --all --no-mail                  # the sites alone
+```
+
+- the addresses are the ones the other server's Dovecot knows (`doveadm user '*'`), and the mail
+  is what lies in each one's Maildir - other mail stores (mbox, mdbox) are not read;
+- mail is switched on for the domain here with its DNS left alone: no MX, SPF or DKIM record is
+  written, so mail goes on arriving at the other server until you move it (`lomp mail dns
+  <domain>` shows the records, and writes them with `--apply`);
+- a mailbox keeps the password it had when the other server is a lomp or a CyberPanel, whose
+  password hashes can be read. Anywhere else, and for a password that was kept in the clear,
+  it gets a new one, printed once at the end and never logged;
+- the mail is unpacked beside the mailbox by the mail user and merged into it: messages that
+  are not here yet are added with their folders and flags, nothing here is deleted, and a
+  second run adds only what is new. A mailbox larger than half the usual quota gets twice
+  its size as quota;
+- a domain that has mailboxes there and no site is listed as `mail` and becomes a mail domain
+  here; on a server installed for mail alone that is what every chosen domain becomes, and
+  its site stays where it is;
+- the domain's aliases and forwarders come too, catch-alls included: lomp's own, CyberPanel's
+  (`e_forwardings`), and the ones in the text files Postfix looks its virtual aliases up in
+  (`virtual_alias_maps`; aliases kept in a database of another panel are not read). An alias
+  this server already has for the domain stays as it is here. An address that is a mailbox
+  here is not made an alias as well - "keep a copy and forward" on the other server is one of
+  those - and the run names each one with where its mail went there, for you to decide;
+- a domain that only forwards - aliases and no mailbox - becomes a mail domain here like one
+  with mailboxes;
+- sieve filters and what a webmail keeps (address books) are not copied.
+
+The other server is only read. Certificates and cron jobs are not copied, and neither is
 anything outside a site's document root. The sites answer over HTTP here until the DNS of a
 domain points to this server; then `sudo lomp renew-ssl <domain>` gets its certificate. Running
 the import again for a site brings what changed in the meantime - worth doing once more just
-before the DNS moves.
+before the DNS moves, and once more for the mail (`--only-mail`) after the MX has moved.
 
 ### WordPress into a site that is already there
 

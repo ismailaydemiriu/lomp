@@ -9428,10 +9428,10 @@ section "import: the sites of another server, brought here over SSH"
 # The other server is a directory tree under $TMP, and what would run there through ssh runs
 # here through sh: the listing, tar and the dump script are the real ones. mysqldump and the
 # client are stand-ins that say how they were called.
-_im_saved="$(declare -p STATE_DIR OPT_DRY_RUN)"
+_im_saved="$(declare -p STATE_DIR OPT_DRY_RUN MAIL_PASSWD_FILE MAIL_ALIAS_DIR)"
 _im_orig="$(declare -f _domain_fix_owner_ids lib_require_tools lib_require_installed lib_server_mail_only lib_backup_domain \
   lib_db_create_for_domain lib_db_restore_domain lib_db_sql lib_domain_apply_config lib_ols_htaccess_reload \
-  lib_import_connect _import_ssh _import_add)"
+  lib_import_connect _import_ssh _import_add _import_mail_on _import_mail_sync lib_mail_installed lib_mail_domain_enabled lib_mail_hash_password lib_mail_tables_apply lib_mail_domain_aliases_seed _mail_stage_dir _mail_stage_drop _mail_sendas_current)"
 STATE_DIR="$TMP/im-state"; mkdir -p "$STATE_DIR"
 _im_r="$TMP/im-remote"; _im_l="$_im_r/usr/local/lsws"; _im_bin="$TMP/im-bin"; _im_log="$TMP/im.log"; _im_out="$TMP/im.out"
 _im_shop="$_im_r/home/shop.example/public_html"
@@ -9486,10 +9486,51 @@ echo "CREATE TABLE t (c text) COLLATE=utf8mb4_0900_ai_ci;"
 EOF
 printf '#!/bin/sh\nexit "${IM_CLIENT_RC:-1}"\n' >"$_im_bin/mysql"
 cp "$_im_bin/mysqldump" "$_im_bin/mariadb-dump"; cp "$_im_bin/mysql" "$_im_bin/mariadb"
+# the other server's mail: three addresses Dovecot knows, the Maildir of two of them, and the
+# hashes of lomp's own password file - one that can be taken over, one that cannot
+_im_users="info@shop.example sales@shop.example boss@mailonly.example"
+_im_hash='{BLF-CRYPT}$2y$05$abcdefghijklmnopqrstuuJ1c0aN1X1X1X1X1X1X1X1X1X1X1X1X1u'
+_im_md="$_im_r/home/vmail/shop.example/info/Maildir"
+mkdir -p "$_im_md/cur" "$_im_md/new" "$_im_md/tmp" "$_im_md/.Sent/cur" "$_im_r/etc/dovecot/lomp" \
+  "$_im_r/home/vmail/mailonly.example/boss/Maildir/cur"
+printf 'Subject: one\n\nfirst\n' >"$_im_md/cur/1700000000.M1P1.old:2,S"
+printf 'Subject: two\n\nsent\n' >"$_im_md/.Sent/cur/1700000001.M2P1.old:2,S"
+printf '3 V1700000000 N2\n' >"$_im_md/dovecot-uidlist"
+printf 'index\n' >"$_im_md/dovecot.index"; printf 'cache\n' >"$_im_md/.Sent/dovecot.index.cache"
+printf 'Subject: boss\n\nhello\n' >"$_im_r/home/vmail/mailonly.example/boss/Maildir/cur/1700000002.M3P1.old:2,S"
+printf '%s\n' "info@shop.example:${_im_hash}::::::userdb_quota_rule=*:storage=1G" \
+  'boss@mailonly.example:{PLAIN}secret-of-the-boss::::::userdb_quota_rule=*:storage=1G' >"$_im_r/etc/dovecot/lomp/passwd"
+# its aliases: lomp's own file for one domain, and a file Postfix looks its aliases up in. The
+# second file Postfix names is the one lomp renders from the first, and is not read again.
+mkdir -p "$_im_r/root/.server-setup/mail/aliases" "$_im_r/etc/postfix/lomp"
+printf '%s\n' '# Managed by lompstack - aliases of shop.example' $'sales2@shop.example\tinfo@shop.example' \
+  $'info@shop.example\tinfo@shop.example,ext@far.example' $'@shop.example\tinfo@shop.example' \
+  $'postmaster@shop.example\tadmin@elsewhere.example' >"$_im_r/root/.server-setup/mail/aliases/shop.example"
+printf '%s\n' '# a comment' 'fwd@fwdonly.example   a@one.example, b@two.example' 'sales2@shop.example other@x.example' \
+  'notanaddress   x@y.example' >"$_im_r/etc/postfix/virtual"
+printf 'rendered@shop.example\tx@y.example\n' >"$_im_r/etc/postfix/lomp/valias"
+cat >"$_im_bin/postconf" <<'EOF'
+#!/bin/sh
+echo "hash:$LOMP_IMPORT_ROOT/etc/postfix/lomp/valias, hash:$LOMP_IMPORT_ROOT/etc/postfix/virtual, mysql:/etc/postfix/x.cf"
+EOF
+cat >"$_im_bin/doveadm" <<'EOF'
+#!/bin/sh
+if [ "$1" = user ]; then printf '%s\n' $IM_MAIL_USERS; exit 0; fi
+if [ "$1 $2" = "mailbox path" ]; then u="$4"; printf '%s/home/vmail/%s/%s/Maildir\n' "$LOMP_IMPORT_ROOT" "${u#*@}" "${u%@*}"; exit 0; fi
+exit 1
+EOF
 chmod +x "$_im_bin"/*
 
 # ---- the listing, as the other server writes it ------------------------------
-_im_scan="$(lib_import_remote_scan | LOMP_IMPORT_ROOT="$_im_r" sh -s)"
+_im_scan="$(lib_import_remote_scan | env PATH="$_im_bin:$PATH" LOMP_IMPORT_ROOT="$_im_r" IM_MAIL_USERS="$_im_users" sh -s)"
+_im_mrow() { awk -F'\t' -v a="$1" '$1 == "M" && $2 == a { print $3 "|" $5; exit }' <<<"$_im_scan"; }
+assert_eq  "a mailbox Dovecot knows, where its mail lies and the hash it logs in with" "$_im_md|$_im_hash" "$(_im_mrow info@shop.example)"
+assert_eq  "one whose Maildir is not there, and whose hash is not known" "-|-" "$(_im_mrow sales@shop.example)"
+assert_has "a domain that has only mail there"                 "boss@mailonly.example" "$_im_scan"
+assert_has "an alias from lomp's own file"                     $'A\tsales2@shop.example\tinfo@shop.example' "$_im_scan"
+assert_has "a catch-all"                                       $'A\t@shop.example\tinfo@shop.example' "$_im_scan"
+assert_has "a forwarder from a file Postfix reads, its targets in one list" $'A\tfwd@fwdonly.example\ta@one.example,b@two.example' "$_im_scan"
+assert_lacks "the file lomp renders is not read a second time" "rendered@shop.example" "$_im_scan"
 _im_row() { awk -F'\t' -v d="$1" '$1 == "S" && $2 == d { print $3 "|" $5 "|" $6 "|" $7 "|" $8 "|" $9; exit }' <<<"$_im_scan"; }
 assert_has "the listing says who it ran as"                    $'U\t' "$_im_scan"
 assert_eq  "a virtual host goes by the names its listener maps to it" \
@@ -9503,10 +9544,14 @@ assert_eq  "one directory on request"  "S|-|$_im_l/Example/html|static|path" \
   "$(lib_import_remote_scan | LOMP_IMPORT_ONLY="$_im_l/Example/html" sh -s | awk -F'\t' '$1 == "S" { print $1 "|" $2 "|" $3 "|" $5 "|" $9 }')"
 
 lib_import_scan_parse <<<"$_im_scan"
-assert_eq  "each site once, the virtual hosts first"           "shop.example blog.example panel.example" "${IMP_DOMAIN[*]}"
-assert_eq  "with what it is"                                   "wordpress static php" "${IMP_KIND[*]}"
-assert_eq  "its database"                                      "shopdb - -" "${IMP_DB[*]}"
-assert_eq  "and whether www is served"                         "1 0 0" "${IMP_WWW[*]}"
+assert_eq  "each site once, the virtual hosts first"           "shop.example blog.example panel.example mailonly.example fwdonly.example" "${IMP_DOMAIN[*]}"
+assert_eq  "with what it is"                                   "wordpress static php mail mail" "${IMP_KIND[*]}"
+assert_eq  "its database"                                      "shopdb - - - -" "${IMP_DB[*]}"
+assert_eq  "and whether www is served"                         "1 0 0 0 0" "${IMP_WWW[*]}"
+assert_eq  "the aliases, each once: the first place that names one counts" "sales2@shop.example info@shop.example @shop.example postmaster@shop.example fwd@fwdonly.example" "${IMP_ALIAS[*]}"
+assert_eq  "with where they go"                                "info@shop.example|a@one.example,b@two.example" "${IMP_ALIAS_TO[0]}|${IMP_ALIAS_TO[4]}"
+assert_eq  "the mailboxes, each with its domain"               "info@shop.example sales@shop.example boss@mailonly.example" "${IMP_BOX[*]}"
+assert_eq  "a hash that is a password in the clear is not one" "$_im_hash - -" "${IMP_BOX_HASH[*]}"
 assert_eq  "the directories without a name are kept apart"     "3" "${#IMP_NAMELESS[@]}"
 assert_lacks "a path with a blank in it is not taken"          "odd" "${IMP_NAMELESS[*]} ${IMP_ROOT[*]}"
 assert_eq  "the user it ran as"                                "$(id -un)" "$IMP_REMOTE_USER"
@@ -9561,7 +9606,7 @@ assert_eq  "no access and no wp-config.php is an error of its own" "4" \
   "$(lib_import_remote_dump | env PATH="$_im_bin:$PATH" DB=shopdb CONF= IM_CLIENT_RC=1 bash -s >/dev/null 2>&1 && printf 0 || printf '%s' "$?")"
 
 # ---- the command -----------------------------------------------------------------
-_im_home="https://www.shop.example"; _im_add_ok=1; _im_dump_mode=""
+_im_home="https://www.shop.example"; _im_add_ok=1; _im_dump_mode=""; _im_mail=0
 _im_site() {   # domain mode
   lib_domain_state_reset
   D_DOMAIN="$1"; D_IDENT="$(lib_domain_ident "$1")"; D_USER="$D_IDENT"; D_GROUP="$D_IDENT"
@@ -9570,7 +9615,8 @@ _im_site() {   # domain mode
   mkdir -p "$D_HOME/public_html" "$D_HOME/private/tmp"
   printf '<body><p>This site was %s.</p></body>\n' "$DOMAIN_PLACEHOLDER_MARK" >"$D_HOME/public_html/index.html"
 }
-eval '_import_ssh() { env PATH="$_im_bin:$PATH" LOMP_IMPORT_ROOT="$_im_r" IM_CLIENT_RC=1 IM_DUMP_MODE="$_im_dump_mode" sh -c "$1"; }
+eval '_import_ssh() { env PATH="$_im_bin:$PATH" LOMP_IMPORT_ROOT="$_im_r" IM_CLIENT_RC=1 IM_DUMP_MODE="$_im_dump_mode" IM_MAIL_USERS="$_im_users" sh -c "$1"; }
+      lib_mail_installed() { (( _im_mail )); }
       lib_import_connect() { IMP_SSH_OPTS=(); printf "connect %s port=%s key=%s pw=%s\n" "$IMP_SSH_TARGET" "$1" "$2" "$3" >>"$_im_log"; }
       lib_require_tools() { return 0; }
       lib_require_installed() { return 0; }
@@ -9677,6 +9723,161 @@ assert_has "which an account that cannot open it cannot bring" "this account can
 assert_true "its files are in place all the same"       test -f "$SITES_ROOT/app.example/public_html/index.php"
 assert_has "and the run ends by naming it"              "Not imported: app.example" "$(cat "$_im_out")"
 
+# ---- the mailboxes ---------------------------------------------------------------
+assert_eq  "a bcrypt hash is one Dovecot here can check"        "$_im_hash" "$(_import_hash "$_im_hash")"
+assert_eq  "CyberPanel's way of writing it too"                 "$_im_hash" "$(_import_hash "{CRYPT}${_im_hash#\{BLF-CRYPT\}}")"
+assert_eq  "and a bare one"                                     "$_im_hash" "$(_import_hash "${_im_hash#\{BLF-CRYPT\}}")"
+assert_eq  "a salted SHA-512 stays what it is"                  '{SHA512-CRYPT}$6$saltsalt$abcdefghijklmnopqrstuvwxyz0123456789' "$(_import_hash '{SHA512-CRYPT}$6$saltsalt$abcdefghijklmnopqrstuvwxyz0123456789')"
+assert_eq  "a password kept in the clear is not taken over"     "-" "$(_import_hash '{PLAIN}secret-of-the-boss')"
+assert_eq  "nor is a hash with a colon in it"                   "-" "$(_import_hash '{SSHA}abcdefgh:x::::::userdb_uid=0')"
+assert_eq  "nor nothing"                                        "-" "$(_import_hash '-')"
+assert_eq  "the usual quota when the mailbox is small"          "1G" "$(_import_mail_quota 1G 100)"
+assert_eq  "twice the mailbox when it is not"                   "4G" "$(_import_mail_quota 1G 2000000)"
+assert_eq  "megabytes are counted as megabytes"                 "1G" "$(_import_mail_quota 500M 300000)"
+assert_eq  "no limit stays no limit"                            "0"  "$(_import_mail_quota 0 9000000)"
+printf '%s\n' $'M\tGood@Box.Example\t/srv/m\t12\t'"$_im_hash" $'M\tgood@box.example\t/srv/again\t1\t-' $'M\tno at sign\t/srv/m\t1\t-' \
+  $'M\tx@box.example\t/srv/it\'s\tmany\t{PLAIN}pw' $'M\ta;b@box.example\t/srv/m\t1\t-' | lib_import_scan_parse
+assert_eq  "a mailbox line counts once, in small letters"       "good@box.example x@box.example" "${IMP_BOX[*]}"
+assert_eq  "with its Maildir, size and hash, each checked"      "/srv/m|12|$_im_hash|-|0|-" "${IMP_BOX_DIR[0]}|${IMP_BOX_KB[0]}|${IMP_BOX_HASH[0]}|${IMP_BOX_DIR[1]}|${IMP_BOX_KB[1]}|${IMP_BOX_HASH[1]}"
+assert_eq  "its domain is an entry of the kind mail"            "box.example mail" "${IMP_DOMAIN[*]} ${IMP_KIND[*]}"
+printf '%s\n' $'A\tFwd@Al.Example\tGood@T.example,bad target,;rm@x,good@t.example,two@t.example' $'A\tnokey\tx@y.example' \
+  $'A\ty@al.example\tjunk' $'A\tfwd@al.example\tlater@t.example' $'A\t@al.example\tz@t.example' | lib_import_scan_parse
+assert_eq  "an alias line: small letters, and only the targets that are addresses" "fwd@al.example=good@t.example,two@t.example @al.example=z@t.example" \
+  "${IMP_ALIAS[0]}=${IMP_ALIAS_TO[0]} ${IMP_ALIAS[1]}=${IMP_ALIAS_TO[1]}"
+assert_eq  "nothing else of it counts"                          "2" "${#IMP_ALIAS[@]}"
+assert_eq  "a domain with aliases alone is an entry too"        "al.example mail" "${IMP_DOMAIN[*]} ${IMP_KIND[*]}"
+
+_im_mail=1; _im_sync_ok=1
+_im_pw="$TMP/im-passwd"; : >"$_im_pw"
+MAIL_PASSWD_FILE="$_im_pw"; MAIL_ALIAS_DIR="$TMP/im-aliases"; mkdir -p "$MAIL_ALIAS_DIR"
+eval 'lib_mail_installed() { (( _im_mail )); }
+      lib_mail_domain_enabled() { [[ -e "$TMP/im-mailon-$1" ]]; }
+      _import_mail_on() {
+        if lib_domain_registered "$1"; then printf "mailon %s site\n" "$1" >>"$_im_log"; else printf "mailon %s domain\n" "$1" >>"$_im_log"; fi
+        : >"$TMP/im-mailon-$1"
+      }
+      lib_mail_hash_password() { printf "{BLF-CRYPT}\$2y\$05\$newhash%s" "$1"; printf "%s\n" "$1" >>"$TMP/im-newpw"; }
+      lib_mail_tables_apply() { printf "tables\n" >>"$_im_log"; }
+      _mail_sendas_current() { printf "sendas\n" >>"$_im_log"; }
+      lib_mail_domain_aliases_seed() { printf "seed %s %s\n" "$1" "$2" >>"$_im_log"; }
+      _mail_stage_dir() { mktemp -d "$TMP/im-stage.XXXXXX"; }
+      _mail_stage_drop() { rm -rf "$1"; }
+      _import_mail_sync() {
+        printf "sync %s\n" "$1" >>"$_im_log"
+        (( _im_sync_ok )) || return 1
+        ( cd "$2" && find . -type f | sort ) >"$TMP/im-synced-$1"
+      }'
+: >"$_im_log"; : >"$RUNUSER_LOG"; : >"$TMP/im-newpw"
+assert_eq  "the list counts the mailboxes of a site"           "0" "$(_imf old.example --list)"
+assert_has "two of them"                                        " 2 " "$(grep 'shop.example' "$_im_out" | sed 's/  */ /g')"
+assert_has "a domain with mailboxes and no site is listed too"  "mail" "$(grep 'mailonly.example' "$_im_out")"
+assert_eq  "a site that is here, with its mailboxes"            "0" "$(_imf old.example --only shop.example)"
+assert_has "the plan names them"                                "shop.example: and its 2 mailbox(es)" "$(cat "$_im_out")"
+assert_has "and the aliases"                                    "and 4 alias(es)" "$(grep 'shop.example: and its' "$_im_out")"
+_im_al="$(cat "$MAIL_ALIAS_DIR/shop.example" 2>/dev/null || true)"
+assert_has "an alias goes where it went there"                  $'sales2@shop.example\tinfo@shop.example' "$_im_al"
+assert_has "the catch-all too"                                  $'@shop.example\tinfo@shop.example' "$_im_al"
+assert_has "and an address this server would point at the first mailbox" $'postmaster@shop.example\tadmin@elsewhere.example' "$_im_al"
+assert_lacks "an address that is a mailbox here is not made an alias as well" $'info@shop.example\tinfo@shop.example,ext' "$_im_al"
+assert_has "which is said, with where its mail went there"      "info@shop.example is a mailbox here, so it was not made an alias as well: on the other server its mail goes to info@shop.example,ext@far.example" "$(cat "$_im_out")"
+assert_has "how many were set"                                  "3 alias(es) and forwarder(s) of shop.example set here" "$(cat "$_im_out")"
+assert_has "mail is turned on for the site, by a command that leaves DNS alone" "mailon shop.example site" "$(cat "$_im_log")"
+assert_has "which is how it is called"                          'mail enable "$1" --no-dns' "$(printf '%s' "$_im_orig" | grep -A3 '^_import_mail_on')"
+assert_has "a mailbox keeps the password it had"                "info@shop.example:${_im_hash}::::::userdb_quota_rule=*:storage=1G" "$(cat "$_im_pw")"
+assert_has "one whose hash is not known gets a new one"         'sales@shop.example:{BLF-CRYPT}$2y$05$newhash' "$(cat "$_im_pw")"
+_im_newpw="$(head -n 1 "$TMP/im-newpw")"
+assert_true "of twenty characters"                              test "${#_im_newpw}" -eq 20
+assert_has "shown once, beside its address"                     "sales@shop.example   ${_im_newpw}" "$(cat "$_im_out")"
+assert_lacks "and not written to the log"                       "$_im_newpw" "$(cat "$LOG_FILE")"
+assert_lacks "the hash that was taken over is not printed"      "abcdefghijklmnopqrstuu" "$(cat "$_im_out")"
+assert_has "how many, and how many with their password"         "2 mailbox(es) of shop.example made here, 1 with the password they had there" "$(cat "$_im_out")"
+assert_has "the mail is unpacked by the mail user"              "-u ${MAIL_VMAIL_USER} -- tar -C $TMP/im-stage." "$(cat "$RUNUSER_LOG")"
+assert_has "and merged into the mailbox"                        "sync info@shop.example" "$(cat "$_im_log")"
+_im_synced="$(cat "$TMP/im-synced-info@shop.example" 2>/dev/null || true)"
+assert_has "the messages came"                                  "./cur/1700000000.M1P1.old:2,S" "$_im_synced"
+assert_has "the folders too"                                    "./.Sent/cur/1700000001.M2P1.old:2,S" "$_im_synced"
+assert_has "and what numbers the messages"                      "./dovecot-uidlist" "$_im_synced"
+assert_lacks "Dovecot's indexes stay behind"                    "dovecot.index" "$_im_synced"
+assert_has "a mailbox without a Maildir there is said to be empty" "sales@shop.example: no Maildir of it was found there" "$(cat "$_im_out")"
+assert_lacks "and nothing is merged into it"                    "sync sales@shop.example" "$(cat "$_im_log")"
+assert_eq  "no staging directory is left"                       "" "$(find "$TMP" -maxdepth 1 -name 'im-stage.*' | head -n 1)"
+assert_has "where the mail goes on arriving is said"            "until its MX points here: setup.sh mail dns shop.example" "$(cat "$_im_out")"
+_im_sum="$(cksum <"$_im_pw")"; : >"$_im_log"
+lib_mail_alias_set shop.example sales2@shop.example changed@here.example
+assert_eq  "the same again"                                     "0" "$(_imf old.example --only shop.example)"
+assert_has "an alias this server has stays as it is here"       $'sales2@shop.example\tchanged@here.example' "$(cat "$MAIL_ALIAS_DIR/shop.example")"
+assert_has "which is counted"                                   "3 alias(es) of shop.example that this server already has were left as they are" "$(cat "$_im_out")"
+assert_lacks "none is set a second time"                        "set here" "$(cat "$_im_out")"
+assert_eq  "makes no mailbox twice and changes no password"     "$_im_sum" "$(cksum <"$_im_pw")"
+assert_has "and merges the mail once more"                      "sync info@shop.example" "$(cat "$_im_log")"
+assert_lacks "mail that is on is not turned on again"           "mailon" "$(cat "$_im_log")"
+
+: >"$_im_log"
+assert_eq  "a domain with mailboxes and no site"                "0" "$(_imf old.example --only mailonly.example)"
+assert_has "becomes a mail domain, which the plan says"         "mailonly.example: 1 mailbox(es)" "$(grep 'becomes a mail domain here' "$_im_out")"
+assert_has "and not a site"                                     "mailon mailonly.example domain" "$(cat "$_im_log")"
+assert_lacks "no site is added for it"                          "add mailonly.example" "$(cat "$_im_log")"
+assert_lacks "a password kept in the clear there is not kept here" "secret-of-the-boss" "$(cat "$_im_pw")"
+assert_has "its mailbox gets a new one"                         'boss@mailonly.example:{BLF-CRYPT}$2y$05$newhash' "$(cat "$_im_pw")"
+assert_has "and its mail"                                       "sync boss@mailonly.example" "$(cat "$_im_log")"
+: >"$_im_log"
+assert_eq  "--no-create makes no mail domain either"            "0" "$(_imf old.example --only mailonly.example --no-create)"
+assert_has "and says so"                                        "mailonly.example: left out, it is not a domain here" "$(cat "$_im_out")"
+assert_lacks "nothing is merged for it"                         "sync " "$(cat "$_im_log")"
+: >"$_im_log"
+assert_eq  "a domain that only forwards"                        "0" "$(_imf old.example --only fwdonly.example)"
+assert_has "is a mail domain with its forwarder"                "fwdonly.example: 1 alias(es); it becomes a mail domain here" "$(cat "$_im_out")"
+assert_has "which goes to both addresses"                       $'fwd@fwdonly.example\ta@one.example,b@two.example' "$(cat "$MAIL_ALIAS_DIR/fwdonly.example")"
+assert_has "the list counts the aliases as well"                " 2 4 " "$(_imf old.example --list >/dev/null; grep 'shop.example' "$_im_out" | sed 's/  */ /g')"
+
+: >"$_im_log"
+assert_eq  "--no-mail leaves the mailboxes"                     "0" "$(_imf old.example --only shop.example --no-mail)"
+assert_lacks "where they are"                                   "sync " "$(cat "$_im_log")"
+assert_eq  "--only-mail for a site without a mailbox"           "0" "$(_imf old.example --only blog.example --only-mail)"
+assert_has "leaves it out"                                      "blog.example: left out, it has no mailbox or alias there" "$(cat "$_im_out")"
+: >"$_im_log"; printf 'only here too\n' >"$_im_d1/kept2.txt"; printf 'changed again\n' >"$_im_shop/wp-content/uploads/a.txt"
+assert_eq  "--only-mail for a site that has some"               "0" "$(_imf old.example --only shop.example --only-mail)"
+assert_has "brings the mail"                                    "sync info@shop.example" "$(cat "$_im_log")"
+assert_eq  "and no file"                                        "changed there" "$(cat "$_im_d1/wp-content/uploads/a.txt")"
+assert_lacks "nor a backup"                                     "backup" "$(cat "$_im_log")"
+assert_lacks "nor a reload of the web server"                   "reload" "$(cat "$_im_log")"
+assert_has "and says what it brought"                           "The mailboxes of 1 domain(s) were brought" "$(cat "$_im_out")"
+# an address that is an alias here
+printf 'info@panel.example\tsomebody@elsewhere.example\n' >"$MAIL_ALIAS_DIR/panel.example"
+_im_users="info@panel.example"; : >"$_im_log"
+mkdir -p "$_im_r/home/vmail/panel.example/info/Maildir/cur"
+assert_eq  "an address that is an alias here"                   "0" "$(_imf old.example --only panel.example --only-mail)"
+assert_has "stays one"                                          "info@panel.example is an alias on this server and stays one" "$(cat "$_im_out")"
+assert_lacks "no mailbox is made under it"                      "info@panel.example:" "$(cat "$_im_pw")"
+assert_lacks "and no mail is merged"                            "sync info@panel.example" "$(cat "$_im_log")"
+_im_users="info@shop.example sales@shop.example boss@mailonly.example"
+_im_sync_ok=0
+assert_eq  "mail that cannot be merged fails the domain"        "1" "$(_imf old.example --only shop.example --only-mail)"
+assert_has "by saying how much is missing"                      "The mail of shop.example is only partly here" "$(cat "$_im_out")"
+_im_sync_ok=1
+# a server without mail
+_im_mail=0; : >"$_im_log"
+assert_eq  "a server that runs no mail imports the site all the same" "0" "$(_imf old.example --only shop.example)"
+assert_has "and says what it left"                              "and 4 alias(es) there, and this server runs no mail: they were not brought" "$(cat "$_im_out")"
+assert_lacks "without trying"                                   "mailon" "$(cat "$_im_log")"
+assert_eq  "--only-mail there is refused"                       "1" "$(_imf old.example --all --only-mail)"
+assert_has "for that reason"                                    "This server runs no mail" "$(cat "$_im_out")"
+assert_eq  "a domain that is only mail is left out there"       "0" "$(_imf old.example --only mailonly.example)"
+assert_has "and nothing is imported"                            "Nothing was imported" "$(cat "$_im_out")"
+# a server for mail alone
+_im_mail=1; : >"$_im_log"
+eval 'lib_server_mail_only() { return 0; }'
+assert_eq  "a server for mail alone takes the mailboxes"        "0" "$(_imf old.example --only shop.example)"
+assert_has "and says that the site stays"                       "the mailboxes are brought, the sites are not" "$(cat "$_im_out")"
+assert_lacks "no site part runs there"                          "backup" "$(cat "$_im_log")"
+assert_eq  "with --no-mail nothing is left for it"              "1" "$(_imf old.example --only shop.example --no-mail)"
+eval 'lib_server_mail_only() { return 1; }'
+assert_eq  "--no-mail and --only-mail"                          "1" "$(_imf old.example --all --no-mail --only-mail)"
+assert_eq  "--only-mail and --path"                             "1" "$(_imf old.example --path /srv/x --as x.example --only-mail)"
+assert_has "mail enable takes --no-dns"                         "--no-dns)" "$(declare -f lib_mail_enable_main)"
+assert_has "and then writes no record"                          'if (( no_dns )); then' "$(declare -f lib_mail_enable_main)"
+_im_mail=0
+
 # what goes wrong
 : >"$_im_log"; _im_add_ok=0
 assert_eq  "a site that cannot be added fails"          "1" "$(_imf old.example --only panel.example)"
@@ -9713,7 +9914,7 @@ assert_has "the command is in the reference"            "import <[user@]host>" "
 assert_has "setup.sh knows it"                          'import)         lib_import_main' "$(cat "$ROOT/setup.sh")"
 
 eval "$_im_orig"; eval "$_im_saved"
-unset -f _im_row _im_dump _im_site _imf
+unset -f _im_row _im_mrow _im_dump _im_site _imf
 
 # =============================================================================
 section "renew-ssl: a WordPress installed before its certificate stops calling itself http://"

@@ -164,10 +164,13 @@ KOMUTLAR
   import <[user@]host> [opts]   Başka bir sunucudan SSH ile site getirir: sunduklarını listeler,
                                 hangilerini istediğinizi sorar, burada henüz olmayan siteleri
                                 ekler, bir WordPress'in dosyalarını ve veritabanını kopyalar ve
-                                wp-config.php dosyasını buradaki veritabanına yöneltir. Diğer
-                                sunucu yalnızca okunur (--list --all --only a.com,b.com
-                                --no-create --port N --key FILE --password-file FILE --path DIR
-                                --as DOMAIN --db NAME)
+                                wp-config.php dosyasını buradaki veritabanına yöneltir. Bu
+                                sunucuda posta kuruluysa alan adının posta kutuları da gelir
+                                (öteki sunucu lomp ya da CyberPanel ise şifreleriyle), takma
+                                adları ve yönlendirmeleri de; DNS'e dokunulmaz. Diğer sunucu
+                                yalnızca okunur (--list --all --only a.com,b.com --no-create
+                                --no-mail --only-mail --port N --key FILE --password-file FILE
+                                --path DIR --as DOMAIN --db NAME)
   list                          Site tablosu (--json)
   status                        Servisler, sürümler, kaynaklar, siteler (--json)
   doctor                        Derin sağlık kontrolü (--json, --quiet)
@@ -415,8 +418,12 @@ COMMANDS
   import <[user@]host> [opts]   Bring sites from another server over SSH: lists what it serves,
                                 asks which ones, adds the sites that are not here yet, copies
                                 the files and the database of a WordPress, and points
-                                wp-config.php at the database here. The other server is only
-                                read (--list --all --only a.com,b.com --no-create --port N
+                                wp-config.php at the database here. The mailboxes of a domain
+                                come with it when this server runs mail - with their passwords
+                                where the other server is a lomp or a CyberPanel - and so do
+                                its aliases and forwarders; DNS is not touched. The other
+                                server is only read (--list --all
+                                --only a.com,b.com --no-create --no-mail --only-mail --port N
                                 --key FILE --password-file FILE --path DIR --as DOMAIN --db NAME)
   list                          Table of sites (--json)
   status                        Services, versions, resources, sites (--json)
@@ -1221,7 +1228,7 @@ _menu_import() {
   local host="" port=""
   printf '\n'; _menu_note "Looks at what another server serves and asks which sites to bring here: their files, and the" \
     "database of a WordPress. A site that is not here yet is added first. The other server is only read." \
-    "You are asked for its SSH password once. Certificates come after the DNS points here."
+    "Its mailboxes come along when this server runs mail. You are asked for the SSH password once."
   _menu_ask host "The other server (user@address, e.g. root@203.0.113.10)"
   [[ -n "$host" ]] || return 0
   _menu_ask port "Its SSH port" "22"
@@ -1992,7 +1999,7 @@ MENU_TR['Full path of the archive to restore']='Geri yüklenecek arşivin tam yo
 MENU_TR['Import sites from another server (files and databases, over SSH)']='Başka bir sunucudan site aktar (dosyalar ve veritabanları, SSH ile)'
 MENU_TR['Looks at what another server serves and asks which sites to bring here: their files, and the']='Başka bir sunucunun yayınladığı sitelere bakar ve hangilerinin buraya getirileceğini sorar: dosyaları ve'
 MENU_TR['database of a WordPress. A site that is not here yet is added first. The other server is only read.']='WordPress veritabanı. Burada henüz olmayan site önce eklenir. Diğer sunucu yalnızca okunur.'
-MENU_TR['You are asked for its SSH password once. Certificates come after the DNS points here.']='SSH şifresi bir kez sorulur. Sertifikalar, DNS buraya yönlendikten sonra alınır.'
+MENU_TR['Its mailboxes come along when this server runs mail. You are asked for the SSH password once.']='Bu sunucuda posta kuruluysa posta kutuları da gelir. SSH şifresi bir kez sorulur.'
 MENU_TR['The other server (user@address, e.g. root@203.0.113.10)']='Diğer sunucu (kullanıcı@adres, örn. root@203.0.113.10)'
 MENU_TR['Its SSH port']='SSH portu'
 # MENU_TR-END
