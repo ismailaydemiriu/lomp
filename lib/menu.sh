@@ -324,6 +324,12 @@ _menu_header() {
   _menu_rule
 }
 
+# Lines of explanation above a question or under a heading, for whoever has not been here in
+# a while.
+_menu_hint() {   # line...
+  printf '%s' "$C_DIM"; printf '  %s\n' "$@"; printf '%s' "$C_RST"
+}
+
 _menu_group() { printf ' %s%s%s\n' "$C_BLD" "$1" "$C_RST"; }
 _menu_item()  { printf '  %s%2s%s) %s\n' "$C_CYN" "$1" "$C_RST" "$2"; }
 
@@ -377,7 +383,7 @@ lib_menu_main() {
     _menu_item  3 "Site credentials"
     _menu_item  4 "Site logs"
     _menu_item  5 "Databases"
-    _menu_item  6 "Node.js apps (PM2) and path proxies"
+    _menu_item  6 "Node.js apps (PM2) and proxies (a domain or a path -> an app's port)"
     _menu_item  7 "Remove a site"
     _menu_item 20 "Mail: domains, mailboxes, DNS"
     _menu_item 21 "Fix file ownership (after uploading as root)"
@@ -448,18 +454,25 @@ _menu_add_site() {
 
   printf '\n%sWhat kind of site?%s\n' "$C_BLD" "$C_RST"
   printf '  1) PHP site (default)\n  2) WordPress, installed and configured\n'
-  printf '  3) Static files only\n  4) Node.js app, run by PM2\n'
-  printf '  5) Reverse proxy to an app you run yourself (host:port)\n'
+  printf '  3) Static files only\n'
+  printf '  4) Node.js app that lomp keeps running (PM2: starts at boot, comes back after a crash)\n'
+  printf '  5) Reverse proxy: the domain goes to a port where an app you start yourself listens\n'
   _menu_ask kind "Choice" "1"
   case "$kind" in
     2) args+=(--wordpress) ;;
     3) args+=(--static) ;;
-    4) _menu_ask port "Port the app listens on (it gets it as PORT)" "$(lib_app_port_pick 2>/dev/null || true)"
+    4) _menu_hint "Visitors reach the app through this site; the app itself listens on a local port." \
+         "It must take that port from the PORT variable (process.env.PORT), not a fixed number." \
+         "Afterwards: put the code into /home/${domain,,}/app, then menu 6 -> 3 (Deploy)."
+       _menu_ask port "Port the app listens on (it gets it as PORT)" "$(lib_app_port_pick 2>/dev/null || true)"
        _menu_ask start "Start command (runs without a shell)" "npm start"
        args+=(--node)
        if [[ -n "$port" ]]; then args+=(--port "$port"); fi
        if [[ -n "$start" && "$start" != "npm start" ]]; then args+=(--start "$start"); fi ;;
-    5) _menu_ask proxy "Application address" "127.0.0.1:3000"; args+=(--proxy "$proxy") ;;
+    5) _menu_hint "Everything that asks for this domain is passed to the address below, on this server." \
+         "lomp does not start that app: you do. While it is down the site answers 503." \
+         "Only one path of a site (example.com/api/) instead: menu 6 -> 11 (Path proxies)."
+       _menu_ask proxy "Where the app listens (host:port)" "127.0.0.1:3000"; args+=(--proxy "$proxy") ;;
     *) ;;
   esac
 
@@ -556,6 +569,10 @@ _menu_apps() {
   while true; do
     printf '\n %sNODE.JS APPS (PM2)%s   every site runs its own PM2 as its own user\n' "$C_BLD" "$C_RST"
     _menu_rule
+    _menu_hint "How it works: the domain -> OpenLiteSpeed -> the app on its own local port (3000, 3001...)." \
+      "PM2 keeps the app running: it starts at boot and comes back after a crash." \
+      "A new app: 2 (add the site), copy the code into /home/<domain>/app, then 3 (deploy)." \
+      "An app you start yourself, or one path of a site sent to a port: 2 (kind 5), or 11."
     _menu_item  1 "List applications"
     _menu_item  2 "Add a site (choose \"Node.js app\")"
     _menu_item  3 "Deploy: install dependencies, build, restart"
@@ -720,10 +737,14 @@ _menu_app_set() {   # domain
 }
 
 _menu_proxies() {
-  local choice="" domain="" path="" target=""
+  local choice="" domain="" path="" target="" current=""
   while true; do
     printf '\n %sPATH PROXIES%s   example.com/api/... -> an application, the rest of the site stays\n' "$C_BLD" "$C_RST"
     _menu_rule
+    _menu_hint "Sends one path of a site you already have to a port on this server," \
+      "e.g. /api/ -> 127.0.0.1:3001. The app must be listening there; lomp does not start it." \
+      "The app gets the full path: /api/users arrives as /api/users, not as /users." \
+      "A whole domain to a port instead: main menu 2 (Add a site), kind 5."
     _menu_item 1 "List path proxies"
     _menu_item 2 "Add a path proxy"
     _menu_item 3 "Remove a path proxy"
@@ -733,11 +754,17 @@ _menu_proxies() {
     case "$choice" in
       1) _menu_run proxy list ;;
       2) if domain="$(_menu_pick_domain)"; then
-           _menu_ask path "Path" "/api/"
-           _menu_ask target "Application address" "127.0.0.1:$(lib_app_port_pick 2>/dev/null || printf '3001')"
+           _menu_ask path "Path of the site that goes to the app" "/api/"
+           _menu_ask target "Where the app listens (host:port)" "127.0.0.1:$(lib_app_port_pick 2>/dev/null || printf '3001')"
            _menu_run proxy add "$domain" "$path" "$target"
          else _menu_pause; fi ;;
       3) if domain="$(_menu_pick_domain)"; then
+           current="$(lib_proxy_state_lines "$domain")"
+           if [[ -z "$current" ]]; then
+             printf '%s%s has no path proxies.%s\n' "$C_YEL" "$domain" "$C_RST"; _menu_pause; continue
+           fi
+           printf '\n%sPath proxies of %s:%s\n' "$C_BLD" "$domain" "$C_RST"
+           while read -r path target; do printf '  %s -> %s\n' "$path" "$target"; done <<<"$current"
            _menu_ask path "Path to remove (e.g. /api/)"
            if [[ -n "$path" ]]; then _menu_run proxy remove "$domain" "$path"; else _menu_pause; fi
          else _menu_pause; fi ;;
