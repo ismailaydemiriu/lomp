@@ -333,9 +333,17 @@ end the command lists the configuration files in the document root that still me
 name (an address or the old path in `wp-config.php`, `.htaccess`, `.env`, ...): those are yours
 to look at.
 
-Not moved by `rename`: a site that runs a Node.js application (its PM2 service and builds carry
-the old paths), and a site whose mail is switched on for the site itself - mailboxes cannot
-change their domain. Both are refused before anything is touched.
+A site that runs a Node.js application is moved too. Its PM2 service is named after the user and
+runs out of the home, so it is taken down before the move and set up again afterwards the way
+a restore does it: dependencies installed again, the build run, PM2 started under the unit of
+the new user, scheduled jobs back in cron. The port and the variables stay; a variable that
+still mentions the old domain is pointed out (`lomp app env example.net list`).
+
+Mail does not move, on purpose: a mailbox is an address at the old domain, and it has to go on
+receiving. A site whose mail was switched on for the site itself leaves that mail behind as a
+mail domain of its own - `example.com` keeps every mailbox, alias, DKIM key and its webmail
+exactly as they were (`lomp mail domain list`), as if it had been added with `mail domain add`.
+The site under its new name starts without mail; `lomp mail enable example.net` gives it some.
 
 A redirect is also available on its own, for a name that never was a site here:
 

@@ -321,6 +321,8 @@ Usage: setup.sh rename <old-domain> <new-domain> [options]
   password. The new name gets a certificate of its own, and a WordPress has the addresses in
   its database rewritten. The old name keeps its certificate and sends every request on to
   the new one with a 301. A safety backup is taken first; the site is away for about a minute.
+  A Node.js application is set up again under the new user (dependencies, build, PM2). Mail
+  stays at the old domain, which becomes a mail domain of its own: addresses do not change.
   --no-redirect        Do not keep the old name as a redirect (its certificate goes too)
   --no-ssl             Do not request a certificate for the new name now (renew-ssl later)
   --no-search-replace  Leave the addresses inside a WordPress database as they are
@@ -347,12 +349,6 @@ _domain_rename_blocker() {   # old new
   if [[ "$ni" != "$D_IDENT" ]]; then
     if id -u "$ni" >/dev/null 2>&1; then printf 'a Linux user called %s exists already' "$ni"; return 0; fi
     if getent group "$ni" >/dev/null 2>&1; then printf 'a Linux group called %s exists already' "$ni"; return 0; fi
-  fi
-  if lib_app_state_load "$old"; then
-    printf 'it runs a Node.js application, whose PM2 service and builds carry the old paths; rename does not move those yet'; return 0
-  fi
-  if lib_mail_installed && lib_mail_domain_has_traces "$old" && ! lib_mail_domain_standalone "$old"; then
-    printf 'its mail belongs to the site, and mailboxes cannot change their domain (setup.sh mail disable %s --delete-data takes the mail away first)' "$old"; return 0
   fi
   return 0
 }
@@ -435,9 +431,39 @@ _domain_rename_undo() {   # old new saved-domain.json had-wpcron(0/1)
   if [[ "$D_MODE" == "wordpress" ]]; then lib_mkdir "${OLS_CACHE_DIR}/${old}" 0750 "$(lib_ols_user):$(lib_ols_group)"; fi
   lib_domain_apply_config "put ${old} back"
   if (( wpcron )); then lib_domain_wpcron_set; fi
+  # its PM2 service was taken down under the old name, and nothing was built under the new one
+  if lib_app_state_load "$old"; then lib_app_apply; _app_jobs_sync; fi
   lib_domain_logrotate_regen
   lib_domain_fail2ban_regen
   return 0
+}
+
+# The mail of a renamed site stays where it is. A mailbox is an address at the old domain: a
+# new domain cannot take it over without every correspondent being told. So the old name
+# becomes a mail domain of its own - the record "mail domain add" would have made, carrying
+# the site's .mail block as it is (selectors, webmail, its mail identifier) - and the site
+# under its new name starts without mail. Sets RENAME_MAIL_KEPT when there was mail to keep.
+_domain_rename_mail_detach() {   # old new
+  local old="$1" sf="" mf=""
+  sf="$(lib_domain_json "$2")"
+  RENAME_MAIL_KEPT=0
+  [[ "$(jq -r 'has("mail")' "$sf" 2>/dev/null || true)" == "true" ]] || return 0
+  if lib_mail_domain_standalone "$old"; then
+    RENAME_MAIL_KEPT=1   # it had a record of its own all along, and that one counts
+  elif lib_mail_domain_has_traces "$old"; then
+    mf="$(lib_mail_domain_file "$old")"
+    mkdir -p "$(dirname "$mf")" && chmod 0700 "$(dirname "$mf")" || return 1
+    jq --arg d "$old" --arg ts "$(lib_iso_now)" '{domain: $d, kind: "mail", created_at: $ts, mail: (.mail // {})}' "$sf" >"${mf}.new" || return 1
+    chmod 0600 "${mf}.new" && mv -f "${mf}.new" "$mf" || return 1
+    RENAME_MAIL_KEPT=1
+    lib_log_write INFO "the mail of ${old} is a mail domain of its own now (the site was renamed to ${2})"
+  fi
+  lib_json_set "$sf" 'del(.mail)'
+}
+
+# Does the site in D_* have mail that is the site's own - not a mail domain's?
+_domain_rename_has_mail() {   # old
+  ! lib_mail_domain_standalone "$1" && lib_mail_domain_has_traces "$1"
 }
 
 # Is there a WordPress in the site in D_*? Asked as the site user: the document root is its.
@@ -489,13 +515,15 @@ _domain_rename_wp() {   # old new
 # Configuration files of the site in D_* that still carry the old name - as an address or as
 # the old home directory. Read as the site user, and only the files such a name is kept in.
 _domain_rename_leftovers() {   # old
-  lib_domain_as_user timeout 30 find "${D_HOME}/public_html" -maxdepth 3 -type f -size -1024k \
+  local -a dirs=("${D_HOME}/public_html")
+  if [[ -d "${D_HOME}/app" ]]; then dirs+=("${D_HOME}/app"); fi
+  lib_domain_as_user timeout 30 find "${dirs[@]}" -maxdepth 3 -name node_modules -prune -o -type f -size -1024k \
     \( -name .htaccess -o -name .user.ini -o -name wp-config.php -o -name .env -o -name 'config*.php' -o -name 'settings*.php' \) \
     -exec grep -lF -e "$1" {} + 2>/dev/null | head -n 20 || true
 }
 
 lib_domain_rename_main() {
-  local old="${1:-}" new="${2:-}" redirect=1 ssl=1 replace=1 a="" why="" rc=0 saved="" wpcron=0 oldssl=0 f="" total=7 left="" oi=""
+  local old="${1:-}" new="${2:-}" redirect=1 ssl=1 replace=1 a="" why="" rc=0 saved="" wpcron=0 oldssl=0 f="" total=7 left="" oi="" app=0 mail=0
   if [[ "$old" == "-h" || "$old" == "--help" || "$old" == "help" ]]; then lib_domain_rename_usage; return 0; fi
   if [[ -z "$old" || -z "$new" || "$old" == -* || "$new" == -* ]]; then
     lib_domain_rename_usage >&2; lib_die "Two names are needed: the site and its new name" "" "setup.sh rename old-name.com new-name.com"
@@ -523,6 +551,8 @@ lib_domain_rename_main() {
   why="$(_domain_rename_blocker "$old" "$new")"
   [[ -z "$why" ]] || lib_die "${old} cannot be renamed to ${new}" "$why" "setup.sh list"
   oi="$D_IDENT"; oldssl="$D_SSL"
+  if lib_app_state_load "$old"; then app=1; total=8; fi
+  if _domain_rename_has_mail "$old"; then mail=1; fi
   (( D_SSL_WANTED )) || ssl=0
 
   printf '\n%sThis will rename the site %s to %s%s\n' "$C_BLD" "$old" "$new" "$C_RST"
@@ -534,7 +564,14 @@ lib_domain_rename_main() {
   if _domain_rename_has_wp; then
     lib_note "WordPress $( (( replace )) && printf 'the addresses in its database are rewritten to %s' "$new" || printf 'its database is left as it is (--no-search-replace)')"
   fi
-  lib_note "a safety backup is written to ${BACKUP_ROOT}/${old}/ first; the site is away for about a minute"
+  if (( app )); then
+    lib_note "Node.js  its PM2 service is set up again under the new user: dependencies are installed again, the application is built and started"
+  fi
+  if (( mail )); then
+    lib_note "mail     stays at @${old}: every mailbox, alias and key as it is, ${old} becoming a mail domain of its own"
+    lib_note "         (${new} starts without mail: setup.sh mail enable ${new})"
+  fi
+  lib_note "a safety backup is written to ${BACKUP_ROOT}/${old}/ first; the site is away for about a minute$( (( app )) && printf ', its application until it is built')"
   if (( ssl )); then
     lib_ssl_dns_check "$new" "$D_WWW" || rc=$?
     if (( rc == 1 )); then
@@ -545,6 +582,7 @@ lib_domain_rename_main() {
   fi
   if (( OPT_DRY_RUN )); then lib_info "[dry-run] nothing was changed"; return 0; fi
   lib_confirm "Continue?" n || lib_die "Rename cancelled" "" "re-run with --yes to skip the question"
+  if (( app )); then _app_site_lock "$old"; fi   # not while a deploy of it is still running
   lib_steps_begin "$total"
   lib_rollback_clear
   lib_system_profile
@@ -564,6 +602,8 @@ lib_domain_rename_main() {
   lib_rollback_push "_domain_rename_undo '${old}' '${new}' '${saved}' '${wpcron}'"
   lib_cron_remove "wpcron:${old}"
   lib_ols_vhost_purge "$old" 1
+  # the PM2 service is named after the user and runs out of the home: both are about to change
+  if (( app )); then lib_cron_remove_prefix "job:${old}:"; lib_app_teardown; fi
   _domain_rename_quiet_user "$D_USER" || lib_die "Processes of ${D_USER} are still running" "they did not stop when asked" "pgrep -u ${D_USER} -a"
   lib_ok "virtual host removed, nothing runs as ${D_USER}"
 
@@ -590,6 +630,7 @@ lib_domain_rename_main() {
   rm -f -- "$(lib_domain_state_dir "$new")/ssl.info"   # the note about the old name's certificate
   D_STATUS="active"
   lib_domain_state_save
+  _domain_rename_mail_detach "$old" "$new"     || lib_warn "The mail of ${old} could not be given a record of its own; its mailboxes still work: setup.sh mail domain add ${old}"
 
   # ---- 5 the old name ----------------------------------------------------------
   # before the certificate, which can take a minute: until this is in place the old name gets
@@ -615,6 +656,17 @@ lib_domain_rename_main() {
     ( lib_redirect_apply "$a" ) || lib_warn "The redirect from ${a} still leads to ${old}; later: setup.sh redirect add ${a} ${new}"
     lib_rollback_clear
   done < <(lib_redirects_to "$old")
+
+  # ---- the application ----------------------------------------------------------
+  # after the redirect, before the certificate: the site answers 502 until this is done. As
+  # after a restore: the dependencies again, a build, then PM2 under the unit of the new user.
+  if (( app )); then
+    lib_step "Node.js application"
+    # PM2's own saved list and pid file name the old paths; lomp starts it from its ecosystem file
+    lib_domain_as_user rm -f -- "${D_HOME}/.pm2/dump.pm2" "${D_HOME}/.pm2/dump.pm2.bak" "${D_HOME}/.pm2/pm2.pid" 2>/dev/null || true
+    ( lib_app_restore ) || lib_warn "The application of ${new} did not come up; later: setup.sh app deploy ${new}"
+    lib_rollback_clear
+  fi
 
   # ---- 6 certificate -----------------------------------------------------------
   lib_step "Certificate for ${new}"
@@ -651,6 +703,13 @@ lib_domain_rename_main() {
   lib_print_kv "Backups"  "${f}/ (the one from before the rename: $(basename "${BK_LAST_FILE:-none}"))"
   if (( ! D_SSL && D_SSL_WANTED )); then lib_note "No certificate yet: point the DNS of ${new} here, then run: setup.sh renew-ssl ${new}"; fi
   if (( redirect )); then lib_note "Keep the DNS of ${old} pointing here for as long as the redirect should work."; fi
+  if (( RENAME_MAIL_KEPT )); then
+    lib_note "Mail: the mailboxes at @${old} work as before; ${old} is a mail domain of its own now (setup.sh mail domain list)."
+    lib_note "Mail for ${new}, if it should have any: setup.sh mail enable ${new} --mailbox info"
+  fi
+  if (( app )) && lib_app_env_json "$new" | grep -qF -- "$old"; then
+    lib_warn "A variable of the application still names ${old}: setup.sh app env ${new} list"
+  fi
   left="$(_domain_rename_leftovers "$old")"
   if [[ -n "$left" ]]; then
     lib_warn "These files still name ${old} (an address, or the old path ${SITES_ROOT}/${old}); have a look at them:"

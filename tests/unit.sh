@@ -7095,14 +7095,13 @@ section "rename: a site under another name, and the old name as a redirect"
 _rn="$TMP/rename"
 _rn_mods="common system ols php db ssl domain harden scan proxy app mail webmail cloudflare backup monitor install rename menu"
 _rn_stubs='
-  HARDEN_PHP_INI_ROOT="$_rn/phpini"; LE_LIVE="$_rn/le"; WPCLI_BIN="$_rn/wp"
+  HARDEN_PHP_INI_ROOT="$_rn/phpini"; LE_LIVE="$_rn/le"; WPCLI_BIN="$_rn/wp"; MAIL_DOMAINS_DIR="$_rn/maildomains"
   lib_require_tools() { :; }; lib_require_installed() { :; }; lib_system_profile() { :; }
   lib_ols_is_installed() { return 0; }
   lib_ols_change_begin() { OLS_PENDING_RELOAD=0; }
   lib_ols_change_commit() { printf "commit pending=%s %s\n" "$OLS_PENDING_RELOAD" "$*" >>"$_rn/calls"; OLS_PENDING_RELOAD=0; }
   lib_mail_installed() { [[ -e "$_rn/mail-installed" ]]; }
   lib_mail_domain_has_traces() { [[ -e "$_rn/mail-traces-$1" ]]; }
-  lib_mail_domain_standalone() { [[ -e "$_rn/mail-own-$1" ]]; }
   lib_ssl_dns_check() { SSL_LAST_ERROR="no A record"; return "$(cat "$_rn/dns-rc" 2>/dev/null || printf 0)"; }
   lib_ssl_obtain_names() { printf "obtain %s\n" "$*" >>"$_rn/calls"; SSL_LAST_ERROR="certbot said no"; [[ -e "$_rn/certbot-works" ]] || return 1; mkdir -p "$SSL_DEPLOY_DIR/$1"; printf c >"$SSL_DEPLOY_DIR/$1/fullchain.pem"; printf k >"$SSL_DEPLOY_DIR/$1/privkey.pem"; }
   lib_ssl_cert_covers() { local c="$1" n=""; shift; for n in "$@"; do grep -qxF -- "$n" "$_rn/covers-$c" 2>/dev/null || return 1; done; }
@@ -7153,6 +7152,11 @@ _rn_stubs='
     lib_domain_logrotate_regen() { printf "logrotate\n" >>"$_rn/calls"; }
     lib_domain_fail2ban_regen() { :; }
     lib_ols_htaccess_watch_ensure() { :; }
+    _app_site_lock() { printf "app-lock %s\n" "$1" >>"$_rn/calls"; }
+    lib_app_teardown() { printf "app-teardown %s\n" "$D_IDENT" >>"$_rn/calls"; }
+    lib_app_restore() { printf "app-restore %s home=%s\n" "$D_IDENT" "$D_HOME" >>"$_rn/calls"; [[ ! -e "$_rn/app-fails" ]]; }
+    lib_app_apply() { printf "app-apply %s\n" "$D_IDENT" >>"$_rn/calls"; }
+    _app_jobs_sync() { printf "app-jobs %s\n" "$D_DOMAIN" >>"$_rn/calls"; }
   }
   _rn_rename() { _rn_flow; lib_domain_rename_main "$@"; }
   _rn_rename_asked() { OPT_YES=0; _rn_flow; lib_domain_rename_main "$@"; }
@@ -7431,12 +7435,10 @@ _rn_long="averyveryveryverylongdomainname"
 _rn_site "${_rn_long}.example" "$(lib_domain_ident "${_rn_long}.example")"
 _rn_case _rn_blocker "${_rn_long}.example" "${_rn_long}.exampleb"; assert_eq "a new name with the same user name is not blocked by that user" "rc=0" "$(_rn_out)"
 jq '.app = {port: 3000}' "$_rn/state/domains/alpha.example/domain.json" >"$_rn/t" && cp "$_rn/t" "$_rn/state/domains/alpha.example/domain.json"
-_rn_case _rn_blocker alpha.example beta.example;   assert_has "a Node.js application" "runs a Node.js application" "$(_rn_out)"
-jq 'del(.app)' "$_rn/state/domains/alpha.example/domain.json" >"$_rn/t" && cp "$_rn/t" "$_rn/state/domains/alpha.example/domain.json"
+_rn_case _rn_blocker alpha.example beta.example;   assert_eq  "a Node.js application is no reason to refuse" "rc=0" "$(_rn_out)"
 : >"$_rn/mail-installed"; : >"$_rn/mail-traces-alpha.example"
-_rn_case _rn_blocker alpha.example beta.example;   assert_has "mail that belongs to the site" "mailboxes cannot change their domain" "$(_rn_out)"
-: >"$_rn/mail-own-alpha.example"
-_rn_case _rn_blocker alpha.example beta.example;   assert_eq  "mail that is a mail domain of its own stays where it is" "rc=0" "$(_rn_out)"
+_rn_case _rn_blocker alpha.example beta.example;   assert_eq  "nor is mail that belongs to the site" "rc=0" "$(_rn_out)"
+jq 'del(.app)' "$_rn/state/domains/alpha.example/domain.json" >"$_rn/t" && cp "$_rn/t" "$_rn/state/domains/alpha.example/domain.json"
 rm -f "$_rn"/mail-*
 jq '.user = "someone"' "$_rn/state/domains/alpha.example/domain.json" >"$_rn/t" && cp "$_rn/t" "$_rn/state/domains/alpha.example/domain.json"
 _rn_case _rn_blocker alpha.example beta.example;   assert_has "a site that runs as another user than its own" "runs as someone:alpha_example" "$(_rn_out)"
@@ -7547,11 +7549,107 @@ _c="$(_rn_calls)"
 assert_lacks "a site that wanted no certificate is not given one" "add-ssl" "$_c"
 assert_has   "without www, the www form goes to the bare name" "search-replace //www.alpha.example //beta.example " "$_c"
 assert_eq    "and the redirect takes no www along" "false" "$(jq -r .www "$_rn/state/domains/alpha.example/redirect.json")"
-_rn_fresh
-: >"$_rn/mail-installed"; : >"$_rn/mail-traces-alpha.example"; : >"$_rn/mail-own-alpha.example"
+
+# ---- rename: a site with mail ---------------------------------------------------------
+# A mailbox is an address at the old domain. It stays one: the old name becomes a mail domain
+# of its own, with the site's .mail block as it was, and the site moves on without mail.
+_rn_mail_site() {
+  _rn_fresh
+  jq '.mail = {enabled: true, selector: "s2026", webmail: true, ident: "alpha_example", selectors_used: ["s2025", "s2026"]}' \
+    "$_rn/state/domains/alpha.example/domain.json" >"$_rn/t" && cp "$_rn/t" "$_rn/state/domains/alpha.example/domain.json"
+  : >"$_rn/mail-installed"; : >"$_rn/mail-traces-alpha.example"
+}
+_rn_mail_site
+_rn_case _rn_rename_dry alpha.example beta.example
+assert_has   "it is said beforehand that the mail stays" "stays at @alpha.example" "$(_rn_out)"
+assert_false "a dry run registers nothing" test -e "$_rn/maildomains"
 _rn_case _rn_rename alpha.example beta.example
-assert_has   "a mail domain of its own does not stop the rename" "rc=0" "$(_rn_out)"
-assert_true  "but its archives stay under its name" test -e "$_rn/backups/alpha.example/alpha.example-20260101-000000.tar.gz"
+_o="$(_rn_out)"
+assert_has   "a site with mail is renamed" "rc=0" "$_o"
+assert_eq    "the old name is a mail domain of its own, with everything its mail had" "alpha.example mail true s2026 true alpha_example s2025,s2026" \
+  "$(jq -r '"\(.domain) \(.kind) \(.mail.enabled) \(.mail.selector) \(.mail.webmail) \(.mail.ident) \(.mail.selectors_used | join(","))"' "$_rn/maildomains/alpha.example/domain.json")"
+assert_eq    "the site under its new name has no mail" "false" "$(_rn_json beta.example 'has("mail")')"
+assert_eq    "and is still everything else" "beta.example alpha_db" "$(_rn_json beta.example '"\(.domain) \(.db.name)"')"
+assert_true  "the archives stay under the old name: the mail's are among them" test -e "$_rn/backups/alpha.example/alpha.example-20260101-000000.tar.gz"
+assert_has   "the safety backup leaves the mail out: nothing happens to it" "--no-mail" "$(_rn_calls | head -n 1)"
+assert_has   "it is said afterwards" "alpha.example is a mail domain of its own now" "$_o"
+assert_has   "with how the new name gets mail" "setup.sh mail enable beta.example" "$_o"
+if (( CAN_CHMOD )); then
+  assert_eq  "the record is root's alone" "600" "$(stat -c %a "$_rn/maildomains/alpha.example/domain.json")"
+fi
+# a record of its own was there all along: that one counts, and is not written over
+_rn_mail_site
+mkdir -p "$_rn/maildomains/alpha.example"; printf '{"domain":"alpha.example","kind":"mail","mail":{"enabled":true,"selector":"own"}}\n' >"$_rn/maildomains/alpha.example/domain.json"
+_rn_case _rn_rename alpha.example beta.example
+assert_eq    "a mail domain that had its own record keeps it" "own" "$(jq -r .mail.selector "$_rn/maildomains/alpha.example/domain.json")"
+assert_eq    "and the site's stale block goes" "false" "$(_rn_json beta.example 'has("mail")')"
+# mail that was switched off and left nothing behind
+_rn_fresh
+jq '.mail = {enabled: false}' "$_rn/state/domains/alpha.example/domain.json" >"$_rn/t" && cp "$_rn/t" "$_rn/state/domains/alpha.example/domain.json"
+_rn_case _rn_rename alpha.example beta.example
+assert_false "mail that left no trace makes no mail domain" test -e "$_rn/maildomains/alpha.example"
+assert_eq    "the block does not follow the site either" "false" "$(_rn_json beta.example 'has("mail")')"
+assert_lacks "and nothing is said about mail" "mail domain of its own" "$(_rn_out)"
+# a rename that is undone leaves the mail the site's
+_rn_mail_site
+: >"$_rn/smoke-fails"
+_rn_case _rn_rename alpha.example beta.example
+assert_has   "a failed rename of a site with mail rolls back" "Rolling back" "$(_rn_out)"
+assert_eq    "its mail is still the site's" "true s2026" "$(_rn_json alpha.example '"\(.mail.enabled) \(.mail.selector)"')"
+assert_false "and no mail domain was made" test -e "$_rn/maildomains/alpha.example"
+
+# ---- rename: a site with a Node.js application ----------------------------------------
+# The PM2 service is named after the user and runs out of the home. It is taken down before
+# either changes and set up again afterwards, the way a restore does it.
+_rn_app_site() {
+  _rn_fresh
+  jq '.mode = "proxy" | .php = {} | .proxy = {target: "127.0.0.1:3000", static_paths: "none"} | .app = {manager: "pm2", port: 3000, start: "npm start", enabled: true}
+      | .workers = [{name: "queue", start: "node queue.js", cron: "*/5 * * * *"}]' \
+    "$_rn/state/domains/alpha.example/domain.json" >"$_rn/t" && cp "$_rn/t" "$_rn/state/domains/alpha.example/domain.json"
+  printf '{"APP_URL":"https://alpha.example"}\n' >"$_rn/state/domains/alpha.example/app-env.json"
+  printf '%s\n' "*/5 * * * * alpha_example /bin/bash $_rn/home/alpha.example/.pm2/jobs/queue.sh # server-setup:job:alpha.example:queue" >>"$_rn/cron"
+  mkdir -p "$_rn/home/alpha.example/.pm2" "$_rn/home/alpha.example/app"
+  : >"$_rn/home/alpha.example/.pm2/dump.pm2"; : >"$_rn/home/alpha.example/.pm2/pm2.pid"; printf '{}' >"$_rn/home/alpha.example/.pm2/lomp.ecosystem.json"
+}
+_rn_app_site
+_rn_case _rn_rename_dry alpha.example beta.example
+assert_has   "it is said beforehand that the application is built again" "its PM2 service is set up again under the new user" "$(_rn_out)"
+_rn_case _rn_rename alpha.example beta.example
+_o="$(_rn_out)"; _c="$(_rn_calls)"
+assert_has   "a site with an application is renamed" "rc=0" "$_o"
+assert_has   "no deploy may be running: its lock is taken" "app-lock alpha.example" "$_c"
+assert_has   "the PM2 service of the old user is taken down" "app-teardown alpha_example" "$_c"
+assert_has   "and set up for the new user in the new home" "app-restore beta_example home=$_rn/home/beta.example" "$_c"
+assert_eq    "down before the user is renamed; up after the site and the redirect, before the certificate" "in order" \
+  "$(awk '/^app-teardown/{t=NR} /^usermod -l/{u=NR} /^apply beta.example/{a=NR} /^redirect-apply alpha.example/{r=NR} /^app-restore/{s=NR} /^add-ssl/{c=NR}
+          END{ if (t && u && a && r && s && c && t < u && u < a && a < r && r < s && s < c) print "in order"; else print t, u, a, r, s, c }' "$_rn/calls")"
+assert_lacks "the scheduled job of the old name is out of cron" "job:alpha.example" "$(cat "$_rn/cron")"
+assert_false "PM2's saved list, which names the old paths, is gone" test -e "$_rn/home/beta.example/.pm2/dump.pm2"
+assert_false "and its pid file" test -e "$_rn/home/beta.example/.pm2/pm2.pid"
+assert_true  "what lomp starts it from is still there" test -e "$_rn/home/beta.example/.pm2/lomp.ecosystem.json"
+assert_eq    "the application's settings follow the site" "3000 npm start queue" "$(_rn_json beta.example '"\(.app.port) \(.app.start) \(.workers[0].name)"')"
+assert_true  "and its variables" test -s "$_rn/state/domains/beta.example/app-env.json"
+assert_has   "a variable that still names the old domain is pointed out" "A variable of the application still names alpha.example" "$_o"
+assert_has   "it has a step of its own" "Node.js application" "$_o"
+assert_lacks "no PHP is asked for on a proxy site" "PHP is not executing" "$_o"
+_rn_app_site
+: >"$_rn/app-fails"
+_rn_case _rn_rename alpha.example beta.example
+assert_has   "an application that does not come up does not undo the rename" "rc=0" "$(_rn_out)"
+assert_has   "it is said, with the command for later" "setup.sh app deploy beta.example" "$(_rn_out)"
+_rn_app_site
+: >"$_rn/smoke-fails"
+_rn_case _rn_rename alpha.example beta.example
+_c="$(_rn_calls)"
+assert_has   "a failed rename of a site with an application rolls back" "Rolling back" "$(_rn_out)"
+assert_has   "its PM2 service is put back for the old user" "app-apply alpha_example" "$_c"
+assert_has   "and its scheduled jobs" "app-jobs alpha.example" "$_c"
+assert_lacks "nothing was built under the new name" "app-restore" "$_c"
+assert_true  "after the old virtual host" bash -c 'a="$(grep -n "^apply alpha.example" "$1" | tail -n 1 | cut -d: -f1)"; b="$(grep -n "^app-apply" "$1" | cut -d: -f1)"; [ "$a" -lt "$b" ]' _ "$_rn/calls"
+_rn_fresh
+: >"$_rn/smoke-fails"
+_rn_case _rn_rename alpha.example beta.example
+assert_lacks "a site without an application gets none on the way back" "app-" "$(_rn_calls)"
 _rn_fresh
 : >"$_rn/redirect-fails"
 _rn_case _rn_rename alpha.example beta.example
@@ -7633,7 +7731,7 @@ assert_has  "and the redirects" "27) _menu_redirects" "$(tr -s ' \n' ' ' <<<"$_r
 _rn_menu_fn="$(declare -f _menu_rename_site)"
 assert_has  "from the menu the old name stays a redirect unless that is declined" '--no-redirect' "$_rn_menu_fn"
 assert_has  "and the name typed is checked before the command runs" 'lib_domain_valid' "$_rn_menu_fn"
-unset -f _rn_case _rn_out _rn_calls _rn_site _rn_fresh _rn_tree _rn_json
+unset -f _rn_case _rn_out _rn_calls _rn_site _rn_fresh _rn_tree _rn_json _rn_mail_site _rn_app_site
 
 # =============================================================================
 section "two domains never share the name their certificate and webmail go by"
