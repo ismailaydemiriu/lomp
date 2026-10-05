@@ -2511,11 +2511,15 @@ lib_mail_boxes_unpark() {   # domain
 }
 
 # Mail still waiting to go out to a domain that is about to stop being one of ours.
+# (The end of the line is compared with the name, not matched against it: as a pattern the
+# dots of a.b.example stand for any character, and the mail queued for a-b.example was
+# counted as this domain's.)
 _mail_warn_queued() {   # domain
   local n=0
   lib_have postqueue || return 0
   (( OPT_DRY_RUN )) && return 0
-  n="$(postqueue -p 2>/dev/null | grep -c "@${1}$" || true)"
+  n="$(postqueue -p 2>/dev/null \
+        | awk -v d="@${1}" 'length($0) >= length(d) && substr($0, length($0) - length(d) + 1) == d { n++ } END { print n + 0 }' || true)"
   [[ "$n" =~ ^[0-9]+$ ]] || n=0
   (( n > 0 )) && lib_warn "${n} message(s) for ${1} are still in the queue; they will be treated as mail for somewhere else now (lomp mail queue)"
   return 0
@@ -2806,6 +2810,10 @@ lib_mail_alias_forget_everywhere() {   # address
 # delete anything, so these are not removed - somebody meant them, and enabling the domain
 # again makes them work - but until then they accept mail and bounce it, and that is worth
 # saying out loud.
+# The domain of each target is compared with this one, not matched against it. As a pattern
+# "@example.com" is found in "info@example.com.tr" as well, and its dots stand for any
+# character: the warning listed another domain's own postmaster alias as one "delivered into"
+# this domain, for every pair like example.com / example.com.tr and a-b.example / a.b.example.
 _mail_alias_targets_elsewhere() {   # domain -> "alias -> target" lines
   local d="$1" f="" other=""
   [[ -d "$MAIL_ALIAS_DIR" ]] || return 0
@@ -2813,7 +2821,14 @@ _mail_alias_targets_elsewhere() {   # domain -> "alias -> target" lines
     [[ -f "$f" ]] || continue
     other="$(basename "$f")"
     [[ "$other" == "$d" ]] && continue
-    awk -F'\t' -v d="@${d}" '$1 !~ /^#/ && $2 ~ d { print "  " $1 " -> " $2 }' "$f" || true
+    awk -F'\t' -v d="$d" '
+      $1 !~ /^#/ {
+        n = split($2, t, ",")
+        for (i = 1; i <= n; i++) {
+          gsub(/[ \t]/, "", t[i]); at = index(t[i], "@")
+          if (at > 0 && substr(t[i], at + 1) == d) { print "  " $1 " -> " $2; break }
+        }
+      }' "$f" || true
   done
   return 0
 }

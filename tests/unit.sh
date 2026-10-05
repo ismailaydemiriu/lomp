@@ -8293,6 +8293,46 @@ assert_lacks "and deletes no account"                                      "user
 eval "$_lr_saved_vars"; eval "$_lr_saved_fn"
 unset -f _lr_do _lr_said _lr_done _lr_fresh _lr_archive
 
+# =============================================================================
+section "a domain is compared, not matched, where another one's name looks like it"
+# "@example.com" as a pattern is also found in "info@example.com.tr", and its dots stand for
+# any character: "@a.b.example" finds "x@a-b.example". "mail disable" and "mail domain del"
+# warned about aliases of other domains "delivered into" this one and listed another domain's
+# own postmaster alias, and the count of mail queued for a domain took in its neighbour's.
+_cm="$TMP/compare"; rm -rf "$_cm"; mkdir -p "$_cm/aliases"
+_cm_saved="$(declare -p MAIL_ALIAS_DIR OPT_DRY_RUN)"
+MAIL_ALIAS_DIR="$_cm/aliases"; OPT_DRY_RUN=0
+printf 'postmaster@example.com.tr\tinfo@example.com.tr\nboth@example.com.tr\tinfo@example.com , x@elsewhere.example\ntwo@example.com.tr\ta@example.com,b@example.com\n# old@example.com.tr\tinfo@example.com\n' >"$MAIL_ALIAS_DIR/example.com.tr"
+printf 'postmaster@a-b.example\tinfo@a-b.example\n' >"$MAIL_ALIAS_DIR/a-b.example"
+printf 'own@example.com\tinfo@example.com\n' >"$MAIL_ALIAS_DIR/example.com"
+_cm_e="$(_mail_alias_targets_elsewhere example.com)"
+assert_has   "an alias of another domain that is delivered into this one is found" "both@example.com.tr -> info@example.com , x@elsewhere.example" "$_cm_e"
+assert_has   "one with two targets here as well"                                  "two@example.com.tr -> a@example.com,b@example.com" "$_cm_e"
+assert_eq    "each once, and nothing else: not a line that is commented out"      2 "$(grep -c . <<<"$_cm_e" || true)"
+assert_lacks "an alias that stays inside a domain whose name starts the same is not" "postmaster@example.com.tr" "$_cm_e"
+assert_lacks "nor this domain's own"                                              "own@example.com" "$_cm_e"
+assert_eq    "a dot in the name stands for a dot, not for any character"          "" "$(_mail_alias_targets_elsewhere a.b.example)"
+assert_eq    "and a name is not found inside a longer one"                        "" "$(_mail_alias_targets_elsewhere example.co)"
+# the queue, as postqueue prints it: the recipients on lines of their own
+_cm_q() {
+  ( lib_have() { return 0; }
+    postqueue() {
+      printf '%s\n' "-Queue ID-  --Size-- ----Arrival Time---- -Sender/Recipient-------" \
+        "A1B2C3D4E5      512 Mon Oct  5 10:00:00  root@host.example" "                                         info@example.com.tr" \
+        "                                         x@a-b.example" "" \
+        "B1B2C3D4E5      512 Mon Oct  5 10:00:00  root@host.example" "                                         info@example.com" "" \
+        "-- 1 Kbytes in 2 Requests."
+    }
+    OPT_QUIET=0; _mail_warn_queued "$1" 2>&1 )
+}
+assert_has   "mail queued for a domain is counted"                                "1 message(s) for example.com are" "$(_cm_q example.com)"
+assert_has   "and its neighbour's is the neighbour's"                             "1 message(s) for example.com.tr are" "$(_cm_q example.com.tr)"
+assert_eq    "what is queued for a-b.example is not a.b.example's"                "" "$(_cm_q a.b.example)"
+assert_has   "but its own"                                                        "1 message(s) for a-b.example are" "$(_cm_q a-b.example)"
+
+eval "$_cm_saved"
+unset -f _cm_q
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 if (( FAIL > 0 )); then exit 1; fi
 exit 0
