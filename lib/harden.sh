@@ -243,6 +243,29 @@ lib_sitefw_migrate() {
 #  harden
 # =============================================================================
 lib_harden_usage() {
+  # a usage text is no single message lib/lang.sh could look up: its Turkish is here
+  if [[ "${LIB_LANG:-en}" == "tr" ]]; then
+    cat <<'EOF'
+Kullanım: lomp harden <domain>|--all [--allow-exec] [--allow-upload-php]
+          lomp harden status
+          lomp harden --firewall on|off
+
+  Bir siteye bırakılmış bir PHP shell'inin yapabileceklerini sınırlar:
+    - PHP süreç başlatamaz (exec, shell_exec, system, proc_open, popen ...) ve yalnızca
+      sitenin kendi dosyalarını okur (open_basedir). WP-CLI ve cron işleri etkilenmez.
+    - yükleme ve önbellek dizinlerindeki betikler (uploads/, files/, media/, cache/, tmp/)
+      403 ile reddedilir; böylece yüklenen bir .php asla çalışmaz.
+    - sitenin kullanıcısı bu makinede yalnızca DNS'e, web sunucusuna, MariaDB'ye, Redis'e ve
+      sitenin kendi uygulamasına erişir - WebAdmin paneline, SSH'ye ya da dinleyen başka bir
+      şeye erişemez.
+
+  --allow-exec         bu site için süreç çalıştırmaya ve open_basedir'e dokunulmaz
+                       (exec/proc_open gerektiren bir uygulama: bazı eklentiler, kuyruk worker'ları)
+  --allow-upload-php   bu site için yükleme dizinlerindeki betiklerin çalışmasına izin verilir
+  --firewall on|off    yalnızca site güvenlik duvarı açılır ya da kapatılır
+EOF
+    return 0
+  fi
   cat <<'EOF'
 Usage: lomp harden <domain>|--all [--allow-exec] [--allow-upload-php]
        lomp harden status
@@ -266,15 +289,15 @@ EOF
 lib_harden_status() {
   local d="" fw="off"
   if lib_sitefw_enabled; then if lib_sitefw_loaded; then fw="on"; else fw="on, but NOT loaded"; fi; fi
-  printf 'Site firewall: %s\n\n' "$fw"
-  printf '%-34s %-10s %-22s %s\n' "SITE" "MODE" "PROCESS EXECUTION" "SCRIPTS IN UPLOAD DIRS"
+  lib_tr "Site firewall: ${fw}"; printf '%s\n\n' "$LIB_TR"
+  lib_tprintf '%-34s %-10s %-22s %s\n' "SITE" "MODE" "PROCESS EXECUTION" "SCRIPTS IN UPLOAD DIRS"
   while read -r d; do
     [[ -n "$d" ]] || continue
     lib_domain_state_load "$d" || continue
     case "$D_MODE" in
-      php)       printf '%-34s %-10s %-22s %s\n' "$d" "$D_MODE" "${D_SEC_EXEC:-not decided}" "${D_SEC_UPLOAD:-not decided}" ;;
-      wordpress) printf '%-34s %-10s %-22s %s\n' "$d" "$D_MODE" "${D_SEC_EXEC:-not decided}" "blocked (wp-content/uploads)" ;;
-      *)         printf '%-34s %-10s %-22s %s\n' "$d" "$D_MODE" "-" "-" ;;
+      php)       lib_tprintf '%-34s %-10s %-22s %s\n' "$d" "$D_MODE" "${D_SEC_EXEC:-not decided}" "${D_SEC_UPLOAD:-not decided}" ;;
+      wordpress) lib_tprintf '%-34s %-10s %-22s %s\n' "$d" "$D_MODE" "${D_SEC_EXEC:-not decided}" "blocked (wp-content/uploads)" ;;
+      *)         lib_tprintf '%-34s %-10s %-22s %s\n' "$d" "$D_MODE" "-" "-" ;;
     esac
   done < <(lib_domains_list)
   return 0

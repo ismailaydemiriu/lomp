@@ -135,7 +135,7 @@ _ss_parse_globals() {
       --json)              OPT_JSON=1; OPT_QUIET=1 ;;
       --non-interactive)   OPT_NON_INTERACTIVE=1 ;;
       --version|-V)        lib_version; exit 0 ;;
-      --help|-h)           lib_usage; exit 0 ;;
+      --help|-h)           lib_lang_load help; lib_usage; exit 0 ;;   # the language first: the reference has a Turkish text
       *)                   ARGS+=("$a") ;;
     esac
   done
@@ -162,7 +162,7 @@ main() {
   fi
 
   case "$cmd" in
-    help|-h|--help) lib_usage; return 0 ;;
+    help|-h|--help) lib_lang_load help; lib_usage; return 0 ;;
     version)        lib_version; return 0 ;;
   esac
 

@@ -44,6 +44,37 @@ APP_JOB_TIMEOUT_DEFAULT="1h"
 APP_ONLY=""
 
 lib_app_usage() {
+  # a usage text is no single message lib/lang.sh could look up: its Turkish is here
+  if [[ "${LIB_LANG:-en}" == "tr" ]]; then
+    cat <<'EOF'
+Kullanım: setup.sh app list [--json]
+          setup.sh app status <domain>
+          setup.sh app start | stop | restart <domain> [--process NAME]
+          setup.sh app logs <domain> [--process NAME] [--out|--error] [-n LINES]
+          setup.sh app worker <domain> list
+          setup.sh app worker <domain> add NAME --start CMD [--cwd DIR] [--port N] [--memory 256M]
+          setup.sh app worker <domain> add NAME --cron "*/5 * * * *" --start CMD [--cwd DIR] [--timeout 1h]
+          setup.sh app worker <domain> remove NAME | run NAME
+          setup.sh app deploy <domain> [--git URL [--branch B]]
+                                        çeker (git), bağımlılıkları kurar, derler, yeniden başlatır
+       setup.sh app deploy-key <domain> özel bir depo için anahtar (açık anahtarı yazdırır)
+       setup.sh app set <domain> [--port N] [--start "npm start" | --script dist/main.js] [--memory 512M|none] [--no-git]
+       setup.sh app env <domain> list [--show] | set NAME | unset NAME... | import-db
+  Bir Node.js sitesi şu komutla oluşturulur:
+  setup.sh add app.example.com --node [--port N] [--start CMD] [--git URL]
+  Uygulama $PORT içindeki portu dinlemelidir. "env set" değeri standart girdiden okur ya da
+  sorar; böylece değer süreç listesinde, kabuk geçmişinde ya da logda hiç görünmez.
+  Depo URL'leri: https://host/owner/repo.git, git@host:owner/repo.git, ssh://git@host/repo.git;
+  içinde asla şifre ya da token olmamalıdır - bunun yerine bir deploy anahtarı kullanın.
+  Worker'lar uygulamanın yanında, aynı PM2 altında, site kullanıcısı olarak ve onun ortamıyla
+  çalışır: kuyruk tüketicileri, botlar (uygulamanın kendi sürecinin adı "web" olur). Seçenek
+  olarak --cron verilirse worker, cron'un başlattığı bir zamanlanmış iş olur: bir çalıştırma
+  öncekiyle asla çakışmaz ve --timeout sonunda durdurulur. "worker run" bir işi hemen başlatır.
+  Dizin, sitenin ev dizinine göredir (varsayılan: app). Gizli değerler başlatma komutuna değil,
+  "app env" içine konur.
+EOF
+    return 0
+  fi
   cat <<'EOF'
 Usage: setup.sh app list [--json]
        setup.sh app status <domain>
@@ -125,7 +156,7 @@ _app_write_as_user() {   # path
   if [[ "$new" == "$old" ]]; then return 0; fi
   APP_FILE_CHANGED=1
   if (( OPT_DRY_RUN )); then
-    (( OPT_QUIET )) || printf '%s[dry ]%s  would write %s as %s (contents not shown)\n' "$C_MAG" "$C_RST" "$path" "$D_USER"
+    (( OPT_QUIET )) || { lib_tr "would write ${path} as ${D_USER} (contents not shown)"; printf '%s[dry ]%s  %s\n' "$C_MAG" "$C_RST" "$LIB_TR"; }
     return 0
   fi
   # noclobber over the temporary name: a pipe or a link the user left there fails the write
@@ -1071,7 +1102,7 @@ lib_app_list() {   # [--json]
   if (( OPT_JSON )); then json=1; fi
   lib_require_tools
   if (( ! json )); then
-    printf '%s%-28s %-6s %-18s %5s %9s %8s %8s%s\n' "$C_BLD" "SITE" "PORT" "STATUS" "CPU" "MEMORY" "UPTIME" "RESTARTS" "$C_RST"
+    lib_tprintf '%s%-28s %-6s %-18s %5s %9s %8s %8s%s\n' "$C_BLD" "SITE" "PORT" "STATUS" "CPU" "MEMORY" "UPTIME" "RESTARTS" "$C_RST"
   fi
   while read -r d; do
     [[ -n "$d" ]] || continue
@@ -1097,18 +1128,18 @@ lib_app_list() {   # [--json]
                 memory_bytes: ($mem | tonumber), started_ms: ($up | tonumber), restarts: ($rs | tonumber),
                 git: (if $git == "" then null else $git end), workers: $wk}]')"
     else
-      printf '%-28s %-6s %-18s %4s%% %9s %8s %8s\n' "$d" "$APP_PORT" "$state" "${cpu:-0}" "$(( ${mem:-0} / 1048576 )) MB" "$(_app_age_ms "${up:-0}")" "${rs:-0}"
+      lib_tprintf '%-28s %-6s %-18s %4s%% %9s %8s %8s\n' "$d" "$APP_PORT" "$state" "${cpu:-0}" "$(( ${mem:-0} / 1048576 )) MB" "$(_app_age_ms "${up:-0}")" "${rs:-0}"
       # one line per worker under its site; a job shows its schedule
       jq -r '.[] | [("  - " + .name), (if .kind == "job" then "job" else ((.port // "-") | tostring) end),
                     (if .kind == "job" then .schedule else .status end), (.cpu | tostring),
                     ((.memory_bytes / 1048576 | floor | tostring) + " MB"), (if .kind == "job" then "-" else (.restarts | tostring) end)] | @tsv' <<<"$wstat" \
         | while IFS=$'\t' read -r wname wport wstate wcpu wmem wrs; do
-            printf '%-28s %-6s %-18s %4s%% %9s %8s %8s\n' "$wname" "$wport" "$wstate" "$wcpu" "$wmem" "-" "$wrs"
+            lib_tprintf '%-28s %-6s %-18s %4s%% %9s %8s %8s\n' "$wname" "$wport" "$wstate" "$wcpu" "$wmem" "-" "$wrs"
           done || true
     fi
   done < <(lib_domains_list)
   if (( json )); then printf '%s\n' "$rows"; return 0; fi
-  if (( n == 0 )); then printf '(no Node.js applications - create one with: setup.sh add app.example.com --node)\n'; fi
+  if (( n == 0 )); then lib_tr "(no Node.js applications - create one with: setup.sh add app.example.com --node)"; printf '%s\n' "$LIB_TR"; fi
   return 0
 }
 
@@ -1138,7 +1169,7 @@ lib_app_status() {   # domain
   lib_print_kv "Logs"         "${D_HOME}/.pm2/logs/web-out.log, web-error.log (setup.sh app logs ${D_DOMAIN})"
   lib_print_kv "Environment"  "$(jq -r 'keys | length' <<<"$(lib_app_env_json "$D_DOMAIN")") variable(s) (setup.sh app env ${D_DOMAIN} list)"
   if [[ "$(lib_app_workers_json "$D_DOMAIN")" != "[]" ]]; then
-    printf '\n%s%-16s %-8s %-14s %-12s %8s  %s%s\n' "$C_BLD" WORKER KIND PORT/SCHEDULE STATUS RESTARTS START "$C_RST"
+    lib_tprintf '\n%s%-16s %-8s %-14s %-12s %8s  %s%s\n' "$C_BLD" WORKER KIND PORT/SCHEDULE STATUS RESTARTS START "$C_RST"
     info=""; if lib_service_active "$unit"; then info="$(_app_jlist)"; fi
     _app_worker_rows "$(_app_workers_status "$(lib_app_workers_json "$D_DOMAIN")" "$info")"
   fi
@@ -1496,7 +1527,7 @@ _app_worker_rows() {   # workers status JSON
   jq -r '.[] | [.name, .kind, (if .kind == "job" then .schedule else ((.port // "-") | tostring) end), .status,
                 (if .kind == "job" then "-" else (.restarts | tostring) end), .start] | @tsv' <<<"$1" \
     | while IFS=$'\t' read -r n k w s r c; do
-        printf '%-16s %-8s %-14s %-12s %8s  %s\n' "$n" "$k" "$w" "$s" "$r" "$c"
+        lib_tprintf '%-16s %-8s %-14s %-12s %8s  %s\n' "$n" "$k" "$w" "$s" "$r" "$c"
       done || true
 }
 
@@ -1506,10 +1537,10 @@ lib_app_worker_list() {   # [--json]   (the site in D_*)
   if lib_service_active "$(lib_app_unit_name "$D_IDENT")"; then jl="$(_app_jlist)"; fi
   if [[ "${1:-}" == "--json" ]] || (( OPT_JSON )); then _app_workers_status "$workers" "$jl"; printf '\n'; return 0; fi
   if [[ "$workers" == "[]" ]]; then
-    printf '(no workers - add one with: setup.sh app worker %s add NAME --start CMD [--cron SCHEDULE])\n' "$D_DOMAIN"
+    lib_tr "(no workers - add one with: setup.sh app worker ${D_DOMAIN} add NAME --start CMD [--cron SCHEDULE])"; printf '%s\n' "$LIB_TR"
     return 0
   fi
-  printf '%s%-16s %-8s %-14s %-12s %8s  %s%s\n' "$C_BLD" NAME KIND PORT/SCHEDULE STATUS RESTARTS START "$C_RST"
+  lib_tprintf '%s%-16s %-8s %-14s %-12s %8s  %s%s\n' "$C_BLD" NAME KIND PORT/SCHEDULE STATUS RESTARTS START "$C_RST"
   _app_worker_rows "$(_app_workers_status "$workers" "$jl")"
   lib_note "logs: setup.sh app logs ${D_DOMAIN} --process NAME (jobs: ${D_HOME}/.pm2/logs/NAME-job.log)"
 }

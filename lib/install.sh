@@ -687,7 +687,7 @@ lib_selfupdate_main() {
     a="$1"; shift
     case "$a" in
       --from) src="${1:-}"; shift ;;
-      -h|--help) printf 'Usage: lomp self-update [--from /path/to/checkout]\n'; return 0 ;;
+      -h|--help) lib_tr "Usage: lomp self-update [--from /path/to/checkout]"; printf '%s\n' "$LIB_TR"; return 0 ;;
       *) lib_die "Unknown option for self-update: ${a}" "" "self-update [--from /path/to/checkout]" ;;
     esac
   done
@@ -1013,7 +1013,7 @@ lib_panel_main() {
   # "panel", "panel open", "panel --minutes 15" and "panel status" must all work
   if (($# > 0)); then
     case "$1" in
-      -h|--help) printf 'Usage: setup.sh panel [open|status|close] [--ip auto|<IP>|any] [--minutes N]\n'; return 0 ;;
+      -h|--help) lib_tr "Usage: setup.sh panel [open|status|close] [--ip auto|<IP>|any] [--minutes N]"; printf '%s\n' "$LIB_TR"; return 0 ;;
       -*) ;;                       # options without an action: open
       *)  action="$1"; shift ;;
     esac

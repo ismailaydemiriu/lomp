@@ -268,27 +268,27 @@ lib_status_main() {
 
   local revision=""; revision="$(lib_manifest_get '.install.revision')"
   lib_heading "Server status - ${SYS_HOSTNAME} (Ubuntu ${OS_VERSION_ID}, lompstack ${SCRIPT_VERSION}${revision:+ @${revision}}${installed_at:+, installed ${installed_at:0:10}})"
-  printf '  %sServices%s\n' "$C_BLD" "$C_RST"
+  lib_tprintf '  %s%s%s\n' "$C_BLD" "Services" "$C_RST"
   for svc in "${services[@]}"; do
     st="${sstate[$svc]}"
     case "$st" in
-      active)   printf '    %s●%s %-14s active\n' "$C_GRN" "$C_RST" "$svc" ;;
-      inactive) printf '    %s●%s %-14s INACTIVE\n' "$C_RED" "$C_RST" "$svc" ;;
-      *)        printf '    %s○%s %-14s not installed\n' "$C_DIM" "$C_RST" "$svc" ;;
+      active)   lib_tprintf '    %s●%s %-14s %s\n' "$C_GRN" "$C_RST" "$svc" "active" ;;
+      inactive) lib_tprintf '    %s●%s %-14s %s\n' "$C_RED" "$C_RST" "$svc" "INACTIVE" ;;
+      *)        lib_tprintf '    %s○%s %-14s %s\n' "$C_DIM" "$C_RST" "$svc" "not installed" ;;
     esac
   done
-  printf '  %sVersions%s\n' "$C_BLD" "$C_RST"
+  lib_tprintf '  %s%s%s\n' "$C_BLD" "Versions" "$C_RST"
   lib_print_kv "OpenLiteSpeed" "$(lib_ols_version)"
   lib_print_kv "PHP (LSPHP)"   "$(lib_php_summary_line)"
   lib_print_kv "MariaDB"       "$(lib_db_version)"
   lib_print_kv "Redis"         "$(lib_redis_version)"
   lib_print_kv "certbot"       "$(lib_pkg_version certbot)"
-  printf '  %sResources%s\n' "$C_BLD" "$C_RST"
+  lib_tprintf '  %s%s%s\n' "$C_BLD" "Resources" "$C_RST"
   lib_print_kv "RAM"   "$(lib_human_mb "$ram_used") used of $(lib_human_mb "$SYS_RAM_MB")$( (( SYS_SWAP_MB > 0 )) && printf ', swap %s' "$(lib_human_mb "$SYS_SWAP_MB")")"
   lib_print_kv "Disk"  "${SYS_DISK_USED_PCT}% used (${SYS_DISK_FREE_GB} GB free of ${SYS_DISK_TOTAL_GB} GB)"
   lib_print_kv "Load / uptime" "${SYS_LOAD} / ${SYS_UPTIME}"
   lib_print_kv "Reboot required" "$reboot"
-  printf '  %sConfiguration%s\n' "$C_BLD" "$C_RST"
+  lib_tprintf '  %s%s%s\n' "$C_BLD" "Configuration" "$C_RST"
   lib_print_kv "WebAdmin"      "$(lib_panel_status_line)"
   lib_print_kv "Cloudflare"    "$(lib_cf_status_line)"
   lib_print_kv "Notifications" "$(lib_notify_channels)"
@@ -299,7 +299,7 @@ lib_status_main() {
   if lib_webmail_installed; then
     lib_print_kv "Webmail" "Roundcube $(lib_webmail_version) for $(lib_webmail_domains | wc -l | tr -d ' ') domain(s)"
   fi
-  printf '  %sSites%s\n' "$C_BLD" "$C_RST"
+  lib_tprintf '  %s%s%s\n' "$C_BLD" "Sites" "$C_RST"
   local n=0
   for d in $(lib_domains_list); do
     lib_domain_state_load "$d" || continue
@@ -310,7 +310,7 @@ lib_status_main() {
   # the domains whose mail is on: a site's, and the ones that have their mail here and no site
   if lib_mail_installed; then
     local nmail=0 mcert=""
-    printf '  %sMail domains%s\n' "$C_BLD" "$C_RST"
+    lib_tprintf '  %s%s%s\n' "$C_BLD" "Mail domains" "$C_RST"
     for d in $(lib_mail_domains); do
       nmail=$((nmail + 1))
       mcert="$(lib_ssl_days_left "$(lib_mail_cert_name "$d")")"
@@ -326,7 +326,7 @@ lib_status_main() {
     if lib_app_state_load "$d"; then napps=$((napps + 1)); fi
   done
   if (( napps > 0 )); then
-    printf '  %sNode.js applications%s\n' "$C_BLD" "$C_RST"
+    lib_tprintf '  %s%s%s\n' "$C_BLD" "Node.js applications" "$C_RST"
     lib_app_list 2>/dev/null | sed 's/^/    /' || true
   fi
   printf '  %sRecent problems in %s%s\n' "$C_BLD" "$LOG_FILE" "$C_RST"

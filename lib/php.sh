@@ -407,7 +407,7 @@ lib_php_cleanup_main() {
     a="$1"; shift
     case "$a" in
       --php) ver="${1:-}"; shift || true ;;
-      -h|--help) printf 'Usage: lomp php-cleanup [--php 8.3]\n'; return 0 ;;
+      -h|--help) lib_tr "Usage: lomp php-cleanup [--php 8.3]"; printf '%s\n' "$LIB_TR"; return 0 ;;
       *) lib_die "Unknown option for php-cleanup: ${a}" "" "php-cleanup [--php 8.3]" ;;
     esac
   done

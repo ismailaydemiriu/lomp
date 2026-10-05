@@ -6,6 +6,263 @@
 #               menu down when it fails.
 
 lib_usage() {
+  # a usage text is no single message lib/lang.sh could look up: its Turkish is here
+  if [[ "${LIB_LANG:-en}" == "tr" ]]; then
+    cat <<'USAGE_EOF'
+lomp - LOMP yığını: Linux + OpenLiteSpeed + MariaDB + PHP (LSPHP), Redis ve TLS ile.
+       Ubuntu 22.04 / 24.04 için üretim VPS kurulumu ve site yönetimi.
+
+KULLANIM
+  sudo lomp                             # argümansız: etkileşimli menü
+  sudo lomp <command>                   # kurulumdan sonra: kısa ad, her yerde çalışır
+  sudo ./setup.sh <command> [arguments] [global flags]
+  sudo ./setup.sh domain.com            # şunun kısaltması: add domain.com
+
+KOMUTLAR
+  install [opts]                Sunucuyu kurar (tekrar çalıştırmak güvenlidir)
+      --php 8.3                 Varsayılan LSPHP sürümü
+      --timezone Europe/Istanbul
+      --admin-port 7080         WebAdmin portu (OpenLiteSpeed varsayılanı; boş her port olur)
+      --admin-access MODE       WebAdmin erişimi: tunnel (varsayılan) | ip | open
+      --admin-ip 1.2.3.4        SİZİN adresiniz (sunucunun değil); --admin-access ip demektir
+                                Mevcut SSH oturumundan alınması için "auto" yazın
+      --email admin@x.com       Varsayılan e-posta (Let's Encrypt / bildirimler)
+      --ssh-port 2222           SSH portunu değiştirir (önce UFW'de açılır)
+      --non-interactive         Hiç soru sormaz, varsayılanları kullanır
+      --with-node [--node 24]   Node.js (NodeSource) + PM2; kurulu ana sürüm korunur
+      --with-python             python3-venv + pip (her uygulamaya ayrı venv)
+      --with-netdata            localhost'a (+ yönetici IP'sine) bağlı Netdata
+      --with-mail [--mail-hostname mail.example.com]
+                                Bu sunucudaki siteler için posta sunucusu (Postfix, Dovecot,
+                                Rspamd); kendi adı, bir A kaydı ve bir PTR kaydı gerekir
+      --mail-only [--mail-hostname mail.example.com]
+                                Yalnızca posta için sunucu: aynı posta sunucusu; web yığını
+                                yalnızca webmail gerektirdiği için kurulur. Alan adları site
+                                değil posta alır ("mail domain add"). --role web bunu geri alır
+      --cloudflare              Cloudflare vekillerine güvenir (gerçek istemci IP'si)
+      --cf-api-token TOKEN      Cloudflare API token'ını saklar (DNS-01 / fail2ban); "-" onu
+                                stdin'den okur, böylece süreç listesinde görünmez
+      --mariadb 11.4            MariaDB'yi resmi depodan kurar
+      --redis-persist           Redis kalıcılığını açar (varsayılan: yalnızca önbellek)
+      --backup-schedule "daily 03:00"
+      --auto-reboot             unattended-upgrades'in yeniden başlatmasına izin verir
+      --skip-upgrade            Kurulum sırasında apt upgrade adımını atlar
+  add <domain> [opts]           Site oluşturur (kullanıcı, dizinler, vhost, SSL)
+      --email a@b.c  --no-ssl  --www  --www-primary  --php 8.3
+      --memory 256M  --upload 64M  --php-children N
+      --proxy 127.0.0.1:3000  --static  --wordpress  --cloudflare  --no-db
+      --wildcard  --staging  --hsts-preload
+      --mail [--mailbox info] [--mail-quota 2G]
+                                Siteyi oluştururken ona kendi postasını verir
+      --wp-title "Title" --wp-admin admin --wp-email a@b.c --wp-locale en_US
+      --node [--port N] [--start "npm start" | --script dist/main.js] [--git URL [--branch B]]
+                                Node.js sitesi: PM2 uygulamayı sitenin kullanıcısı olarak
+                                çalıştırır, OpenLiteSpeed ona vekillik eder (3000'den itibaren
+                                boş bir port); --git ile uygulama hemen yayına alınır
+                                --no-db verilmedikçe her site kendi veritabanını ve
+                                MariaDB kullanıcısını alır.
+  wordpress <domain>            En güncel WordPress'in dosyalarını (wordpress.org/latest.zip)
+                                var olan bir PHP sitesinin public_html dizinine, sitenin kendi
+                                kullanıcısı olarak koyar; kurulum tarayıcıda tamamlanır ve
+                                yazdığı wp-config.php bir dakika içinde 0640'a kapatılır
+                                ("add --wordpress" ise tamamını kurar)
+  db <domain>                   Sitenin MariaDB veritabanını oluşturur (veya gösterir)
+  db list                       Her sitenin veritabanı, kullanıcısı ve boyutu (şifreler yok)
+  db passwd <domain>            Sitenin veritabanı kullanıcısına yeni, rastgele bir şifre
+  proxy list [<domain>]         Her sitenin yol vekilleri ve uygulamaları yanıt veriyor mu
+  proxy add <domain> <path> <host:port>
+                                Var olan bir sitenin bir yolu altında bir uygulama yayınlar,
+                                her modda: proxy add example.com /api/ 127.0.0.1:3001
+  proxy remove <domain> <path>  O yolun vekilliğini durdurur
+  app list                      Node.js uygulamaları: durum, CPU, bellek, yeniden başlatma
+                                sayısı (--json)
+  app status <domain>
+  app start|stop|restart <domain> [--process NAME]
+  app logs <domain> [--process NAME] [--out|--error] [-n LINES]
+  app worker <domain> list | remove NAME | run NAME
+  app worker <domain> add NAME --start CMD [--cwd DIR] [--port N] [--memory 256M]
+  app worker <domain> add NAME --cron "*/5 * * * *" --start CMD [--timeout 1h]
+                                İşçiler (kuyruk tüketicileri, botlar) uygulamanın yanında, onun
+                                PM2'si altında çalışır; --cron ile işi cron başlatır, aynı anda
+                                tek çalıştırma olur
+  app deploy <domain> [--git URL [--branch B]]
+                                git'ten çeker (ilk seferde: clone), bağımlılıklar değiştiyse
+                                kurar, bellek sınırıyla derler, yeniden başlatır
+  app deploy-key <domain>       Özel depo için sitenin salt okunur anahtarını oluşturur/yazdırır
+  app set <domain> [--port N] [--start CMD | --script FILE] [--memory 512M|none] [--no-git]
+  app env <domain> list [--show] | set NAME | unset NAME... | import-db
+                                Değerler stdin'den veya gizli bir istemden gelir, komut satırından
+                                asla gelmez; import-db DB_* ve DATABASE_URL ekler
+  mail domain add <domain> [--mailbox info] [--quota 2G]
+                                Bu sunucunun sitesi olmayan bir alan adı için posta (web
+                                sitesi başka yerdedir veya yoktur): Linux kullanıcısı, vhost yok
+  mail domain add <domain> --to <you@example.com> [--address info,sales] [--catch-all]
+                                Aynısı, kendi posta kutusu olmadan: adresleri var olan bir
+                                posta kutusuna teslim edilir - birkaç alan adı için tek gelen
+                                kutusu - ve o posta kutusu onların adına gönderebilir
+  mail domain list              Postası olan her alan adı: site mi, yalnızca posta mı; posta
+                                kutuları, takma adlar
+  mail domain del <domain> [--dns-cleanup] [--no-backup]
+                                Posta alan adını ve tüm postasını son bir yedekten sonra kaldırır
+  mail enable <domain> [--mailbox info] [--quota 2G]
+                                Siteye kendi postasını verir: DKIM anahtarı, mail.<domain> için
+                                sertifika ve eklenecek DNS kayıtları
+                                (--to, --address ve --catch-all burada da çalışır)
+  mail disable <domain> [--delete-data]
+  mail box add|passwd|quota|list|del|kick <user@domain>
+                                Şifreler stdin'den veya gizli bir istemden gelir, komut satırından
+                                asla gelmez; "kick" posta kutusunun açık oturumlarını sonlandırır
+  mail alias add|del|list <alias@domain> [target,...]
+                                Başka bir yere giden adres; gittiği buradaki bir posta kutusu
+                                onun adına da gönderebilir. Takma ad olarak "@<domain>" bir
+                                catch-all olur: alan adının kendi satırı olmayan her adresi
+  mail dns <domain> [--check] [--json]   DNS'e ne yazılacağı ve orada olup olmadığı
+  mail dns <domain> --apply [--replace-mx]
+                                O kayıtları saklanan token ile Cloudflare'e yazar.
+                                Yabancı bir MX veya ikinci bir SPF kaydı bildirilir, asla üzerine
+                                yazılmaz; yalnızca lompstack'in yazdığı kayıtlar kaldırılır
+  mail status|test|queue        Posta yığını: ne çalışıyor, ters DNS, giden 25 numaralı port
+  mail cert [domain]            Gelmemiş bir sertifikayı yeniden ister
+  mail regenerate               Her posta yapılandırma dosyasını yeniden yazar ve yığını
+                                yeniden başlatır
+  mail webmail on|off <domain>  webmail.<domain> adresinde webmail. Webmaili olan her alan adı
+                                tek bir Roundcube'u ve tek bir PHP sürecini paylaşır; yirmincisi
+                                bir vhost'a mal olur, başka bir şeye değil
+  webmail status                Ne çalışıyor ve hangi alan adları için (herkes kendi şifresini
+                                orada, Ayarlar (Settings) altında değiştirir)
+  webmail update [version]      Daha yeni bir Roundcube alır (bu her gün kendiliğinden de olur)
+  webmail forget <user@domain>|@<domain>|--gone
+                                Artık olmayan bir posta kutusu için webmail tarafında kalanları
+                                kaldırır (adres defteri, kimlikler, ayarlar). Bir posta kutusu
+                                silinince bu kendiliğinden olur; komut, lomp bunu yapmaya
+                                başlamadan önce veya veritabanı kapalıyken giden kutular içindir.
+                                --gone böyle adreslerin hepsidir: onları listeler (doctor ilk
+                                birkaçını söyler) ve kaldırmadan önce sorar
+  webmail uninstall | purge     Kaldırır; "purge" veritabanını da siler
+  mail dkim status <domain>     Bu alan adının hangi anahtarla imzaladığı
+  mail dkim rotate <domain> [--abort]
+                                İkinci bir anahtar üretir ve kaydını yayınlar; DNS onu taşıyınca
+                                imzalama kendiliğinden ona geçer, eski anahtar ise gönderilmiş
+                                postalar doğrulanabilsin diye bir hafta saklanır
+  mail backup <domain> [--keep N]     Yalnızca posta: posta kutuları, takma adlar, DKIM anahtarı
+  mail restore <domain> [--file A]    ve postanın kendisi; aynı posta kutularına, aynı şifreler
+                                ve aynı anahtarla geri gelir. Boş olmayan bir posta kutusu
+                                önce sorulur: kopya oradakinin yerini alır. Bir betikte
+                                yanıtlamak için --yes ekleyin
+  mail relay set --host H [--port 587] --user U [--spf-include NAME] [--tls LEVEL] | relay off
+                                25 numaralı portun kapalı olduğu yerde giden postayı başka bir
+                                sunucu üzerinden gönderir; şifre stdin'den okunur
+  remove <domain> [opts]        Site kaldırır (--keep-db --keep-files --keep-ssl; takma ad: delete)
+  rename <old> <new> [opts]     Siteyi başka bir alan adına taşır: dosyalar, kullanıcı, loglar
+                                ve ayarlar onunla gelir, veritabanı kalır, yeni ad sertifikasını
+                                alır, WordPress'in adresleri yeniden yazılır ve eski ad her şeyi
+                                301 ile yeni ada gönderir
+                                (--no-redirect --no-ssl --no-search-replace)
+  redirect add <from> <to>      Site olmayan, ziyaretçilerini yalnızca başka bir ada gönderen
+                                bir ad (301, yol korunur; --www --no-ssl)
+  redirect list | del <from>    Yönlendirmeler; birine yanıt vermeyi bırakır (--keep-ssl)
+  import <[user@]host> [opts]   Başka bir sunucudan SSH ile site getirir: sunduklarını listeler,
+                                hangilerini istediğinizi sorar, burada henüz olmayan siteleri
+                                ekler, bir WordPress'in dosyalarını ve veritabanını kopyalar ve
+                                wp-config.php dosyasını buradaki veritabanına yöneltir. Diğer
+                                sunucu yalnızca okunur (--list --all --only a.com,b.com
+                                --no-create --port N --key FILE --password-file FILE --path DIR
+                                --as DOMAIN --db NAME)
+  list                          Site tablosu (--json)
+  status                        Servisler, sürümler, kaynaklar, siteler (--json)
+  doctor                        Derin sağlık kontrolü (--json, --quiet)
+  credentials <domain>|--all    Saklanan kimlik bilgilerini gösterir (asla loglanmaz)
+  fix-owner <domain>|--all      root olarak yüklemeden sonra (WinSCP, scp) sitenin dosyalarını
+                                kendi kullanıcısına geri verir. Yalnızca başkasına ait olan
+                                değişir; logs/ ve dosya izinleri aynı kalır. Yüklemeden sonra
+                                bir dakika içinde kendiliğinden olur; komut hemen şimdi içindir
+  fix-owner --auto on|off       Bunu durdurur (root sitede kendi dosyalarını tutar) veya başlatır
+  optimize                      Sistemi yeniden ölçer ve yeniden ayarlar (fark gösterir)
+  harden <domain>|--all         Bir sitedeki PHP shell'in yapabileceklerini sınırlar: PHP'den
+                                süreç çalıştırma yok, open_basedir, yükleme dizinlerinde betik
+                                yok, bu makinede yalnızca DNS, web, MariaDB, Redis ve kendi
+                                uygulaması erişilebilir (site başına --allow-exec,
+                                --allow-upload-php; "harden status"; --firewall on|off)
+  scan <domain>|--all [--wide]  Sitenin PHP dosyalarında web shell'lerin yapıldığı şeyleri arar
+                                (çözülmüş veya istekten gelen verinin eval edilmesi, istekten
+                                kurulan komutlar, paketlenmiş kod) ve açılacak dosyaları
+                                listeler. Hiçbir şeyi değiştirmez; --wide ayrıca her eval,
+                                base64_decode ve exec kullanımını listeler
+  php-cleanup [--php 8.3]       Bir "apt-get install lsphp83*" işlemini geri alır: lomp'un kendi
+                                PHP paketlerinin ötesinde eklediklerini siler (derleyici, hata
+                                ayıklama sembolleri, kaynaklar, dağıtımın PHP'si). Listeyi
+                                gösterir ve önce sorar
+  backup <domain>|--all [opts]  --remote --encrypt --keep N --no-mail --dry-run
+                                Postası olan bir alan adı, sitenin arşivinin yanında ikinci bir
+                                arşiv alır, saklama süresi de ayrıdır: posta gigabaytla ölçülür
+         --configure-remote     rsync/rclone hedefini yapılandırır
+         --schedule "daily 03:00" [--encrypt] [--remote] [--keep N] [--no-mail]
+                                Her siteyi otomatik yedekler ("weekly sun 04:00", "hourly" veya
+                                bir cron ifadesi de olur); --schedule off bunu durdurur
+  restore <domain> --file <archive>   [--no-db] [--no-files] [--no-mail] [--mail-file F]
+                                Posta, yanındaki en yeni posta arşivinden gelir; posta kutusu
+                                şifreleri ve DKIM anahtarı aynı kalır
+  renew-ssl [domain] [opts]     --force --all --staging --wildcard
+  renew-ssl --missing           Sertifikası olmayan her site için sertifika (DNS'i doğrudan veya
+                                Cloudflare üzerinden buraya bakmalıdır); başarısız olan biri
+                                diğerlerini durdurmaz
+  ssl [status]                  Her sertifika, siteler ve posta: var mı, ne kadar süresi kaldı
+                                ve kendiliğinden yenileniyor mu (certbot'u ne çalıştırıyor,
+                                deploy hook, her yenileme dosyası). Hiçbir şeyi değiştirmez;
+                                Cloudflare'in ne zaman Full (strict) olabileceğini de söyler
+  ssl test                      Her yenilemenin provasını yapar (certbot renew --dry-run)
+  ssl fix                       Otomatik yenilemeyi onarır: zamanlayıcı veya cron girdisi, hook
+  update                        Güvenli paket güncellemesi + sıralı servis yeniden başlatmaları;
+                                yeni bir lompstack'in değiştirdiklerini de uygular (zamanlanmış
+                                görevler, site ev dizinleri, loglar)
+  self-update [--from DIR]      En son lompstack'i çeker ve kurulu kopyayı yeniler; o da
+                                değiştirdiklerini sunucuya uygular.
+                                Hiçbir pakete dokunulmaz (onu update yapar).
+  update-cf-ips                 Cloudflare IP aralıklarını yeniler
+  firewall [status]             Web portları herkese mi yoksa yalnızca Cloudflare'e mi yanıt verir
+  firewall --web-cloudflare-only   80/443'ü Cloudflare aralıkları dışında her şeye kapatır;
+                                böylece kimse sunucunun adresini kullanarak korumayı dolanamaz.
+                                Cloudflare token'ı gerekir: sertifikalar o zaman DNS-01 ile gelir
+  firewall --web-open           Onları yeniden açar
+  htaccess-check                Bir sitenin .htaccess dosyası değişince OpenLiteSpeed'i yeniden
+                                yükler (cron her dakika çalıştırır; OpenLiteSpeed onu yalnızca
+                                yüklenirken okur), root'un siteye yüklediklerini sitenin
+                                kullanıcısına verir ve WordPress'in daha açık bıraktığı
+                                wp-config.php dosyasını 0640'a kapatır
+  notify [opts]                 --email a@b.c [--smtp-host H --smtp-port P
+                                --smtp-user U --smtp-pass P --smtp-from F]
+                                --telegram-token T --telegram-chat ID
+                                --webhook URL   --ssh-login on|off  --test  --show
+  panel [open|status|close]     WebAdmin panelini açar. Yalın "panel", portu mevcut SSH
+                                oturumunuzun adresi için 60 dakikalığına açar ve URL'yi,
+                                kullanıcıyı ve şifreyi yazdırır; kendiliğinden yeniden
+                                kapanır. Seçenekler: --ip auto|IP|any, --minutes N
+                                (0 = açık kalır). "status" mevcut durumu ve SSH tünel
+                                komutunu gösterir, "close" hemen kapatır. Dinamik IP'ler
+                                için tasarlanmıştır.
+  logs <domain> [--access|--error] [-n LINES]
+  menu                          Etkileşimli menü (yalın "lomp" da bunu açar); Türkçe veya
+                                İngilizce: bir kez sorulur, 28. madde bunu değiştirir
+  help                          Bu metin
+
+GENEL SEÇENEKLER
+  --yes / -y        Onaylara evet yanıtı varsayılır
+  --dry-run         Deneme: neyin değişeceğini gösterir; hiçbir şeyi değiştirmez
+  --quiet / -q      Yalnızca uyarılar ve hatalar
+  --verbose / -v    Komut çıktısını gösterir
+  --no-color        Renkleri kapatır
+  --json            Makinece okunabilir çıktı (status, doctor, list)
+  --non-interactive Hiç sormaz (varsayılanlar kullanılır)
+  --version         Betiğin ve hedef bileşenlerin sürümlerini gösterir
+
+YOLLAR
+  Siteler        /home/<domain>/{public_html,logs,private,backups}
+  Durum          /root/.server-setup/   (0700; kimlik bilgileri burada durur)
+  Log            /var/log/server_setup.log
+  Yedekler       /var/backups/server-setup/
+USAGE_EOF
+    return 0
+  fi
   cat <<'USAGE_EOF'
 lomp - LOMP stack: Linux + OpenLiteSpeed + MariaDB + PHP (LSPHP), with Redis and TLS.
        Production VPS provisioning and site management for Ubuntu 22.04 / 24.04.

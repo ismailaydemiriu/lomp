@@ -273,7 +273,7 @@ lib_redirect_add() {
 lib_redirect_list() {
   local d="" n=0 ssl=""
   lib_require_tools
-  printf '%s%-30s %-34s %-24s%s\n' "$C_BLD" "FROM" "TO" "SSL" "$C_RST"
+  lib_tprintf '%s%-30s %-34s %-24s%s\n' "$C_BLD" "FROM" "TO" "SSL" "$C_RST"
   while read -r d; do
     [[ -n "$d" ]] || continue
     lib_redirect_load "$d" || continue

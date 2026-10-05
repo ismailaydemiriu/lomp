@@ -6,6 +6,19 @@
 #                removed entry back. lib_ols_render_vhconf renders it from D_PATH_PROXIES.
 
 lib_proxy_usage() {
+  # a usage text is no single message lib/lang.sh could look up: its Turkish is here
+  if [[ "${LIB_LANG:-en}" == "tr" ]]; then
+    cat <<'EOF'
+Kullanım: setup.sh proxy list [<domain>] [--json]
+          setup.sh proxy add <domain> <path> <host:port>
+          setup.sh proxy remove <domain> <path>
+  <path>       /api/ gibi bir URL öneki (eksik eğik çizgi eklenir). Uygulamaya önek dahil tam
+               yol gelir; bu yüzden rotaları o önekin altında olmalıdır.
+  <host:port>  uygulamanın dinlediği yer, örn. 127.0.0.1:3001
+Yoldaki WebSocket yükseltmeleri de aynen geçirilir.
+EOF
+    return 0
+  fi
   cat <<'EOF'
 Usage: setup.sh proxy list [<domain>] [--json]
        setup.sh proxy add <domain> <path> <host:port>
@@ -169,17 +182,17 @@ lib_proxy_list() {
     printf '%s\n' "$rows"
     return 0
   fi
-  printf '%s%-28s %-22s %-22s %s%s\n' "$C_BLD" "DOMAIN" "PATH" "TARGET" "APPLICATION" "$C_RST"
+  lib_tprintf '%s%-28s %-22s %-22s %s%s\n' "$C_BLD" "DOMAIN" "PATH" "TARGET" "APPLICATION" "$C_RST"
   while read -r d; do
     [[ -n "$d" ]] || continue
     if [[ -n "$want" && "$d" != "$want" ]]; then continue; fi
     while read -r p t; do
       [[ -n "$p" ]] || continue
       if lib_tcp_open "${t%:*}" "${t##*:}"; then state="answers"; else state="not listening"; fi
-      printf '%-28s %-22s %-22s %s\n' "$d" "$p" "$t" "$state"
+      lib_tprintf '%-28s %-22s %-22s %s\n' "$d" "$p" "$t" "$state"
       n=$((n + 1))
     done < <(lib_proxy_state_lines "$d")
   done < <(lib_domains_list)
-  if (( n == 0 )); then printf '(no path proxies - add one with: setup.sh proxy add example.com /api/ 127.0.0.1:3001)\n'; fi
+  if (( n == 0 )); then lib_tr "(no path proxies - add one with: setup.sh proxy add example.com /api/ 127.0.0.1:3001)"; printf '%s\n' "$LIB_TR"; fi
   return 0
 }

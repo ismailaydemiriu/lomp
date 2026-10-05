@@ -110,6 +110,32 @@ lib_step() {
   lib_log_write STEP "[${LIB_STEP_CURRENT}/${LIB_STEP_TOTAL}] $*"
 }
 
+# printf for a table: where Turkish is shown, every %s argument that has a line of its own in
+# lib/lang.sh's table - a column heading, a word in a cell - is put in Turkish, and the columns
+# are padded by characters, which printf, counting bytes, gets wrong for Turkish letters. Only
+# whole arguments are looked up (a domain name or a path costs one lookup and stays what it
+# is); the text of the format itself is not touched. In English it is printf and nothing else.
+lib_tprintf() {   # format argument...
+  # shellcheck disable=SC2059
+  if [[ "${LIB_LANG:-en}" == "en" ]]; then printf "$@"; return 0; fi
+  local fmt="$1" nf="" arg="" left="" width="" conv="" pad=0 LC_ALL=C.UTF-8
+  local -a out=()
+  shift
+  while [[ "$fmt" =~ ^([^%]*)%(-?)([0-9]*)([sd%])(.*)$ ]]; do
+    nf+="${BASH_REMATCH[1]}"; left="${BASH_REMATCH[2]}"; width="${BASH_REMATCH[3]:-0}"; conv="${BASH_REMATCH[4]}"
+    fmt="${BASH_REMATCH[5]}"
+    if [[ "$conv" == "%" ]]; then nf+="%%"; continue; fi
+    arg="${1:-}"; (($# > 0)) && shift
+    if [[ "$conv" == "s" && -n "$arg" && -n "${LIB_TR_EXACT[$arg]:-}" ]]; then arg="${LIB_TR_EXACT[$arg]}"; fi
+    pad=$(( width - ${#arg} )); (( pad > 0 )) || pad=0
+    if [[ -n "$left" ]]; then printf -v arg '%s%*s' "$arg" "$pad" ""; else printf -v arg '%*s%s' "$pad" "" "$arg"; fi
+    nf+="%s"; out+=("$arg")
+  done
+  nf+="$fmt"
+  # shellcheck disable=SC2059
+  printf "$nf" ${out[@]+"${out[@]}"}
+}
+
 lib_print_kv() {
   local label=""
   lib_tr "$1"; label="$LIB_TR"
@@ -366,7 +392,7 @@ lib_prompt() {
 # lib_run cmd args...  : logs the command, captures output into the log, returns rc.
 lib_run() {
   if (( OPT_DRY_RUN )); then
-    (( OPT_QUIET )) || printf '%s[dry ]%s  would run: %s\n' "$C_MAG" "$C_RST" "$(printf '%s ' "$@" | lib_mask_secrets)"
+    (( OPT_QUIET )) || { lib_tr "would run: $(printf '%s ' "$@" | lib_mask_secrets)"; printf '%s[dry ]%s  %s\n' "$C_MAG" "$C_RST" "$LIB_TR"; }
     return 0
   fi
   lib_log_write CMD "$*"
@@ -394,7 +420,7 @@ lib_run() {
 lib_run_secret() {
   local desc="$1"; shift
   if (( OPT_DRY_RUN )); then
-    (( OPT_QUIET )) || printf '%s[dry ]%s  would run: %s\n' "$C_MAG" "$C_RST" "$desc"
+    (( OPT_QUIET )) || { lib_tr "would run: ${desc}"; printf '%s[dry ]%s  %s\n' "$C_MAG" "$C_RST" "$LIB_TR"; }
     return 0
   fi
   lib_log_write CMD "$desc"
@@ -456,12 +482,12 @@ lib_write_file() {
   LIB_FILE_CHANGED=1
   if (( OPT_DRY_RUN )); then
     if [[ -n "$secret" ]]; then
-      (( OPT_QUIET )) || printf '%s[dry ]%s  would write %s (%s bytes, contents not shown)\n' "$C_MAG" "$C_RST" "$path" "$(wc -c <"$content" | tr -d ' ')"
+      (( OPT_QUIET )) || { lib_tr "would write ${path} ($(wc -c <"$content" | tr -d ' ') bytes, contents not shown)"; printf '%s[dry ]%s  %s\n' "$C_MAG" "$C_RST" "$LIB_TR"; }
     elif [[ -f "$path" ]]; then
-      (( OPT_QUIET )) || printf '%s[dry ]%s  would modify %s\n' "$C_MAG" "$C_RST" "$path"
+      (( OPT_QUIET )) || { lib_tr "would modify ${path}"; printf '%s[dry ]%s  %s\n' "$C_MAG" "$C_RST" "$LIB_TR"; }
       (( OPT_QUIET )) || diff -u "$path" "$content" 2>/dev/null | head -n 60 | sed 's/^/        /' || true
     else
-      (( OPT_QUIET )) || printf '%s[dry ]%s  would create %s (%s lines)\n' "$C_MAG" "$C_RST" "$path" "$(wc -l <"$content" | tr -d ' ')"
+      (( OPT_QUIET )) || { lib_tr "would create ${path} ($(wc -l <"$content" | tr -d ' ') lines)"; printf '%s[dry ]%s  %s\n' "$C_MAG" "$C_RST" "$LIB_TR"; }
     fi
     rm -f "$content"
     return 0
@@ -495,7 +521,7 @@ lib_mkdir() {
   # "link/" names the directory behind the link, so a trailing slash hides it from [[ -L ]]
   while [[ "$path" == ?*/ ]]; do path="${path%/}"; done
   if (( OPT_DRY_RUN )); then
-    [[ -d "$path" ]] || { (( OPT_QUIET )) || printf '%s[dry ]%s  would create directory %s\n' "$C_MAG" "$C_RST" "$path"; }
+    [[ -d "$path" ]] || { (( OPT_QUIET )) || { lib_tr "would create directory ${path}"; printf '%s[dry ]%s  %s\n' "$C_MAG" "$C_RST" "$LIB_TR"; }; }
     return 0
   fi
   if [[ -n "${SITES_ROOT:-}" && "$path" == "$SITES_ROOT"/?* ]]; then
@@ -546,7 +572,7 @@ lib_rm() {      # lib_rm path...   (dry-run aware)
   local p=""
   for p in "$@"; do
     [[ -e "$p" || -L "$p" ]] || continue
-    if (( OPT_DRY_RUN )); then (( OPT_QUIET )) || printf '%s[dry ]%s  would remove %s\n' "$C_MAG" "$C_RST" "$p"; continue; fi
+    if (( OPT_DRY_RUN )); then (( OPT_QUIET )) || { lib_tr "would remove ${p}"; printf '%s[dry ]%s  %s\n' "$C_MAG" "$C_RST" "$LIB_TR"; }; continue; fi
     rm -rf -- "$p"
     lib_log_write INFO "removed ${p}"
   done
@@ -564,7 +590,7 @@ lib_secure_file() {   # chmod 600 root:root (dry-run aware)
 lib_append_line_once() {
   local file="$1" line="$2"
   if [[ -f "$file" ]] && grep -qxF -- "$line" "$file"; then return 0; fi
-  if (( OPT_DRY_RUN )); then (( OPT_QUIET )) || printf '%s[dry ]%s  would append to %s: %s\n' "$C_MAG" "$C_RST" "$file" "$line"; return 0; fi
+  if (( OPT_DRY_RUN )); then (( OPT_QUIET )) || { lib_tr "would append to ${file}: ${line}"; printf '%s[dry ]%s  %s\n' "$C_MAG" "$C_RST" "$LIB_TR"; }; return 0; fi
   lib_backup_config "$file" >/dev/null
   printf '%s\n' "$line" >>"$file"
   LIB_FILE_CHANGED=1
@@ -622,7 +648,7 @@ lib_apt_install() {
 lib_apt_key_install() {
   local url="$1" dest="$2" tmp=""
   if [[ -s "$dest" ]]; then lib_debug "keyring present: $dest"; return 0; fi
-  if (( OPT_DRY_RUN )); then (( OPT_QUIET )) || printf '%s[dry ]%s  would install apt key %s -> %s\n' "$C_MAG" "$C_RST" "$url" "$dest"; return 0; fi
+  if (( OPT_DRY_RUN )); then (( OPT_QUIET )) || { lib_tr "would install apt key ${url} -> ${dest}"; printf '%s[dry ]%s  %s\n' "$C_MAG" "$C_RST" "$LIB_TR"; }; return 0; fi
   mkdir -p /etc/apt/keyrings && chmod 0755 /etc/apt/keyrings
   tmp="$(lib_mktemp)"
   curl -fsSL --retry 3 --max-time 60 -o "$tmp" "$url" || lib_die "Could not download signing key ${url}" "network problem" "check connectivity / DNS"
@@ -637,7 +663,7 @@ lib_apt_key_install() {
 }
 
 lib_systemctl() {   # lib_systemctl action unit [unit...]
-  if (( OPT_DRY_RUN )); then (( OPT_QUIET )) || printf '%s[dry ]%s  would run: systemctl %s\n' "$C_MAG" "$C_RST" "$*"; return 0; fi
+  if (( OPT_DRY_RUN )); then (( OPT_QUIET )) || { lib_tr "would run: systemctl $*"; printf '%s[dry ]%s  %s\n' "$C_MAG" "$C_RST" "$LIB_TR"; }; return 0; fi
   lib_run systemctl "$@"
 }
 lib_service_active()  { systemctl is-active --quiet "$1" 2>/dev/null; }
@@ -645,7 +671,7 @@ lib_service_enabled() { systemctl is-enabled --quiet "$1" 2>/dev/null; }
 lib_service_exists()  { systemctl list-unit-files "$1.service" 2>/dev/null | grep -q "^$1.service"; }
 
 lib_ufw_rule() {    # lib_ufw_rule allow 80/tcp comment 'x'   (idempotent by ufw itself)
-  if (( OPT_DRY_RUN )); then (( OPT_QUIET )) || printf '%s[dry ]%s  would run: ufw %s\n' "$C_MAG" "$C_RST" "$*"; return 0; fi
+  if (( OPT_DRY_RUN )); then (( OPT_QUIET )) || { lib_tr "would run: ufw $*"; printf '%s[dry ]%s  %s\n' "$C_MAG" "$C_RST" "$LIB_TR"; }; return 0; fi
   lib_run ufw "$@"
 }
 
@@ -667,7 +693,7 @@ lib_ufw_delete_port_rules() {
   lib_have ufw || return 0
   if (( OPT_DRY_RUN )); then
     count="$(lib_ufw_port_rule_numbers "$port" | wc -l | tr -d ' ')"
-    (( count > 0 )) && { (( OPT_QUIET )) || printf '%s[dry ]%s  would remove %s UFW rule(s) for port %s\n' "$C_MAG" "$C_RST" "$count" "$port"; }
+    (( count > 0 )) && { (( OPT_QUIET )) || { lib_tr "would remove ${count} UFW rule(s) for port ${port}"; printf '%s[dry ]%s  %s\n' "$C_MAG" "$C_RST" "$LIB_TR"; }; }
     return 0
   fi
   while read -r n; do

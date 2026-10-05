@@ -7193,6 +7193,9 @@ _rn_stubs='
   _rn_say_tr() { _rn_tr; lib_tr "$1"; printf "%s" "$LIB_TR"; }
   _rn_usage_tr() { _rn_tr; lib_domain_rename_usage; lib_redirect_usage; }
   _rn_usage_en() { lib_domain_rename_usage; lib_redirect_usage; }
+  _rn_list_tr() { _rn_tr; lib_domain_list_main; }
+  _rn_harden_tr() { _rn_tr; lib_sitefw_enabled() { return 0; }; lib_sitefw_loaded() { return 1; }; lib_harden_status; }
+  _rn_rlist_tr() { _rn_tr; lib_redirect_list; }
   _rn_blocker() { lib_domain_state_load "$1"; _domain_rename_blocker "$1" "$2"; }
   _rn_redirect() { _rn_conf; lib_redirect_main "$@"; }
   _rn_vhconf() { lib_redirect_load "$1"; lib_redirect_render_vhconf; }
@@ -8237,6 +8240,26 @@ _rn_case _rn_redirect_tr list
 assert_has   "an empty redirect list says so in Turkish" "(yönlendirme yok - eklemek için: setup.sh redirect add old-name.com example.com)" "$(_rn_out)"
 _rn_case _rn_redirect list
 assert_has   "and in English as before" "(no redirects - add one with: setup.sh redirect add old-name.com example.com)" "$(_rn_out)"
+# the tables: headings and the words in the cells, columns in line
+_rn_fresh
+_rn_case lib_redirect_save old.example alpha.example 1
+_rn_case _rn_list_tr
+_o="$(_rn_out)"
+assert_has   "list: the headings" "ALAN ADI                     MOD        PHP   SSL                      SON YEDEK              DURUM" "$_o"
+assert_has   "a row keeps its columns under them" "alpha.example                php        8.3   60 days" "$_o"
+assert_has   "the word in a cell is Turkish" " etkin" "$(grep '^alpha.example' <<<"$_o")"
+assert_has   "the line under the table" "1 site; dosyalar $_rn/home/<domain>/public_html altında" "$_o"
+assert_has   "a redirect's row is still there" "-> alpha.example" "$_o"
+_rn_case lib_domain_list_main
+assert_has   "in English the table is what it was" "DOMAIN                       MODE       PHP   SSL                      LAST BACKUP            STATUS" "$(_rn_out)"
+assert_has   "row and all" " active" "$(_rn_out | grep '^alpha.example')"
+_rn_case _rn_harden_tr
+_o="$(_rn_out)"
+assert_has   "harden status: the firewall line" "Site güvenlik duvarı: açık ama YÜKLÜ DEĞİL" "$_o"
+assert_has   "its headings" "SİTE                               MOD        SÜREÇ ÇALIŞTIRMA       YÜKLEME DİZİNLERİNDE BETİK" "$_o"
+assert_has   "a cell: blocked, and one nobody decided" "php        engelli                karar yok" "$_o"
+_rn_case _rn_rlist_tr
+assert_has   "redirect list: the headings" "KAYNAK                         HEDEF                              SSL" "$(_rn_out)"
 # an English run says what it always said: the scripts and the tests above read that
 _rn_fresh
 _rn_case _rn_rename alpha.example beta.example
@@ -9323,6 +9346,55 @@ for _dt_h in '"CERTIFICATES"' '"Sites"' '"Redirects"' '"Mail"' '"AUTOMATIC RENEW
 done
 assert_eq   "each of them has its Turkish"        "SERTİFİKALAR Siteler Yönlendirmeler Posta OTOMATİK YENİLEME (henüz site yok)" \
   "$(_dt_plain CERTIFICATES) $(_dt_plain Sites) $(_dt_plain Redirects) $(_dt_plain Mail) $(_dt_plain "AUTOMATIC RENEWAL") $(_dt_plain "(no sites yet)")"
+# --help: every usage text has its Turkish, with the same options as the English one - a text
+# that names an option the command does not take, or leaves one out, sends somebody the wrong way
+_uo() { grep -o -- '--[a-z][a-z0-9-]*' | sort | uniq -c | tr -s ' \n' ' '; }
+for _u in lib_usage lib_domain_add_usage lib_domain_wordpress_usage lib_domain_fix_owner_usage lib_app_usage lib_mail_usage \
+          lib_harden_usage lib_scan_usage lib_proxy_usage lib_import_usage lib_domain_rename_usage lib_redirect_usage lib_ssl_usage; do
+  if ! declare -F "$_u" >/dev/null; then fail "${_u} is not there"; continue; fi
+  _u_en="$("$_u")"; _u_tr="$( LIB_LANG="tr"; "$_u" )"
+  assert_true  "${_u}: there is a Turkish text"            test -n "$_u_tr" -a "$_u_tr" != "$_u_en"
+  assert_eq    "${_u}: it names the same options"          "$(_uo <<<"$_u_en")" "$(_uo <<<"$_u_tr")"
+  assert_lacks "${_u}: and does not say Usage: in English" "Usage:" "$_u_tr"
+  assert_lacks "${_u}: the English one is as it was"       "Kullanım" "$_u_en"
+done
+assert_has  "the command reference in Turkish"   "KOMUTLAR" "$( LIB_LANG="tr"; lib_usage )"
+assert_has  "names every command the English one does: rename" "rename <old> <new>" "$( LIB_LANG="tr"; lib_usage )"
+assert_eq   "and has as many command lines as the English one" \
+  "$(lib_usage | grep -cE '^  [a-z][a-z-]+( |$)')" "$( LIB_LANG="tr"; lib_usage | grep -cE '^  [a-z][a-z-]+( |$)' )"
+# "lomp help" and --help are answered before anything else is set up: the language has to be
+# known by then, or the reference comes out in English on a server that speaks Turkish
+assert_eq   "setup.sh asks for the language before it prints the reference, both ways in" 2 \
+  "$(grep -c 'lib_lang_load help; lib_usage' "$ROOT/setup.sh")"
+assert_lacks "and never prints it without" "lib_usage; " "$(grep -v 'lib_lang_load help; lib_usage' "$ROOT/setup.sh" | grep -v '^ *#' | grep 'lib_usage;' || true)"
+if true; then
+  _u_help="$(LOMP_LANG=tr bash "$ROOT/setup.sh" help 2>/dev/null | head -n 12)"
+  assert_has "lomp help, asked for in Turkish, is Turkish" "KULLANIM" "$_u_help"
+  _u_help="$(LOMP_LANG=tr bash "$ROOT/setup.sh" --help 2>/dev/null | head -n 12)"
+  assert_has "and so is --help" "KULLANIM" "$_u_help"
+  _u_help="$(bash "$ROOT/setup.sh" help 2>/dev/null | head -n 12)"
+  assert_has "piped and without a language it is the English one" "USAGE" "$_u_help"
+fi
+assert_eq   "a one-line usage" "Kullanım: lomp php-cleanup [--php 8.3]" "$(_dt_plain "Usage: lomp php-cleanup [--php 8.3]")"
+unset -f _uo
+# lib_tprintf: printf for a table
+_tp() { ( LIB_LANG="tr"; lib_lang_build; lib_tprintf "$@" ); }
+assert_eq   "in English it is printf, flags and all" "$(printf '%-10s|%5s|%4s%%|%d|%s\n' MODE SIZE 7 3 x)" "$(lib_tprintf '%-10s|%5s|%4s%%|%d|%s\n' MODE SIZE 7 3 x)"
+assert_eq   "in Turkish a heading is looked up and padded to the same column" "MOD       |BOYUT|   7%|3|x" "$(_tp '%-10s|%5s|%4s%%|%d|%s\n' MODE SIZE 7 3 x)"
+assert_eq   "Turkish letters count as one each" "VERİTABANI  |SİTE  |" "$(_tp '%-12s|%-6s|\n' DATABASE SITE)"
+assert_eq   "right-aligned too" "   SİTE|" "$(_tp '%7s|\n' SITE)"
+assert_eq   "what has no line of its own stays" "a.example   |/home/a.example|" "$(_tp '%-12s|%s|\n' a.example /home/a.example)"
+assert_eq   "a sentence is not looked up as a pattern: only whole arguments are" "Site a.example is not registered" "$(_tp '%s\n' "Site a.example is not registered")"
+assert_eq   "an argument longer than its column is not cut" "YÜKLEME DİZİNLERİNDE BETİK|x" "$(_tp '%-5s|%s\n' "SCRIPTS IN UPLOAD DIRS" x)"
+assert_eq   "colours pass through untouched" $'\033[1mMOD  \033[0m' "$(_tp '%s%-5s%s\n' $'\033[1m' MODE $'\033[0m')"
+assert_eq   "a format with no argument left prints what printf would" "a||" "$(_tp '%s|%s|\n' a)"
+# what a dry run says it would do
+_dd() { ( OPT_DRY_RUN=1; OPT_QUIET=0; C_MAG=""; C_RST=""; if [[ "$1" == "tr" ]]; then LIB_LANG="tr"; lib_lang_build; fi; lib_mkdir "$TMP/dry-new-dir" 0755 2>&1; lib_rm "$TMP" 2>&1 ); }
+assert_has  "a dry run in Turkish: a directory" "[dry ]  $TMP/dry-new-dir dizini oluşturulacaktı" "$(_dd tr)"
+assert_has  "a removal"                         "[dry ]  $TMP kaldırılacaktı" "$(_dd tr)"
+assert_has  "in English it says what it said"   "[dry ]  would create directory $TMP/dry-new-dir" "$(_dd en)"
+assert_true "and nothing was created or removed" test -d "$TMP" -a ! -e "$TMP/dry-new-dir"
+unset -f _tp _dd
 # the other commands: a line from each of them, so that a module whose messages fell out of
 # the table is noticed
 assert_eq   "install"  "SSH port değişikliği başarısız oldu ve geri alındı" "$(_dt_plain "SSH port change failed and was reverted")"

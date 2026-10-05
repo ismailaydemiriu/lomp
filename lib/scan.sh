@@ -126,6 +126,25 @@ _scan_run() {   # home wide
 }
 
 lib_scan_usage() {
+  # a usage text is no single message lib/lang.sh could look up: its Turkish is here
+  if [[ "${LIB_LANG:-en}" == "tr" ]]; then
+    cat <<'EOF'
+Kullanım: lomp scan <domain>... | --all [--wide]
+
+  Bir sitenin PHP dosyalarında web shell'lerin yapıldığı şeyleri arar ve açılıp bakılacak
+  dosyaları listeler. Hiçbir şeyi değiştirmez.
+    STRONG  çözülmüş verinin ya da isteğin gönderdiğinin eval edilmesi, isteğin gönderdiğinden
+            oluşan bir komut ya da include, bir ikon içinde PHP kodu, bilinen bir shell'in adı
+    LOOK    paketlenmiş ya da gizlenmiş kod (iç içe çözme, uzun kodlanmış dizgeler, \x kaçışları,
+            chr() zincirleri), yükleme dizininde bir betik, bir dosyaya yazılan istek verisi,
+            .htaccess ya da .user.ini içinde auto_prepend_file
+
+  --wide    eval, base64_decode, exec, system, shell_exec, passthru, popen, proc_open, assert
+            ya da create_function kullanan her dosyayı da listeler. Eklentiler de bunları
+            kullanır: bir WordPress sitesinde bu uzun bir listedir.
+EOF
+    return 0
+  fi
   cat <<'EOF'
 Usage: lomp scan <domain>... | --all [--wide]
 

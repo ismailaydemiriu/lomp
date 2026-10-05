@@ -153,6 +153,37 @@ lib_domain_state_guard() {   # domain
 #  add
 # =============================================================================
 lib_domain_add_usage() {
+  # a usage text is no single message lib/lang.sh could look up: its Turkish is here
+  if [[ "${LIB_LANG:-en}" == "tr" ]]; then
+    cat <<'EOF'
+Kullanım: setup.sh add <domain> [options]
+  --email a@b.c        İletişim e-postası (Let's Encrypt, vhost adminEmails)
+  --no-ssl             Sertifika istenmez (sonradan renew-ssl ile eklenir)
+  --www                www.<domain> da sunulur; www -> apex yönlendirilir
+  --www-primary        --www ile: bunun yerine apex -> www yönlendirilir
+  --php 8.3            Bu sitenin PHP sürümü (gerektiğinde kurulur)
+  --php-children N     Bu sitenin LSAPI worker sayısı (varsayılan profilden gelir)
+  --memory 256M        PHP memory_limit           --upload 64M  upload_max_filesize
+  --proxy 127.0.0.1:3000   Kendi çalıştırdığınız bir uygulamaya ters proxy (Node/Python/...)
+  --node               Node.js sitesi: uygulamayı PM2, sitenin kullanıcısı olarak çalıştırır
+                       (bkz. setup.sh app help)
+  --port N             --node ile: uygulamanın portu (varsayılan: 3000'den itibaren ilk boş)
+  --start "npm start"  --node ile: kabuksuz çalışan başlatma komutu  (ya da --script dist/main.js)
+  --git URL            --node ile: hemen bu depodan dağıtım yapılır (--branch B)
+  --static-paths "/static/,/assets/"   Proxy modunda OLS'nin sunduğu yollar
+  --ws-path PATH       Artık gerekmez: WebSocket yükseltmeleri her yolda proxy'lenir
+  --static             Yalnızca statik site (PHP yok)
+  --wordpress          WordPress kurulur (veritabanı kendiliğinden oluşturulur)
+  --no-db              Veritabanı oluşturulmaz (varsayılan olarak bir tane oluşturulur)
+  --with-db            Veritabanı oluşturulur - varsayılan budur, eski betikler için korunur
+  --cloudflare         Cloudflare gerçek IP modu açılır (genel)
+  --wildcard           *.<domain> için de istenir (DNS-01, --cf-api-token gerekir)
+  --staging            Let's Encrypt staging CA kullanılır
+  --hsts-preload       HSTS başlığına "preload" eklenir (geri alınamaz)
+  --wp-title "Site"  --wp-admin admin  --wp-email a@b.c  --wp-locale en_US
+EOF
+    return 0
+  fi
   cat <<'EOF'
 Usage: setup.sh add <domain> [options]
   --email a@b.c        Contact e-mail (Let's Encrypt, vhost adminEmails)
@@ -1088,6 +1119,23 @@ lib_domain_wp_config_close() {
 }
 
 lib_domain_wordpress_usage() {
+  # a usage text is no single message lib/lang.sh could look up: its Turkish is here
+  if [[ "${LIB_LANG:-en}" == "tr" ]]; then
+    cat <<'EOF'
+Kullanım: setup.sh wordpress <domain>
+  En güncel WordPress'in dosyalarını (https://wordpress.org/latest.zip), var olan bir PHP
+  sitesinin belge köküne, sitenin kendi kullanıcısı olarak doğrudan yerleştirir: dizinler 0755,
+  dosyalar 0644. Kurulumun kendisi - dil, veritabanı girişi, yönetici hesabı - tarayıcıda
+  tamamlanır; sitenin veritabanı giriş bilgileri sonunda yazdırılır.
+  İçinde zaten bir şey bulunan belge kökü için önce sorulur (--yes bunu yanıtlar):
+  WordPress'in dosyaları aynı adlı dosyaların yerine geçer, gerisi kalır. root'un oraya
+  yüklediği dosyalar, fix-owner'ın yaptığı gibi, önce sitenin kullanıcısına devredilir.
+  wp-config.php dosyası olan bir siteye dokunulmaz. Seçenek olarak --dry-run verilirse hiçbir
+  şey indirilmez ya da yazılmaz.
+  WordPress'in kurucusu wp-config.php dosyasını 0666 bırakır; bir dakika içinde 0640 olur.
+EOF
+    return 0
+  fi
   cat <<'EOF'
 Usage: setup.sh wordpress <domain>
   Put the files of the latest WordPress (https://wordpress.org/latest.zip) straight into the
@@ -1414,7 +1462,7 @@ lib_domain_list_main() {
     if ((${#files[@]} == 0)); then printf '[]\n'; else jq -s '.' "${files[@]}"; fi
     return 0
   fi
-  printf '%s%-28s %-10s %-5s %-24s %-22s %-10s%s\n' "$C_BLD" "DOMAIN" "MODE" "PHP" "SSL" "LAST BACKUP" "STATUS" "$C_RST"
+  lib_tprintf '%s%-28s %-10s %-5s %-24s %-22s %-10s%s\n' "$C_BLD" "DOMAIN" "MODE" "PHP" "SSL" "LAST BACKUP" "STATUS" "$C_RST"
   while read -r d; do
     [[ -n "$d" ]] || continue
     lib_domain_state_load "$d" || continue
@@ -1422,10 +1470,10 @@ lib_domain_list_main() {
     last="${D_BACKUP_LAST:--}"
     status="$D_STATUS"
     [[ -d "$D_HOME/public_html" ]] || status="${status} (missing dir!)"
-    printf '%-28s %-10s %-5s %-24s %-22s %-10s\n' "$d" "$D_MODE" "${D_PHP:--}" "${ssl:0:24}" "${last:0:22}" "$status"
+    lib_tprintf '%-28s %-10s %-5s %-24s %-22s %-10s\n' "$d" "$D_MODE" "${D_PHP:--}" "${ssl:0:24}" "${last:0:22}" "$status"
     rows+=("$d")
   done < <(lib_domains_list)
-  ((${#rows[@]} == 0)) && printf '(no sites yet - add one with: setup.sh add example.com)\n'
+  if ((${#rows[@]} == 0)); then lib_tr "(no sites yet - add one with: setup.sh add example.com)"; printf '%s\n' "$LIB_TR"; fi
   # names that are no site and only send their visitors on to one
   while read -r d; do
     [[ -n "$d" ]] || continue
@@ -1433,7 +1481,8 @@ lib_domain_list_main() {
     ssl="$(lib_ssl_deployed "$d" && lib_ssl_status_line "$d" || printf -- '-')"
     printf '%-28s %-10s %-5s %-24s %-22s %s\n' "$d" "redirect" "-" "${ssl:0:24}" "-" "-> ${R_TARGET}"
   done < <(lib_redirects_list)
-  printf '\n%s%d site(s); files under %s/<domain>/public_html%s\n' "$C_DIM" "${#rows[@]}" "$SITES_ROOT" "$C_RST"
+  lib_tr "${#rows[@]} site(s); files under ${SITES_ROOT}/<domain>/public_html"
+  printf '\n%s%s%s\n' "$C_DIM" "$LIB_TR" "$C_RST"
 }
 
 lib_domain_logs_main() {
@@ -1476,6 +1525,22 @@ DOM_HARDLINKS_SYSCTL="/proc/sys/fs/protected_hardlinks"
 DOM_MOUNTINFO="/proc/self/mountinfo"
 
 lib_domain_fix_owner_usage() {
+  # a usage text is no single message lib/lang.sh could look up: its Turkish is here
+  if [[ "${LIB_LANG:-en}" == "tr" ]]; then
+    cat <<'EOF'
+Kullanım: setup.sh fix-owner <domain>... | --all
+          setup.sh fix-owner --auto on|off
+  root olarak yüklemeden sonra (WinSCP, scp, root'un açtığı bir arşiv) bir sitenin dosyalarını
+  kendi kullanıcısına ve grubuna geri verir. Yalnızca başkasına ait olanlar değişir; logs/
+  root'ta kalır, dosya izinleri de olduğu gibi kalır. Seçenek --dry-run ise yalnızca sayar.
+  Aynısı her sitede, yüklemeden sonraki bir dakika içinde kendiliğinden olur: bu komut, bir
+  dakika beklemeden hemen yapmak ve bir sitenin dosyalarının neden devredilmediğini görmek
+  içindir. Bunu --auto off durdurur; root'un bir sitede bilerek kendi dosyalarını tuttuğu
+  sunucu içindir (devredilince sitenin PHP'si bu dosyaları değiştirebilir); yeniden başlatmak
+  için --auto on kullanın.
+EOF
+    return 0
+  fi
   cat <<'EOF'
 Usage: setup.sh fix-owner <domain>... | --all
        setup.sh fix-owner --auto on|off

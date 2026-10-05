@@ -2880,7 +2880,7 @@ lib_mail_box_list_main() {   # [domain]
     } | jq -s '.'
     return 0
   fi
-  printf '  %-34s %-10s %s\n' "MAILBOX" "QUOTA" "USED"
+  lib_tprintf '  %-34s %-10s %s\n' "MAILBOX" "QUOTA" "USED"
   while read -r a; do
     [[ -n "$a" ]] || continue
     q="$(lib_mail_box_quota "$a")"
@@ -2990,7 +2990,7 @@ lib_mail_alias_list_main() {   # [domain]
     } | jq -s '.'
     return 0
   fi
-  printf '  %-34s %s\n' "ALIAS" "GOES TO"
+  lib_tprintf '  %-34s %s\n' "ALIAS" "GOES TO"
   while read -r d; do
     [[ -n "$d" ]] || continue
     f="$(lib_mail_alias_file "$d")"
@@ -3145,7 +3145,7 @@ lib_mail_domain_list_main() {
     } | jq -s '.'
     return 0
   fi
-  printf '%s%-30s %-5s %-5s %-6s %-9s %-8s %s%s\n' "$C_BLD" "DOMAIN" "KIND" "MAIL" "BOXES" "ALIASES" "WEBMAIL" "CERTIFICATE" "$C_RST"
+  lib_tprintf '%s%-30s %-5s %-5s %-6s %-9s %-8s %s%s\n' "$C_BLD" "DOMAIN" "KIND" "MAIL" "BOXES" "ALIASES" "WEBMAIL" "CERTIFICATE" "$C_RST"
   while read -r d; do
     [[ -n "$d" ]] || continue
     _mail_domain_listed "$d" || continue
@@ -3157,15 +3157,17 @@ lib_mail_domain_list_main() {
     all=""; [[ -n "$(lib_mail_catchall "$d")" ]] && all="+all"
     if [[ "$(lib_json_get "$(lib_mail_json "$d")" '.mail.webmail')" == "true" ]]; then wm="yes"; else wm="no"; fi
     cert="$(lib_ssl_days_left "$(lib_mail_cert_name "$d")")"
-    printf '%-30s %-5s %-5s %-6s %-9s %-8s %s\n' "$d" "$kind" "$state" "$boxes" "${aliases}${all}" "$wm" \
-      "$( [[ -n "$cert" ]] && printf '%s days' "$cert" || printf 'none yet')"
+    if [[ -n "$cert" ]]; then lib_tr "days"; cert="${cert} ${LIB_TR}"; else cert="none yet"; fi
+    lib_tprintf '%-30s %-5s %-5s %-6s %-9s %-8s %s\n' "$d" "$kind" "$state" "$boxes" "${aliases}${all}" "$wm" "$cert"
   done < <(lib_mail_domains_known)
   if (( n == 0 )); then
-    printf '(no domain has mail yet - give one its mail with: lomp mail domain add example.com --mailbox info)\n'
+    lib_tr "(no domain has mail yet - give one its mail with: lomp mail domain add example.com --mailbox info)"; printf '%s\n' "$LIB_TR"
     return 0
   fi
-  printf '\n%s%d domain(s). KIND site: a site of this server; mail: mail only, added with "mail domain add".%s\n' "$C_DIM" "$n" "$C_RST"
-  printf '%sALIASES +all: every other address of the domain goes somewhere too (lomp mail alias list).%s\n' "$C_DIM" "$C_RST"
+  lib_tr "${n} domain(s). KIND site: a site of this server; mail: mail only, added with \"mail domain add\"."
+  printf '\n%s%s%s\n' "$C_DIM" "$LIB_TR" "$C_RST"
+  lib_tr "ALIASES +all: every other address of the domain goes somewhere too (lomp mail alias list)."
+  printf '%s%s%s\n' "$C_DIM" "$LIB_TR" "$C_RST"
   return 0
 }
 
@@ -3642,6 +3644,66 @@ lib_mail_status_main() {
 }
 
 lib_mail_usage() {
+  # a usage text is no single message lib/lang.sh could look up: its Turkish is here
+  if [[ "${LIB_LANG:-en}" == "tr" ]]; then
+    cat <<'EOF'
+Kullanım: lomp mail <command>
+
+  domain add <domain> [--mailbox info] [--quota 2G]
+                         postası burada olan, sitesi burada olmayan alan adı (web sitesi başka
+                         bir sunucudadır ya da hiç yoktur): Linux kullanıcısı ve sanal konak yok
+  domain add <domain> --to <you@example.com> [--address info,sales] [--catch-all]
+                         aynısı, kendi posta kutusu olmadan: adresleri var olan bir posta
+                         kutusuna teslim edilir; o kutu bu adreslerle de gönderebilir
+  domain list            burada postası olan her alan adı: site ya da yalnızca posta, posta
+                         kutuları, takma adlar
+  domain del <domain> [--dns-cleanup] [--no-backup]
+                         bir posta alan adını ve tüm postasını, son bir yedekten sonra kaldırır
+
+  enable <domain> [--mailbox info] [--quota 2G]
+                         bir siteye kendi postasını verir: DKIM anahtarı, sertifika, eklenecek
+                         DNS kayıtları (--to, --address ve --catch-all burada da çalışır)
+  disable <domain> [--delete-data] [--dns-cleanup]
+                         bu alan adı için posta alımını durdurur: teslim ve giriş yok, ama her
+                         ileti diskte kalır ve yeniden etkinleştirince posta kutuları geri gelir
+
+  box add <user@domain> [--quota 2G]    şifre stdin'den okunur ya da sorulur, asla komut
+  box passwd <user@domain>              satırından alınmaz
+  box quota <user@domain> <2G|0>
+  box list [domain] | box del <user@domain> | box kick <user@domain>
+
+  alias add <alias@domain> <target[,target]>   başka yere giden bir adres; gittiği buradaki
+                                        posta kutusu bu adresle de gönderebilir
+  alias add @<domain> <target>          tümünü yakala: alan adının posta kutusu da kendi takma
+                                        adı da olmayan her adresi
+  alias del <alias@domain> | alias list [domain]
+
+  dns <domain> [--json] [--check]       DNS'e ne konacağı ve orada olup olmadığı
+  dns <domain> --apply [--replace-mx]   saklanan token ile Cloudflare'e yazar
+  cert [domain]                         gelmemiş bir sertifikayı yeniden ister
+
+  webmail on|off|status <domain>        webmail.<domain> adresinde bir webmail; tek kurulum, açık
+                                        olduğu her alan adına hizmet verir
+
+  dkim rotate <domain>                  ikinci bir imzalama anahtarı ve yayımlanacak kayıt;
+  dkim rotate <domain> --abort          saatlik bir iş, DNS kaydı taşıyınca imzalamayı ona
+  dkim status <domain>                  geçirir ve eski anahtarı bir hafta sonra kaldırır
+
+  backup <domain> [--keep N]            posta kutuları, takma adlar, anahtarlar ve posta
+  restore <domain> [--file ARCHIVE]     bunları geri koyar; içinde hâlâ posta olan posta kutusu
+                                        için önce sorulur, boş olan için sorulmaz
+
+  status                 posta yığınının ne yaptığı ve gönderip gönderemediği
+  test                   ters DNS'i ve giden 25 numaralı portun açık olup olmadığını denetler
+  queue                  Postfix kuyruğunu gösterir
+  regenerate             her posta yapılandırma dosyasını yeniden yazar, yığını yeniden başlatır
+  relay set --host H [--port 587] --user U [--spf-include NAME] [--tls secure|encrypt]
+                         giden postayı başka bir sunucu üzerinden gönderir; şifre standart
+                         girdiden okunur, asla bir argümandan alınmaz
+  relay off              giden postayı yeniden doğrudan gönderir
+EOF
+    return 0
+  fi
   cat <<'EOF'
 Usage: lomp mail <command>
 

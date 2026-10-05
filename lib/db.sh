@@ -358,7 +358,7 @@ FLUSH PRIVILEGES;" || return 1
 lib_db_list() {
   local d="" size="" n=0
   lib_db_installed || { lib_note "MariaDB is not installed"; return 0; }
-  printf '\n%s%-28s %-26s %-26s %9s%s\n' "$C_BLD" "SITE" "DATABASE" "USER" "SIZE" "$C_RST"
+  lib_tprintf '\n%s%-28s %-26s %-26s %9s%s\n' "$C_BLD" "SITE" "DATABASE" "USER" "SIZE" "$C_RST"
   while read -r d; do
     [[ -n "$d" ]] || continue
     n=$((n + 1))

@@ -17,6 +17,37 @@ declare -ga IMP_NAMELESS=()
 IMP_OPT_NO_DB=0 IMP_OPT_NO_FILES=0
 
 lib_import_usage() {
+  # a usage text is no single message lib/lang.sh could look up: its Turkish is here
+  if [[ "${LIB_LANG:-en}" == "tr" ]]; then
+    cat <<'EOF'
+Kullanım: setup.sh import <[user@]host> [options]
+  Siteleri başka bir sunucudan SSH üzerinden bu sunucuya getirir: dosyalar sitenin
+  public_html dizinine, sitenin kendi kullanıcısı olarak; bir WordPress'in veritabanı da
+  buradaki site veritabanına aktarılır ve wp-config.php ona yönlendirilir. Henüz burada
+  olmayan site önce eklenir (sertifikasız: DNS hâlâ öteki sunucuyu gösterir). Öteki sunucu
+  yalnızca okunur.
+
+  Seçenek olarak --all ya da --only verilmezse orada bulunan siteler listelenir ve hangilerini
+  istediğiniz sorulur.
+
+  --port N               Öteki sunucunun SSH portu (varsayılan 22)
+  --key FILE             Giriş için kullanılacak özel anahtar
+  --password-file FILE   İlk satırı SSH şifresi olan dosya. Ne --key ne de bu verilmişse ssh
+                         şifreyi kendisi, bir kez sorar
+  --list                 Yalnızca orada ne olduğunu gösterir
+  --all                  Orada bulunan her site
+  --only a.com,b.com     Yalnızca bunlar
+  --no-create            Yalnızca burada zaten var olan siteler (ötekileri önce kendiniz ekleyin)
+  --path DIR --as DOMAIN Öteki sunucunun bir dizini bu alan adı olarak; orada bir ad altında
+                         sunulmayan site için (örneğin /usr/local/lsws/Example/html)
+  --db NAME              Seçenek --path ise: getirilecek veritabanı, WordPress olmayan site için
+  --no-db  --no-files    Veritabanları ya da dosyalar dışarıda bırakılır
+  Kullanıcı (varsayılan root) sitelerin dosyalarını okuyabilmelidir. Kopyalanmayanlar: posta,
+  sertifikalar, cron işleri ve --db ile adı verilmedikçe WordPress dışındaki uygulamaların
+  veritabanları.
+EOF
+    return 0
+  fi
   cat <<'EOF'
 Usage: setup.sh import <[user@]host> [options]
   Bring sites from another server to this one over SSH: the files into the site's
