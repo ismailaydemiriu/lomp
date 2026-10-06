@@ -2,6 +2,9 @@
 # tests/unit.sh - offline unit tests for the pure bash/awk logic of setup.sh.
 # Runs without root and without network on any machine with bash 5, awk, jq, openssl.
 #   bash tests/unit.sh
+# ShellCheck's data-flow pass needs about 17 GB of memory for a file of this length (measured
+# with 0.11.0), and the CI runner that has less stopped the job. Every other check still runs.
+# shellcheck extended-analysis=false
 set -Eeuo pipefail
 shopt -s lastpipe
 HERE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"

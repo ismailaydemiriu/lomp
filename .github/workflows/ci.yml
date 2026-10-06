@@ -15,8 +15,10 @@ jobs:
 
       - name: Install shellcheck
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq shellcheck
+          # the release itself, not the distribution's 0.9.0: tests/unit.sh switches the
+          # data-flow pass off for its own length, a directive that 0.10 brought
+          curl -fsSL https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.linux.x86_64.tar.xz | tar -xJ -C "$RUNNER_TEMP"
+          sudo install -m 0755 "$RUNNER_TEMP/shellcheck-v0.11.0/shellcheck" /usr/local/bin/shellcheck
           shellcheck --version
 
       - name: Syntax check (bash -n)
