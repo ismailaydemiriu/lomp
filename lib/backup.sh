@@ -158,13 +158,19 @@ lib_backup_domain() {   # domain [--keep N] [--encrypt] [--remote] [--tag T]
     dbfile="${work}/db-${DBI_NAME}.sql.gz"
     if ! lib_db_dump_domain "$domain" "$dbfile"; then BK_ERROR="database dump failed (${DBI_NAME})"; rm -rf "$work"; lib_backup_failed "$domain"; return 1; fi
     parts+=("$(basename "$dbfile")")
+    # ... and the other databases the site has (lib/db.sh), each in a dump of its own
+    while read -r a; do
+      [[ -n "$a" ]] || continue
+      if ! lib_db_dump_name "$a" "${work}/xdb-${a}.sql.gz"; then BK_ERROR="database dump failed (${a})"; rm -rf "$work"; lib_backup_failed "$domain"; return 1; fi
+      parts+=("xdb-${a}.sql.gz")
+    done < <(lib_db_extra_names "$domain")
   fi
   # ---- vhost + state -------------------------------------------------------
   mkdir -p "${work}/conf" "${work}/state"
   vh="${LSWS_VHOSTS_DIR}/${domain}/vhconf.conf"
   [[ -f "$vh" ]] && cp "$vh" "${work}/conf/vhconf.conf" && parts+=("conf/vhconf.conf")
   # (cron.imported: the cron jobs an import gave the site - lib/import.sh)
-  for a in domain.json db.info wp.info ssl.info app-env.json cron.imported; do
+  for a in domain.json db.info db.extra wp.info ssl.info app-env.json cron.imported; do
     [[ -f "$(lib_domain_state_dir "$domain")/${a}" ]] && cp "$(lib_domain_state_dir "$domain")/${a}" "${work}/state/${a}" && parts+=("state/${a}")
   done
   # ---- manifest + checksums ------------------------------------------------
@@ -523,6 +529,20 @@ lib_restore_main() {
       lib_db_restore_domain "$domain" "$dump" || lib_die "Database import failed" "SQL error (see log)" "inspect the dump"
       lib_ok "Database ${DBI_NAME} restored"
     fi
+  fi
+  # ---- the other databases of the site ---------------------------------------
+  # Each under the name the archive gives it, opened to the site's user again. The list the
+  # archive carries is the list the site has afterwards.
+  if (( ! no_db )) && [[ -s "${work}/x/state/db.extra" ]] && lib_db_info_load "$domain"; then
+    local xn="" xo=""
+    if (( ! OPT_DRY_RUN )); then cp "${work}/x/state/db.extra" "$(lib_db_extra_file "$domain")" && chmod 0600 "$(lib_db_extra_file "$domain")"; fi
+    while IFS=$'\t' read -r xn xo; do
+      [[ "$xn" =~ ^[A-Za-z0-9_]+$ && -s "${work}/x/xdb-${xn}.sql.gz" ]] || continue
+      if (( OPT_DRY_RUN )); then lib_info "[dry-run] would import xdb-${xn}.sql.gz into ${xn}"; continue; fi
+      _db_extra_grant "$xn" && lib_db_restore_name "$xn" "${work}/x/xdb-${xn}.sql.gz" \
+        || lib_die "Database import failed" "SQL error in ${xn} (see log)" "inspect the dump"
+      lib_ok "Database ${xn} restored"
+    done <"${work}/x/state/db.extra"
   fi
   # ---- wp.info -----------------------------------------------------------------
   if [[ -s "${work}/x/state/wp.info" && ! -s "$(lib_domain_state_dir "$domain")/wp.info" ]] && (( ! OPT_DRY_RUN )); then

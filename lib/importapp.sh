@@ -69,6 +69,7 @@ app_emit() {   # domain target source [application directory, command line, memo
   fi
   printf 'Q\t%s\t%s\t%s\n' "$ad" "$adb" "$aconf"
   ssl_row "$ad"
+  if [ "$adir2" != - ]; then db_rows "$adir2" "$adb"; fi
 }
 app_names() {   # target source, the names on stdin (blanks between them): one entry a name
   set -f
@@ -444,6 +445,10 @@ lib_importapp_site() {   # index into the list of sites
       if [[ -n "$IMP_FIXED" ]]; then lib_ok "The application's database login is now the one of this server (${DBI_NAME}), in: ${IMP_FIXED}"
       else lib_warn "The application's own settings still name the database of the other server: put in the one of this server (setup.sh app env ${domain} import-db)"; fi
     fi
+  fi
+  if (( ! IMP_OPT_NO_DB )); then
+    lib_import_xdbs "$domain" "$dir" "$db" "${D_HOME}/app" "$work" "$created"
+    lib_db_info_load "$domain" || true
   fi
 
   # ---- dependencies, build, PM2: what a restore does -------------------------------

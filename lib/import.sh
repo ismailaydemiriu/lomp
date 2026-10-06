@@ -24,6 +24,8 @@ declare -ga IMP_CRON_ROOT=() IMP_CRON_WHEN=() IMP_CRON_CMD=()
 IMP_OPT_FULL=0
 # one entry per certificate found: the domain, the certificate file there, its key file
 declare -ga IMP_CERT_DOMAIN=() IMP_CERT_FILE=() IMP_CERT_KEY=()
+# one entry per database a site has beside its first: the directory, the name, the file that names it
+declare -ga IMP_XDB_ROOT=() IMP_XDB_NAME=() IMP_XDB_CONF=()
 IMP_OPT_NO_SSL=0
 # the CA file a certificate is checked against ("": the system's), and what counts as now (tests)
 IMP_SSL_CAFILE="${IMP_SSL_CAFILE:-}"
@@ -381,6 +383,7 @@ _import_mb() {   # kilobytes -> "12 MB"
 #   S <domain|-> <document root> <kilobytes> <static|php|wordpress> <database|-> <www 0|1> <wp-config.php|-> <ols|dir|path> <PHP version|-> <memory_limit|-> <upload_max_filesize|->
 #   C <document root> <when: five fields or @word> <command>
 #   T <domain> <certificate file> <key file>
+#   D <document root> <one more database> <the file that names it>
 #   M <address> <its Maildir|-> <kilobytes> <password hash|->
 #   A <alias address, or @domain> <where it goes, addresses divided by commas>
 # The database of a site that is no WordPress is the one its own configuration files name
@@ -475,7 +478,7 @@ dbconf() {
   BEGIN {
     K["name", 1] = "db_name|dbname|db_database|database_name|db_adi|dbadi|veritabani|vt_adi|mysql_database|mysql_db"
     K["user", 1] = "db_username|db_user|dbusername|dbuser|db_kullanici|mysql_username|mysql_user"
-    K["pass", 1] = "db_password|db_pass|dbpassword|dbpass|db_sifre|db_pwd|mysql_password|mysql_pass"
+    K["pass", 1] = "db_password|db_passwd|db_pass|dbpassword|dbpasswd|dbpass|db_sifre|db_pwd|mysql_password|mysql_pass"
     K["host", 1] = "db_hostname|db_host|dbhost|db_server|dbserver|mysql_host"
     K["name", 3] = "database|db"
     K["user", 3] = "username|kullanici_adi|kullanici|user|kadi"
@@ -516,7 +519,7 @@ dbconf_files() {
     find "$1" -maxdepth 3 \( -name node_modules -o -name vendor -o -name cache -o -name uploads -o -name .git \) -prune -o -type f -size -200k \
       \( -iname 'config*.php' -o -iname 'configuration.php' -o -iname 'settings*.php' -o -iname 'db*.php' -o -iname 'database*.php' \
          -o -iname 'conn*.php' -o -iname 'baglan*.php' -o -iname 'ayar*.php' -o -iname 'vt*.php' -o -iname 'veritabani*.php' \
-         -o -iname 'local*.php' -o -iname 'env.php' -o -iname '*.inc.php' -o -iname 'config*.inc' -o -name '.env' \) -print 2>/dev/null
+         -o -iname 'local*.php' -o -iname 'env.php' -o -iname '*.inc.php' -o -iname 'config*.inc' -o -name '.env' -o -name 'wp-config.php' \) -print 2>/dev/null
     [ ! -f "${1%/*}/.env" ] || printf '%s\n' "${1%/*}/.env"
   } | awk '{ n = gsub(/\//, "/"); print n "\t" $0 }' | sort -n | cut -f2- | head -n 60
 }
@@ -547,6 +550,30 @@ ssl_row() {   # domain [virtual host configuration]
   fi
   [ -s "$sc" ] && [ -s "$sk" ] || return 0
   printf 'T\t%s\t%s\t%s\n' "$1" "$sc" "$sk"
+}
+# The databases a site has beside its first: every other one a configuration file under it
+# names AND that can be opened - by the account that runs this, or with the login in that
+# file. A name nothing opens is a sample file's, or a database that is gone.
+db_rows() {   # directory, its first database ("-": none)
+  xclient="$(command -v mariadb 2>/dev/null || command -v mysql 2>/dev/null || true)"
+  [ -n "$xclient" ] || return 0
+  xseen=" $2 "
+  dbconf_files "$1" | while IFS= read -r xf; do
+    xn="$(dbconf_val "$xf" name)"
+    [ -n "$xn" ] || continue
+    case "$xn" in *[!A-Za-z0-9_-]*) continue ;; esac
+    case "$xseen" in *" $xn "*) continue ;; esac
+    if ! "$xclient" -N -B -e 'SELECT 1' "$xn" >/dev/null 2>&1; then
+      xc="$(umask 077; mktemp)" || continue
+      dbconf_cnf "$xf" >"$xc" 2>/dev/null && "$xclient" --defaults-extra-file="$xc" -N -B -e 'SELECT 1' "$xn" >/dev/null 2>&1
+      xr=$?
+      rm -f "$xc"
+      [ "$xr" = 0 ] || continue
+    fi
+    # (only now: a name one file could not open may be opened by the next that names it)
+    xseen="$xseen$xn "
+    printf 'D\t%s\t%s\t%s\n' "$1" "$xn" "$xf"
+  done
 }
 IMPORT_LIB
 }
@@ -623,6 +650,7 @@ row() {   # domain docroot www source [PHP version, memory_limit, upload_max_fil
   kb="$(du -sk "$root" 2>/dev/null | cut -f1)"
   printf 'S\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$1" "$root" "${kb:-0}" "$kind" "$db" "$3" "$conf" "$4" "${5:--}" "${6:--}" "${7:--}"
   cron_rows "$1" "$root"
+  if [ "$kind" != static ]; then db_rows "$root" "$db"; fi
 }
 # One PHP setting as a site has it: what its virtual host overrides, else its .user.ini, else
 # the php.ini of the PHP it runs.
@@ -859,10 +887,21 @@ lib_import_scan_parse() {   # reads the listing from stdin
   IMP_BOX=() IMP_BOX_DIR=() IMP_BOX_KB=() IMP_BOX_HASH=() IMP_ALIAS=() IMP_ALIAS_TO=()
   IMP_REMOTE_USER=""
   IMP_CERT_DOMAIN=() IMP_CERT_FILE=() IMP_CERT_KEY=()
+  IMP_XDB_ROOT=() IMP_XDB_NAME=() IMP_XDB_CONF=()
   lib_importapp_reset
   while IFS=$'\t' read -r tag domain root kb kind db www conf _ php mem upl _; do
     # a name that is passed on to a port, and its database (lib/importapp.sh)
     if [[ "$tag" == "P" ]]; then lib_importapp_row "$domain" "$root" "$kb" "$kind" "$db" "$www" "$conf" "$php" "$mem" "$upl"; continue; fi
+    if [[ "$tag" == "D" ]]; then
+      # one more database of a site: the directory, the name, the file
+      _import_path_ok "$domain" && _import_dbname_ok "$root" && _import_path_ok "$kb" || continue
+      dup=0
+      for (( k = 0; k < ${#IMP_XDB_ROOT[@]}; k++ )); do
+        if [[ "${IMP_XDB_ROOT[k]}" == "$domain" && "${IMP_XDB_NAME[k]}" == "$root" ]]; then dup=1; break; fi
+      done
+      (( dup )) || { IMP_XDB_ROOT+=("$domain"); IMP_XDB_NAME+=("$root"); IMP_XDB_CONF+=("$kb"); }
+      continue
+    fi
     if [[ "$tag" == "T" ]]; then
       # a certificate: the name, and where its two files are
       domain="${domain,,}"
@@ -1110,8 +1149,8 @@ lib_import_dbconf_rewrite() {   # file, its F lines (a file); name user password
 # Every configuration file of a site that names the database it had there, pointed at the one
 # it has here. The names of the files that were changed come back in IMP_FIXED.
 IMP_FIXED=""
-_import_dbconf_fix() {   # document root, the database's name there, a work directory
-  local docroot="$1" old="$2" work="$3" f="" name=""
+_import_dbconf_fix() {   # document root, the database's name there, a work directory [, its name here when it is not the site's first]
+  local docroot="$1" old="$2" work="$3" new="${4:-$DBI_NAME}" f="" name=""
   IMP_FIXED=""
   [[ "${DBI_NAME}${DBI_USER}${DBI_PASS}" =~ ^[A-Za-z0-9_]+$ ]] || return 0
   while IFS= read -r f; do
@@ -1120,7 +1159,7 @@ _import_dbconf_fix() {   # document root, the database's name there, a work dire
     lib_import_dbconf "${work}/conf.in" "$f" >"${work}/conf.pos" 2>/dev/null || continue
     name="$(awk -F'\t' '$2 == "name" { print $6; exit }' "${work}/conf.pos")"
     [[ -n "$name" && "$name" == "$old" ]] || continue
-    lib_import_dbconf_rewrite "${work}/conf.in" "${work}/conf.pos" "$DBI_NAME" "$DBI_USER" "$DBI_PASS" >"${work}/conf.out" || continue
+    lib_import_dbconf_rewrite "${work}/conf.in" "${work}/conf.pos" "$new" "$DBI_USER" "$DBI_PASS" >"${work}/conf.out" || continue
     lib_domain_as_user tee "$f" <"${work}/conf.out" >/dev/null || continue
     IMP_FIXED+="${IMP_FIXED:+, }$( [[ "$f" == "$docroot"/* ]] && printf '%s' "${f#"$docroot"/}" || printf '%s' "${f##*/}" )"
   done < <(lib_domain_as_user sh -c "$(lib_import_remote_lib)"'
@@ -1273,10 +1312,41 @@ _import_check_site() {   # index, fix 0|1
   return "$bad"
 }
 
+# The other databases found for one directory, as indexes into IMP_XDB_*, one per line -
+# the site's first database (it may be named by more than one file) left out.
+_import_xdb_of() {   # directory, its first database
+  local k=0
+  for (( k = 0; k < ${#IMP_XDB_ROOT[@]}; k++ )); do
+    if [[ "${IMP_XDB_ROOT[k]}" == "$1" && "${IMP_XDB_NAME[k]}" != "$2" ]]; then printf '%d\n' "$k"; fi
+  done
+  return 0
+}
+
+# The other databases of a site: each into a database of its own here, opened by the site's
+# one user, and every file that named it there pointed at it here.
+lib_import_xdbs() {   # domain, directory there, its first database, directory here, work directory, 1 when the site is new
+  local domain="$1" root="$2" first="$3" here="$4" work="$5" created="$6" k="" n=0
+  local -a mine=()
+  mapfile -t mine < <(_import_xdb_of "$root" "$first")
+  ((${#mine[@]} > 0)) || return 0
+  lib_db_info_load "$domain" || return 0
+  for k in "${mine[@]}"; do
+    lib_db_extra_add "$domain" "${IMP_XDB_NAME[k]}" \
+      || lib_die "A database for ${IMP_XDB_NAME[k]} could not be made" "SQL error (see the log)" "check MariaDB, then run the import again"
+    lib_import_db "$domain" "${IMP_XDB_NAME[k]}" "${IMP_XDB_CONF[k]}" "$work" "$created" "$DBX_NAME"
+    lib_ok "Database ${IMP_XDB_NAME[k]} imported into ${DBX_NAME}"
+    _import_dbconf_fix "$here" "${IMP_XDB_NAME[k]}" "$work" "$DBX_NAME"
+    if [[ -n "$IMP_FIXED" ]]; then lib_ok "Its login is now the one of this server (${DBX_NAME}), in: ${IMP_FIXED}"
+    else lib_warn "The file that names ${IMP_XDB_NAME[k]} still has the login of the other server: the database is ${DBX_NAME} here (setup.sh credentials ${domain})"; fi
+    n=$((n + 1))
+  done
+  return 0
+}
+
 # One database of the other server into the site's own here: dumped there, checked for being
 # whole, and imported. Dies - with nothing imported - when any of that fails.
-lib_import_db() {   # domain, database there, the file that names its login ("-": none), work directory, 1 when the site is new
-  local domain="$1" db="$2" conf="$3" work="$4" created="$5" dump="" n=0
+lib_import_db() {   # domain, database there, the file that names its login ("-": none), work directory, 1 when the site is new [, another database of the site to fill]
+  local domain="$1" db="$2" conf="$3" work="$4" created="$5" into="${6:-}" dump="" n=0
   if ! lib_db_info_load "$domain"; then lib_db_create_for_domain "$domain"; fi
   dump="${work}/dump.sql.gz"
   lib_info "Fetching the database ${db} ..."
@@ -1295,7 +1365,7 @@ lib_import_db() {   # domain, database there, the file that names its login ("-"
     gzip -dc "$dump" | sed -e 's/utf8mb4_0900_ai_ci/utf8mb4_unicode_520_ci/g' | gzip -c >"${work}/dump2.sql.gz"
     dump="${work}/dump2.sql.gz"
   fi
-  lib_db_restore_domain "$domain" "$dump" \
+  { if [[ -n "$into" ]]; then lib_db_restore_name "$into" "$dump"; else lib_db_restore_domain "$domain" "$dump"; fi; } \
     || lib_die "The database of ${domain} could not be imported" "an SQL error (see the log)" \
          "its tables may be half replaced: run the import again$( (( created )) || printf ', or go back with: setup.sh restore %s --file <the pre-import archive>' "$domain")"
 }
@@ -1684,6 +1754,11 @@ lib_import_site_part() {   # index
       lib_ok "Database ${db} imported into ${DBI_NAME}"
     fi
   fi
+  # ---- the other databases the site has ----------------------------------------
+  if (( ! IMP_OPT_NO_DB )) && [[ "$D_MODE" != "static" ]]; then
+    lib_import_xdbs "$domain" "$root" "$db" "$docroot" "$work" "$created"
+    lib_db_info_load "$domain" || true
+  fi
 
   # ---- wp-config.php: the database it has here -------------------------------
   cfg="${docroot}/wp-config.php"
@@ -1745,7 +1820,7 @@ lib_import_site_part() {   # index
 lib_import_main() {
   if [[ "${1:-}" == "cron" ]]; then shift; lib_require_tools; lib_require_installed; lib_import_cron_main "$@"; return 0; fi
   local a="" target="" port="22" key="" pwfile="" list=0 all=0 only="" no_create=0 path="" as="" dbname=""
-  local i=0 n=0 here="" ans="" x="" total_kb=0 avail_kb=0 found=0 okc=0 what="" mkb=0 mail_kb=0 crons=0 limits=""
+  local i=0 n=0 here="" ans="" x="" total_kb=0 avail_kb=0 found=0 okc=0 what="" mkb=0 mail_kb=0 crons=0 limits="" xdbs="" k=""
   local -a chosen=() todo=() failed=()
   IMP_OPT_NO_DB=0; IMP_OPT_NO_FILES=0; IMP_OPT_NO_MAIL=0; IMP_OPT_ONLY_MAIL=0; IMP_OPT_NO_CRON=0; IMP_OPT_FULL=0; IMP_OPT_CHECK=0; IMP_OPT_FIX=0; IMP_OPT_NO_SSL=0
   while (($# > 0)); do
@@ -1929,6 +2004,10 @@ lib_import_main() {
     if [[ "$here" == "new" && "${IMP_KIND[i]}" != "static" ]]; then
       limits="$(_import_php_limits "$i" | tr '\n' ' ')"
       if [[ -n "$limits" ]]; then lib_note "${x}: it keeps the PHP limits it has there, which are above this server's own (${limits% })"; fi
+    fi
+    if (( ! IMP_OPT_NO_DB )) && [[ "${IMP_KIND[i]}" != "static" ]]; then
+      xdbs="$(_import_xdb_of "${IMP_ROOT[i]}" "${IMP_DB[i]}" | while read -r k; do printf '%s ' "${IMP_XDB_NAME[k]}"; done)"
+      if [[ -n "$xdbs" ]]; then lib_note "${x}: and the other database(s) its files name: ${xdbs% }"; fi
     fi
     crons="$(_import_cron_of "${IMP_ROOT[i]}" | wc -l | tr -d ' ')"
     if (( crons > 0 && ! IMP_OPT_NO_CRON )); then

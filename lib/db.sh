@@ -269,6 +269,82 @@ FLUSH PRIVILEGES;"
   DBI_NAME="$dbname"; DBI_USER="$dbuser"; DBI_PASS="$dbpass"
 }
 
+# ---- more than one database for a site --------------------------------------------------
+# A site has one database, made with it and named in db.info. An application may keep a
+# second one (a forum beside the shop, a WordPress in a directory of its own), and "import"
+# brings those along: each is a database of its own here, opened by the site's ONE database
+# user with the site's one password. They are listed in db.extra beside db.info - "the name
+# here<TAB>the name it had where it came from" - and whatever dumps, restores, grants or drops
+# the site's database does the same for them.
+lib_db_extra_file() { printf '%s/db.extra' "$(lib_domain_state_dir "$1")"; }
+
+lib_db_extras() {   # domain -> "name here<TAB>name it came from", one a line
+  local f=""
+  f="$(lib_db_extra_file "$1")"
+  [[ -s "$f" ]] || return 0
+  awk -F'\t' '$1 ~ /^[A-Za-z0-9_]+$/ { print $1 "\t" $2 }' "$f" || true
+  return 0
+}
+
+lib_db_extra_names() { lib_db_extras "$1" | cut -f1; }   # domain -> the names here
+
+lib_db_extra_of() {   # domain, the name it came from -> its name here, or status 1
+  local n=""
+  n="$(lib_db_extras "$1" | awk -F'\t' -v o="$2" '$2 == o { print $1; exit }')"
+  [[ -n "$n" ]] || return 1
+  printf '%s' "$n"
+}
+
+# The site's database user on one more database - on the socket, and over TCP where the site
+# has that login too (a Node.js application's).
+_db_extra_grant() {   # database  (the site's login in DBI_*)
+  local sql=""
+  sql="CREATE DATABASE IF NOT EXISTS \`${1}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+GRANT ALL PRIVILEGES ON \`${1}\`.* TO '${DBI_USER}'@'localhost';"
+  if [[ "$(lib_db_sql "SELECT COUNT(*) FROM mysql.user WHERE User='${DBI_USER}' AND Host='127.0.0.1'" 2>/dev/null || true)" == "1" ]]; then
+    sql+="
+GRANT ALL PRIVILEGES ON \`${1}\`.* TO '${DBI_USER}'@'127.0.0.1';"
+  fi
+  lib_db_sql "${sql}
+FLUSH PRIVILEGES;" >/dev/null
+}
+
+# One more database for a site: made, opened to the site's user, and written down. The name
+# is the site's own with a number, as a second site of the same name would get. DBX_NAME.
+DBX_NAME=""
+lib_db_extra_add() {   # domain, the name it came from
+  local domain="$1" origin="$2" name="" f=""
+  DBX_NAME=""
+  lib_db_info_load "$domain" || return 1
+  if name="$(lib_db_extra_of "$domain" "$origin")"; then
+    DBX_NAME="$name"
+    lib_db_exists "$name" || _db_extra_grant "$name" || return 1
+    return 0
+  fi
+  name="$(_db_unique_name "$(_db_name_base "$domain" db 60)" db 60)" || return 1
+  [[ "$name" =~ ^[A-Za-z0-9_]+$ && "$origin" != *$'\t'* && "$origin" != *$'\n'* ]] || return 1
+  _db_extra_grant "$name" || return 1
+  f="$(lib_db_extra_file "$domain")"
+  printf '%s\t%s\n' "$name" "$origin" >>"$f" && chmod 0600 "$f" || return 1
+  lib_json_set "$(lib_domain_json "$domain")" '.db.extra = ((.db.extra // []) + [$n] | unique)' --arg n "$name"
+  lib_log_write INFO "database ${name} added to ${domain} (it was ${origin} where it came from)"
+  DBX_NAME="$name"
+}
+
+lib_db_dump_name() {   # database, outfile.gz
+  (( OPT_DRY_RUN )) && return 0
+  if ! "$(lib_db_dumper)" --protocol=socket --socket="$DB_SOCKET" --single-transaction --quick --routines --triggers --events \
+        --default-character-set=utf8mb4 "$1" 2>>"$LOG_FILE" | gzip -c >"$2"; then
+    rm -f "$2"; return 1
+  fi
+  chmod 0600 "$2"
+}
+
+lib_db_restore_name() {   # database, dump.sql.gz
+  (( OPT_DRY_RUN )) && return 0
+  gzip -dc "$2" | "$(lib_db_client)" --protocol=socket --socket="$DB_SOCKET" "$1" 2>>"$LOG_FILE"
+}
+
 lib_db_show() {   # print credentials (never logged)
   local domain="$1"
   lib_db_info_load "$domain" || { lib_info "No database registered for ${domain}"; return 0; }
@@ -278,6 +354,11 @@ lib_db_show() {   # print credentials (never logged)
   lib_print_kv "Password" "$DBI_PASS"
   lib_print_kv "Host"     "localhost (socket ${DB_SOCKET})"
   lib_print_kv "Charset"  "utf8mb4 / utf8mb4_unicode_ci"
+  local x="" o=""
+  while IFS=$'\t' read -r x o; do
+    [[ -n "$x" ]] || continue
+    lib_print_kv "One more database" "${x} (the same user and password)${o:+; it was ${o} where it came from}"
+  done < <(lib_db_extras "$domain")
   printf '\n'
 }
 
@@ -290,6 +371,7 @@ lib_db_tcp_account_ensure() {   # domain
     "CREATE USER IF NOT EXISTS '${DBI_USER}'@'127.0.0.1' IDENTIFIED BY '${DBI_PASS}';
 ALTER USER '${DBI_USER}'@'127.0.0.1' IDENTIFIED BY '${DBI_PASS}';
 GRANT ALL PRIVILEGES ON \`${DBI_NAME}\`.* TO '${DBI_USER}'@'127.0.0.1';
+$(lib_db_extra_names "$1" | sed -e "s/.*/GRANT ALL PRIVILEGES ON \`&\`.* TO '${DBI_USER}'@'127.0.0.1';/")
 FLUSH PRIVILEGES;"
 }
 
@@ -297,13 +379,15 @@ lib_db_drop_for_domain() {   # domain [force]
   local domain="$1" info=""
   info="$(lib_db_info_file "$domain")"
   lib_db_info_load "$domain" || return 0
-  if (( OPT_DRY_RUN )); then lib_info "[dry-run] would drop database ${DBI_NAME} and user ${DBI_USER}"; return 0; fi
+  local more=""
+  more="$(lib_db_extra_names "$domain" | tr '\n' ' ')"
+  if (( OPT_DRY_RUN )); then lib_info "[dry-run] would drop database ${DBI_NAME}${more:+ and ${more% }} and user ${DBI_USER}"; return 0; fi
   lib_db_sql_secret "drop database ${DBI_NAME} and user ${DBI_USER}" \
-    "DROP DATABASE IF EXISTS \`${DBI_NAME}\`; DROP USER IF EXISTS '${DBI_USER}'@'localhost'; DROP USER IF EXISTS '${DBI_USER}'@'127.0.0.1'; FLUSH PRIVILEGES;" \
+    "$(lib_db_extra_names "$domain" | sed -e 's/.*/DROP DATABASE IF EXISTS `&`;/') DROP DATABASE IF EXISTS \`${DBI_NAME}\`; DROP USER IF EXISTS '${DBI_USER}'@'localhost'; DROP USER IF EXISTS '${DBI_USER}'@'127.0.0.1'; FLUSH PRIVILEGES;" \
     || lib_warn "could not drop database ${DBI_NAME} (see log)"
-  rm -f "$info"
+  rm -f "$info" "$(lib_db_extra_file "$domain")"
   [[ -s "$(lib_domain_json "$domain")" ]] && lib_json_set "$(lib_domain_json "$domain")" 'del(.db)'
-  lib_ok "Database ${DBI_NAME} and user ${DBI_USER} removed"
+  lib_ok "Database ${DBI_NAME}${more:+ and ${more% }} and user ${DBI_USER} removed"
 }
 
 lib_db_dump_domain() {   # domain outfile.gz

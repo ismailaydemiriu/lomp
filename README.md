@@ -442,6 +442,18 @@ here already, and asks which ones to bring. Then, for each:
   or deeper than three directories is not found: the run says so, and `lomp credentials
   <domain>` prints what to put in.
 
+**A site that keeps more than one database brings all of them.** Beside the first one - the
+database of its WordPress, or the one the file nearest the top of the site logs in to - every
+other database a configuration file under the site names comes too, when it can be opened
+there (by the account you logged in with, or with the login in that file; a name nothing
+opens is a sample file's, or a database that is gone): a forum beside a shop, a WordPress in
+a directory of its own. On this server a site has one database user, so each of them becomes
+a database of its own here (`example_db_2`, `example_db_3` ...) that the site's user opens
+with the site's password, and the file that named it is given that name, user and password.
+From then on they are the site's: `lomp credentials <domain>` lists them, a backup dumps
+them, `restore` puts them back, a Node.js application's login over TCP opens them, and
+`remove` drops them with the site. A database no file under the site names is not found.
+
 A directory that is served under no name - `/usr/local/lsws/Example/html`, `/var/www/html`, a
 user's `public_html` - is listed apart; `--path DIR --as DOMAIN` brings it as that domain, and
 `--db NAME` with it a database the site's own files do not name.

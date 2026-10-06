@@ -9681,7 +9681,7 @@ cat >"$_im_bin/mysql" <<'EOF'
 # lets in whoever logs in as $IM_CLIENT_USER through an option file; otherwise $IM_CLIENT_RC
 for a in "$@"; do
   case "$a" in --defaults-extra-file=*)
-    if [ -n "${IM_CLIENT_USER:-}" ] && grep -q "^user=\"$IM_CLIENT_USER\"\$" "${a#*=}"; then exit 0; fi ;;
+    for u in ${IM_CLIENT_USER:-}; do if grep -q "^user=\"$u\"\$" "${a#*=}"; then exit 0; fi; done ;;
   esac
 done
 exit "${IM_CLIENT_RC:-1}"
@@ -10345,7 +10345,7 @@ lib_import_cron_apply shop.example
 assert_has "written again, they follow the site's PHP"  "${_im_su} ${LSWS_HOME}/lsphp82/bin/php ${_im_d1}/cron.php" "$(cat "$CRON_FILE")"
 assert_has "rename writes them again under the new name" 'lib_import_cron_apply "$new"' "$(declare -f lib_domain_rename_main)"
 assert_has "after taking them out under the old one"    'lib_cron_remove_prefix "imported:${old}:"' "$(declare -f lib_domain_rename_main)"
-assert_has "a backup carries them"                      "domain.json db.info wp.info ssl.info app-env.json cron.imported; do" "$(grep -A70 '^lib_backup_domain() {' "$ROOT/lib/backup.sh")"
+assert_has "a backup carries them"                      "domain.json db.info db.extra wp.info ssl.info app-env.json cron.imported; do" "$(grep -A70 '^lib_backup_domain() {' "$ROOT/lib/backup.sh")"
 assert_has "and a restore writes them into cron again"  'lib_import_cron_apply "$domain"' "$(declare -f lib_restore_main)"
 assert_has "remove takes them with the site"            'lib_cron_remove_prefix "imported:${domain}:"' "$(declare -f lib_domain_remove_main)"
 assert_eq  "--clear removes them"                       "0" "$(_imf cron shop.example --clear)"
@@ -10673,6 +10673,91 @@ fi
 assert_has "renew-ssl --missing counts a site whose certificate was only brought" "'.ssl.imported')\" != \"true\" ]] && continue" "$(declare -f lib_ssl_renew_main)"
 assert_has "and a certificate of its own takes the mark away" "del(.ssl.imported)" "$(declare -f lib_ssl_deploy)"
 unset -f _is_ca _is_leaf
+
+# ---- more than one database for a site -----------------------------------------------------
+# The application of crm.example keeps a forum with a database of its own, a sample file that
+# names one nothing opens, and (from before) a file that names a database of somebody else.
+_ix_keep="$(declare -f lib_db_exists lib_db_restore_name lib_db_sql_secret lib_db_sql)"
+mkdir -p "$_im_crm/phpbb"
+printf '%s\n' '<?php' '// phpBB writes them so' "\$dbhost = 'localhost';" "\$dbname = 'forumdb';" "\$dbuser = 'forumuser';" "\$dbpasswd = 'forum-secret';" >"$_im_crm/phpbb/config.php"
+printf '<?php\n$db_name = "sample_db"; $db_user = "you"; $db_pass = "change-me";\n' >"$_im_crm/config.sample.php"
+assert_eq  "a password under the name phpBB gives it"   "host=localhost name=forumdb pass=forum-secret user=forumuser " "$(_im_f "$_im_crm/phpbb/config.php")"
+_ix_scan="$(lib_import_remote_scan | env PATH="$_im_bin:$PATH" LOMP_IMPORT_ROOT="$_im_r" LOMP_IMPORT_OWNER="$_im_me" IM_MAIL_USERS="$_im_users" IM_CLIENT_RC=1 IM_CLIENT_USER="crmuser forumuser" sh -s)"
+_ix_d="$(awk -F'\t' '$1 == "D" { printf "%s=%s ", $3, $4 }' <<<"$_ix_scan")"
+assert_eq  "the other database a file under the site names, and that its login opens" "forumdb=$_im_crm/phpbb/config.php " "$_ix_d"
+assert_lacks "the site's first database is not another one"  "crmdb=" "$_ix_d"
+assert_lacks "a database nothing opens is not listed"        "sample_db" "$_ix_scan"
+assert_lacks "nor one that is somebody else's"               "otherdb" "$_ix_d"
+lib_import_scan_parse <<<"$_ix_scan"
+# a copy of that file left with a login that opens nothing any more, read before it; and a
+# WordPress in a directory of its own
+mkdir -p "$_im_crm/old" "$_im_crm/wp"
+sed 's/forumuser/gone_user/' "$_im_crm/phpbb/config.php" >"$_im_crm/old/config.php"
+printf '%s\n' '<?php' "define( 'DB_NAME', 'blogdb' );" "define( 'DB_USER', 'bloguser' );" "define( 'DB_PASSWORD', 'blog-pw' );" "define( 'DB_HOST', 'localhost' );" >"$_im_crm/wp/wp-config.php"
+assert_eq  "a name one file cannot open is the next one's to open; a wp-config.php in a directory is read" \
+  "forumdb=$_im_crm/phpbb/config.php blogdb=$_im_crm/wp/wp-config.php " \
+  "$(lib_import_remote_scan | env PATH="$_im_bin:$PATH" LOMP_IMPORT_ROOT="$_im_r" LOMP_IMPORT_OWNER="$_im_me" IM_MAIL_USERS="$_im_users" IM_CLIENT_RC=1 IM_CLIENT_USER="crmuser forumuser bloguser" sh -s | awk -F'\t' '$1 == "D" { printf "%s=%s ", $3, $4 }')"
+rm -rf "$_im_crm/old" "$_im_crm/wp"
+assert_eq  "kept with the directory it belongs to"       "$_im_crm forumdb $_im_crm/phpbb/config.php" "${IMP_XDB_ROOT[*]} ${IMP_XDB_NAME[*]} ${IMP_XDB_CONF[*]}"
+printf '%s\n' $'D\t/srv/a\tgood_db\t/srv/a/c.php' $'D\t/srv/a\tgood_db\t/srv/a/d.php' $'D\t/srv/a\tb\';DROP\t/srv/a/c.php' $'D\t/srv/it\'s\tx\t/srv/a/c.php' \
+  $'D\t/srv/a\tother\t/srv/a/c d.php' | lib_import_scan_parse
+assert_eq  "a database line counts once, when its three fields are what they should be" "good_db=/srv/a/c.php" "${IMP_XDB_NAME[*]}=${IMP_XDB_CONF[*]}"
+
+# lomp's own side of it: the list, the grants, the removal
+_ix_sql="$TMP/ix-sql"; : >"$_ix_sql"
+eval 'lib_db_exists() { [[ "$1" == "crm_db" ]]; }
+      lib_db_sql() { printf "%s\n" "$1" >>"$_ix_sql"; if [[ "$1" == *"Host="*"127.0.0.1"* ]]; then printf "%s\n" "$_ix_tcp"; else printf "%s\n" "$_im_home"; fi; }
+      lib_db_sql_secret() { printf "%s\n" "$2" >>"$_ix_sql"; }
+      lib_db_restore_name() { gzip -dc "$2" >"$TMP/im-restored-x-$1.sql"; }'
+_ix_tcp=0
+assert_eq  "a site has no other database at first"       "" "$(lib_db_extras crm.example)"
+lib_db_extra_add crm.example forumdb
+assert_eq  "one more: the site's name with a number"     "crm_db_2" "$DBX_NAME"
+assert_eq  "written down with the name it came from"     $'crm_db_2\tforumdb' "$(cat "$(lib_db_extra_file crm.example)")"
+printf '%s\t%s\n' 'x`; DROP DATABASE mysql' 'y' >>"$(lib_db_extra_file crm.example)"
+assert_eq  "a line of the list that is no database name is not one" "crm_db_2" "$(lib_db_extra_names crm.example | tr '\n' ' ' | sed 's/ $//')"
+sed -i '$d' "$(lib_db_extra_file crm.example)"
+assert_has "made, and opened to the site's one user"     "GRANT ALL PRIVILEGES ON \`crm_db_2\`.* TO 'crm_user'@'localhost';" "$(cat "$_ix_sql")"
+assert_lacks "not over TCP, where the site has no such login" "@'127.0.0.1';" "$(grep GRANT "$_ix_sql")"
+assert_eq  "in the site's record too"                    '["crm_db_2"]' "$(jq -c '.db.extra' "$(lib_domain_json crm.example)")"
+if (( CAN_CHMOD )); then assert_eq "the list is root's alone" "600" "$(stat -c %a "$(lib_db_extra_file crm.example)")"; fi
+: >"$_ix_sql"; lib_db_extra_add crm.example forumdb
+assert_eq  "asked for again, it is the same one"         "crm_db_2 1" "$DBX_NAME $(wc -l <"$(lib_db_extra_file crm.example)" | tr -d ' ')"
+_ix_tcp=1; : >"$_ix_sql"; eval 'lib_db_exists() { return 1; }'; lib_db_extra_add crm.example forumdb
+assert_has "one that is gone is made again, over TCP too where the site logs in that way" "TO 'crm_user'@'127.0.0.1';" "$(cat "$_ix_sql")"
+: >"$_ix_sql"; lib_db_tcp_account_ensure crm.example
+assert_has "the TCP login opens the other database as well" "GRANT ALL PRIVILEGES ON \`crm_db_2\`.* TO 'crm_user'@'127.0.0.1';" "$(cat "$_ix_sql")"
+assert_has "the credentials name it"                     "crm_db_2 (the same user and password); it was forumdb where it came from" "$(lib_db_show crm.example)"
+assert_has "a backup dumps it"                           'lib_db_dump_name "$a" "${work}/xdb-${a}.sql.gz"' "$(grep -A80 '^lib_backup_domain() {' "$ROOT/lib/backup.sh")"
+assert_has "every one of them"                           'done < <(lib_db_extra_names "$domain")' "$(grep -A80 '^lib_backup_domain() {' "$ROOT/lib/backup.sh")"
+assert_has "and carries the list"                        "domain.json db.info db.extra wp.info" "$(grep -A80 '^lib_backup_domain() {' "$ROOT/lib/backup.sh")"
+assert_has "a restore puts it back"                      'lib_db_restore_name "$xn" "${work}/x/xdb-${xn}.sql.gz"' "$(declare -f lib_restore_main)"
+assert_has "the first database of an archive is not one of the others" "-name 'db-*.sql.gz'" "$(declare -f lib_restore_main)"
+: >"$_ix_sql"; ( lib_db_drop_for_domain crm.example ) >/dev/null 2>&1
+assert_has "removing the site's database removes the other one" 'DROP DATABASE IF EXISTS `crm_db_2`;' "$(cat "$_ix_sql")"
+assert_false "and the list"                              test -e "$(lib_db_extra_file crm.example)"
+# (the site's own database back, as the section's stand-in makes one)
+lib_db_create_for_domain crm.example >/dev/null 2>&1
+
+# the command
+eval 'lib_db_exists() { [[ "$1" == "crm_db" ]]; }'
+_ix_tcp=0; _im_client_user="crmuser forumuser"; : >"$_im_log"; rm -f "$TMP"/im-restored-x-*.sql
+assert_eq  "a site with a second database"               "0" "$(_imf old.example --only crm.example --no-mail --no-cron --no-ssl)"
+assert_has "which the plan names"                        "crm.example: and the other database(s) its files name: forumdb" "$(cat "$_im_out")"
+assert_has "has it here, in a database of its own"       "Database forumdb imported into crm_db_2" "$(cat "$_im_out")"
+assert_has "filled from the dump made with the login its file had" 'user="forumuser"' "$(cat "$TMP/im-restored-x-crm_db_2.sql" 2>/dev/null)"
+assert_eq  "the file that named it names the one here, with the site's user and password" \
+  "\$dbname = 'crm_db_2'; \$dbuser = 'crm_user'; \$dbpasswd = 'LocalPass9';" "$(grep -E '^\$db(name|user|passwd)' "$_im_d3/phpbb/config.php" | tr '\n' ' ' | sed 's/ $//')"
+assert_has "which is said"                               "Its login is now the one of this server (crm_db_2), in: phpbb/config.php" "$(cat "$_im_out")"
+assert_has "the first database's file still names the first" "\$db_name = 'crm_db';" "$(cat "$_im_d3/config.php")"
+assert_lacks "no password is printed"                    "forum-secret" "$(cat "$_im_out")"
+assert_lacks "or logged"                                 "forum-secret" "$(cat "$LOG_FILE")"
+assert_eq  "again: it is one database still"             "0 1" "$(_imf old.example --only crm.example --no-mail --no-cron --no-ssl) $(wc -l <"$(lib_db_extra_file crm.example)" | tr -d ' ')"
+rm -f "$TMP"/im-restored-x-*.sql
+assert_eq  "--no-db leaves every database"               "0" "$(_imf old.example --only crm.example --no-mail --no-cron --no-ssl --no-db)"
+assert_false "where it is"                               test -e "$TMP/im-restored-x-crm_db_2.sql"
+_im_client_user=""
+eval "$_ix_keep"
 
 eval "$_im_orig"; eval "$_im_saved"
 unset -f _im_row _im_mrow _im_php _im_lim _im_crow _im_f _im_rw _im_pick _im_dump _im_site _imf
