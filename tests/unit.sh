@@ -9447,15 +9447,15 @@ if declare -F _app_worker_rows >/dev/null; then
   unset -f _wr
 fi
 # import --check and --fix, and the rest of what import had no Turkish for
-assert_eq   "import --check: a site that is not here" "a.example henüz burada bir site değil: karşılaştırılacak bir şey yok (önce aktarın)" "$(_dt_plain "a.example is not a site here yet: nothing to compare (import it first)")"
+assert_eq   "import --check: a site that is not here" "a.example burada henüz bir site değil: karşılaştırılacak bir şey yok (önce aktarın)" "$(_dt_plain "a.example is not a site here yet: nothing to compare (import it first)")"
 assert_eq   "what it counted" "Orada: 120 dosya ve dizin. Burada eksik: 3. Boyutu farklı: 1." "$(_dt_plain "There: 120 file(s) and director(ies). Missing here: 3. Different size: 1.")"
-assert_eq   "what could not be read there" "www-data kullanıcısı orada 2 yeri okuyamadı: içlerinde ne varsa bu karşılaştırmada da yok (bakın: /var/log/server_setup.log)" "$(_dt_plain "www-data could not read 2 place(s) there: whatever is inside them is not in this comparison either (see /var/log/server_setup.log)")"
+assert_eq   "what could not be read there" "www-data orada 2 yeri okuyamadı: içlerindekiler bu karşılaştırmada da yok (/var/log/server_setup.log dosyasına bakın)" "$(_dt_plain "www-data could not read 2 place(s) there: whatever is inside them is not in this comparison either (see /var/log/server_setup.log)")"
 assert_eq   "by a user that has no name" "kullanıcı orada 2 yeri okuyamadı: içlerinde ne varsa bu karşılaştırmada da yok (bakın: /var/log/server_setup.log)" "$(_dt_plain "the user could not read 2 place(s) there: whatever is inside them is not in this comparison either (see /var/log/server_setup.log)")"
-assert_eq   "the list that is cut" "... ve 12 tane daha; listenin tamamı /var/log/server_setup.log içinde" "$(_dt_plain "... and 12 more; the whole list is in /var/log/server_setup.log")"
-assert_eq   "files of another size" "4 dosyanın buradaki boyutu oradakinden farklı (o zamandan beri bir tarafta değişmiş ya da yarım kopyalanmış). Dokunulmadı; ilkleri:" "$(_dt_plain "4 file(s) have another size here than there (changed on either side since, or half copied). Left alone; the first ones:")"
-assert_eq   "nothing missing" "Orada olan her şey burada da var: a.example" "$(_dt_plain "Everything that is there is here: a.example")"
+assert_eq   "the list that is cut" "... ve 12 tane daha; listenin tamamı /var/log/server_setup.log dosyasında" "$(_dt_plain "... and 12 more; the whole list is in /var/log/server_setup.log")"
+assert_eq   "files of another size" "4 dosyanın boyutu burada orada olandan farklı (sonradan iki tarafta da değişmiş ya da yarım kopyalanmış olabilir). Dokunulmadı; ilk birkaçı:" "$(_dt_plain "4 file(s) have another size here than there (changed on either side since, or half copied). Left alone; the first ones:")"
+assert_eq   "nothing missing" "Orada olan her şey burada: a.example" "$(_dt_plain "Everything that is there is here: a.example")"
 assert_eq   "how to bring it" "Yalnızca eksik olanları getirmek için: setup.sh import root@old.example --only a.example --check --fix" "$(_dt_plain "Bring what is missing, and nothing else: setup.sh import root@old.example --only a.example --check --fix")"
-assert_eq   "--fix at work" "Eksik 3 yol, a_example kullanıcısı olarak /home/a.example/public_html dizinine kopyalanıyor ..." "$(_dt_plain "Copying the 3 missing path(s) into /home/a.example/public_html as a_example ...")"
+assert_eq   "--fix at work" "Eksik 3 yol /home/a.example/public_html dizinine a_example kullanıcısı olarak kopyalanıyor ..." "$(_dt_plain "Copying the 3 missing path(s) into /home/a.example/public_html as a_example ...")"
 assert_eq   "and done" "a.example sitesinin eksik dosyaları artık burada: /home/a.example/public_html" "$(_dt_plain "The missing files of a.example are here: /home/a.example/public_html")"
 assert_eq   "--fix without --check" "--fix yalnızca --check ile kullanılır" "$(_dt_plain "--fix belongs to --check")"
 assert_eq   "--check with what it does not go with" "--only-mail, --full ya da --no-files ile birlikte kullanılmaz" "$(_dt_plain "it does not go with --only-mail, --full or --no-files")"
@@ -9464,6 +9464,24 @@ assert_eq   "sites that are not whole" "Tam değil: a.example b.example" "$(_dt_
 assert_eq   "mail that has no room" "posta kutuları 2.0 GB; kopyalanırken bunun iki katı gerekir, boş alan ise 1.5 GB" "$(_dt_plain "the mailboxes are 2.0 GB, twice that is needed while they are copied, and 1.5 GB is free")"
 assert_eq   "mail where none runs" "Postayı bir kez, gönderirken kullanacağı adla kurun, sonra getirin: setup.sh install --with-mail --mail-hostname mail.example.com   ve   setup.sh import root@old.example --only a.example --only-mail" "$(_dt_plain "Install it once, with the name it will send as, then bring them: setup.sh install --with-mail --mail-hostname mail.example.com   and   setup.sh import root@old.example --only a.example --only-mail")"
 assert_eq   "an option import cron does not know" "import cron için bilinmeyen seçenek: --x" "$(_dt_plain "Unknown option for import cron: --x")"
+# reasons, hints and short results: what a command says when it stops
+assert_eq   "a backup that went up" "Yüklendi: rclone:remote:backups" "$(_dt_plain "Uploaded to rclone:remote:backups")"
+assert_eq   "a schedule" "Zamanlanmış yedekler: daily 03:00 (0 3 * * *) -> /var/backups/server-setup [encrypt]" "$(_dt_plain "Scheduled backups: daily 03:00 (0 3 * * *) -> /var/backups/server-setup [encrypt]")"
+assert_eq   "a restore that was not wanted" "Geri yükleme iptal edildi" "$(_dt_plain "Restore cancelled")"
+assert_eq   "logs that stayed behind, with the reason" "/home/a.example/logs içindeki logların bir kısmı /var/log/lomp-sites/a.example dizinine taşınamadı (no room); kalanı orada duruyor" "$(_dt_plain "the logs in /home/a.example/logs could not all be moved to /var/log/lomp-sites/a.example (no room); the rest stays there")"
+assert_eq   "and without one" "/home/a.example/logs içindeki logların bir kısmı /var/log/lomp-sites/a.example dizinine taşınamadı; kalanı orada duruyor" "$(_dt_plain "the logs in /home/a.example/logs could not all be moved to /var/log/lomp-sites/a.example; the rest stays there")"
+assert_eq   "wp-config.php closed" "a.example sitesinin wp-config.php dosyası 0640 yapıldı (önceki: 0666)" "$(_dt_plain "wp-config.php of a.example closed to 0640 (it was 0666)")"
+assert_eq   "wp-cli" "wp-cli sağlama toplamı uyuşmuyor" "$(_dt_plain "wp-cli checksum mismatch")"
+assert_eq   "a mailbox that is there" "info@a.example zaten var" "$(_dt_plain "info@a.example already exists")"
+assert_eq   "one that was removed" "info@a.example silindi" "$(_dt_plain "info@a.example is gone")"
+assert_eq   "a longer line that ends the same way is still its own" "a.example kopyalanamadı: /var/www/a/wp-config.php yok" "$(_dt_plain "a.example could not be copied: /var/www/a/wp-config.php is missing")"
+assert_eq   "the WebAdmin port, with who holds it" "WebAdmin portu 7080 hâlâ kullanımda (nginx kullanıyor)" "$(_dt_plain "WebAdmin port 7080 is still in use by nginx")"
+assert_eq   "and without" "WebAdmin portu 7080 hâlâ kullanımda" "$(_dt_plain "WebAdmin port 7080 is still in use")"
+assert_eq   "a listener that is not there" "a.example, 'HTTPS' dinleyicisine eşlenemedi" "$(_dt_plain "Could not map a.example onto the 'HTTPS' listener")"
+assert_eq   "the mail configuration put back" "Önceki posta yapılandırması geri konuldu (/root/.server-setup/archive/mail-conf-1.tar.gz)" "$(_dt_plain "The previous mail configuration was put back (/root/.server-setup/archive/mail-conf-1.tar.gz)")"
+assert_eq   "a webmail user that cannot be told" "silinmiş olanı adıyla verin: lomp webmail forget <address>   (lomp mail box list a.example)" "$(_dt_plain "name the one that is gone: lomp webmail forget <address>   (lomp mail box list a.example)")"
+assert_eq   "the timezone" "Saat dilimi zaten Europe/Istanbul" "$(_dt_plain "Timezone already Europe/Istanbul")"
+assert_eq   "a port that is closed" "7080 portu açık değil" "$(_dt_plain "port 7080 is not opened")"
 # lib_tprintf: printf for a table
 _tp() { ( LIB_LANG="tr"; lib_lang_build; lib_tprintf "$@" ); }
 assert_eq   "in English it is printf, flags and all" "$(printf '%-10s|%5s|%4s%%|%d|%s\n' MODE SIZE 7 3 x)" "$(lib_tprintf '%-10s|%5s|%4s%%|%d|%s\n' MODE SIZE 7 3 x)"
@@ -9508,6 +9526,15 @@ for (( _dt_i = 0; _dt_i + 1 < ${#LIB_TR_PAIRS[@]}; _dt_i += 2 )); do
   (( $# >= 2 )) || _dt_gen+="[${_dt_en}] "
 done
 assert_eq   "a line that starts with a value has at least two words of its own" "" "$_dt_gen"
+# one English text, one line: of two the first is what is looked up, and the second only
+# looks as if it were the Turkish (two sessions translated the same messages once)
+_dt_gen=""; declare -A _dt_seen=()
+for (( _dt_i = 0; _dt_i + 1 < ${#LIB_TR_PAIRS[@]}; _dt_i += 2 )); do
+  [[ -z "${_dt_seen[${LIB_TR_PAIRS[_dt_i]}]:-}" ]] || _dt_gen+="[${LIB_TR_PAIRS[_dt_i]}] "
+  _dt_seen[${LIB_TR_PAIRS[_dt_i]}]=1
+done
+unset _dt_seen
+assert_eq   "no text is in the table twice" "" "$_dt_gen"
 # an argument in angle brackets is part of the command: <domain> in Turkish too, not here
 # <alan-adı> and there <domain>
 _dt_gen=""; _dt_re='(<[^<> ]+>)(.*)$'
