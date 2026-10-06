@@ -10,7 +10,9 @@
 #  day it ran out. Here a real site on a real OpenLiteSpeed is renamed in that state, and its
 #  old name is watched: the certificate it presents over HTTPS, where it sends a visitor,
 #  what rename, doctor, "renew-ssl --missing" and "redirect add" say and do about it - while
-#  its DNS still points elsewhere, and once it points here.
+#  its DNS still points elsewhere, and once it points here. Two copies are left alone:
+#  any, when rename is run with --no-ssl, and a Cloudflare origin certificate, which is meant
+#  to stand for years (only "redirect add", asked by name, fetches another).
 #
 #  The site is not imported. It gets a certificate through "renew-ssl" and is then made what
 #  an import leaves: the lineage taken away, the record marked. The run of a real import over
@@ -101,6 +103,19 @@ copy_of_it() {
   if [ -s "$STATE/$1/domain.json" ]; then
     jq '.ssl.imported = true' "$STATE/$1/domain.json" >"$SRC/t.json" && cat "$SRC/t.json" >"$STATE/$1/domain.json"
   fi
+}
+# ... or a Cloudflare origin certificate, as import brings one: signed by a CA that calls
+# itself what Cloudflare's origin CA is called, for the name and its www
+origin_of_it() {
+  local d="$SRC/origin"
+  mkdir -p "$d"
+  openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 30 -keyout "$d/ca.key" -out "$d/ca.pem" \
+    -subj "/O=CloudFlare, Inc./OU=CloudFlare Origin SSL Certificate Authority" >/dev/null 2>&1 || return 1
+  openssl req -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout "$d/key.pem" -out "$d/leaf.csr" -subj "/CN=$1" >/dev/null 2>&1 || return 1
+  printf 'subjectAltName=DNS:%s,DNS:www.%s\n' "$1" "$1" >"$d/ext.cnf"
+  openssl x509 -req -in "$d/leaf.csr" -CA "$d/ca.pem" -CAkey "$d/ca.key" -CAcreateserial -days 20 -extfile "$d/ext.cnf" -out "$d/leaf.pem" >/dev/null 2>&1 || return 1
+  cat "$d/leaf.pem" >"$DEPLOY/$1/fullchain.pem" && cat "$d/key.pem" >"$DEPLOY/$1/privkey.pem" || return 1
+  copy_of_it "$1"
 }
 
 for s in mariadb lsws; do systemctl is-active --quiet "$s" || systemctl start "$s"; done; sleep 3
@@ -291,6 +306,51 @@ eq    "E: which is the one presented" "$FP1" "$(served "$OLD")"
 lomp redirect add "$OLD" "$NEW" --www >"$SRC/addE3.out" 2>&1
 eq    "E: run again, certbot is not asked again" 1 "$(asked "$OLD")"
 eq    "E: and the certificate stays" "$FP1" "$(fp "$OLD")"
+
+echo; echo "===== G: rename --no-ssl: the run asks for no certificate, the old name's included"
+site || { bad "G: the site could not be set up"; exit 1; }
+copy_of_it "$OLD"
+FP0="$(fp "$OLD")"; : >"$SRC/certbot.log"
+lomp rename "$OLD" "$NEW" --yes --no-ssl >"$SRC/renameG.out" 2>&1; RC=$?; echo "rename rc=$RC"
+show "$SRC/renameG.out" 'copy|copied|of its own|Renamed|FAILED'
+O="$(cat "$SRC/renameG.out")"
+eq    "G: the rename succeeds" 0 "$RC"
+has   "G: the plan says that none is asked for" "none of its own is asked for now (--no-ssl), and the copy stays" "$O"
+eq    "G: certbot hears nothing, though the DNS points here" 0 "$(grep -c '^certonly' "$SRC/certbot.log")"
+lacks "G: nor is it said to be asked" "asking for one of its own" "$O"
+has   "G: what the old name redirects under is said all the same" "$OLD redirects under a certificate that was copied from another server" "$O"
+has   "G: and why none was asked for" "One of its own could not be had now: none was asked for in this run (--no-ssl)" "$O"
+eq    "G: the copy is where it was" "$FP0" "$(fp "$OLD")"
+eq    "G: and is what the old name presents" "$FP0" "$(served "$OLD")"
+
+echo; echo "===== H: a Cloudflare origin certificate stays as it is"
+site || { bad "H: the site could not be set up"; exit 1; }
+origin_of_it "$OLD" || { bad "H: no origin certificate could be made"; exit 1; }
+FP0="$(fp "$OLD")"; echo "   the origin certificate: ${FP0:0:29}... ($(openssl x509 -noout -issuer -in "$DEPLOY/$OLD/fullchain.pem" | cut -c1-90))"
+: >"$SRC/certbot.log"
+lomp rename "$OLD" "$NEW" --yes >"$SRC/renameH.out" 2>&1; RC=$?; echo "rename rc=$RC"
+show "$SRC/renameH.out" 'origin|copy|of its own|Cloudflare too|Renamed|FAILED'
+O="$(cat "$SRC/renameH.out")"
+eq    "H: the rename succeeds" 0 "$RC"
+has   "H: it is said what the old name's certificate is, and that it stays" "The certificate of $OLD is a Cloudflare origin certificate (" "$O"
+has   "H: with the command for one that works without Cloudflare" "For one that works without Cloudflare too: setup.sh redirect add $OLD $NEW --www" "$O"
+lacks "H: nothing about a copy that runs out" "it runs out in" "$O"
+lacks "H: the plan has no line about a copy" "that certificate is a copy" "$O"
+eq    "H: certbot is not asked for the old name, though its DNS points here" 0 "$(asked "$OLD")"
+eq    "H: the origin certificate is where it was" "$FP0" "$(fp "$OLD")"
+eq    "H: and is what the old name presents" "$FP0" "$(served "$OLD")"
+eq    "H: under which it sends its visitors on" "301 https://$NEW/some/path?x=1" "$(goes "$OLD")"
+: >"$SRC/certbot.log"
+lomp renew-ssl --missing >"$SRC/missingH.out" 2>&1
+lacks "H: renew-ssl --missing passes it over" "== redirect add $OLD" "$(cat "$SRC/missingH.out")"
+eq    "H: and certbot hears nothing of it" 0 "$(asked "$OLD")"
+lacks "H: so it is not among the failed" "$OLD" "$(grep -E 'SSL renewal failed for:' "$SRC/missingH.out" | sed "s/$NEW//g")"
+lomp doctor >"$SRC/doctorH.out" 2>&1
+lacks "H: doctor has nothing to put right about it" "redirect $OLD: ssl" "$(cat "$SRC/doctorH.out")"
+lomp redirect add "$OLD" "$NEW" --www >"$SRC/addH.out" 2>&1; RC=$?; echo "redirect add rc=$RC"
+eq    "H: asked for by name, redirect add fetches one of the name's own" 1 "$(asked "$OLD")"
+check "H: which has a lineage" "[ -e $LIVE/$OLD/.stand-in ]"
+check "H: and takes the origin certificate's place" "[ -n \"\$(fp $OLD)\" ] && [ \"\$(fp $OLD)\" != '$FP0' ]"
 
 echo; echo "===== F: the control - a site whose certificate certbot issued here"
 site || { bad "F: the site could not be set up"; exit 1; }

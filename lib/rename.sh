@@ -208,13 +208,22 @@ lib_redirect_ssl_ensure() {
   return 0
 }
 
-# What is said of a redirect that goes on answering under such a copy.
+# What is said of a redirect that goes on answering under such a copy. A Cloudflare origin
+# certificate is a copy too, and one that is meant to stand for years: that is said, and is no
+# warning.
 _redirect_copy_say() {   # from to www(0/1)
-  local days=""
+  local days="" again="setup.sh redirect add ${1} ${2}"
+  if (( ${3:-0} )); then again+=" --www"; fi
   days="$(lib_ssl_days_left "$1")"
+  if lib_ssl_cert_origin "$1"; then
+    lib_note "${1} redirects under a Cloudflare origin certificate (${days:-?} days left): fine for as long as it is behind Cloudflare, and nothing here renews it"
+    lib_note "One of its own could not be had now: ${SSL_LAST_ERROR:-no reason given}"
+    lib_note "To ask again: ${again}"
+    return 0
+  fi
   lib_warn "${1} redirects under a certificate that was copied from another server: nothing renews it here, and it runs out in ${days:-?} day(s)"
   lib_note "One of its own could not be had now: ${SSL_LAST_ERROR:-no reason given}"
-  lib_note "Once the DNS of ${1} points here: setup.sh redirect add ${1} ${2}$( (( ${3:-0} )) && printf ' --www')   (setup.sh renew-ssl --missing asks for it too)"
+  lib_note "Once the DNS of ${1} points here: ${again}   (setup.sh renew-ssl --missing asks for it too)"
 }
 
 lib_redirect_usage() {
@@ -491,11 +500,27 @@ _domain_rename_move() {   # old new
 # "import" brought has none (see lib_redirect_ssl_ensure), and the site's record, which said
 # so, is the new name's by now. So the old name is asked for a certificate of its own here,
 # and where none can be had yet the copy stays and it is said when it runs out.
+# Not asked for: a Cloudflare origin certificate, which is meant to stand for years and is
+# fine behind Cloudflare; and anything at all under --no-ssl, which is the operator saying
+# that this run shall request no certificate.
 # Run in a subshell: nothing in it may end the rename.
-_domain_rename_old_cert() {   # old new
-  local old="$1" new="$2"
+_domain_rename_old_cert() {   # old new no-ssl(0/1)
+  local old="$1" new="$2" again="" days=""
   if ! lib_ssl_deployed "$old" || lib_ssl_cert_exists "$old"; then return 0; fi
   lib_redirect_load "$old" || return 0
+  if lib_ssl_cert_origin "$old"; then
+    again="setup.sh redirect add ${old} ${new}"
+    if (( R_WWW )); then again+=" --www"; fi
+    days="$(lib_ssl_days_left "$old")"
+    lib_info "The certificate of ${old} is a Cloudflare origin certificate (${days:-?} days left): it stays, and is fine for as long as ${old} is behind Cloudflare"
+    lib_note "For one that works without Cloudflare too: ${again}"
+    return 0
+  fi
+  if (( ${3:-0} )); then
+    SSL_LAST_ERROR="none was asked for in this run (--no-ssl)"
+    _redirect_copy_say "$old" "$new" "$R_WWW"
+    return 0
+  fi
   lib_info "The certificate of ${old} is a copy from another server, which nothing renews here: asking for one of its own"
   if lib_redirect_ssl_ensure && (( SSL_OBTAINED )); then
     lib_redirect_apply "$old" reload
@@ -846,7 +871,7 @@ _domain_rename_leftovers() {   # what to look for: the old name, or the forms it
 }
 
 lib_domain_rename_main() {
-  local old="${1:-}" new="${2:-}" redirect=1 ssl=1 replace=1 a="" why="" rc=0 saved="" wpcron=0 oldssl=0 f="" total=7 left="" oi="" app=0 mail=0 nodom=0 oh="" what="" mailmove=1
+  local old="${1:-}" new="${2:-}" redirect=1 ssl=1 replace=1 a="" why="" rc=0 saved="" wpcron=0 oldssl=0 f="" total=7 left="" oi="" app=0 mail=0 nodom=0 oh="" what="" mailmove=1 nossl=0
   local -a seek=() greps=()
   if [[ "$old" == "-h" || "$old" == "--help" || "$old" == "help" ]]; then lib_domain_rename_usage; return 0; fi
   if [[ -z "$old" || -z "$new" || "$old" == -* || "$new" == -* ]]; then
@@ -857,7 +882,7 @@ lib_domain_rename_main() {
     a="$1"; shift
     case "$a" in
       --no-redirect)       redirect=0 ;;
-      --no-ssl)            ssl=0 ;;
+      --no-ssl)            ssl=0; nossl=1 ;;
       --no-search-replace) replace=0 ;;
       --keep-mail)         mailmove=0 ;;
       *)                   lib_domain_rename_usage >&2; lib_die "Unknown option for rename: ${a}" "" "see the usage above" ;;
@@ -900,8 +925,13 @@ lib_domain_rename_main() {
   if (( nodom )); then lib_note "${old}  is no domain name, so nothing ever asked this server for it: nothing stays behind under it"
   elif (( redirect )); then lib_note "${old}  stays as a redirect: every request goes on to ${new} with a 301$( (( oldssl )) && printf ', under the certificate it has')"
   else lib_note "${old}  is no longer answered here, and its certificate is deleted (--no-redirect)"; fi
-  if (( redirect && oldssl )) && lib_ssl_deployed "$old" && ! lib_ssl_cert_exists "$old"; then
-    lib_note "         that certificate is a copy from another server, which nothing renews here: one of its own is asked for, and the copy stays until then"
+  # (a Cloudflare origin certificate is such a copy too, and is left as it is: nothing to say)
+  if (( redirect && oldssl )) && lib_ssl_deployed "$old" && ! lib_ssl_cert_exists "$old" && ! lib_ssl_cert_origin "$old"; then
+    if (( nossl )); then
+      lib_note "         that certificate is a copy from another server, which nothing renews here: none of its own is asked for now (--no-ssl), and the copy stays"
+    else
+      lib_note "         that certificate is a copy from another server, which nothing renews here: one of its own is asked for, and the copy stays until then"
+    fi
   fi
   if _domain_rename_has_wp; then
     lib_note "WordPress $( (( replace )) && printf 'the addresses in its database are rewritten to %s' "$new" || printf 'its database is left as it is (--no-search-replace)')"
@@ -991,7 +1021,7 @@ lib_domain_rename_main() {
     if ( lib_redirect_apply "$old" ); then
       lib_ok "${old} now sends every request on to ${new}$( lib_ssl_deployed "$old" && printf ', over HTTPS too')"
       # ... under a certificate certbot renews, or one of its own from here on
-      ( _domain_rename_old_cert "$old" "$new" ) || lib_warn "The certificate of ${old} could not be looked at; whether it renews by itself: setup.sh ssl status"
+      ( _domain_rename_old_cert "$old" "$new" "$nossl" ) || lib_warn "The certificate of ${old} could not be looked at; whether it renews by itself: setup.sh ssl status"
     else
       lib_warn "The redirect from ${old} could not be set up; later: setup.sh redirect add ${old} ${new}$( (( D_WWW )) && printf ' --www')"
     fi

@@ -202,6 +202,15 @@ lib_ssl_issuer() {
   openssl x509 -issuer -noout -in "$f" 2>/dev/null | sed -E 's/^issuer=//; s/.*O *= *([^,]+).*/\1/' || true
 }
 
+# A Cloudflare origin certificate: issued by Cloudflare for the server behind its proxy, for up
+# to fifteen years, and accepted by Cloudflare alone. "import" brings one as it is. It has no
+# lineage at certbot and needs none for as long as the name stays behind Cloudflare.
+lib_ssl_cert_origin() {   # cert-name -> 0 when the deployed certificate is one
+  local f="${SSL_DEPLOY_DIR}/${1}/fullchain.pem"
+  [[ -s "$f" ]] || return 1
+  [[ "$(openssl x509 -noout -issuer -in "$f" 2>/dev/null || true)" == *"CloudFlare Origin"* ]]
+}
+
 lib_ssl_cf_token_available() { [[ -s "$CF_INI" ]] && grep -q '^dns_cloudflare_api_token' "$CF_INI"; }
 
 # =============================================================================
@@ -394,11 +403,14 @@ lib_ssl_renew_main() {
     # was had its certificate from an import, and was renamed since. Its record went with the
     # site, so the certificate itself is what tells - deployed, and no lineage at certbot
     # (lib_redirect_ssl_ensure). A redirect that has none at all is not taken: it still
-    # redirects, over HTTP, and was perhaps added that way on purpose.
+    # redirects, over HTTP, and was perhaps added that way on purpose. Nor is one that holds
+    # a Cloudflare origin certificate: that one is meant to stand, and a run that could not
+    # replace it would be called failed for a certificate that is fine.
     if (( missing )); then
       while read -r d; do
         [[ -n "$d" ]] || continue
         { lib_ssl_deployed "$d" && ! lib_ssl_cert_exists "$d"; } || continue
+        lib_ssl_cert_origin "$d" && continue
         lib_redirect_load "$d" || continue
         if (( staging )); then lib_info "${d} is a redirect and is left out of a --staging run: its certificate is asked for as the real one only"; continue; fi
         r=$((r + 1))

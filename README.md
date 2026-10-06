@@ -349,6 +349,9 @@ behind as a redirect:
   asked for one of its own while the rename is at it; if none can be had yet (its DNS is still
   at the other server), the copy stays, the run says in how many days it runs out, and
   `redirect add` again or `renew-ssl --missing` fetches one once the DNS points here.
+  With `--no-ssl` none is asked for, for either name. A Cloudflare origin certificate is left
+  as it is - it is meant to stand for years, behind Cloudflare - by rename, by `--missing` and
+  by `doctor`; `redirect add`, asked by name, fetches one that works without Cloudflare too.
 
 A safety backup is written first, and the site is away for about a minute. If anything fails
 before the site answers under its new name, everything is put back under the old one. At the

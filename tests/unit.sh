@@ -7158,6 +7158,19 @@ assert_lacks "and no site is said to have been renewed"                "SSL rene
 assert_eq   "after that nothing is missing"                            0 "$(run_isolated _sc_tee lib_ssl_renew_main --missing)"
 assert_eq   "and nothing is asked for any more"                        "" "$(cat "$_sc/child.log")"
 assert_has  "which is said as before"                                  "Every site already has a certificate" "$(cat "$_sc/out")"
+# a Cloudflare origin certificate is such a copy too, and is meant to stand for years
+if lib_have openssl; then
+  _sc_red origin.test false 0 0
+  _sc_mk "$SSL_DEPLOY_DIR/origin.test" "CloudFlare Origin SSL Certificate Authority" 60 origin.test
+  assert_true  "a certificate Cloudflare issued for an origin is known by its issuer" lib_ssl_cert_origin origin.test
+  assert_false "one of another issuer is not"                            lib_ssl_cert_origin a.test
+  assert_false "nor is a name without a certificate"                     lib_ssl_cert_origin none.test
+  # (certbot would get none for it: asked, the run would be called failed)
+  : >"$_sc/stuck-origin.test"; : >"$_sc/child.log"
+  assert_eq   "a redirect that holds one is passed over: no run fails for a certificate that is fine" 0 "$(run_isolated _sc_tee lib_ssl_renew_main --missing)"
+  assert_eq   "nothing is asked for it"                                  "" "$(cat "$_sc/child.log")"
+  rm -rf "${STATE_DIR:?}/domains/origin.test" "${SSL_DEPLOY_DIR:?}/origin.test" "$_sc/stuck-origin.test"
+fi
 unset -f _sc_red
 STATE_DIR="$_sc_state"; SCRIPT_PATH="$_sc_script"
 
@@ -7216,6 +7229,7 @@ _rn_stubs='
     printf c >"$SSL_DEPLOY_DIR/$1/fullchain.pem"; printf k >"$SSL_DEPLOY_DIR/$1/privkey.pem"
   }
   lib_ssl_cert_covers() { local c="$1" n=""; shift; for n in "$@"; do grep -qxF -- "$n" "$_rn/covers-$c" 2>/dev/null || return 1; done; }
+  lib_ssl_cert_origin() { [[ -e "$_rn/origin-$1" ]]; }
   lib_ssl_status_line() { printf "60 days"; }
   lib_ssl_delete() { printf "ssl-delete %s\n" "$1" >>"$_rn/calls"; rm -rf "${SSL_DEPLOY_DIR:?}/$1"; }
   lib_ols_smoke_test() { printf "smoke %s\n" "$*" >>"$_rn/calls"; OLS_TEST_OUTPUT="HTTP 500"; [[ ! -e "$_rn/smoke-fails" ]]; }
@@ -7519,6 +7533,18 @@ assert_true  "it has a lineage now" test -s "$_rn/le/old.example/fullchain.pem"
 _rn_case _rn_redirect12 add old.example alpha.example --www
 assert_lacks "which is then not asked for again" "obtain" "$(_rn_calls)"
 assert_lacks "and nothing is said of it" "nothing renews it" "$(_rn_out)"
+# a Cloudflare origin certificate is such a copy too - and one that is meant to stand for years
+rm -rf "$_rn/le/old.example"; rm -f "$_rn/certbot-works"; : >"$_rn/origin-old.example"; : >"$_rn/calls"
+_rn_case _rn_redirect12 add old.example alpha.example --www
+_o="$(_rn_out)"
+assert_has   "an origin certificate: asked by name, redirect add still tries for one of the name's own" "obtain old.example old.example www.old.example" "$(_rn_calls)"
+assert_has   "none could be had: what it answers under is said" "old.example redirects under a Cloudflare origin certificate (12 days left): fine for as long as it is behind Cloudflare, and nothing here renews it" "$_o"
+assert_lacks "as a note, not as a warning" "[warn]" "$_o"
+assert_lacks "and not as a copy that runs out" "copied from another server" "$_o"
+assert_has   "with the reason" "One of its own could not be had now: certbot said no" "$_o"
+assert_has   "and the command to ask again, www with it" "To ask again: setup.sh redirect add old.example alpha.example --www" "$_o"
+assert_lacks "renew-ssl --missing is not named for it: it passes such a redirect over" "renew-ssl --missing" "$_o"
+rm -f "$_rn/origin-old.example"
 
 # ---- redirect add / del: what is refused ----------------------------------------------
 _rn_fresh
@@ -7582,6 +7608,10 @@ mkdir -p "$_rn/ssl/old.example"; printf c >"$_rn/ssl/old.example/fullchain.pem";
 _rn_case _rn_doctor
 assert_has   "doctor names a redirect's certificate that is a copy nothing renews" \
   "WARN|redirect old.example: ssl|its certificate is a copy from another server that nothing renews here; it runs out in ? days (setup.sh redirect add old.example alpha.example)" "$(_rn_out)"
+: >"$_rn/origin-old.example"
+_rn_case _rn_doctor
+assert_lacks "a Cloudflare origin certificate is meant to stand: nothing to put right" "redirect old.example: ssl" "$(_rn_out)"
+rm -f "$_rn/origin-old.example"
 _rn_case lib_redirect_save old.example alpha.example 1
 _rn_case _rn_doctor
 assert_has   "the command it gives keeps www where the redirect has it" "(setup.sh redirect add old.example alpha.example --www)" "$(_rn_out)"
@@ -7848,6 +7878,34 @@ _rn_copy_site
 _rn_case _rn_rename12 alpha.example beta.example --no-redirect
 assert_lacks "--no-redirect: no certificate is asked for a name that stops answering" "obtain alpha.example" "$(_rn_calls)"
 assert_has   "the copy goes with the name" "ssl-delete alpha.example" "$(_rn_calls)"
+# --no-ssl: the run shall ask for no certificate, and that goes for the old name too
+_rn_copy_site
+: >"$_rn/certbot-works"
+_rn_case _rn_rename12 alpha.example beta.example --no-ssl
+_o="$(_rn_out)"
+assert_has   "--no-ssl: the rename succeeds" "rc=0" "$_o"
+assert_lacks "--no-ssl: no certificate is asked for the old name either" "obtain" "$(_rn_calls)"
+assert_lacks "nor is it said to be" "asking for one of its own" "$_o"
+assert_has   "what it redirects under is said all the same" "alpha.example redirects under a certificate that was copied from another server: nothing renews it here, and it runs out in 12 day(s)" "$_o"
+assert_has   "and why none was asked for" "One of its own could not be had now: none was asked for in this run (--no-ssl)" "$_o"
+_rn_copy_site
+_rn_case _rn_rename_dry alpha.example beta.example --no-ssl
+assert_has   "and the plan says so beforehand" "none of its own is asked for now (--no-ssl), and the copy stays" "$(_rn_out)"
+assert_lacks "not that one is asked for" "the copy stays until then" "$(_rn_out)"
+# a Cloudflare origin certificate is meant to stand for years: it stays as it is
+_rn_copy_site
+: >"$_rn/origin-alpha.example"; : >"$_rn/certbot-works"
+_rn_case _rn_rename12 alpha.example beta.example
+_o="$(_rn_out)"
+assert_lacks "a Cloudflare origin certificate: none is asked for under the old name" "obtain alpha.example" "$(_rn_calls)"
+assert_has   "it is said what it is, and that it stays" "The certificate of alpha.example is a Cloudflare origin certificate (12 days left): it stays, and is fine for as long as alpha.example is behind Cloudflare" "$_o"
+assert_has   "with the command for one that works without Cloudflare, www with it" "For one that works without Cloudflare too: setup.sh redirect add alpha.example beta.example --www" "$_o"
+assert_lacks "nothing about a copy that runs out" "it runs out in" "$_o"
+assert_true  "it is still in place" test -s "$_rn/ssl/alpha.example/fullchain.pem"
+_rn_copy_site
+: >"$_rn/origin-alpha.example"
+_rn_case _rn_rename_dry alpha.example beta.example
+assert_lacks "and the plan has no line about a copy" "that certificate is a copy" "$(_rn_out)"
 unset -f _rn_copy_site
 # what is said of it, in Turkish
 _rn_case _rn_say_tr "alpha.example redirects under a certificate that was copied from another server: nothing renews it here, and it runs out in 12 day(s)"
@@ -7867,6 +7925,13 @@ assert_eq    "what renew-ssl --missing says of them" "Kopya bir sertifikayla yan
 assert_true  "the rest has its Turkish too: a certificate step that fell over" grep -qF "'The certificate of {1} could not be looked at; whether it renews by itself: setup.sh ssl status' '" "$ROOT/lib/lang.sh"
 assert_true  "a redirect left out of a rehearsal" grep -qF "'{1} is a redirect and is left out of a --staging run: its certificate is asked for as the real one only' '" "$ROOT/lib/lang.sh"
 assert_true  "and what doctor says" grep -qF "'@doctor its certificate is a copy from another server that nothing renews here; it runs out in {1} days (setup.sh redirect add {2} {3})' '" "$ROOT/lib/lang.sh"
+_rn_case _rn_say_tr "The certificate of alpha.example is a Cloudflare origin certificate (12 days left): it stays, and is fine for as long as alpha.example is behind Cloudflare"
+assert_has   "an origin certificate that stays, in Turkish" "alpha.example sertifikası bir Cloudflare origin sertifikası (12 gün kaldı)" "$(_rn_out)"
+_rn_case _rn_say_tr "One of its own could not be had now: none was asked for in this run (--no-ssl)"
+assert_eq    "the reason under --no-ssl" "Kendi sertifikası şimdi alınamadı: bu çalıştırmada sertifika istenmedi (--no-ssl)rc=0" "$(_rn_out)"
+assert_true  "a redirect under an origin certificate" grep -qF "'{1} redirects under a Cloudflare origin certificate ({2} days left): fine for as long as it is behind Cloudflare, and nothing here renews it' '" "$ROOT/lib/lang.sh"
+assert_true  "the two commands for it" bash -c 'grep -qF "$1" "$3" && grep -qF "$2" "$3"' _ "'For one that works without Cloudflare too: {1}' '" "'To ask again: {1}' '" "$ROOT/lib/lang.sh"
+assert_true  "and the plan under --no-ssl" grep -qF "none of its own is asked for now (--no-ssl), and the copy stays' '" "$ROOT/lib/lang.sh"
 
 # ---- rename: a site with mail ---------------------------------------------------------
 # A mailbox is an address at the old domain. It stays one: the old name becomes a mail domain

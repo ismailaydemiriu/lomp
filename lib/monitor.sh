@@ -638,8 +638,9 @@ _doc_check_domains() {
     if lib_ssl_deployed "$d"; then
       days="$(lib_ssl_days_left "$d")"
       # one without a lineage at certbot is a copy "import" brought for the site this name was:
-      # it serves until it runs out, and nothing renews it
-      if ! lib_ssl_cert_exists "$d"; then
+      # it serves until it runs out, and nothing renews it. A Cloudflare origin certificate
+      # is meant to stand for years, and is nothing to put right.
+      if ! lib_ssl_cert_exists "$d" && ! lib_ssl_cert_origin "$d"; then
         _doc_add WARN "redirect ${d}: ssl" "its certificate is a copy from another server that nothing renews here; it runs out in ${days:-?} days (setup.sh redirect add ${d} ${R_TARGET}$( (( R_WWW )) && printf ' --www'))"
       elif [[ -n "$days" ]] && (( days < 7 )); then _doc_add WARN "redirect ${d}: ssl" "its certificate expires in ${days} days: does its DNS still point here?"; fi
     else
