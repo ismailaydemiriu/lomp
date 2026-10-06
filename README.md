@@ -507,9 +507,23 @@ names what is larger on the other server.
 
 The other server is only read. Certificates are not copied, and neither is
 anything outside a site's document root. The sites answer over HTTP here until the DNS of a
-domain points to this server; then `sudo lomp renew-ssl <domain>` gets its certificate. Running
-the import again for a site brings what changed in the meantime - worth doing once more just
-before the DNS moves, and once more for the mail (`--only-mail`) after the MX has moved.
+domain points to this server; then `sudo lomp renew-ssl <domain>` gets its certificate.
+
+**Running the import again for a site brings what changed in the meantime** - worth doing once
+more just before the DNS moves, and once more for the mail (`--only-mail`) after the MX has
+moved. The second time only the files that were made or changed on the other server since the
+first copy come over: the moment a copy began, by the other server's own clock, is kept with
+the site, and the next import of the same directory of the same server asks for what is newer
+than that - by the time the other server itself notes when a file is made or changed (ctime),
+which no unpacked archive and no copied file can set back. The database is brought whole each
+time. What follows from that:
+
+- a file you changed or deleted here in the meantime stays as it is here, unless it changed
+  there too;
+- a file deleted there is not deleted here - nothing here is ever deleted by an import;
+- `--full` copies every file again, and so does the first import after a `restore` of the site,
+  an import from another server or another directory, and a server whose `find` is too old to
+  be asked.
 
 ### WordPress into a site that is already there
 

@@ -528,6 +528,9 @@ lib_restore_main() {
   if [[ -s "${work}/x/state/wp.info" && ! -s "$(lib_domain_state_dir "$domain")/wp.info" ]] && (( ! OPT_DRY_RUN )); then
     cp "${work}/x/state/wp.info" "$(lib_domain_state_dir "$domain")/wp.info" && chmod 0600 "$(lib_domain_state_dir "$domain")/wp.info"
   fi
+  # The files are the archive's again: an import that follows has to compare all of them,
+  # not only what changed on the other server since the last one (lib/import.sh).
+  if (( ! no_files && ! OPT_DRY_RUN )); then rm -f -- "$(lib_import_mark_file "$domain")"; fi
   # ---- the cron jobs an import gave it ---------------------------------------
   # The archive says which ones the site has: they are written for the user and the home it
   # has now. An archive from before they were kept in it says nothing, and changes nothing.

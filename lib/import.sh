@@ -21,6 +21,7 @@ declare -ga IMP_MEM=() IMP_UPL=()
 IMP_DEF_MEM=0 IMP_DEF_UPL=0
 # one entry per cron job found: the document root it belongs to, when it runs, what it runs
 declare -ga IMP_CRON_ROOT=() IMP_CRON_WHEN=() IMP_CRON_CMD=()
+IMP_OPT_FULL=0
 IMP_OPT_NO_CRON=0
 # directories that are served there under no name this server could give a site
 declare -ga IMP_NAMELESS=()
@@ -60,6 +61,7 @@ Kullanım: setup.sh import <[user@]host> [options]
   --no-db  --no-files    Veritabanları ya da dosyalar dışarıda bırakılır
   --no-mail              Posta kutuları dışarıda bırakılır
   --no-cron              Cron işleri dışarıda bırakılır
+  --full                 Yalnızca son aktarımdan beri orada değişenleri değil, her dosyayı yeniden kopyalar
   --only-mail            Yalnızca posta kutuları getirilir: burada site olmayan alan adı bir
                          posta alan adı olur (yalnızca posta için kurulmuş sunucuda hep böyledir)
   Bu sunucuda posta kuruluysa seçilen alan adının posta kutuları da onunla gelir: öteki
@@ -78,6 +80,9 @@ Kullanım: setup.sh import <[user@]host> [options]
   sitenin dizinini ya da alan adını anan satırlar; yollar bu sunucuya göre yeniden yazılır.
   Siz oradan kaldırana kadar öteki sunucuda da çalışmaya devam ederler.
   "setup.sh import cron <domain>" bir siteye verilenleri listeler, --clear hepsini kaldırır.
+  Daha önce aktarılmış bir site için yalnızca o zamandan beri öteki sunucuda oluşturulan ya da
+  değişen dosyalar gelir (öteki sunucunun her dosya için tuttuğu zamana göre); bu arada burada
+  değiştirilen ya da silinen dosya burada olduğu gibi kalır, --full ise her şeyi yeniden kopyalar.
   Kullanıcı (varsayılan root) sitelerin dosyalarını okuyabilmelidir; posta kutularını ve öteki
   hesapların crontab'larını yalnızca root görür. Kopyalanmayanlar: sieve filtreleri,
   sertifikalar ve --db ile adı verilmedikçe WordPress dışındaki uygulamaların veritabanları.
@@ -109,6 +114,7 @@ Usage: setup.sh import <[user@]host> [options]
   --no-db  --no-files    Leave the databases, or the files, out
   --no-mail              Leave the mailboxes out
   --no-cron              Leave the cron jobs out
+  --full                 Copy every file again, not only what changed there since the last import
   --only-mail            Bring only the mailboxes: a domain that is no site here becomes a
                          mail domain (this is what happens on a server installed for mail alone)
   The mailboxes of a chosen domain come with it when this server runs mail: the addresses the
@@ -127,6 +133,10 @@ Usage: setup.sh import <[user@]host> [options]
   directory or its domain, with the paths rewritten for this server. They go on running on
   the other server too until you take them out there. "setup.sh import cron <domain>" lists
   the ones a site was given, and --clear removes them.
+  A site that was imported before gets only the files that were made or changed on the other
+  server since then (by the time the other server itself noted for each file); a file that
+  was changed or deleted here in the meantime is left as it is here, and --full copies
+  everything again.
   The user (default root) has to be able to read the sites' files, and only root sees the
   mailboxes and the other accounts' crontabs. Not copied: sieve filters, certificates, and
   the databases of applications other than WordPress unless --db names one.
@@ -1027,6 +1037,39 @@ dbconf_files "$1"' sh "$docroot" 2>/dev/null || true)
   return 0
 }
 
+# ---- what was copied last time ----------------------------------------------------
+# After the files of a site have come over, the moment that copy began - by the other server's
+# own clock - is kept with the site, with what names that server and the directory. The next
+# import from the same directory of the same server then asks only for what changed there
+# since: by ctime, the time a server notes itself when a file is made or changed and that no
+# unpacked archive or copied file can set back.
+lib_import_mark_file() { printf '%s/import.mark' "$(lib_domain_state_dir "$1")"; }
+
+# The other server's clock and what tells it from any other: "<epoch> <id>", or nothing.
+_import_remote_now() {
+  local got="" ts="" id=""
+  got="$(_import_ssh 'printf "%s %s\n" "$(date +%s)" "$(cat /etc/machine-id 2>/dev/null || hostname)"' </dev/null 2>>"$LOG_FILE" || true)"
+  read -r ts id _ <<<"$got"
+  [[ "$ts" =~ ^[0-9]{9,11}$ && "$id" =~ ^[A-Za-z0-9._-]{1,64}$ ]] || return 1
+  printf '%s %s' "$ts" "$id"
+}
+
+# The time of the last copy of that directory of that server into this site, or nothing.
+_import_mark_get() {   # domain, the server's id, the directory there
+  local f="" id="" root="" ts=""
+  f="$(lib_import_mark_file "$1")"
+  [[ -s "$f" ]] || return 1
+  IFS=$'\t' read -r id root ts _ <"$f" || true
+  [[ "$id" == "$2" && "$root" == "$3" && "$ts" =~ ^[0-9]{9,11}$ ]] || return 1
+  printf '%s' "$ts"
+}
+
+# What the other server packed, unpacked by the site's own user. The directories that are here
+# keep their modes: public_html's own is this server's business.
+_import_unpack() {   # document root  (the archive on stdin)
+  lib_domain_as_user tar -C "$1" --no-overwrite-dir -xzpf - 2>>"$LOG_FILE"
+}
+
 _import_add() {   # domain add-options...
   SERVER_SETUP_LOCKED=1 "$SCRIPT_PATH" add "$@" --yes --quiet
 }
@@ -1210,7 +1253,7 @@ lib_import_mail() {   # domain
 
 lib_import_site_part() {   # index
   local i="$1" domain="" root="" kind="" db="" www="" conf="" docroot="" ids="" uid="" gid="" foreign=0
-  local created=0 work="" dump="" n=0 home="" host="" imported=0 cfg=""
+  local created=0 work="" dump="" n=0 home="" host="" imported=0 cfg="" now="" since="" list="" changed=0 got=""
   local -a args=()
   domain="${IMP_DOMAIN[i]}"; root="${IMP_ROOT[i]}"; kind="${IMP_KIND[i]}"; db="${IMP_DB[i]}"
   www="${IMP_WWW[i]}"; conf="${IMP_CONF[i]}"
@@ -1227,9 +1270,8 @@ lib_import_site_part() {   # index
       if _import_php_available "${IMP_PHP[i]}"; then args+=(--php "${IMP_PHP[i]}")
       else lib_warn "${domain} runs PHP ${IMP_PHP[i]} there, which this server cannot install: it gets PHP ${PHP_VERSION}"; fi
     fi
-    if [[ "$kind" != "static" || "$db" != "-" ]]; then
-      mapfile -t -O "${#args[@]}" args < <(_import_php_limits "$i")
-    fi
+    # (a static site is given none by "add", whatever is said)
+    mapfile -t -O "${#args[@]}" args < <(_import_php_limits "$i")
     if (( www )); then args+=(--www); fi
     lib_info "Adding the site ${domain}"
     _import_add "$domain" "${args[@]}" \
@@ -1262,14 +1304,46 @@ lib_import_site_part() {   # index
         || lib_die "The files of ${domain} were not copied" "what is in ${docroot} could not all be handed to ${D_USER} (see above)" "clear that up, then run it again"
     fi
     if _domain_wp_placeholder "$docroot"; then lib_domain_as_user rm -f -- "${docroot}/index.html" || true; fi
-    lib_info "Copying the files ($(_import_mb "${IMP_KB[i]}")) into ${docroot} as ${D_USER} ..."
+    # What to ask for: everything, or what changed there since the last copy of this very
+    # directory. The list is made over there, into a file whose name comes back with its count.
+    now=""; since=""; list=""; changed=0
+    now="$(_import_remote_now || true)"
+    if (( ! created && ! IMP_OPT_FULL )) && [[ -n "$now" ]]; then
+      since="$(_import_mark_get "$domain" "${now#* }" "$root" || true)"
+    fi
+    if [[ -n "$since" ]]; then
+      got="$(_import_ssh "cd '${root}' && l=\$(mktemp) && find . -mindepth 1 -path ./wp-content/cache -prune -o -newerct '@${since}' -print0 >\"\$l\" && printf '%s %s\n' \"\$(tr -cd '\\000' <\"\$l\" | wc -c)\" \"\$l\"" </dev/null 2>>"$LOG_FILE" || true)"
+      read -r changed list _ <<<"$got"
+      if ! [[ "$changed" =~ ^[0-9]+$ ]] || ! _import_path_ok "$list"; then
+        # an older find, or no room for the list: everything, then
+        since=""; list=""; changed=0
+      fi
+    fi
     # tar's status 1 is "a file changed while it was read": the other server is live. The
     # directories that are here keep their modes (public_html's own is this server's business).
-    _import_ssh "tar -C '${root}' --exclude=./wp-content/cache -czf - . ; r=\$?; [ \"\$r\" -le 1 ]" </dev/null 2>>"$LOG_FILE" \
-      | lib_domain_as_user tar -C "$docroot" --no-overwrite-dir -xzpf - 2>>"$LOG_FILE" \
-      || lib_die "The files of ${domain} could not all be copied" \
-           "the connection dropped, the disk is full, or ${IMP_SSH_TARGET} cannot read everything in ${root} (see the log)" \
-           "what was copied stays; run the import again to complete it"
+    if [[ -n "$since" ]] && (( changed == 0 )); then
+      _import_ssh "rm -f '${list}'" </dev/null 2>>"$LOG_FILE" || true
+      lib_info "No file of ${domain} changed there since $(date -d "@${since}" '+%Y-%m-%d %H:%M' 2>/dev/null || printf '%s' "$since"): nothing to copy (--full copies everything again)"
+    elif [[ -n "$since" ]]; then
+      lib_info "Copying the ${changed} file(s) and directories that changed there since $(date -d "@${since}" '+%Y-%m-%d %H:%M' 2>/dev/null || printf '%s' "$since") into ${docroot} as ${D_USER} ..."
+      _import_ssh "tar -C '${root}' --null --no-recursion -T '${list}' -czf - ; r=\$?; rm -f '${list}'; [ \"\$r\" -le 1 ]" </dev/null 2>>"$LOG_FILE" \
+        | _import_unpack "$docroot" \
+        || lib_die "The files of ${domain} could not all be copied" \
+             "the connection dropped, the disk is full, or ${IMP_SSH_TARGET} cannot read everything in ${root} (see the log)" \
+             "what was copied stays; run the import again to complete it"
+    else
+      lib_info "Copying the files ($(_import_mb "${IMP_KB[i]}")) into ${docroot} as ${D_USER} ..."
+      _import_ssh "tar -C '${root}' --exclude=./wp-content/cache -czf - . ; r=\$?; [ \"\$r\" -le 1 ]" </dev/null 2>>"$LOG_FILE" \
+        | _import_unpack "$docroot" \
+        || lib_die "The files of ${domain} could not all be copied" \
+             "the connection dropped, the disk is full, or ${IMP_SSH_TARGET} cannot read everything in ${root} (see the log)" \
+             "what was copied stays; run the import again to complete it"
+    fi
+    # the copy is whole: the next one starts from the moment this one began
+    if [[ -n "$now" ]]; then
+      printf '%s\t%s\t%s\n' "${now#* }" "$root" "${now%% *}" >"$(lib_import_mark_file "$domain")" 2>/dev/null \
+        && chmod 0600 "$(lib_import_mark_file "$domain")" || true
+    fi
     # a wp-config.php kept one directory above the document root there
     if [[ "$kind" == "wordpress" && "$conf" != "-" && "$conf" != "${root}/wp-config.php" ]]; then
       _import_ssh "cat '${conf}'" </dev/null 2>>"$LOG_FILE" | lib_domain_as_user tee "${docroot}/wp-config.php" >/dev/null \
@@ -1371,7 +1445,7 @@ lib_import_main() {
   local a="" target="" port="22" key="" pwfile="" list=0 all=0 only="" no_create=0 path="" as="" dbname=""
   local i=0 n=0 here="" ans="" x="" total_kb=0 avail_kb=0 found=0 okc=0 what="" mkb=0 mail_kb=0 crons=0 limits=""
   local -a chosen=() todo=() failed=()
-  IMP_OPT_NO_DB=0; IMP_OPT_NO_FILES=0; IMP_OPT_NO_MAIL=0; IMP_OPT_ONLY_MAIL=0; IMP_OPT_NO_CRON=0
+  IMP_OPT_NO_DB=0; IMP_OPT_NO_FILES=0; IMP_OPT_NO_MAIL=0; IMP_OPT_ONLY_MAIL=0; IMP_OPT_NO_CRON=0; IMP_OPT_FULL=0
   while (($# > 0)); do
     a="$1"; shift
     case "$a" in
@@ -1389,6 +1463,7 @@ lib_import_main() {
       --no-db)         IMP_OPT_NO_DB=1 ;;
       --no-files)      IMP_OPT_NO_FILES=1 ;;
       --no-cron)       IMP_OPT_NO_CRON=1 ;;
+      --full)          IMP_OPT_FULL=1 ;;
       --no-mail)       IMP_OPT_NO_MAIL=1 ;;
       --only-mail)     IMP_OPT_ONLY_MAIL=1 ;;
       -*)              lib_import_usage >&2; lib_die "Unknown option for import: ${a}" "" "see the usage above" ;;

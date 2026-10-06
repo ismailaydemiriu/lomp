@@ -2302,6 +2302,8 @@ LIB_TR_PAIRS=(
   '{1} takes uploads of {2}M there and {3} here; the site here keeps its own' '{1} orada {2}M, burada {3} boyutunda yükleme kabul ediyor; buradaki site kendi değerini koruyor'
   'The cron jobs an import gave {1} are back (setup.sh import cron {2})' 'Aktarımla {1} sitesine gelen cron işleri geri yüklendi (setup.sh import cron {2})'
   '[dry-run] would put back the cron jobs an import gave {1}' '[dry-run] aktarımla {1} sitesine gelen cron işleri geri yüklenecekti'
+  'No file of {1} changed there since {2}: nothing to copy (--full copies everything again)' '{1} sitesinin hiçbir dosyası orada {2} tarihinden beri değişmedi: kopyalanacak bir şey yok (--full her şeyi yeniden kopyalar)'
+  'Copying the {1} file(s) and directories that changed there since {2} into {3} as {4} ...' 'Orada {2} tarihinden beri değişen {1} dosya ve dizin {3} dizinine {4} kullanıcısı olarak kopyalanıyor ...'
   'Not copied: certificates, sieve filters of the mail. The other server was only read.' 'Kopyalanmayanlar: sertifikalar, postanın sieve filtreleri. Diğer sunucu yalnızca okundu.'
   '{1} runs PHP {2} there, which this server cannot install: it gets PHP {3}' '{1} orada PHP {2} ile çalışıyor, bu sunucu o sürümü kuramıyor: PHP {3} veriliyor'
   '{1} runs PHP {2} there and PHP {3} here; the site here keeps its own' '{1} orada PHP {2}, burada PHP {3} ile çalışıyor; buradaki site kendi sürümünü koruyor'

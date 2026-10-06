@@ -9600,6 +9600,8 @@ cat >"$_im_crm/include/db.php" <<'EOF'
 $baglanti = mysqli_connect("localhost", "crmuser", "crm-pw", "crmdb");
 EOF
 printf '<?php\n$db_name = "otherdb"; $db_user = "other"; $db_pass = "x";\n' >"$_im_crm/admin/config.php"
+mkdir -p "$_im_crm/app"
+printf '%s\n' 'APP_ENV=production' 'DB_DATABASE=crmdb' 'DB_USERNAME=envcrm' 'DB_PASSWORD=env-secret' >"$_im_crm/app/.env"
 printf '<?php\n$db_name = "crmdb"; $db_user = "vendored"; $db_pass = "x";\n' >"$_im_crm/vendor/config.php"
 # the ways a login is written
 printf '%s\n' '<?php' 'define("DB_HOST", "db.internal:3307");' "define( 'DB_DATABASE', 'defdb' );" "define('DB_USERNAME','defuser');" "define('DB_PASSWORD', 'def;pw');" >"$_im_cf/define.php"
@@ -9665,6 +9667,12 @@ _im_lim() { awk -F'\t' -v d="$1" -v r="$2" '$1 == "S" && ($2 == d || $3 == r) { 
 assert_eq  "the limits a virtual host sets for itself"                "1G|16M" "$(_im_lim shop.example -)"
 assert_eq  "or its .user.ini, or the php.ini of the PHP it runs"      "768M|300M" "$(_im_lim none "$_im_l/Example/html")"
 assert_eq  "a directory that is no virtual host has none to name"     "-|-" "$(_im_lim blog.example -)"
+IMP_MEM=(100 1024 -); IMP_UPL=(16 200 -); IMP_DEF_MEM=256; IMP_DEF_UPL=64
+assert_eq  "limits below this server's own are not passed on" "" "$(_import_php_limits 0 | tr '\n' ' ')"
+assert_eq  "limits above it are, each by its option"     "--memory 1024M --upload 200M " "$(_import_php_limits 1 | tr '\n' ' ')"
+assert_eq  "limits that are not known are none"          "" "$(_import_php_limits 2 | tr '\n' ' ')"
+IMP_DEF_MEM=1024
+assert_eq  "one that equals it is not passed either"     "--upload 200M " "$(_import_php_limits 1 | tr '\n' ' ')"
 assert_eq  "megabytes"                 "128"  "$(_import_size_mb 128M)"
 assert_eq  "gigabytes, in any case"    "1024" "$(_import_size_mb 1g)"
 assert_eq  "kilobytes"                 "64"   "$(_import_size_mb 65536K)"
@@ -9919,7 +9927,10 @@ assert_has "the count is said"                          "2 site(s) imported" "$(
 assert_has "and what comes next"                        "renew-ssl" "$(cat "$_im_out")"
 
 : >"$_im_log"
+assert_has "what was copied, from where and when, is kept with the site" "$_im_shop" "$(cat "$(lib_import_mark_file shop.example)" 2>/dev/null)"
+sleep 1
 printf 'changed there\n' >"$_im_shop/wp-content/uploads/a.txt"; printf 'mine\n' >"$_im_d1/kept.txt"
+sleep 1
 assert_eq  "a site that is here already"                "0" "$(_imf old.example --only shop.example)"
 assert_lacks "is not added again"                       "add " "$(cat "$_im_log")"
 assert_has "keeps the PHP it has here, which is said"   "shop.example runs PHP 7.4 there and PHP 8.3 here" "$(cat "$_im_out")"
@@ -9931,6 +9942,27 @@ assert_has "which the plan says"                        "A backup is taken first
 assert_eq  "a file of the same name is replaced"        "changed there" "$(cat "$_im_d1/wp-content/uploads/a.txt")"
 assert_eq  "one that is only here stays"                "mine" "$(cat "$_im_d1/kept.txt")"
 assert_lacks "its settings are left alone"              "apply " "$(cat "$_im_log")"
+assert_has "only what changed there since is asked for" "that changed there since" "$(cat "$_im_out")"
+: >"$RUNUSER_LOG"
+assert_eq  "a third time, with nothing changed there"   "0" "$(_imf old.example --only shop.example --no-cron)"
+assert_has "nothing is copied, which is said"           "nothing to copy" "$(cat "$_im_out")"
+assert_lacks "no archive is unpacked"                   "tar -C $_im_d1" "$(cat "$RUNUSER_LOG")"
+assert_has "wp-config.php still names the database here" "define( 'DB_NAME', 'shop_db' );" "$(cat "$_im_d1/wp-config.php")"
+assert_eq  "no list is left on the other side"          "" "$(find "${TMPDIR:-/tmp}" -maxdepth 1 -name 'tmp.*' -newer "$_im_out" 2>/dev/null | head -n 1)"
+rm -f "$_im_d1/index.php"
+assert_eq  "a file deleted here"                        "0" "$(_imf old.example --only shop.example --no-cron)"
+assert_false "stays deleted: it did not change there"   test -e "$_im_d1/index.php"
+assert_eq  "--full"                                     "0" "$(_imf old.example --only shop.example --no-cron --full)"
+assert_true "copies everything again"                   test -f "$_im_d1/index.php"
+rm -f "$_im_d1/index.php"
+printf 'another-machine\t%s\t9999999999\n' "$_im_shop" >"$(lib_import_mark_file shop.example)"
+assert_eq  "what was copied from another server"        "0" "$(_imf old.example --only shop.example --no-cron)"
+assert_true "says nothing about this one: everything comes" test -f "$_im_d1/index.php"
+rm -f "$_im_d1/index.php"
+printf '%s\t%s\t9999999999\n' "$(cut -f1 "$(lib_import_mark_file shop.example)")" "/some/other/dir" >"$(lib_import_mark_file shop.example)"
+assert_eq  "nor does a copy of another directory"       "0" "$(_imf old.example --only shop.example --no-cron)"
+assert_true "of the same server"                        test -f "$_im_d1/index.php"
+assert_has "a restore forgets it: the files are the archive's again" 'rm -f -- "$(lib_import_mark_file "$domain")"' "$(declare -f lib_restore_main)"
 
 : >"$_im_log"
 assert_eq  "--no-create leaves out what is not here"    "0" "$(_imf old.example --only panel.example --no-create)"
@@ -10118,9 +10150,11 @@ assert_has "and its password"                                  'password="crm-pw
 assert_has "the file near the top now has the login of this server" "\$db_name = 'crm_db';   // the database" "$(cat "$_im_d3/config.php")"
 assert_has "its user and password too"                         "\$db_user = 'crm_user';" "$(cat "$_im_d3/config.php")$(grep -c "db_pass = 'LocalPass9';" "$_im_d3/config.php")"
 assert_has "and so has the other file that named that database" '$baglanti = mysqli_connect("localhost", "crm_user", "LocalPass9", "crm_db");' "$(cat "$_im_d3/include/db.php")"
+assert_eq  "a .env that named it, read as one though it was a copy that was read" \
+  "DB_DATABASE=crm_db DB_USERNAME=crm_user DB_PASSWORD=LocalPass9" "$(grep '^DB_' "$_im_d3/app/.env" | tr '\n' ' ' | sed 's/ $//')"
 assert_has "a file that names another database is left alone"  '$db_name = "otherdb"; $db_user = "other";' "$(cat "$_im_d3/admin/config.php")"
 assert_has "and so is a library's"                             '$db_user = "vendored"' "$(cat "$_im_d3/vendor/config.php")"
-assert_has "which files were changed is said"                  "is now the one of this server (crm_db), in: config.php, include/db.php" "$(cat "$_im_out")"
+assert_has "which files were changed is said"                  "is now the one of this server (crm_db), in: config.php, app/.env, include/db.php" "$(cat "$_im_out")"
 assert_lacks "no password is in what is printed"               "LocalPass9" "$(cat "$_im_out")"
 assert_lacks "nor the old one"                                 "crm-pw" "$(cat "$_im_out")$(cat "$LOG_FILE")"
 assert_has "the files are written by the site's user"          "-u $(lib_domain_ident crm.example) -- env -C / tee $_im_d3/config.php" "$(cat "$RUNUSER_LOG")"
