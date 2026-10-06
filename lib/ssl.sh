@@ -181,7 +181,10 @@ lib_ssl_cert_covers() {   # cert-name name [name...]
 
 lib_ssl_expiry_epoch() {   # certfile -> epoch (empty when unreadable)
   local end=""
-  end="$(openssl x509 -enddate -noout -in "$1" 2>/dev/null | cut -d= -f2)"
+  # "|| true": a file openssl cannot read fails the pipeline, and inside this command
+  # substitution the ERR trap made an unexpected failure of it - "ssl status", doctor and list
+  # ended there instead of saying that the file cannot be read
+  end="$(openssl x509 -enddate -noout -in "$1" 2>/dev/null | cut -d= -f2 || true)"
   [[ -n "$end" ]] && date -d "$end" +%s 2>/dev/null || printf ''
 }
 

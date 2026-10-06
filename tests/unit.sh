@@ -7414,6 +7414,15 @@ _rn_case _rn_redirect add old.example alpha.example --www
 assert_has "one that lacks www is" "obtain old.example old.example www.old.example" "$(_rn_calls)"
 assert_eq  "and OpenLiteSpeed is reloaded though no file changed: the certificate did" "pending=0 pending=1" "$(_rn_calls | grep '^commit' | awk '{print $2}' | tr '\n' ' ' | sed 's/ $//')"
 
+# ---- a certificate file that cannot be read ------------------------------------------------
+# The files of this section's certificates are a letter each. Asked for the days such a file
+# has left, openssl fails - inside a command substitution, where the ERR trap turned it into
+# an unexpected failure of whatever was running: ssl status, doctor, list.
+_rn_case lib_ssl_days_left old.example
+assert_eq    "a certificate file that cannot be read has no days to tell, and that is all" "rc=0" "$(_rn_out)"
+_rn_case lib_ssl_lineage_check old.example old.example
+assert_has   "ssl status gets to say what is wrong with it" "FAIL||0|the certificate file cannot be read" "$(_rn_out)"
+
 # ---- redirect add / del: what is refused ----------------------------------------------
 _rn_fresh
 _rn_case _rn_redirect add alpha.example new.example;   assert_has "a site cannot be made a redirect" "alpha.example is a site of this server" "$(_rn_out)"
