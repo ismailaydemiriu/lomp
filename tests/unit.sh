@@ -10372,6 +10372,12 @@ _wh_src="$(declare -f lib_domain_rename_main)"
 assert_has   "rename does it for a name that is the first with a certificate" '( lib_domain_wp_https keep-cache )' "$_wh_src"
 assert_true  "after the old name was rewritten" test "$(_wh_line '_domain_rename_wp "$old"')" -lt "$(_wh_line 'lib_domain_wp_https')"
 assert_true  "and before the cache is emptied" test "$(_wh_line 'lib_domain_wp_https')" -lt "$(_wh_line '_domain_rename_cache_clear')"
+_wh_src="$(declare -f lib_domain_add_main)"
+assert_has   "add does it for a WordPress that is in the document root already" 'if (( D_SSL )); then' "$(grep -B1 'lib_domain_wp_https' <<<"$_wh_src")"
+assert_has   "where nothing in it can end the add" '( lib_domain_wp_https ) ||' "$_wh_src"
+assert_true  "after the certificate step" test "$(_wh_line 'lib_domain_add_ssl')" -lt "$(_wh_line 'lib_domain_wp_https')"
+assert_true  "and before WordPress is installed, so a new one is not asked twice" test "$(_wh_line 'lib_domain_wp_https')" -lt "$(_wh_line 'lib_domain_wp_install')"
+assert_lacks "the certificate step itself does not: rename goes through it before the database says the new name" "lib_domain_wp_https" "$(declare -f lib_domain_add_ssl)"
 
 # in Turkish
 _wh_tr() { ( LIB_LANG="tr"; lib_lang_build; lib_tr "$1"; printf '%s' "$LIB_TR" ); }

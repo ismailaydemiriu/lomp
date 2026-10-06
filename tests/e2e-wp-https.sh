@@ -8,7 +8,8 @@
 #  "renew-ssl": http:// becomes https://, an address somebody set is left alone, an address
 #  pinned in wp-config.php and a WordPress that wp-cli cannot run are warnings and never fail
 #  the certificate. The same after "rename" to a name that is the first with a certificate.
-#  A site added with --www --www-primary keeps its www name through the change.
+#  A site added with --www --www-primary keeps its www name through the change. "add" over a
+#  WordPress that is there already (remove --keep-files --keep-db, then add) does it too.
 #  Then "renew-ssl --all" and "renew-ssl --missing" with two such sites: each takes the one
 #  that is its to take, and no other site of the server is changed.
 #
@@ -60,8 +61,14 @@ drop() {
     rm -rf "/var/backups/server-setup/$d"
     [ -e "/etc/letsencrypt/live/$d/.stand-in" ] && rm -rf "/etc/letsencrypt/live/$d"
   done
+  # the database scenario H kept through "remove --keep-db": no site record names it any more
+  if [ -n "${KEPT_DB:-}" ]; then
+    mysql -e "DROP DATABASE IF EXISTS \`$KEPT_DB\`; DROP USER IF EXISTS '$KEPT_DBU'@'localhost';" 2>/dev/null
+    KEPT_DB=""
+  fi
   return 0
 }
+storeddb() { mysql -N -e "SELECT CONCAT(option_name, '=', option_value) FROM \`$1\`.wp_options WHERE option_name IN ('home','siteurl') ORDER BY option_name" 2>&1 | tr '\n' ' ' | sed 's/ $//'; }
 
 for s in mariadb lsws; do systemctl is-active --quiet "$s" || systemctl start "$s"; done; sleep 3
 rm -rf "$SRC"; mkdir -p "$SRC/tree" "$SRC/bin"; cp -r "$WT/setup.sh" "$WT/lib" "$SRC/tree/"
@@ -286,6 +293,31 @@ R="$(get $(rs "$DM") -o /dev/null -w '%{http_code} %{redirect_url}' "https://$DM
 check "G: the bare name goes to the www name with one 301" "[ '$R' = '301 https://www.$DM/' ]"
 J="$(get "${WR[@]}" "https://www.$DM/wp-json/" | jq -c '{url, home}' 2>/dev/null)"; echo "   REST index: $J"
 check "G: the REST index names the site with https://www." "[ '$J' = '{\"url\":\"https://www.$DM\",\"home\":\"https://www.$DM\"}' ]"
+
+echo; echo "===== H: add over a WordPress that is there already (remove --keep-files --keep-db, then add)"
+drop
+lomp add "$DM" --wordpress --no-ssl >"$SRC/addH.out" 2>&1; RC=$?; echo "add rc=$RC"; (( RC == 0 )) || tail -n 15 "$SRC/addH.out"
+KDB="$(db "$DM")"; KDBU="$(jq -r '.db.user' "$STATE/$DM/domain.json")"
+lomp remove "$DM" --keep-files --keep-db --yes >"$SRC/removeH.out" 2>&1; RC=$?; echo "remove --keep-files --keep-db rc=$RC"
+KEPT_DB="$KDB"; KEPT_DBU="$KDBU"
+check "H: the site is gone, its files and its database are still there" "[ $RC -eq 0 ] && [ ! -e $STATE/$DM ] && [ -f /home/$DM/public_html/wp-config.php ]"
+B="$(storeddb "$KDB")"; echo "   stored before: $B"
+check "H: the WordPress in them says http://" "[ '$B' = 'home=http://$DM siteurl=http://$DM' ]"
+lomp add "$DM" >"$SRC/addH2.out" 2>&1; RC=$?; echo "add (certificate at once) rc=$RC"; (( RC == 0 )) || tail -n 15 "$SRC/addH2.out"
+grep -E 'WordPress: |HTTPS active|\[warn\]|\[error\]' "$SRC/addH2.out" | cut -c1-200 | sed 's/^/   | /'
+O="$(cat "$SRC/addH2.out")"
+check "H: add succeeded and the site has its certificate" "[ $RC -eq 0 ] && [ \"\$(jq -r .ssl.enabled $STATE/$DM/domain.json 2>/dev/null)\" = true ]"
+A="$(storeddb "$KDB")"; echo "   stored after:  $A"
+check "H: the WordPress that was there says https:// now" "[ '$A' = 'home=https://$DM siteurl=https://$DM' ]"
+has   "H: it is said" "WordPress: its home is now https://$DM (was http://$DM)" "$O"
+lacks "H: no warning about WordPress" "[warn]  WordPress" "$O"
+sleep 2
+R="$(get $(rs "$DM") -o /dev/null -w '%{http_code}' "https://$DM/")"
+check "H: its front page answers 200 over https" "[ '$R' = 200 ]"
+J="$(get $(rs "$DM") "https://$DM/wp-json/" | jq -c '{url, home}' 2>/dev/null)"; echo "   REST index: $J"
+check "H: the REST index names the site with https" "[ '$J' = '{\"url\":\"https://$DM\",\"home\":\"https://$DM\"}' ]"
+drop
+check "H: the kept database is gone again" "[ -z \"\$(mysql -N -e \"SHOW DATABASES LIKE '$KDB'\" 2>/dev/null)\" ]"
 
 # ---- renew-ssl --all and --missing: they walk over every site of the server ----------------
 #   DM   added with --no-ssl          (no certificate wanted: --all passes it by, --missing takes it)

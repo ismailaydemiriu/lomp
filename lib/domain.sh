@@ -387,6 +387,11 @@ lib_domain_add_main() {
   if (( D_SSL_WANTED )); then
     lib_step "SSL certificate (Let's Encrypt)"
     lib_domain_add_ssl
+    # A WordPress that is in the document root already - the files were kept by "remove", or
+    # put there before the site was added - may call itself http://. Here and not in
+    # lib_domain_add_ssl: rename gets its certificate through that too, before the addresses
+    # in the database say the new name. In a subshell: nothing in it may end the add.
+    if (( D_SSL )); then ( lib_domain_wp_https ) || true; fi
   fi
 
   # ---- 6 database ----------------------------------------------------------

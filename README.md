@@ -230,6 +230,8 @@ named and left alone. Links inside posts are not rewritten: WordPress and the re
 them into `https://` as they are served, and `renew-ssl` says how many there are and prints
 the `wp search-replace` command for rewriting them for good. If wp-cli fails, that is a
 warning; the certificate is in place either way, and the next `renew-ssl` looks again.
+`add` does the same for a WordPress that is in the document root already when the site gets
+its certificate - one whose files were kept by `remove --keep-files --keep-db`, for instance.
 
 ---
 
