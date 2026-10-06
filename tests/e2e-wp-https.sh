@@ -8,6 +8,8 @@
 #  "renew-ssl": http:// becomes https://, an address somebody set is left alone, an address
 #  pinned in wp-config.php and a WordPress that wp-cli cannot run are warnings and never fail
 #  the certificate. The same after "rename" to a name that is the first with a certificate.
+#  Then "renew-ssl --all" and "renew-ssl --missing" with two such sites: each takes the one
+#  that is its to take, and no other site of the server is changed.
 #
 #  certbot and the DNS answers for the test's names are stand-ins, first in PATH for this
 #  test's own commands only: a self-signed certificate for the test's names, and a Cloudflare
@@ -259,4 +261,76 @@ check "F: with the www name stored, renew-ssl succeeds" "[ $RC -eq 0 ]"
 A="$(stored "$DM")"; echo "   stored after:  $A"; echo "   wp.info after:  $(wpurl "$DM")"
 check "F: the www is kept, only the scheme changed" "[ '$A' = 'home=https://www.$DM siteurl=https://www.$DM' ]"
 check "F: in lomp's record too" "[ \"\$(wpurl $DM)\" = 'https://www.$DM' ]"
+
+# ---- renew-ssl --all and --missing: they walk over every site of the server ----------------
+#   DM   added with --no-ssl          (no certificate wanted: --all passes it by, --missing takes it)
+#   DM2  added while DNS pointed away (certificate wanted, not there: --all takes it)
+# Every other site is asked for a certificate too. On a test server they fail - their DNS does
+# not point here, and the stand-in refuses their names - which is why the two commands may end
+# with status 1; what is checked is that they stay what they were.
+sslrec() { jq -r '"\(.ssl.enabled)/\(.ssl.wanted)"' "$STATE/$1/domain.json" 2>/dev/null; }
+others() {   # every other site: its record, its WordPress record, its vhost, its certificate directory
+  local d=""
+  ls "$STATE" | grep -v -e "^$DM\$" -e "^$DM2\$" | while read -r d; do
+    echo "== $d"; cat "$STATE/$d/domain.json" "$STATE/$d/wp.info" "/usr/local/lsws/conf/vhosts/$d/vhconf.conf" 2>/dev/null
+    ls "/etc/letsencrypt/live/$d" "/etc/server-setup/ssl/$d" 2>&1
+  done | cksum
+}
+echo; echo "other sites here: $(ls "$STATE" | grep -v -e "^$DM\$" -e "^$DM2\$" | tr '\n' ' ')"
+drop
+OTHERS_ALL="$(others)"
+echo; echo "===== two WordPress sites without a certificate"
+lomp add "$DM" --wordpress --no-ssl >"$SRC/add1.out" 2>&1; RC=$?; echo "add $DM rc=$RC"; (( RC == 0 )) || tail -n 15 "$SRC/add1.out"
+: >"$SRC/dns-elsewhere"
+lomp add "$DM2" --wordpress >"$SRC/add2.out" 2>&1; RC=$?; echo "add $DM2 rc=$RC"; (( RC == 0 )) || tail -n 15 "$SRC/add2.out"
+rm -f "$SRC/dns-elsewhere"
+echo "   $DM: ssl enabled/wanted $(sslrec "$DM"), stored $(stored "$DM")"
+echo "   $DM2: ssl enabled/wanted $(sslrec "$DM2"), stored $(stored "$DM2")"
+check "the --no-ssl site wants no certificate and says http://" "[ \"\$(sslrec $DM)\" = false/false ] && [ \"\$(stored $DM)\" = 'home=http://$DM siteurl=http://$DM' ]"
+check "the other wanted one, got none, and says http://" "[ \"\$(sslrec $DM2)\" = false/true ] && [ \"\$(stored $DM2)\" = 'home=http://$DM2 siteurl=http://$DM2' ]"
+
+echo; echo "===== renew-ssl --all"
+lomp renew-ssl --all >"$SRC/all.out" 2>&1; RC=$?; echo "renew-ssl --all rc=$RC"
+grep -E '^== renew-ssl|WordPress: |SSL active|SSL renewal|FAILED' "$SRC/all.out" | cut -c1-200 | sed 's/^/   | /'
+O="$(cat "$SRC/all.out")"
+echo "   $DM: ssl $(sslrec "$DM"), stored $(stored "$DM")"
+echo "   $DM2: ssl $(sslrec "$DM2"), stored $(stored "$DM2"), wp.info $(wpurl "$DM2")"
+has   "--all: it takes the site that wants a certificate" "== renew-ssl $DM2 ==" "$O"
+lacks "--all: and passes the --no-ssl site by" "== renew-ssl $DM ==" "$O"
+check "--all: that site has its certificate" "[ \"\$(sslrec $DM2)\" = true/true ]"
+check "--all: and its WordPress says https:// in the database" "[ \"\$(stored $DM2)\" = 'home=https://$DM2 siteurl=https://$DM2' ]"
+check "--all: lomp's record too" "[ \"\$(wpurl $DM2)\" = 'https://$DM2' ]"
+has   "--all: it is said in the output of the whole run" "WordPress: its home is now https://$DM2 (was http://$DM2)" "$O"
+check "--all: the --no-ssl site is untouched" "[ \"\$(sslrec $DM)\" = false/false ] && [ \"\$(stored $DM)\" = 'home=http://$DM siteurl=http://$DM' ] && [ \"\$(wpurl $DM)\" = 'http://$DM' ]"
+F="$(grep -E 'SSL renewal failed for:' "$SRC/all.out" | head -n 1)"; echo "   failed list: ${F:-none}"
+lacks "--all: neither of the test's sites is among the failed" "wphttps" "$F"
+check "--all: the other sites are what they were" "[ \"\$(others)\" = \"$OTHERS_ALL\" ]"
+
+echo; echo "===== renew-ssl --missing"
+lomp renew-ssl --missing >"$SRC/missing.out" 2>&1; RC=$?; echo "renew-ssl --missing rc=$RC"
+grep -E '^== renew-ssl|WordPress: |SSL active|SSL renewal|FAILED' "$SRC/missing.out" | cut -c1-200 | sed 's/^/   | /'
+O="$(cat "$SRC/missing.out")"
+echo "   $DM: ssl $(sslrec "$DM"), stored $(stored "$DM"), wp.info $(wpurl "$DM")"
+has   "--missing: it takes the --no-ssl site" "== renew-ssl $DM ==" "$O"
+lacks "--missing: and not the one that has a certificate by now" "== renew-ssl $DM2 ==" "$O"
+check "--missing: the site has its certificate, and wants it from now on" "[ \"\$(sslrec $DM)\" = true/true ]"
+check "--missing: its WordPress says https:// in the database" "[ \"\$(stored $DM)\" = 'home=https://$DM siteurl=https://$DM' ]"
+check "--missing: lomp's record too" "[ \"\$(wpurl $DM)\" = 'https://$DM' ]"
+has   "--missing: it is said" "WordPress: its home is now https://$DM (was http://$DM)" "$O"
+check "--missing: the first site keeps what it got" "[ \"\$(stored $DM2)\" = 'home=https://$DM2 siteurl=https://$DM2' ]"
+F="$(grep -E 'SSL renewal failed for:' "$SRC/missing.out" | head -n 1)"; echo "   failed list: ${F:-none}"
+lacks "--missing: neither of the test's sites is among the failed" "wphttps" "$F"
+check "--missing: the other sites are what they were" "[ \"\$(others)\" = \"$OTHERS_ALL\" ]"
+
+echo; echo "===== renew-ssl --all again: both have a certificate, nothing is left to do"
+lomp renew-ssl --all >"$SRC/all2.out" 2>&1; RC=$?; echo "renew-ssl --all rc=$RC"
+O="$(cat "$SRC/all2.out")"
+has   "again: both sites are taken" "== renew-ssl $DM ==" "$O"
+has   "again: (the second too)" "== renew-ssl $DM2 ==" "$O"
+lacks "again: nothing is said about WordPress" "WordPress" "$O"
+check "again: the stored addresses are what they were" "[ \"\$(stored $DM)\" = 'home=https://$DM siteurl=https://$DM' ] && [ \"\$(stored $DM2)\" = 'home=https://$DM2 siteurl=https://$DM2' ]"
+for d in "$DM" "$DM2"; do
+  C="$(curl -s -m 15 -k --resolve "$d:443:127.0.0.1" "https://$d/wp-json/" | jq -r '.url' 2>/dev/null)"
+  check "the REST index of $d names it with https" "[ '$C' = 'https://$d' ]"
+done
 exit 0

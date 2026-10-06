@@ -1282,7 +1282,8 @@ One more of the same kind is for a WordPress that gets its certificate after it 
 (certbot and the DNS answer are stand-ins for the test's two names under `lomptest.net`):
 
 ```bash
-LOMPSTACK_INTEGRATION=yes bash tests/e2e-wp-https.sh          # http:// to https:// in the database, by renew-ssl and by rename
+LOMPSTACK_INTEGRATION=yes bash tests/e2e-wp-https.sh          # http:// to https:// in the database, by renew-ssl
+                                                              # (one site, --all, --missing) and by rename
 ```
 
 `add` has one for a WordPress site with `--www-primary`, and for what an `add` that fails
