@@ -2695,4 +2695,17 @@ LIB_TR_PAIRS=(
   'to delete the mail of {1} for good: lomp mail disable {2} --delete-data' '{1} alan adının postasını kalıcı olarak silmek için: lomp mail disable {2} --delete-data'
   '{1} already exists' '{1} zaten var'
   '{1} is gone' '{1} silindi'
+  # ---- import of a Node.js application or a proxy, and of a certificate: what was left
+  '{1}  <-  {2}: the Node.js application in {3}' '{1}  <-  {2}: {3} içindeki Node.js uygulaması'
+  '{1}  <-  {2}: passed on to {3}' '{1}  <-  {2}: {3} adresine iletiliyor'
+  '{1} could not be imported' '{1} aktarılamadı'
+  'what it is passed on to is not known any more' 'nereye iletildiği artık bilinmiyor'
+  'run the import again' 'aktarımı yeniden çalıştırın'
+  'there its address is passed on to an application' 'orada adresi bir uygulamaya iletiliyor'
+  'remove it here first, or import that name under another one' 'önce buradakini kaldırın ya da o adı başka bir adla aktarın'
+  'there it runs one, in {1}' 'orada {1} içinde bir uygulama çalıştırıyor'
+  'remove it here first: the import adds it with its application' 'önce buradakini kaldırın: aktarım onu uygulamasıyla birlikte ekler'
+  'what {1} holds could not all be copied into {2}/public_html' '{1} içindekilerin bir kısmı {2}/public_html dizinine kopyalanamadı'
+  'The application'\''s own settings still name the database of the other server: put in the one of this server (setup.sh app env {1} import-db)' 'Uygulamanın kendi ayarları hâlâ diğer sunucunun veritabanını gösteriyor: bu sunucununkini yazın (setup.sh app env {1} import-db)'
+  'it does not name {1}' '{1} adını içermiyor'
 )

@@ -9482,6 +9482,15 @@ assert_eq   "the mail configuration put back" "Önceki posta yapılandırması g
 assert_eq   "a webmail user that cannot be told" "silinmiş olanı adıyla verin: lomp webmail forget <address>   (lomp mail box list a.example)" "$(_dt_plain "name the one that is gone: lomp webmail forget <address>   (lomp mail box list a.example)")"
 assert_eq   "the timezone" "Saat dilimi zaten Europe/Istanbul" "$(_dt_plain "Timezone already Europe/Istanbul")"
 assert_eq   "a port that is closed" "7080 portu açık değil" "$(_dt_plain "port 7080 is not opened")"
+# import of an application, a proxy, a certificate: the lines that had no Turkish
+assert_eq   "import: the heading of a Node.js application" "a.example  <-  root@old.example: /var/www/a içindeki Node.js uygulaması" "$(_dt_plain "a.example  <-  root@old.example: the Node.js application in /var/www/a")"
+assert_eq   "and of a proxy" "a.example  <-  root@old.example: 127.0.0.1:3000 adresine iletiliyor" "$(_dt_plain "a.example  <-  root@old.example: passed on to 127.0.0.1:3000")"
+assert_eq   "its mailboxes keep their own heading" "a.example  <-  root@old.example: posta kutuları" "$(_dt_plain "a.example  <-  root@old.example: its mailboxes")"
+assert_eq   "a site whose target was lost" "a.example aktarılamadı" "$(_dt_plain "a.example could not be imported")"
+assert_eq   "a proxy that runs an application there" "orada /var/www/a içinde bir uygulama çalıştırıyor" "$(_dt_plain "there it runs one, in /var/www/a")"
+assert_eq   "static files that did not all come" "/var/www/a/public içindekilerin bir kısmı /home/a.example/public_html dizinine kopyalanamadı" "$(_dt_plain "what /var/www/a/public holds could not all be copied into /home/a.example/public_html")"
+assert_eq   "an application that still names the other database" "Uygulamanın kendi ayarları hâlâ diğer sunucunun veritabanını gösteriyor: bu sunucununkini yazın (setup.sh app env a.example import-db)" "$(_dt_plain "The application's own settings still name the database of the other server: put in the one of this server (setup.sh app env a.example import-db)")"
+assert_has  "a certificate for another name, inside its warning" "a.example adını içermiyor" "$(_dt_plain "The certificate of a.example was not brought: it does not name a.example. The site answers over HTTP until it has one (setup.sh renew-ssl a.example)")"
 # lib_tprintf: printf for a table
 _tp() { ( LIB_LANG="tr"; lib_lang_build; lib_tprintf "$@" ); }
 assert_eq   "in English it is printf, flags and all" "$(printf '%-10s|%5s|%4s%%|%d|%s\n' MODE SIZE 7 3 x)" "$(lib_tprintf '%-10s|%5s|%4s%%|%d|%s\n' MODE SIZE 7 3 x)"
