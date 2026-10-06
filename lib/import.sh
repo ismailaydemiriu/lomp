@@ -1137,7 +1137,8 @@ _import_check_site() {   # index, fix 0|1
   fi
   if (( diff > 0 )); then
     lib_note "${diff} file(s) have another size here than there (changed on either side since, or half copied). Left alone; the first ones:"
-    head -n 10 "${work}/differs" | awk -F'\t' '{ printf "        %s  (there %s bytes, here %s)\n", $1, $2, $3 }'
+    lib_tr "(there %s bytes, here %s)"
+    head -n 10 "${work}/differs" | awk -F'\t' -v f="$LIB_TR" '{ printf "        %s  " f "\n", $1, $2, $3 }'
   fi
   if (( miss == 0 )); then
     rm -rf "$work"

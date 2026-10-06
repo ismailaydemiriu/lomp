@@ -9446,6 +9446,24 @@ if declare -F _app_worker_rows >/dev/null; then
   assert_has  "in English they are what they were"     "queue            process  -              not running           0  npm run queue" "$(_wr en)"
   unset -f _wr
 fi
+# import --check and --fix, and the rest of what import had no Turkish for
+assert_eq   "import --check: a site that is not here" "a.example henüz burada bir site değil: karşılaştırılacak bir şey yok (önce aktarın)" "$(_dt_plain "a.example is not a site here yet: nothing to compare (import it first)")"
+assert_eq   "what it counted" "Orada: 120 dosya ve dizin. Burada eksik: 3. Boyutu farklı: 1." "$(_dt_plain "There: 120 file(s) and director(ies). Missing here: 3. Different size: 1.")"
+assert_eq   "what could not be read there" "www-data kullanıcısı orada 2 yeri okuyamadı: içlerinde ne varsa bu karşılaştırmada da yok (bakın: /var/log/server_setup.log)" "$(_dt_plain "www-data could not read 2 place(s) there: whatever is inside them is not in this comparison either (see /var/log/server_setup.log)")"
+assert_eq   "by a user that has no name" "kullanıcı orada 2 yeri okuyamadı: içlerinde ne varsa bu karşılaştırmada da yok (bakın: /var/log/server_setup.log)" "$(_dt_plain "the user could not read 2 place(s) there: whatever is inside them is not in this comparison either (see /var/log/server_setup.log)")"
+assert_eq   "the list that is cut" "... ve 12 tane daha; listenin tamamı /var/log/server_setup.log içinde" "$(_dt_plain "... and 12 more; the whole list is in /var/log/server_setup.log")"
+assert_eq   "files of another size" "4 dosyanın buradaki boyutu oradakinden farklı (o zamandan beri bir tarafta değişmiş ya da yarım kopyalanmış). Dokunulmadı; ilkleri:" "$(_dt_plain "4 file(s) have another size here than there (changed on either side since, or half copied). Left alone; the first ones:")"
+assert_eq   "nothing missing" "Orada olan her şey burada da var: a.example" "$(_dt_plain "Everything that is there is here: a.example")"
+assert_eq   "how to bring it" "Yalnızca eksik olanları getirmek için: setup.sh import root@old.example --only a.example --check --fix" "$(_dt_plain "Bring what is missing, and nothing else: setup.sh import root@old.example --only a.example --check --fix")"
+assert_eq   "--fix at work" "Eksik 3 yol, a_example kullanıcısı olarak /home/a.example/public_html dizinine kopyalanıyor ..." "$(_dt_plain "Copying the 3 missing path(s) into /home/a.example/public_html as a_example ...")"
+assert_eq   "and done" "a.example sitesinin eksik dosyaları artık burada: /home/a.example/public_html" "$(_dt_plain "The missing files of a.example are here: /home/a.example/public_html")"
+assert_eq   "--fix without --check" "--fix yalnızca --check ile kullanılır" "$(_dt_plain "--fix belongs to --check")"
+assert_eq   "--check with what it does not go with" "--only-mail, --full ya da --no-files ile birlikte kullanılmaz" "$(_dt_plain "it does not go with --only-mail, --full or --no-files")"
+assert_eq   "a domain with mail only" "m.example: yalnızca posta kutuları, karşılaştırılacak dosya yok" "$(_dt_plain "m.example: mailboxes only, no files to compare")"
+assert_eq   "sites that are not whole" "Tam değil: a.example b.example" "$(_dt_plain "Not whole: a.example b.example")"
+assert_eq   "mail that has no room" "posta kutuları 2.0 GB; kopyalanırken bunun iki katı gerekir, boş alan ise 1.5 GB" "$(_dt_plain "the mailboxes are 2.0 GB, twice that is needed while they are copied, and 1.5 GB is free")"
+assert_eq   "mail where none runs" "Postayı bir kez, gönderirken kullanacağı adla kurun, sonra getirin: setup.sh install --with-mail --mail-hostname mail.example.com   ve   setup.sh import root@old.example --only a.example --only-mail" "$(_dt_plain "Install it once, with the name it will send as, then bring them: setup.sh install --with-mail --mail-hostname mail.example.com   and   setup.sh import root@old.example --only a.example --only-mail")"
+assert_eq   "an option import cron does not know" "import cron için bilinmeyen seçenek: --x" "$(_dt_plain "Unknown option for import cron: --x")"
 # lib_tprintf: printf for a table
 _tp() { ( LIB_LANG="tr"; lib_lang_build; lib_tprintf "$@" ); }
 assert_eq   "in English it is printf, flags and all" "$(printf '%-10s|%5s|%4s%%|%d|%s\n' MODE SIZE 7 3 x)" "$(lib_tprintf '%-10s|%5s|%4s%%|%d|%s\n' MODE SIZE 7 3 x)"
