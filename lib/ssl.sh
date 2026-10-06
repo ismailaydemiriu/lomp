@@ -318,7 +318,8 @@ lib_ssl_deploy() {
     printf 'CERT_NAME=%s\nEXPIRES=%s\nDEPLOYED=%s\nISSUER=%s\n' "$domain" "$exp" "$(lib_iso_now)" "$(lib_ssl_issuer "$domain")" \
       >"$(lib_domain_state_dir "$domain")/ssl.info"
     chmod 0600 "$(lib_domain_state_dir "$domain")/ssl.info"
-    lib_json_set "$(lib_domain_json "$domain")" '.ssl.enabled = true | .ssl.cert_name = $n | .ssl.expires = $e | .ssl.updated_at = $ts' \
+    # (a certificate of its own takes the place of one "import" brought)
+    lib_json_set "$(lib_domain_json "$domain")" '.ssl.enabled = true | .ssl.cert_name = $n | .ssl.expires = $e | .ssl.updated_at = $ts | del(.ssl.imported)' \
       --arg n "$domain" --arg e "$exp" --arg ts "$(lib_iso_now)"
   fi
   lib_log_write INFO "certificate deployed for ${domain} (expires ${exp})"
@@ -372,7 +373,10 @@ lib_ssl_renew_main() {
       if (( missing )); then
         # every site that has none, the ones added with --no-ssl included: asking for all of
         # them at once is the operator saying they are wanted now
-        [[ "$(lib_json_get_raw "$(lib_domain_json "$d")" '.ssl.enabled')" == "true" ]] && continue
+        # ... and the ones that answer with a certificate "import" brought from another server:
+        # nobody renews that one
+        [[ "$(lib_json_get_raw "$(lib_domain_json "$d")" '.ssl.enabled')" == "true" \
+           && "$(lib_json_get_raw "$(lib_domain_json "$d")" '.ssl.imported')" != "true" ]] && continue
       else
         # lib_json_get would turn a literal false into "" (jq's // treats false like null)
         [[ "$(lib_json_get_raw "$(lib_domain_json "$d")" '.ssl.wanted')" == "false" ]] && continue

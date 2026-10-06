@@ -9561,7 +9561,7 @@ section "import: the sites of another server, brought here over SSH"
 # The other server is a directory tree under $TMP, and what would run there through ssh runs
 # here through sh: the listing, tar and the dump script are the real ones. mysqldump and the
 # client are stand-ins that say how they were called.
-_im_saved="$(declare -p STATE_DIR OPT_DRY_RUN MAIL_PASSWD_FILE MAIL_ALIAS_DIR CRON_FILE)"
+_im_saved="$(declare -p STATE_DIR OPT_DRY_RUN MAIL_PASSWD_FILE MAIL_ALIAS_DIR CRON_FILE IMP_SSL_CAFILE)"
 CRON_FILE="$TMP/im-cron"
 _im_orig="$(declare -f _domain_fix_owner_ids lib_require_tools lib_require_installed lib_server_mail_only lib_backup_domain \
   lib_db_create_for_domain lib_db_restore_domain lib_db_sql lib_domain_apply_config lib_ols_htaccess_reload \
@@ -9895,7 +9895,7 @@ _im_home="https://www.shop.example"; _im_add_ok=1; _im_dump_mode=""; _im_mail=0;
 _im_site() {   # domain mode
   lib_domain_state_reset
   D_DOMAIN="$1"; D_IDENT="$(lib_domain_ident "$1")"; D_USER="$D_IDENT"; D_GROUP="$D_IDENT"
-  D_HOME="$SITES_ROOT/$1"; D_MODE="$2"; D_PHP="8.3"; D_MEMORY="256M"; D_UPLOAD="64M"; D_STATUS="active"
+  D_HOME="$SITES_ROOT/$1"; D_MODE="$2"; D_PHP="8.3"; D_MEMORY="256M"; D_UPLOAD="64M"; D_STATUS="active"; D_SSL_WANTED=0   # (as "add --no-ssl" leaves it)
   lib_domain_state_save
   mkdir -p "$D_HOME/public_html" "$D_HOME/private/tmp"
   printf '<body><p>This site was %s.</p></body>\n' "$DOMAIN_PLACEHOLDER_MARK" >"$D_HOME/public_html/index.html"
@@ -10547,6 +10547,95 @@ assert_has "and says so"                               "px.example: passed on to
 assert_has "setup.sh loads the module"                 "importapp import rename menu; do" "$(cat "$ROOT/setup.sh")"
 eval "$_ia_keep"
 unset -f _ia_p _ia_q _ia_ols _ia_cmd
+
+# ---- certificates ---------------------------------------------------------------------
+# Real certificates, made here: a CA this server is told to trust, one it is not, one that calls
+# itself Cloudflare's origin CA, and leaves signed by them. (openssl with -subj; not on MSYS.)
+_is="$TMP/im-ssl"; mkdir -p "$_is"
+_is_ca() {   # name, organisation
+  openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout "$_is/$1.key" -out "$_is/$1.pem" \
+    -days 30 -subj "/O=$2/CN=$2 Root" >/dev/null 2>&1
+}
+_is_leaf() {   # name, CA, names (DNS:a,DNS:b)
+  openssl req -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout "$_is/$1.key" -out "$_is/$1.csr" -subj "/CN=leaf" >/dev/null 2>&1 \
+    && printf 'subjectAltName=%s\nbasicConstraints=CA:FALSE\n' "$3" >"$_is/$1.ext" \
+    && openssl x509 -req -in "$_is/$1.csr" -CA "$_is/$2.pem" -CAkey "$_is/$2.key" -CAcreateserial -days 30 -extfile "$_is/$1.ext" -out "$_is/$1.pem" >/dev/null 2>&1
+}
+if _is_ca good "Test Trust" && _is_ca other "Somebody Else" && _is_ca cf "CloudFlare Origin SSL Certificate Authority" \
+   && _is_leaf blog good "DNS:blog.example,DNS:www.blog.example" && _is_leaf wild good "DNS:*.example" \
+   && _is_leaf elsewhere good "DNS:elsewhere.example" && _is_leaf untrusted other "DNS:blog.example" && _is_leaf origin cf "DNS:blog.example" \
+   && openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout "$_is/self.key" -out "$_is/self.pem" -days 30 \
+        -subj "/CN=blog.example" -addext "subjectAltName=DNS:blog.example" >/dev/null 2>&1; then
+  IMP_SSL_CAFILE="$_is/good.pem"
+  _is_ok() { if _import_cert_ok "$@" >"$TMP/is-why" 2>&1; then printf 'ok'; else cat "$TMP/is-why"; fi; }
+  assert_eq  "a certificate a browser accepts for the name, with its key" "ok" "$(_is_ok blog.example "$_is/blog.pem" "$_is/blog.key")"
+  assert_eq  "a wildcard that covers the name"            "ok" "$(_is_ok blog.example "$_is/wild.pem" "$_is/wild.key")"
+  assert_has "another certificate's key"                  "its key is not the key of the certificate" "$(_is_ok blog.example "$_is/blog.pem" "$_is/wild.key")"
+  assert_has "a certificate for another name"             "it does not name blog.example" "$(_is_ok blog.example "$_is/elsewhere.pem" "$_is/elsewhere.key")"
+  assert_has "a wildcard one level too high does not cover it" "it does not name a.blog.example" "$(_is_ok a.blog.example "$_is/wild.pem" "$_is/wild.key")"
+  assert_has "one that has run out"                       "it has run out" "$(IMP_SSL_NOW=$(( $(date +%s) + 86400 * 400 )); _is_ok blog.example "$_is/blog.pem" "$_is/blog.key")"
+  assert_has "one that runs out within the day"           "it has run out" "$(IMP_SSL_NOW=$(( $(date +%s) + 86400 * 29 + 3600 )); _is_ok blog.example "$_is/blog.pem" "$_is/blog.key")"
+  assert_has "a self-signed one"                          "self-signed" "$(_is_ok blog.example "$_is/self.pem" "$_is/self.key")"
+  assert_has "one from a CA this server does not trust"   "no browser would accept it" "$(_is_ok blog.example "$_is/untrusted.pem" "$_is/untrusted.key")"
+  assert_eq  "a Cloudflare origin certificate is Cloudflare's to accept" "ok" "$(_is_ok blog.example "$_is/origin.pem" "$_is/origin.key")"
+  assert_has "something that is no certificate"           "no certificate" "$(printf 'junk\n' >"$_is/junk.pem"; _is_ok blog.example "$_is/junk.pem" "$_is/blog.key")"
+
+  # where the other server keeps them: the pair a virtual host names, or certbot's
+  mkdir -p "$_im_r/etc/letsencrypt/live/blog.example" "$_im_r/etc/letsencrypt/live/crm.example" "$_im_r/etc/letsencrypt/live/panel.example" "$_im_r/srv/certs"
+  cp "$_is/blog.pem" "$_im_r/etc/letsencrypt/live/blog.example/fullchain.pem"; cp "$_is/blog.key" "$_im_r/etc/letsencrypt/live/blog.example/privkey.pem"
+  cp "$_is/blog.pem" "$_im_r/etc/letsencrypt/live/crm.example/fullchain.pem"; cp "$_is/wild.key" "$_im_r/etc/letsencrypt/live/crm.example/privkey.pem"
+  cp "$_is/wild.pem" "$_im_r/etc/letsencrypt/live/panel.example/fullchain.pem"; cp "$_is/wild.key" "$_im_r/etc/letsencrypt/live/panel.example/privkey.pem"
+  cp "$_is/wild.pem" "$_im_r/srv/certs/shop.crt"; cp "$_is/wild.key" "$_im_r/srv/certs/shop.key"
+  printf 'vhssl  {\n  keyFile                 %s\n  certFile                %s\n}\n' "$_im_r/srv/certs/shop.key" "$_im_r/srv/certs/shop.crt" >>"$_im_l/conf/vhosts/shop.example/vhconf.conf"
+  _is_scan="$(lib_import_remote_scan | env PATH="$_im_bin:$PATH" LOMP_IMPORT_ROOT="$_im_r" LOMP_IMPORT_OWNER="$_im_me" IM_MAIL_USERS="$_im_users" sh -s)"
+  assert_has "the pair a virtual host names"              $'T\tshop.example\t'"$_im_r/srv/certs/shop.crt"$'\t'"$_im_r/srv/certs/shop.key" "$_is_scan"
+  assert_has "or the one certbot keeps under the name"    $'T\tblog.example\t'"$_im_r/etc/letsencrypt/live/blog.example/fullchain.pem"$'\t'"$_im_r/etc/letsencrypt/live/blog.example/privkey.pem" "$_is_scan"
+  assert_eq  "a name without one has none"                "0" "$(grep -c $'^T\tmailonly' <<<"$_is_scan" || true)"
+  printf '%s\n' $'T\tGood.example\t/srv/a.pem\t/srv/a.key' $'T\tgood.example\t/srv/b.pem\t/srv/b.key' $'T\tbad name\t/srv/a.pem\t/srv/a.key' \
+    $'T\tquote.example\t/srv/it\'s.pem\t/srv/a.key' $'T\tkey.example\t/srv/a.pem\t/srv/a b.key' | lib_import_scan_parse
+  assert_eq  "a certificate line counts once, when its name and both paths are what they should be" "good.example=/srv/a.pem,/srv/a.key" \
+    "${IMP_CERT_DOMAIN[*]}=${IMP_CERT_FILE[*]},${IMP_CERT_KEY[*]}"
+
+  # the command
+  : >"$_im_log"; _is_dst="$SSL_DEPLOY_DIR/blog.example"; rm -rf "$_is_dst"
+  assert_eq  "a site with a certificate there"            "0" "$(_imf old.example --only blog.example --no-mail --no-cron)"
+  assert_eq  "has it here, the very one"                  "$(cksum <"$_is/blog.pem")" "$(cksum <"$_is_dst/fullchain.pem" 2>/dev/null)"
+  assert_eq  "with its key"                               "$(cksum <"$_is/blog.key")" "$(cksum <"$_is_dst/privkey.pem" 2>/dev/null)"
+  if (( CAN_CHMOD )); then assert_eq "which only root reads" "600 700" "$(stat -c %a "$_is_dst/privkey.pem") $(stat -c %a "$_is_dst")"; fi
+  assert_eq  "the site is on HTTPS, wants to stay there, and the certificate is marked as brought" "true true true" \
+    "$(jq -r '"\(.ssl.enabled) \(.ssl.wanted) \(.ssl.imported)"' "$(lib_domain_json blog.example)")"
+  assert_has "the web server is told"                     "apply blog.example" "$(cat "$_im_log")"
+  assert_has "that it answers over HTTPS is said"         "blog.example answers over HTTPS with the certificate it had there" "$(cat "$_im_out")"
+  assert_has "and that nobody renews it"                  "setup.sh renew-ssl blog.example" "$(cat "$_im_out")"
+  assert_lacks "the key is not printed"                   "PRIVATE KEY" "$(cat "$_im_out")"
+  assert_lacks "or logged"                                "PRIVATE KEY" "$(cat "$LOG_FILE")"
+  assert_has "where it came from is on record"            "IMPORTED=root@old.example" "$(cat "$STATE_DIR/domains/blog.example/ssl.info")"
+  # another one there, and this one still only brought: the newer one comes
+  cp "$_is/origin.pem" "$_im_r/etc/letsencrypt/live/blog.example/fullchain.pem"; cp "$_is/origin.key" "$_im_r/etc/letsencrypt/live/blog.example/privkey.pem"
+  assert_eq  "a certificate that was only brought is replaced by the one there now" "0" "$(_imf old.example --only blog.example --no-mail --no-cron)"
+  assert_eq  "which is in place"                          "$(cksum <"$_is/origin.pem")" "$(cksum <"$_is_dst/fullchain.pem")"
+  # a certificate of its own: the site keeps it
+  lib_json_set "$(lib_domain_json blog.example)" 'del(.ssl.imported)'
+  cp "$_is/blog.pem" "$_im_r/etc/letsencrypt/live/blog.example/fullchain.pem"; cp "$_is/blog.key" "$_im_r/etc/letsencrypt/live/blog.example/privkey.pem"
+  assert_eq  "a site that has a certificate of its own here" "0" "$(_imf old.example --only blog.example --no-mail --no-cron)"
+  assert_eq  "keeps it"                                   "$(cksum <"$_is/origin.pem")" "$(cksum <"$_is_dst/fullchain.pem")"
+  assert_has "which is said"                              "blog.example has a certificate of its own here" "$(cat "$_im_out")"
+  # a pair that is none
+  rm -rf "$SSL_DEPLOY_DIR/crm.example"
+  assert_eq  "a key that is not the certificate's"        "0" "$(_imf old.example --only crm.example --no-mail --no-cron --no-db)"
+  assert_has "is not brought, and why"                    "The certificate of crm.example was not brought: its key is not the key of the certificate" "$(cat "$_im_out")"
+  assert_false "nothing is put in place"                  test -e "$SSL_DEPLOY_DIR/crm.example/fullchain.pem"
+  assert_eq  "and the site stays on HTTP"                 "false" "$(jq -r '.ssl.enabled // false' "$(lib_domain_json crm.example)")"
+  rm -rf "$SSL_DEPLOY_DIR/panel.example"
+  assert_eq  "--no-ssl leaves a certificate that is good"  "0" "$(_imf old.example --only panel.example --no-mail --no-cron --no-ssl)"
+  assert_false "where it is"                              test -e "$SSL_DEPLOY_DIR/panel.example/fullchain.pem"
+  assert_eq  "without it, it comes"                       "0" "$(_imf old.example --only panel.example --no-mail --no-cron)"
+  assert_true "a wildcard for its name"                   test -s "$SSL_DEPLOY_DIR/panel.example/fullchain.pem"
+  unset -f _is_ok
+fi
+assert_has "renew-ssl --missing counts a site whose certificate was only brought" "'.ssl.imported')\" != \"true\" ]] && continue" "$(declare -f lib_ssl_renew_main)"
+assert_has "and a certificate of its own takes the mark away" "del(.ssl.imported)" "$(declare -f lib_ssl_deploy)"
+unset -f _is_ca _is_leaf
 
 eval "$_im_orig"; eval "$_im_saved"
 unset -f _im_row _im_mrow _im_php _im_lim _im_crow _im_f _im_rw _im_pick _im_dump _im_site _imf

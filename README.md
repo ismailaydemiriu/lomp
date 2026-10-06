@@ -535,8 +535,27 @@ names what is larger on the other server.
   list with what the other server has then; `rename` and `remove` take the jobs along, a
   backup of the site carries them, and `restore` writes them into cron again.
 
-The other server is only read. Certificates are not copied, and neither is
-anything outside a site's document root. The sites answer over HTTP here until the DNS of a
+**The certificate a site answers with there comes too**, with its key, so that the site
+answers over HTTPS here before its DNS has moved - which is when you want to look at it, and
+what Cloudflare in Full (strict) asks of the new server from the first request.
+
+- it is the pair the site's OpenLiteSpeed virtual host names (`certFile`, `keyFile`), or the
+  one certbot keeps for the domain (`/etc/letsencrypt/live/<domain>/`); certificates another
+  web server is configured with elsewhere are not looked for;
+- it is put in place only when it would do its job: the key is the certificate's, the
+  certificate names the domain (or is a wildcard for it), it has more than a day left, and a
+  browser would accept it - its chain leads to a CA this server trusts. A Cloudflare origin
+  certificate is accepted as it is: Cloudflare is who asks for it. Anything else - self-signed,
+  run out, for another name - stays there, the run says why, and the site answers over HTTP;
+- a site that has a certificate of its own here keeps it;
+- **nobody renews an imported certificate.** It is marked as brought, `lomp ssl` shows it, and
+  once the DNS points here `sudo lomp renew-ssl <domain>` - or `renew-ssl --missing`, which
+  counts every such site - gets the site one of its own, which then takes its place;
+- `--no-ssl` leaves the certificates where they are. The key travels over the SSH connection
+  and is never printed or logged.
+
+The other server is only read. Nothing outside a site's document root is copied, apart from
+what is listed above. The sites answer over HTTP here until the DNS of a
 domain points to this server; then `sudo lomp renew-ssl <domain>` gets its certificate.
 
 **Running the import again for a site brings what changed in the meantime** - worth doing once

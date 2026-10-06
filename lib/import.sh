@@ -22,6 +22,12 @@ IMP_DEF_MEM=0 IMP_DEF_UPL=0
 # one entry per cron job found: the document root it belongs to, when it runs, what it runs
 declare -ga IMP_CRON_ROOT=() IMP_CRON_WHEN=() IMP_CRON_CMD=()
 IMP_OPT_FULL=0
+# one entry per certificate found: the domain, the certificate file there, its key file
+declare -ga IMP_CERT_DOMAIN=() IMP_CERT_FILE=() IMP_CERT_KEY=()
+IMP_OPT_NO_SSL=0
+# the CA file a certificate is checked against ("": the system's), and what counts as now (tests)
+IMP_SSL_CAFILE="${IMP_SSL_CAFILE:-}"
+IMP_SSL_NOW="${IMP_SSL_NOW:-}"
 IMP_OPT_NO_CRON=0
 IMP_OPT_CHECK=0 IMP_OPT_FIX=0
 # directories that are served there under no name this server could give a site
@@ -62,6 +68,7 @@ Kullanım: setup.sh import <[user@]host> [seçenekler]
   --no-db  --no-files    Veritabanları ya da dosyalar dışarıda bırakılır
   --no-mail              Posta kutuları dışarıda bırakılır
   --no-cron              Cron işleri dışarıda bırakılır
+  --no-ssl               Sertifikalar dışarıda bırakılır
   --full                 Yalnızca son aktarımdan beri orada değişenleri değil, her dosyayı yeniden kopyalar
   --check                Hiçbir şeyi değiştirmez: sitenin orada ve burada olan her dosya ve dizinini
                          karşılaştırır, eksik olanları (en üst yolları) ve boyutu farklı olanları söyler
@@ -79,6 +86,12 @@ Kullanım: setup.sh import <[user@]host> [seçenekler]
   Eklenen site, bu sunucu kurabiliyorsa öteki sunucuda çalıştığı PHP sürümünü alır (OpenLiteSpeed
   yapılandırmasından okunur); memory_limit ve upload_max_filesize değerleri de
   bu sunucunun verdiğinden büyükse korunur. Burada zaten olan site kendi ayarlarını korur.
+  Sitenin orada sunduğu sertifika da anahtarıyla birlikte gelir; böylece site, DNS taşınmadan
+  önce burada HTTPS ile yanıt verir: OpenLiteSpeed sanal konağının gösterdiği ya da certbot'un
+  o alan adı için tuttuğu sertifika. Yalnızca bir tarayıcı bugün o alan adı için kabul
+  edecekse (ya da bir Cloudflare origin sertifikasıysa) alınır; burada sertifikası olan site
+  kendisininkini korur. Aktarılan sertifika yenilenmez: DNS buraya yönlenince
+  "setup.sh renew-ssl --missing" böyle her siteye kendi sertifikasını alır.
   Sitenin cron işleri de onunla gelir ve burada sitenin kendi kullanıcısı olarak çalışır:
   dosyalarının sahibi olan hesabın crontab'ı ile root'un crontab'ında ve /etc/cron.d içinde
   sitenin dizinini ya da alan adını içeren satırlar; yollar bu sunucuya göre yeniden yazılır.
@@ -126,6 +139,7 @@ Usage: setup.sh import <[user@]host> [options]
   --no-db  --no-files    Leave the databases, or the files, out
   --no-mail              Leave the mailboxes out
   --no-cron              Leave the cron jobs out
+  --no-ssl               Leave the certificates out
   --full                 Copy every file again, not only what changed there since the last import
   --check                Change nothing: compare every file and directory of the site there with
                          what is here, and name what is missing (the topmost paths) and what has
@@ -144,6 +158,12 @@ Usage: setup.sh import <[user@]host> [options]
   configuration) when this server can install it, and its memory_limit and
   upload_max_filesize where they are above what this server gives; a site that is here
   keeps its own.
+  The certificate a site answers with there comes too, with its key, so that the site
+  answers over HTTPS here before its DNS has moved: the one its OpenLiteSpeed virtual host
+  names, or the one certbot keeps for the domain. It is taken only when a browser would
+  accept it for the domain today (or it is a Cloudflare origin certificate); a site that has
+  a certificate here keeps its own. An imported certificate is not renewed: once the DNS
+  points here, "setup.sh renew-ssl --missing" gets every such site one of its own.
   The cron jobs of a site come with it and run here as the site's user: the crontab of the
   account that owns its files, and the lines of root's crontab and /etc/cron.d that name its
   directory or its domain, with the paths rewritten for this server. They go on running on
@@ -360,6 +380,7 @@ _import_mb() {   # kilobytes -> "12 MB"
 #   U <user it runs as>
 #   S <domain|-> <document root> <kilobytes> <static|php|wordpress> <database|-> <www 0|1> <wp-config.php|-> <ols|dir|path> <PHP version|-> <memory_limit|-> <upload_max_filesize|->
 #   C <document root> <when: five fields or @word> <command>
+#   T <domain> <certificate file> <key file>
 #   M <address> <its Maildir|-> <kilobytes> <password hash|->
 #   A <alias address, or @domain> <where it goes, addresses divided by commas>
 # The database of a site that is no WordPress is the one its own configuration files name
@@ -512,6 +533,20 @@ dbconf_pick() {
     fi
     printf 'N\t%s\n' "$pf"
   done | awk -F"$TAB" '$1 == "T" { print $2; t = 1; exit } $1 == "N" && n == "" { n = $2 } END { if (!t && n != "") print n }'
+}
+# The certificate a name answers with: the pair its virtual host names, or the one certbot
+# keeps under the name. Only where the two files are - what is in them is judged over here.
+ssl_row() {   # domain [virtual host configuration]
+  case "$1" in ''|-|*[!a-z0-9.-]*) return 0 ;; esac
+  sc=""; sk=""
+  if [ -n "${2:-}" ] && [ -r "$2" ]; then
+    sc="$(awk '$1 == "certFile" { print $2; exit }' "$2" 2>/dev/null)"; sk="$(awk '$1 == "keyFile" { print $2; exit }' "$2" 2>/dev/null)"
+  fi
+  if [ ! -s "$sc" ] || [ ! -s "$sk" ]; then
+    sc="${R:-}/etc/letsencrypt/live/$1/fullchain.pem"; sk="${R:-}/etc/letsencrypt/live/$1/privkey.pem"
+  fi
+  [ -s "$sc" ] && [ -s "$sk" ] || return 0
+  printf 'T\t%s\t%s\t%s\n' "$1" "$sc" "$sk"
 }
 IMPORT_LIB
 }
@@ -715,6 +750,7 @@ if [ -r "$L/conf/httpd_config.conf" ]; then
       seen="$seen$b "
       case "$dml" in *" www.$b "*) w=1 ;; *) w=0 ;; esac
       row "$b" "$dr" "$w" ols "$pv" "$pm" "$pu"
+      ssl_row "$b" "$cf"
     done
     set +f
     [ "$seen" != " " ] || row - "$dr" 0 ols "$pv" "$pm" "$pu"
@@ -742,6 +778,7 @@ for base in "$R/home" "$R/var/www" "$R/www/wwwroot" "$R/var/www/vhosts"; do
       *) name=- ;;
     esac
     row "$name" "$root" 0 dir
+    ssl_row "$name"
   done
 done
 exit 0
@@ -821,10 +858,22 @@ lib_import_scan_parse() {   # reads the listing from stdin
   IMP_CRON_ROOT=() IMP_CRON_WHEN=() IMP_CRON_CMD=()
   IMP_BOX=() IMP_BOX_DIR=() IMP_BOX_KB=() IMP_BOX_HASH=() IMP_ALIAS=() IMP_ALIAS_TO=()
   IMP_REMOTE_USER=""
+  IMP_CERT_DOMAIN=() IMP_CERT_FILE=() IMP_CERT_KEY=()
   lib_importapp_reset
   while IFS=$'\t' read -r tag domain root kb kind db www conf _ php mem upl _; do
     # a name that is passed on to a port, and its database (lib/importapp.sh)
     if [[ "$tag" == "P" ]]; then lib_importapp_row "$domain" "$root" "$kb" "$kind" "$db" "$www" "$conf" "$php" "$mem" "$upl"; continue; fi
+    if [[ "$tag" == "T" ]]; then
+      # a certificate: the name, and where its two files are
+      domain="${domain,,}"
+      lib_domain_valid "$domain" && _import_path_ok "$root" && _import_path_ok "$kb" || continue
+      dup=0
+      for x in ${IMP_CERT_DOMAIN[@]+"${IMP_CERT_DOMAIN[@]}"}; do
+        if [[ "$x" == "$domain" ]]; then dup=1; break; fi
+      done
+      (( dup )) || { IMP_CERT_DOMAIN+=("$domain"); IMP_CERT_FILE+=("$root"); IMP_CERT_KEY+=("$kb"); }
+      continue
+    fi
     if [[ "$tag" == "Q" ]]; then lib_importapp_db_row "$domain" "$root" "$kb"; continue; fi
     if [[ "$tag" == "C" ]]; then
       # document root, when, command - in the variables of a site line. The command is the
@@ -1251,6 +1300,81 @@ lib_import_db() {   # domain, database there, the file that names its login ("-"
          "its tables may be half replaced: run the import again$( (( created )) || printf ', or go back with: setup.sh restore %s --file <the pre-import archive>' "$domain")"
 }
 
+# ---- certificates -------------------------------------------------------------------
+# Is this pair one to put in front of visitors: the key is the certificate's, the certificate
+# names the domain, it has more than a day left, and a client accepts it - checked against
+# the CAs this server trusts, with the chain the file brings. A Cloudflare origin certificate
+# is accepted by Cloudflare alone, and that is who asks for it. Says why not on stdout.
+_import_cert_ok() {   # domain, certificate file, key file
+  local d="$1" cert="$2" key="$3" a="" b="" names="" end="" now="" issuer="" subject="" parent=""
+  openssl x509 -noout -in "$cert" >/dev/null 2>&1 || { printf 'what was sent is no certificate'; return 1; }
+  a="$(openssl x509 -noout -pubkey -in "$cert" 2>/dev/null | openssl pkey -pubin -outform DER 2>/dev/null | sha256sum | cut -d' ' -f1)"
+  b="$(openssl pkey -in "$key" -pubout -outform DER 2>/dev/null | sha256sum | cut -d' ' -f1)"
+  [[ -n "$a" && "$a" == "$b" ]] || { printf 'its key is not the key of the certificate'; return 1; }
+  names="$(openssl x509 -noout -ext subjectAltName -in "$cert" 2>/dev/null | tr ',' '\n' | sed -n 's/.*DNS:[[:space:]]*\([^[:space:],]\{1,\}\).*/\1/p' | tr 'A-Z' 'a-z')"
+  parent="${d#*.}"
+  grep -qxF -- "$d" <<<"$names" || grep -qxF -- "*.${parent}" <<<"$names" || { printf 'it does not name %s' "$d"; return 1; }
+  end="$(lib_ssl_expiry_epoch "$cert")"; now="${IMP_SSL_NOW:-$(date +%s)}"
+  [[ "$end" =~ ^[0-9]+$ ]] && (( end > now + 86400 )) || { printf 'it has run out, or does so within a day'; return 1; }
+  issuer="$(openssl x509 -noout -issuer -in "$cert" 2>/dev/null | sed 's/^issuer= *//')"
+  subject="$(openssl x509 -noout -subject -in "$cert" 2>/dev/null | sed 's/^subject= *//')"
+  [[ "$issuer" != "$subject" ]] || { printf 'it is self-signed: no browser accepts it'; return 1; }
+  if [[ "$issuer" == *"CloudFlare Origin"* ]]; then return 0; fi
+  if [[ -n "$IMP_SSL_CAFILE" ]]; then openssl verify -purpose sslserver -CAfile "$IMP_SSL_CAFILE" -untrusted "$cert" "$cert" >/dev/null 2>&1
+  else openssl verify -purpose sslserver -untrusted "$cert" "$cert" >/dev/null 2>&1; fi \
+    || { printf 'no browser would accept it: its chain does not lead to a CA this server trusts'; return 1; }
+  return 0
+}
+
+# The certificate the site answered with there, in front of the site here - so that HTTPS
+# answers before the DNS has moved. It is nobody's to renew: marked as imported, it is one of
+# the sites "renew-ssl --missing" gets a certificate of their own once the DNS points here.
+lib_import_ssl() {   # domain  (the site is here)
+  local domain="$1" k=0 found=-1 work="" why="" dst="" exp=""
+  for (( k = 0; k < ${#IMP_CERT_DOMAIN[@]}; k++ )); do
+    if [[ "${IMP_CERT_DOMAIN[k]}" == "$domain" ]]; then found=$k; break; fi
+  done
+  (( found >= 0 )) || return 0
+  lib_domain_registered "$domain" || return 0
+  lib_domain_state_load "$domain"
+  if (( D_SSL )) && lib_ssl_deployed "$domain" && [[ "$(lib_json_get_raw "$(lib_domain_json "$domain")" '.ssl.imported')" != "true" ]]; then
+    lib_note "${domain} has a certificate of its own here; the one of the other server was left there"
+    return 0
+  fi
+  work="$(lib_mktemp -d)"; chmod 0700 "$work"
+  ( umask 077
+    _import_ssh "cat '${IMP_CERT_FILE[found]}'" </dev/null >"${work}/fullchain.pem" 2>>"$LOG_FILE" \
+      && _import_ssh "cat '${IMP_CERT_KEY[found]}'" </dev/null >"${work}/privkey.pem" 2>>"$LOG_FILE" ) \
+    || { lib_warn "The certificate of ${domain} could not be read there; the site answers over HTTP until it has one (setup.sh renew-ssl ${domain})"; rm -rf "$work"; return 0; }
+  if ! why="$(_import_cert_ok "$domain" "${work}/fullchain.pem" "${work}/privkey.pem")"; then
+    lib_warn "The certificate of ${domain} was not brought: ${why}. The site answers over HTTP until it has one (setup.sh renew-ssl ${domain})"
+    rm -rf "$work"; return 0
+  fi
+  if (( D_WWW )) && ! openssl x509 -noout -ext subjectAltName -in "${work}/fullchain.pem" 2>/dev/null | grep -qiE "DNS:(www\.${domain//./\\.}|\*\.${domain//./\\.})([, ]|\$)"; then
+    lib_warn "The certificate of ${domain} does not name www.${domain}: that name will show a certificate warning until the site has one of its own"
+  fi
+  dst="${SSL_DEPLOY_DIR}/${domain}"
+  lib_mkdir "$SSL_DEPLOY_DIR" 0700 root:root
+  lib_mkdir "$dst" 0700 root:root
+  cp "${work}/fullchain.pem" "${dst}/fullchain.pem.new" && cp "${work}/privkey.pem" "${dst}/privkey.pem.new" && chmod 0600 "${dst}"/*.new \
+    && mv -f "${dst}/fullchain.pem.new" "${dst}/fullchain.pem" && mv -f "${dst}/privkey.pem.new" "${dst}/privkey.pem" \
+    || { lib_warn "The certificate of ${domain} could not be put in place (see the log)"; rm -rf "$work"; return 0; }
+  rm -rf "$work"
+  exp="$(openssl x509 -enddate -noout -in "${dst}/fullchain.pem" 2>/dev/null | cut -d= -f2)"
+  D_SSL=1; D_SSL_WANTED=1
+  lib_domain_state_save
+  lib_json_set "$(lib_domain_json "$domain")" '.ssl.enabled = true | .ssl.imported = true | .ssl.cert_name = $n | .ssl.expires = $e | .ssl.updated_at = $ts' \
+    --arg n "$domain" --arg e "$exp" --arg ts "$(lib_iso_now)"
+  printf 'CERT_NAME=%s\nEXPIRES=%s\nDEPLOYED=%s\nISSUER=%s\nIMPORTED=%s\n' "$domain" "$exp" "$(lib_iso_now)" "$(lib_ssl_issuer "$domain")" "$IMP_SSH_TARGET" \
+    >"$(lib_domain_state_dir "$domain")/ssl.info"
+  chmod 0600 "$(lib_domain_state_dir "$domain")/ssl.info"
+  lib_domain_apply_config "serve ${domain} with the certificate it had on the other server" \
+    || { lib_warn "The certificate of ${domain} is in place, but the web server did not take it (setup.sh doctor)"; return 0; }
+  lib_log_write INFO "certificate of ${domain} imported from ${IMP_SSH_TARGET} (expires ${exp})"
+  lib_ok "${domain} answers over HTTPS with the certificate it had there (it runs out ${exp})"
+  lib_note "Nobody renews that one. Once the DNS of ${domain} points here: setup.sh renew-ssl ${domain}   (or --missing, for every such site)"
+}
+
 _import_add() {   # domain add-options...
   SERVER_SETUP_LOCKED=1 "$SCRIPT_PATH" add "$@" --yes --quiet
 }
@@ -1288,6 +1412,7 @@ lib_import_site() {   # index
   else
     lib_import_site_part "$i"
   fi
+  if (( ! IMP_OPT_NO_SSL && ! IMP_OPT_ONLY_MAIL )) && [[ "${IMP_KIND[i]}" != "mail" ]]; then lib_import_ssl "$domain"; fi
   if (( ! IMP_OPT_NO_MAIL )); then lib_import_mail "$domain"; fi
   return 0
 }
@@ -1622,7 +1747,7 @@ lib_import_main() {
   local a="" target="" port="22" key="" pwfile="" list=0 all=0 only="" no_create=0 path="" as="" dbname=""
   local i=0 n=0 here="" ans="" x="" total_kb=0 avail_kb=0 found=0 okc=0 what="" mkb=0 mail_kb=0 crons=0 limits=""
   local -a chosen=() todo=() failed=()
-  IMP_OPT_NO_DB=0; IMP_OPT_NO_FILES=0; IMP_OPT_NO_MAIL=0; IMP_OPT_ONLY_MAIL=0; IMP_OPT_NO_CRON=0; IMP_OPT_FULL=0; IMP_OPT_CHECK=0; IMP_OPT_FIX=0
+  IMP_OPT_NO_DB=0; IMP_OPT_NO_FILES=0; IMP_OPT_NO_MAIL=0; IMP_OPT_ONLY_MAIL=0; IMP_OPT_NO_CRON=0; IMP_OPT_FULL=0; IMP_OPT_CHECK=0; IMP_OPT_FIX=0; IMP_OPT_NO_SSL=0
   while (($# > 0)); do
     a="$1"; shift
     case "$a" in
@@ -1640,6 +1765,7 @@ lib_import_main() {
       --no-db)         IMP_OPT_NO_DB=1 ;;
       --no-files)      IMP_OPT_NO_FILES=1 ;;
       --no-cron)       IMP_OPT_NO_CRON=1 ;;
+      --no-ssl)        IMP_OPT_NO_SSL=1 ;;
       --full)          IMP_OPT_FULL=1 ;;
       --check)         IMP_OPT_CHECK=1 ;;
       --fix)           IMP_OPT_FIX=1 ;;
@@ -1857,7 +1983,7 @@ lib_import_main() {
     lib_ok "${okc} site(s) imported from ${IMP_SSH_TARGET}"
     lib_note "They answer over HTTP here. To see one before its DNS moves, put this server's address and the domain into your own computer's hosts file."
     lib_note "Once a domain's DNS points here, its certificate: setup.sh renew-ssl <domain>"
-    lib_note "Not copied: certificates, sieve filters of the mail. The other server was only read."
+    lib_note "Not copied: sieve filters of the mail. The other server was only read."
   fi
   if ((${#failed[@]} > 0)); then
     lib_die "Not imported: ${failed[*]}" "see the errors above" "clear them up and run the import again for those: --only $(IFS=,; printf '%s' "${failed[*]}")"

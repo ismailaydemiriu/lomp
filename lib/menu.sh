@@ -173,7 +173,8 @@ KOMUTLAR
                                 çalıştığı PHP sürümünü alır (bu sunucunun verdiğinden büyük
                                 memory_limit ya da yükleme boyutu da korunur), cron işleri burada sitenin
                                 kullanıcısı olarak çalışır. Bir porta iletilen ad, uygulamasıyla
-                                bir Node.js sitesi ya da bir proxy olarak gelir. Öteki sunucu
+                                bir Node.js sitesi ya da bir proxy olarak gelir. Sitenin orada
+                                sunduğu sertifika da gelir (--no-ssl). Öteki sunucu
                                 yalnızca okunur
                                 (--list --all --only a.com,b.com --no-create --no-mail
                                 --only-mail --no-cron --port N --key FILE --password-file FILE
@@ -435,6 +436,7 @@ COMMANDS
                                 size above this server's own), and its cron jobs run here
                                 as the site's user. A name that is passed on to a port
                                 comes as a Node.js site with its application, or as a proxy.
+                                The certificate a site answers with comes too (--no-ssl).
                                 The other server is only read (--list
                                 --all --only a.com,b.com --no-create --no-mail --only-mail
                                 --no-cron --port N --key FILE --password-file FILE --path DIR

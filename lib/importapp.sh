@@ -68,6 +68,7 @@ app_emit() {   # domain target source [application directory, command line, memo
     [ -n "$adb" ] && [ -n "$aconf" ] || { adb=-; aconf=-; }
   fi
   printf 'Q\t%s\t%s\t%s\n' "$ad" "$adb" "$aconf"
+  ssl_row "$ad"
 }
 app_names() {   # target source, the names on stdin (blanks between them): one entry a name
   set -f
