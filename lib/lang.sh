@@ -2702,7 +2702,7 @@ LIB_TR_PAIRS=(
   'what it is passed on to is not known any more' 'nereye iletildiği artık bilinmiyor'
   'run the import again' 'aktarımı yeniden çalıştırın'
   'there its address is passed on to an application' 'orada adresi bir uygulamaya iletiliyor'
-  'remove it here first, or import that name under another one' 'önce buradakini kaldırın ya da o adı başka bir adla aktarın'
+  'remove it here first, or import that name under another one' 'önce buradakini kaldırın ya da oradakini başka bir adla aktarın'
   'there it runs one, in {1}' 'orada {1} içinde bir uygulama çalıştırıyor'
   'remove it here first: the import adds it with its application' 'önce buradakini kaldırın: aktarım onu uygulamasıyla birlikte ekler'
   'what {1} holds could not all be copied into {2}/public_html' '{1} içindekilerin bir kısmı {2}/public_html dizinine kopyalanamadı'
