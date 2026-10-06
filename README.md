@@ -525,7 +525,7 @@ time. What follows from that:
 - a file deleted there is not deleted here - nothing here is ever deleted by an import;
 - `--check` changes nothing: it lists every file and directory of the site there and names what is
   missing here (the topmost paths) and what has another size; `--check --fix` brings the missing
-  ones and overwrites nothing. Directories named `cache`, `.cache` and `caches` are left out;
+  ones and overwrites nothing. Directories named `cache`, `.cache` and `caches` are left out of the copy and of the check;
 - `--full` copies every file again, and so does the first import after a `restore` of the site,
   an import from another server or another directory, and a server whose `find` is too old to
   be asked.

@@ -1401,7 +1401,7 @@ lib_import_site_part() {   # index
       since="$(_import_mark_get "$domain" "${now#* }" "$root" || true)"
     fi
     if [[ -n "$since" ]]; then
-      got="$(_import_ssh "cd '${root}' && l=\$(mktemp) && find . -mindepth 1 -path ./wp-content/cache -prune -o -newerct '@${since}' -print0 >\"\$l\" && printf '%s %s\n' \"\$(tr -cd '\\000' <\"\$l\" | wc -c)\" \"\$l\"" </dev/null 2>>"$LOG_FILE" || true)"
+      got="$(_import_ssh "cd '${root}' && l=\$(mktemp) && find . -mindepth 1 \( -name cache -o -name .cache -o -name caches \) -prune -o -newerct '@${since}' -print0 >\"\$l\" && printf '%s %s\n' \"\$(tr -cd '\\000' <\"\$l\" | wc -c)\" \"\$l\"" </dev/null 2>>"$LOG_FILE" || true)"
       read -r changed list _ <<<"$got"
       if ! [[ "$changed" =~ ^[0-9]+$ ]] || ! _import_path_ok "$list"; then
         # an older find, or no room for the list: everything, then
@@ -1422,7 +1422,7 @@ lib_import_site_part() {   # index
              "what was copied stays; run the import again to complete it"
     else
       lib_info "Copying the files ($(_import_mb "${IMP_KB[i]}")) into ${docroot} as ${D_USER} ..."
-      _import_ssh "tar -C '${root}' --exclude=./wp-content/cache -czf - . ; r=\$?; [ \"\$r\" -le 1 ]" </dev/null 2>>"$LOG_FILE" \
+      _import_ssh "tar -C '${root}' --exclude=cache --exclude=.cache --exclude=caches -czf - . ; r=\$?; [ \"\$r\" -le 1 ]" </dev/null 2>>"$LOG_FILE" \
         | _import_unpack "$docroot" \
         || lib_die "The files of ${domain} could not all be copied" \
              "the connection dropped, the disk is full, or ${IMP_SSH_TARGET} cannot read everything in ${root} (see the log)" \
