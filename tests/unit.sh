@@ -7087,6 +7087,8 @@ _sc_script="$SCRIPT_PATH"; SCRIPT_PATH="$_sc/child.sh"
 {
   printf '%s\n' '#!/usr/bin/env bash'
   printf 'printf "%%s\\n" "$*" >>"%s"\n' "$_sc/child.log"
+  # "redirect add <name> ...": certbot issues one for the name - a lineage - unless it is stuck
+  printf 'if [[ "$1" == redirect && ! -e "%s/stuck-$3" ]]; then mkdir -p "%s/$3"; printf c >"%s/$3/fullchain.pem"; fi\n' "$_sc" "$LE_LIVE" "$LE_LIVE"
   printf '%s\n' '[[ "$2" != bad.test ]]'
 } >"$SCRIPT_PATH"
 chmod +x "$SCRIPT_PATH"
@@ -7116,6 +7118,47 @@ for _d in asked.test never.test bad.test; do printf '{"ssl":{"enabled":true}}\n'
 : >"$_sc/child.log"
 assert_eq   "nothing missing is no failure"                            0 "$(run_isolated _sc_tee lib_ssl_renew_main --missing)"
 assert_eq   "and nothing is asked for"                                 "" "$(cat "$_sc/child.log")"
+# ---- ... and for a name that only redirects, where what it answers with is a copy ----
+# The site it was had its certificate from an import (a copy: deployed, no lineage at certbot)
+# and was renamed since. The mark --missing reads for sites went with the site's record.
+_sc_red() {   # name www(true/false) deployed(0/1) lineage(0/1)
+  mkdir -p "$STATE_DIR/domains/$1"
+  printf '{"domain":"%s","kind":"redirect","target":"target.test","www":%s}\n' "$1" "$2" >"$STATE_DIR/domains/$1/redirect.json"
+  if (( $3 )); then mkdir -p "$SSL_DEPLOY_DIR/$1"; printf c >"$SSL_DEPLOY_DIR/$1/fullchain.pem"; printf k >"$SSL_DEPLOY_DIR/$1/privkey.pem"; fi
+  if (( $4 )); then mkdir -p "$LE_LIVE/$1"; printf c >"$LE_LIVE/$1/fullchain.pem"; fi
+}
+_sc_red copy.test  true  1 0
+_sc_red stuck.test false 1 0
+_sc_red own.test   false 1 1
+_sc_red none.test  false 0 0
+: >"$_sc/stuck-stuck.test"; : >"$_sc/child.log"
+assert_eq   "a redirect that got none of its own makes the run fail"   1 "$(run_isolated _sc_tee lib_ssl_renew_main --missing)"
+_o="$(cat "$_sc/child.log")"
+assert_has  "a redirect that answers under a copy is taken, www with it" "redirect add copy.test target.test --www --yes" "$_o"
+assert_has  "and one without www, without"                             "redirect add stuck.test target.test --yes" "$_o"
+assert_lacks "one whose certificate certbot renews is left alone"      "own.test" "$_o"
+assert_lacks "and so is one that has none: it redirects over HTTP, perhaps on purpose" "none.test" "$_o"
+assert_lacks "no site is asked for again"                              "renew-ssl" "$_o"
+assert_has  "the one that still has no lineage is named"               "failed for: stuck.test" "$(cat "$_sc/out")"
+assert_has  "and how many are done"                                    "the 1 of 2 that got one are done" "$(cat "$_sc/out")"
+: >"$_sc/child.log"
+assert_eq   "--staging leaves a redirect out: there is no rehearsal for it" 0 "$(run_isolated _sc_tee lib_ssl_renew_main --missing --staging)"
+assert_eq   "nothing is asked for it"                                  "" "$(cat "$_sc/child.log")"
+assert_has  "and it is said"                                           "stuck.test is a redirect and is left out of a --staging run" "$(cat "$_sc/out")"
+: >"$_sc/child.log"
+_sc_rc="$(run_isolated _sc_tee lib_ssl_renew_main --all)"
+assert_has  "--all is about the sites, as it was"                      "renew-ssl has.test --yes" "$(cat "$_sc/child.log")"
+assert_lacks "it takes no redirect"                                    "redirect" "$(cat "$_sc/child.log")"
+rm -f "$_sc/stuck-stuck.test"; : >"$_sc/child.log"
+assert_eq   "once it can be had the run succeeds"                      0 "$(run_isolated _sc_tee lib_ssl_renew_main --missing)"
+assert_eq   "only the one that was left is asked for"                  "redirect add stuck.test target.test --yes" "$(cat "$_sc/child.log")"
+assert_has  "it is said what was done"                                 "1 redirect(s) that answered under a copied certificate have one of their own now" "$(cat "$_sc/out")"
+assert_lacks "and no site is said to have been renewed"                "SSL renewal finished" "$(cat "$_sc/out")"
+: >"$_sc/child.log"
+assert_eq   "after that nothing is missing"                            0 "$(run_isolated _sc_tee lib_ssl_renew_main --missing)"
+assert_eq   "and nothing is asked for any more"                        "" "$(cat "$_sc/child.log")"
+assert_has  "which is said as before"                                  "Every site already has a certificate" "$(cat "$_sc/out")"
+unset -f _sc_red
 STATE_DIR="$_sc_state"; SCRIPT_PATH="$_sc_script"
 
 # ---- reaching it ----
@@ -7164,7 +7207,14 @@ _rn_stubs='
   lib_mail_installed() { [[ -e "$_rn/mail-installed" ]]; }
   lib_mail_domain_has_traces() { [[ -e "$_rn/mail-traces-$1" ]]; }
   lib_ssl_dns_check() { SSL_LAST_ERROR="no A record"; return "$(cat "$_rn/dns-rc" 2>/dev/null || printf 0)"; }
-  lib_ssl_obtain_names() { printf "obtain %s\n" "$*" >>"$_rn/calls"; SSL_LAST_ERROR="certbot said no"; [[ -e "$_rn/certbot-works" ]] || return 1; mkdir -p "$SSL_DEPLOY_DIR/$1"; printf c >"$SSL_DEPLOY_DIR/$1/fullchain.pem"; printf k >"$SSL_DEPLOY_DIR/$1/privkey.pem"; }
+  # certbot, standing in: what it issues has a lineage of its own ($LE_LIVE) and a deployed copy
+  lib_ssl_obtain_names() {
+    printf "obtain %s\n" "$*" >>"$_rn/calls"; SSL_LAST_ERROR="certbot said no"
+    [[ ! -e "$_rn/certbot-dies" ]] || lib_die "certbot fell over"
+    [[ -e "$_rn/certbot-works" ]] || return 1
+    mkdir -p "$SSL_DEPLOY_DIR/$1" "$LE_LIVE/$1"; printf c >"$LE_LIVE/$1/fullchain.pem"
+    printf c >"$SSL_DEPLOY_DIR/$1/fullchain.pem"; printf k >"$SSL_DEPLOY_DIR/$1/privkey.pem"
+  }
   lib_ssl_cert_covers() { local c="$1" n=""; shift; for n in "$@"; do grep -qxF -- "$n" "$_rn/covers-$c" 2>/dev/null || return 1; done; }
   lib_ssl_status_line() { printf "60 days"; }
   lib_ssl_delete() { printf "ssl-delete %s\n" "$1" >>"$_rn/calls"; rm -rf "${SSL_DEPLOY_DIR:?}/$1"; }
@@ -7232,6 +7282,9 @@ _rn_stubs='
     _app_jobs_sync() { printf "app-jobs %s\n" "$D_DOMAIN" >>"$_rn/calls"; }
   }
   _rn_rename() { _rn_flow; lib_domain_rename_main "$@"; }
+  # ... with a certificate file that can be read: twelve days are left on it
+  _rn_rename12() { lib_ssl_days_left() { printf 12; }; _rn_flow; lib_domain_rename_main "$@"; }
+  _rn_redirect12() { lib_ssl_days_left() { printf 12; }; _rn_conf; lib_redirect_main "$@"; }
   _rn_rename_asked() { OPT_YES=0; _rn_flow; lib_domain_rename_main "$@"; }
   _rn_rename_dry() { OPT_DRY_RUN=1; _rn_flow; lib_domain_rename_main "$@"; }
   # the same in Turkish: the fresh modules put the lib_tr that changes nothing back, so the
@@ -7307,6 +7360,8 @@ _rn_site() {   # domain ident [mode]
   printf 'DB_NAME=alpha_db\nDB_USER=alpha_user\nDB_PASS=secret\n' >"$_rn/state/domains/$d/db.info"
   printf 'CERT_NAME=%s\n' "$d" >"$_rn/state/domains/$d/ssl.info"
   printf 'c' >"$_rn/ssl/$d/fullchain.pem"; printf 'k' >"$_rn/ssl/$d/privkey.pem"
+  # its certificate is one certbot issued here: a lineage, and the copy the servers read
+  mkdir -p "$_rn/le/$d"; printf 'c' >"$_rn/le/$d/fullchain.pem"
   printf '%s\nwww.%s\n' "$d" "$d" >"$_rn/covers-$d"
   printf '<?php // the site\n' >"$_rn/home/$d/public_html/index.php"
   printf 'line\n' >"$_rn/sitelogs/$d/access.log"
@@ -7423,6 +7478,48 @@ assert_eq    "a certificate file that cannot be read has no days to tell, and th
 _rn_case lib_ssl_lineage_check old.example old.example
 assert_has   "ssl status gets to say what is wrong with it" "FAIL||0|the certificate file cannot be read" "$(_rn_out)"
 
+# ---- redirect add: a certificate that is a copy nothing renews --------------------------
+# "import" can bring the certificate a site answers with: a copy in the deploy directory, no
+# lineage at certbot, and a mark in the site's record so that renew-ssl --missing replaces it.
+# The site renamed, the record is the new name's and the copy stays with the redirect - which
+# took "deployed, and covers the names" for "has one", until the day the copy ran out.
+printf 'old.example\nwww.old.example\n' >"$_rn/covers-old.example"; rm -rf "$_rn/le/old.example"; rm -f "$_rn/certbot-works"; : >"$_rn/calls"
+_rn_case _rn_redirect12 add old.example alpha.example --www
+_o="$(_rn_out)"
+assert_has   "one without a lineage at certbot is asked for again" "obtain old.example old.example www.old.example" "$(_rn_calls)"
+assert_has   "none could be had: the command still succeeds" "rc=0" "$_o"
+assert_has   "it is said what the redirect answers under, and for how long" "old.example redirects under a certificate that was copied from another server: nothing renews it here, and it runs out in 12 day(s)" "$_o"
+assert_has   "why no other could be had" "One of its own could not be had now: certbot said no" "$_o"
+assert_has   "and the command for later, www with it" "Once the DNS of old.example points here: setup.sh redirect add old.example alpha.example --www   (setup.sh renew-ssl --missing asks for it too)" "$_o"
+assert_lacks "it is not said to have no certificate" "No certificate for old.example" "$_o"
+assert_lacks "nor to redirect over HTTP only" "HTTP only" "$_o"
+assert_has   "the copy goes on serving" "(HTTPS too)" "$_o"
+assert_true  "and is where it was" test -s "$_rn/ssl/old.example/fullchain.pem"
+assert_eq    "nothing was reloaded for it: no file changed" "pending=0 pending=0" "$(_rn_calls | grep '^commit' | awk '{print $2}' | tr '\n' ' ' | sed 's/ $//')"
+_rn_case _rn_redirect add old.example alpha.example
+assert_has   "a file the days cannot be read from: said as it is, and without www the command has none" "it runs out in ? day(s)" "$(_rn_out)"
+assert_has   "the command for later, as the redirect is" "setup.sh redirect add old.example alpha.example   (setup.sh renew-ssl" "$(_rn_out)"
+printf 1 >"$_rn/dns-rc"; : >"$_rn/calls"
+_rn_case _rn_redirect12 add old.example alpha.example --www
+assert_lacks "DNS that points elsewhere: certbot is not asked for it either" "obtain" "$(_rn_calls)"
+assert_has   "and that is the reason given" "One of its own could not be had now: its DNS does not point to this server (no A record)" "$(_rn_out)"
+assert_has   "the copy still serves" "rc=0" "$(_rn_out)"
+printf 'old.example\n' >"$_rn/covers-old.example"
+_rn_case _rn_redirect12 add old.example alpha.example --www
+assert_has   "a copy that lacks a name is no certificate for the redirect, as before" "No certificate for old.example: its DNS does not point to this server" "$(_rn_out)"
+assert_lacks "and is not called one that runs out" "it runs out in" "$(_rn_out)"
+printf 'old.example\nwww.old.example\n' >"$_rn/covers-old.example"
+rm -f "$_rn/dns-rc"; : >"$_rn/certbot-works"; : >"$_rn/calls"
+_rn_case _rn_redirect12 add old.example alpha.example --www
+assert_has   "once one can be had it takes the copy's place" "obtain old.example old.example www.old.example" "$(_rn_calls)"
+assert_lacks "nothing is said about a copy any more" "copied from another server" "$(_rn_out)"
+assert_eq    "OpenLiteSpeed is reloaded for it: the file changed under the same path" "pending=0 pending=1" "$(_rn_calls | grep '^commit' | awk '{print $2}' | tr '\n' ' ' | sed 's/ $//')"
+assert_true  "it has a lineage now" test -s "$_rn/le/old.example/fullchain.pem"
+: >"$_rn/calls"
+_rn_case _rn_redirect12 add old.example alpha.example --www
+assert_lacks "which is then not asked for again" "obtain" "$(_rn_calls)"
+assert_lacks "and nothing is said of it" "nothing renews it" "$(_rn_out)"
+
 # ---- redirect add / del: what is refused ----------------------------------------------
 _rn_fresh
 _rn_case _rn_redirect add alpha.example new.example;   assert_has "a site cannot be made a redirect" "alpha.example is a site of this server" "$(_rn_out)"
@@ -7480,6 +7577,26 @@ assert_has   "any other answer is a failure" "FAIL|redirect old.example|HTTP 403
 _rn_case lib_redirect_save gone.example alpha.example 0
 _rn_case _rn_doctor
 assert_has   "and so is one whose virtual host is missing" "FAIL|redirect gone.example|virtualhost block missing" "$(_rn_out)"
+# a certificate in place that nothing renews: a copy an import brought for the site this was
+mkdir -p "$_rn/ssl/old.example"; printf c >"$_rn/ssl/old.example/fullchain.pem"; printf k >"$_rn/ssl/old.example/privkey.pem"
+_rn_case _rn_doctor
+assert_has   "doctor names a redirect's certificate that is a copy nothing renews" \
+  "WARN|redirect old.example: ssl|its certificate is a copy from another server that nothing renews here; it runs out in ? days (setup.sh redirect add old.example alpha.example)" "$(_rn_out)"
+_rn_case lib_redirect_save old.example alpha.example 1
+_rn_case _rn_doctor
+assert_has   "the command it gives keeps www where the redirect has it" "(setup.sh redirect add old.example alpha.example --www)" "$(_rn_out)"
+rm -rf "$_rn/ssl/old.example"
+_rn_case _rn_doctor
+assert_has   "and so does the one for a redirect without a certificate" "is not redirected (setup.sh redirect add old.example alpha.example --www)" "$(_rn_out)"
+_rn_case lib_redirect_save gone.example alpha.example 1
+_rn_case _rn_doctor
+assert_has   "and the one for a redirect whose virtual host is missing" "virtualhost block missing in httpd_config.conf (setup.sh redirect add gone.example alpha.example --www)" "$(_rn_out)"
+_rn_case lib_redirect_save gone.example alpha.example 0
+_rn_case lib_redirect_save old.example alpha.example 0
+mkdir -p "$_rn/ssl/old.example" "$_rn/le/old.example"; printf c >"$_rn/ssl/old.example/fullchain.pem"; printf k >"$_rn/ssl/old.example/privkey.pem"; printf c >"$_rn/le/old.example/fullchain.pem"
+_rn_case _rn_doctor
+assert_lacks "a certificate with a lineage at certbot is none of that" "redirect old.example: ssl" "$(_rn_out)"
+rm -rf "$_rn/ssl/old.example" "$_rn/le/old.example"
 : >"$_rn/calls"
 _rn_case _rn_ssl
 _o="$(_rn_out)"
@@ -7664,6 +7781,92 @@ _c="$(_rn_calls)"
 assert_lacks "a site that wanted no certificate is not given one" "add-ssl" "$_c"
 assert_has   "without www, the www form goes to the bare name" "search-replace //www.alpha.example //beta.example " "$_c"
 assert_eq    "and the redirect takes no www along" "false" "$(jq -r .www "$_rn/state/domains/alpha.example/redirect.json")"
+
+# ---- rename: the old name's certificate is a copy an import brought ----------------------
+# The copy stays with the old name, which goes on redirecting under it; the record that knew
+# nobody renews it (.ssl.imported, which renew-ssl --missing reads) becomes the new name's.
+# So the old name is asked for a certificate of its own while the rename is at it, and where
+# none can be had - its DNS is usually still at the other server - it is said what is there.
+_rn_copy_site() {
+  _rn_fresh
+  rm -rf "$_rn/le/alpha.example"
+  jq '.ssl.imported = true' "$_rn/state/domains/alpha.example/domain.json" >"$_rn/t" && cp "$_rn/t" "$_rn/state/domains/alpha.example/domain.json"
+}
+_rn_fresh
+_rn_case _rn_rename12 alpha.example beta.example
+assert_lacks "a certificate certbot issued here: nothing is asked for under the old name" "obtain alpha.example" "$(_rn_calls)"
+assert_lacks "and nothing is said about a copy" "copy from another server" "$(_rn_out)"
+_rn_copy_site
+_rn_case _rn_rename_dry alpha.example beta.example
+assert_has   "it is said before anything moves that the certificate is a copy" "that certificate is a copy from another server, which nothing renews here: one of its own is asked for, and the copy stays until then" "$(_rn_out)"
+assert_lacks "a dry run asks for none" "obtain" "$(_rn_calls)"
+_rn_copy_site
+printf 1 >"$_rn/dns-rc"
+_rn_case _rn_rename12 alpha.example beta.example
+_o="$(_rn_out)"; _c="$(_rn_calls)"
+assert_has   "the rename of such a site succeeds" "rc=0" "$_o"
+assert_eq    "the new name's record claims no brought certificate" "false null" "$(_rn_json beta.example '"\(.ssl.enabled) \(.ssl.imported)"')"
+assert_has   "the old name redirects under the copy" "alpha.example now sends every request on to beta.example, over HTTPS too" "$_o"
+assert_has   "it is said that one of its own is asked for" "The certificate of alpha.example is a copy from another server, which nothing renews here: asking for one of its own" "$_o"
+assert_lacks "DNS still at the other server: certbot is not asked" "obtain alpha.example" "$_c"
+assert_has   "it is said what the redirect answers under, and for how long" "alpha.example redirects under a certificate that was copied from another server: nothing renews it here, and it runs out in 12 day(s)" "$_o"
+assert_has   "why none of its own could be had" "One of its own could not be had now: its DNS does not point to this server (no A record)" "$_o"
+assert_has   "and what to run once its DNS is here, www as the site had it" "Once the DNS of alpha.example points here: setup.sh redirect add alpha.example beta.example --www " "$_o"
+assert_true  "the copy stays in place" test -s "$_rn/ssl/alpha.example/fullchain.pem"
+assert_lacks "nobody deletes it" "ssl-delete" "$_c"
+assert_true  "the rename goes on: the new name's certificate is asked for after that" bash -c 'r="$(grep -n "^redirect-apply alpha.example" "$1" | head -n 1 | cut -d: -f1)"; s="$(grep -n "^add-ssl beta.example" "$1" | cut -d: -f1)"; [ -n "$s" ] && [ "$r" -lt "$s" ]' _ "$_rn/calls"
+assert_has   "and it ends as a rename does" "Renamed alpha.example to beta.example" "$_o"
+_rn_copy_site
+: >"$_rn/certbot-works"
+_rn_case _rn_rename12 alpha.example beta.example
+_o="$(_rn_out)"; _c="$(_rn_calls)"
+assert_has   "where one can be had, the old name gets a certificate of its own" "obtain alpha.example alpha.example www.alpha.example" "$_c"
+assert_has   "which is said" "alpha.example has a certificate of its own now" "$_o"
+assert_lacks "and nothing about a copy that runs out" "it runs out in" "$_o"
+assert_eq    "the redirect is applied again for it, with a reload: the file changed under the same path" "redirect-apply alpha.example|redirect-apply alpha.example reload" "$(grep '^redirect-apply alpha.example' "$_rn/calls" | tr '\n' '|' | sed 's/|$//')"
+assert_true  "it has a lineage now, and certbot renews it" test -s "$_rn/le/alpha.example/fullchain.pem"
+_rn_copy_site
+jq '.www = false' "$_rn/state/domains/alpha.example/domain.json" >"$_rn/t" && cp "$_rn/t" "$_rn/state/domains/alpha.example/domain.json"
+: >"$_rn/certbot-works"
+_rn_case _rn_rename12 alpha.example beta.example
+assert_has   "a site without www: its name alone is asked for" "obtain alpha.example alpha.example" "$(grep '^obtain alpha' "$_rn/calls" | sed 's/$/|/')"
+assert_lacks "not www" "www.alpha.example" "$(grep '^obtain alpha' "$_rn/calls")"
+_rn_copy_site
+: >"$_rn/certbot-dies"
+_rn_case _rn_rename12 alpha.example beta.example
+_o="$(_rn_out)"
+assert_has   "a certificate step that falls over does not end the rename" "rc=0" "$_o"
+assert_has   "it is said, with where to look" "The certificate of alpha.example could not be looked at; whether it renews by itself: setup.sh ssl status" "$_o"
+assert_has   "and the new name still gets its turn" "add-ssl beta.example" "$(_rn_calls)"
+_rn_copy_site
+rm -rf "$_rn/ssl/alpha.example"
+jq '.ssl.enabled = false' "$_rn/state/domains/alpha.example/domain.json" >"$_rn/t" && cp "$_rn/t" "$_rn/state/domains/alpha.example/domain.json"
+_rn_case _rn_rename12 alpha.example beta.example
+assert_lacks "a site without a certificate: its old name is asked for none" "obtain alpha.example" "$(_rn_calls)"
+assert_lacks "and nothing is said about one" "copy from another server" "$(_rn_out)"
+_rn_copy_site
+_rn_case _rn_rename12 alpha.example beta.example --no-redirect
+assert_lacks "--no-redirect: no certificate is asked for a name that stops answering" "obtain alpha.example" "$(_rn_calls)"
+assert_has   "the copy goes with the name" "ssl-delete alpha.example" "$(_rn_calls)"
+unset -f _rn_copy_site
+# what is said of it, in Turkish
+_rn_case _rn_say_tr "alpha.example redirects under a certificate that was copied from another server: nothing renews it here, and it runs out in 12 day(s)"
+assert_eq    "what a redirect answers under has its Turkish" "alpha.example, başka bir sunucudan kopyalanmış bir sertifikayla yönlendiriyor: burada onu hiçbir şey yenilemiyor ve 12 gün sonra sona eriyorrc=0" "$(_rn_out)"
+_rn_case _rn_say_tr "One of its own could not be had now: its DNS does not point to this server (no A record)"
+assert_eq    "the reason, and the reason inside it" "Kendi sertifikası şimdi alınamadı: DNS kaydı bu sunucuya yönlenmiyor (no A record)rc=0" "$(_rn_out)"
+_rn_case _rn_say_tr "Once the DNS of alpha.example points here: setup.sh redirect add alpha.example beta.example --www   (setup.sh renew-ssl --missing asks for it too)"
+assert_eq    "the command for later, as it was given" "alpha.example için DNS kaydı buraya yönlenince: setup.sh redirect add alpha.example beta.example --www   (setup.sh renew-ssl --missing de bunu ister)rc=0" "$(_rn_out)"
+_rn_case _rn_say_tr "The certificate of alpha.example is a copy from another server, which nothing renews here: asking for one of its own"
+assert_has   "that one of its own is asked for" "alpha.example sertifikası başka bir sunucudan gelen bir kopya" "$(_rn_out)"
+_rn_case _rn_say_tr "alpha.example has a certificate of its own now"
+assert_eq    "that it has one" "alpha.example artık kendi sertifikasına sahiprc=0" "$(_rn_out)"
+_rn_case _rn_say_tr "         that certificate is a copy from another server, which nothing renews here: one of its own is asked for, and the copy stays until then"
+assert_has   "the line of the plan" "bu sertifika başka bir sunucudan gelen bir kopya" "$(_rn_out)"
+_rn_case _rn_say_tr "2 redirect(s) that answered under a copied certificate have one of their own now"
+assert_eq    "what renew-ssl --missing says of them" "Kopya bir sertifikayla yanıt veren 2 yönlendirmenin artık kendi sertifikası varrc=0" "$(_rn_out)"
+assert_true  "the rest has its Turkish too: a certificate step that fell over" grep -qF "'The certificate of {1} could not be looked at; whether it renews by itself: setup.sh ssl status' '" "$ROOT/lib/lang.sh"
+assert_true  "a redirect left out of a rehearsal" grep -qF "'{1} is a redirect and is left out of a --staging run: its certificate is asked for as the real one only' '" "$ROOT/lib/lang.sh"
+assert_true  "and what doctor says" grep -qF "'@doctor its certificate is a copy from another server that nothing renews here; it runs out in {1} days (setup.sh redirect add {2} {3})' '" "$ROOT/lib/lang.sh"
 
 # ---- rename: a site with mail ---------------------------------------------------------
 # A mailbox is an address at the old domain. It stays one: the old name becomes a mail domain

@@ -370,7 +370,7 @@ lib_ssl_renew_main() {
     lib_die "--missing takes no domain" "it is every site that has no certificate" "renew-ssl --missing   or   renew-ssl ${domain}"
   fi
   if (( all )) || (( missing )) || [[ -z "$domain" ]]; then
-    local d="" failed=() n=0
+    local d="" failed=() n=0 r=0
     while read -r d; do
       [[ -n "$d" ]] || continue
       if (( missing )); then
@@ -390,15 +390,34 @@ lib_ssl_renew_main() {
         failed+=("$d")
       fi
     done < <(lib_domains_list)
-    if (( n == 0 )); then
+    # ... and a name that only redirects, where what it answers with is such a copy: the site it
+    # was had its certificate from an import, and was renamed since. Its record went with the
+    # site, so the certificate itself is what tells - deployed, and no lineage at certbot
+    # (lib_redirect_ssl_ensure). A redirect that has none at all is not taken: it still
+    # redirects, over HTTP, and was perhaps added that way on purpose.
+    if (( missing )); then
+      while read -r d; do
+        [[ -n "$d" ]] || continue
+        { lib_ssl_deployed "$d" && ! lib_ssl_cert_exists "$d"; } || continue
+        lib_redirect_load "$d" || continue
+        if (( staging )); then lib_info "${d} is a redirect and is left out of a --staging run: its certificate is asked for as the real one only"; continue; fi
+        r=$((r + 1))
+        lib_heading "redirect add ${d} ${R_TARGET}"
+        SERVER_SETUP_LOCKED=1 "$SCRIPT_PATH" redirect add "$d" "$R_TARGET" $( (( R_WWW )) && printf -- '--www') --yes $( (( OPT_QUIET )) && printf -- '--quiet') || true
+        # the command succeeds while the copy still serves: what counts here is a lineage
+        lib_ssl_cert_exists "$d" || failed+=("$d")
+      done < <(lib_redirects_list)
+    fi
+    if (( n + r == 0 )); then
       if (( missing )); then lib_info "Every site already has a certificate"; else lib_info "No sites with SSL enabled"; fi
       return 0
     fi
     if ((${#failed[@]} > 0)); then
       lib_notify_send "SSL renewal failed on $(hostname)" "renew-ssl failed for: ${failed[*]}. See ${LOG_FILE}." || true
-      lib_die "SSL renewal failed for: ${failed[*]}" "see the per-domain errors above" "fix DNS / certbot problems and re-run$( (( missing )) && printf ' (the %s of %s that got one are done; --missing asks only for the rest)' "$(( n - ${#failed[@]} ))" "$n")"
+      lib_die "SSL renewal failed for: ${failed[*]}" "see the per-domain errors above" "fix DNS / certbot problems and re-run$( (( missing )) && printf ' (the %s of %s that got one are done; --missing asks only for the rest)' "$(( n + r - ${#failed[@]} ))" "$(( n + r ))")"
     fi
-    lib_ok "SSL renewal finished for ${n} site(s)"
+    (( n == 0 )) || lib_ok "SSL renewal finished for ${n} site(s)"
+    (( r == 0 )) || lib_ok "${r} redirect(s) that answered under a copied certificate have one of their own now"
     return 0
   fi
 

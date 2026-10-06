@@ -4,6 +4,8 @@
 
 # ---- the redirect lib_redirect_load read --------------------------------------
 R_DOMAIN="" R_TARGET="" R_WWW=0
+# ---- what lib_redirect_ssl_ensure found ----------------------------------------
+SSL_OBTAINED=0 SSL_UNRENEWED=0
 
 # =============================================================================
 #  Redirects
@@ -176,17 +178,43 @@ lib_redirect_sync_target() {   # site
 
 # A certificate that covers every name of the redirect in R_*, deployed. 0 = it is there.
 # SSL_OBTAINED says whether this call is what put it there.
+#
+# "There" used to be all that was asked, and it is not enough: a certificate "import" brought
+# for the site this name was is a copy of what another server holds. It has no lineage at
+# certbot, so nothing renews it, and the record that said so (.ssl.imported) went to the new
+# name when the site was renamed. A redirect holding such a copy looked finished here and went
+# on answering with it until the day it ran out. So one without a lineage is asked for again -
+# and where none can be had yet, which is usual while the name's DNS still points at the other
+# server, the copy stays, 0 is still the answer and SSL_UNRENEWED says what it is
+# (SSL_LAST_ERROR has why no other could be had).
 lib_redirect_ssl_ensure() {
-  local rc=0
+  local rc=0 copy=0
   local -a names=("$R_DOMAIN")
-  SSL_OBTAINED=0
+  SSL_OBTAINED=0; SSL_UNRENEWED=0
   (( R_WWW )) && names+=("www.${R_DOMAIN}")
-  if lib_ssl_deployed "$R_DOMAIN" && lib_ssl_cert_covers "$R_DOMAIN" "${names[@]}"; then return 0; fi
+  if lib_ssl_deployed "$R_DOMAIN" && lib_ssl_cert_covers "$R_DOMAIN" "${names[@]}"; then
+    if lib_ssl_cert_exists "$R_DOMAIN"; then return 0; fi
+    copy=1
+  fi
   lib_ssl_dns_check "$R_DOMAIN" "$R_WWW" || rc=$?
-  if (( rc == 1 )); then SSL_LAST_ERROR="its DNS does not point to this server (${SSL_LAST_ERROR})"; return 1; fi
-  lib_ssl_obtain_names "$R_DOMAIN" "${names[@]}" || return 1
-  SSL_OBTAINED=1
+  if (( rc == 1 )); then
+    SSL_LAST_ERROR="its DNS does not point to this server (${SSL_LAST_ERROR})"
+  elif lib_ssl_obtain_names "$R_DOMAIN" "${names[@]}"; then
+    SSL_OBTAINED=1
+    return 0
+  fi
+  (( copy )) || return 1
+  SSL_UNRENEWED=1
   return 0
+}
+
+# What is said of a redirect that goes on answering under such a copy.
+_redirect_copy_say() {   # from to www(0/1)
+  local days=""
+  days="$(lib_ssl_days_left "$1")"
+  lib_warn "${1} redirects under a certificate that was copied from another server: nothing renews it here, and it runs out in ${days:-?} day(s)"
+  lib_note "One of its own could not be had now: ${SSL_LAST_ERROR:-no reason given}"
+  lib_note "Once the DNS of ${1} points here: setup.sh redirect add ${1} ${2}$( (( ${3:-0} )) && printf ' --www')   (setup.sh renew-ssl --missing asks for it too)"
 }
 
 lib_redirect_usage() {
@@ -258,6 +286,7 @@ lib_redirect_add() {
     if lib_redirect_ssl_ensure; then
       # with "reload" only when the files changed under a path the virtual host already named
       if (( SSL_OBTAINED )); then lib_redirect_apply "$from" reload; else lib_redirect_apply "$from"; fi
+      if (( SSL_UNRENEWED )); then _redirect_copy_say "$from" "$to" "$www"; fi
     else
       lib_warn "No certificate for ${from}: ${SSL_LAST_ERROR}"
       lib_note "It redirects over HTTP only until then. Once its DNS points here: setup.sh redirect add ${from} ${to}$( (( www )) && printf ' --www')"
@@ -422,13 +451,14 @@ _domain_rename_quiet_user() {   # user
 }
 
 # The state file of the site under its new name: who it is and where it lives. The certificate
-# was the old name's, and so were the backups its record points at.
+# was the old name's - also where it was one "import" brought, so the mark that says nobody
+# renews it goes too: the new name has none - and so were the backups its record points at.
 _domain_rename_state() {   # file new ident home old
   local tmp=""
   tmp="$(lib_mktemp)"
   jq --arg d "$2" --arg i "$3" --arg h "$4" --arg old "$5" --arg ts "$(lib_iso_now)" \
     '.domain = $d | .ident = $i | .user = $i | .group = $i | .home = $h
-     | .ssl.enabled = false | del(.ssl.expires) | del(.ssl.cert_name) | del(.ssl.updated_at)
+     | .ssl.enabled = false | del(.ssl.expires) | del(.ssl.cert_name) | del(.ssl.updated_at) | del(.ssl.imported)
      | del(.backup) | .renamed_from = $old | .renamed_at = $ts' "$1" >"$tmp" || return 1
   chmod 0600 "$tmp" && mv -f "$tmp" "$1"
 }
@@ -453,6 +483,26 @@ _domain_rename_move() {   # old new
   _domain_rename_state "$(lib_domain_json "$new")" "$new" "$ni" "$nh" "$old" || lib_die "Could not rewrite the state of ${new}" "" "inspect $(lib_domain_json "$new")"
   # written again for the new name by whatever renders its virtual host
   lib_rm "$(lib_harden_php_ini_dir "$old")" "${OLS_CACHE_DIR}/${old}"
+  return 0
+}
+
+# The certificate the old name goes on redirecting under. A site's own has a lineage at
+# certbot, which renews it for the redirect as it did for the site: nothing to do. One that
+# "import" brought has none (see lib_redirect_ssl_ensure), and the site's record, which said
+# so, is the new name's by now. So the old name is asked for a certificate of its own here,
+# and where none can be had yet the copy stays and it is said when it runs out.
+# Run in a subshell: nothing in it may end the rename.
+_domain_rename_old_cert() {   # old new
+  local old="$1" new="$2"
+  if ! lib_ssl_deployed "$old" || lib_ssl_cert_exists "$old"; then return 0; fi
+  lib_redirect_load "$old" || return 0
+  lib_info "The certificate of ${old} is a copy from another server, which nothing renews here: asking for one of its own"
+  if lib_redirect_ssl_ensure && (( SSL_OBTAINED )); then
+    lib_redirect_apply "$old" reload
+    lib_ok "${old} has a certificate of its own now"
+    return 0
+  fi
+  _redirect_copy_say "$old" "$new" "$R_WWW"
   return 0
 }
 
@@ -850,6 +900,9 @@ lib_domain_rename_main() {
   if (( nodom )); then lib_note "${old}  is no domain name, so nothing ever asked this server for it: nothing stays behind under it"
   elif (( redirect )); then lib_note "${old}  stays as a redirect: every request goes on to ${new} with a 301$( (( oldssl )) && printf ', under the certificate it has')"
   else lib_note "${old}  is no longer answered here, and its certificate is deleted (--no-redirect)"; fi
+  if (( redirect && oldssl )) && lib_ssl_deployed "$old" && ! lib_ssl_cert_exists "$old"; then
+    lib_note "         that certificate is a copy from another server, which nothing renews here: one of its own is asked for, and the copy stays until then"
+  fi
   if _domain_rename_has_wp; then
     lib_note "WordPress $( (( replace )) && printf 'the addresses in its database are rewritten to %s' "$new" || printf 'its database is left as it is (--no-search-replace)')"
   fi
@@ -937,6 +990,8 @@ lib_domain_rename_main() {
     lib_redirect_save "$old" "$new" "$D_WWW"
     if ( lib_redirect_apply "$old" ); then
       lib_ok "${old} now sends every request on to ${new}$( lib_ssl_deployed "$old" && printf ', over HTTPS too')"
+      # ... under a certificate certbot renews, or one of its own from here on
+      ( _domain_rename_old_cert "$old" "$new" ) || lib_warn "The certificate of ${old} could not be looked at; whether it renews by itself: setup.sh ssl status"
     else
       lib_warn "The redirect from ${old} could not be set up; later: setup.sh redirect add ${old} ${new}$( (( D_WWW )) && printf ' --www')"
     fi

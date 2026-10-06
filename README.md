@@ -345,6 +345,10 @@ behind as a redirect:
 - `example.com` (and `www.` if the site had it) keeps its certificate and answers every request
   with a `301` to the same path on the new name, over HTTP and HTTPS. Keep its DNS pointing at
   the server for as long as that should work. `--no-redirect` drops the old name instead.
+  Where that certificate is one `import` brought - a copy nothing renews here - the old name is
+  asked for one of its own while the rename is at it; if none can be had yet (its DNS is still
+  at the other server), the copy stays, the run says in how many days it runs out, and
+  `redirect add` again or `renew-ssl --missing` fetches one once the DNS points here.
 
 A safety backup is written first, and the site is away for about a minute. If anything fails
 before the site answers under its new name, everything is put back under the old one. At the
@@ -564,7 +568,9 @@ what Cloudflare in Full (strict) asks of the new server from the first request.
 - a site that has a certificate of its own here keeps it;
 - **nobody renews an imported certificate.** It is marked as brought, `lomp ssl` shows it, and
   once the DNS points here `sudo lomp renew-ssl <domain>` - or `renew-ssl --missing`, which
-  counts every such site - gets the site one of its own, which then takes its place;
+  counts every such site - gets the site one of its own, which then takes its place. A site
+  that is renamed while it still answers with one leaves it to its old name, the redirect:
+  `--missing` counts that redirect too, and `lomp ssl` and `lomp doctor` name it;
 - `--no-ssl` leaves the certificates where they are. The key travels over the SSH connection
   and is never printed or logged.
 
