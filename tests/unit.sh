@@ -9440,10 +9440,10 @@ if declare -F _app_worker_rows >/dev/null; then
                                {"name":"mailer","kind":"job","schedule":"*/5 * * * *","status":"scheduled","restarts":0,"start":"npm run mail"},
                                {"name":"sync","kind":"process","port":3101,"status":"stopping","restarts":2,"start":"npm run sync"}]' ) 2>&1 || true; }
   _o="$(_wr tr)"
-  assert_has  "a worker that does not run, in Turkish" "queue            süreç    -              çalışmıyor          0  npm run queue" "$_o"
-  assert_has  "a job that waits for its time"          "mailer           iş       */5 * * * *    zamanlanmış         -  npm run mail" "$_o"
-  assert_has  "one on its way down"                    "sync             süreç    3101           durduruluyor        2  npm run sync" "$_o"
-  assert_has  "in English they are what they were"     "queue            process  -              not running         0  npm run queue" "$(_wr en)"
+  assert_has  "a worker that does not run, in Turkish" "queue            süreç    -              çalışmıyor            0  npm run queue" "$_o"
+  assert_has  "a job that waits for its time"          "mailer           iş       */5 * * * *    zamanlanmış           -  npm run mail" "$_o"
+  assert_has  "one on its way down"                    "sync             süreç    3101           durduruluyor          2  npm run sync" "$_o"
+  assert_has  "in English they are what they were"     "queue            process  -              not running           0  npm run queue" "$(_wr en)"
   unset -f _wr
 fi
 # lib_tprintf: printf for a table

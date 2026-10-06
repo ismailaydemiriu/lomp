@@ -1102,7 +1102,7 @@ lib_app_list() {   # [--json]
   if (( OPT_JSON )); then json=1; fi
   lib_require_tools
   if (( ! json )); then
-    lib_tprintf '%s%-28s %-6s %-18s %5s %9s %8s %8s%s\n' "$C_BLD" "SITE" "PORT" "STATUS" "CPU" "MEMORY" "UPTIME" "RESTARTS" "$C_RST"
+    lib_tprintf '%s%-28s %-6s %-18s %5s %9s %8s %10s%s\n' "$C_BLD" "SITE" "PORT" "STATUS" "CPU" "MEMORY" "UPTIME" "RESTARTS" "$C_RST"
   fi
   while read -r d; do
     [[ -n "$d" ]] || continue
@@ -1128,13 +1128,13 @@ lib_app_list() {   # [--json]
                 memory_bytes: ($mem | tonumber), started_ms: ($up | tonumber), restarts: ($rs | tonumber),
                 git: (if $git == "" then null else $git end), workers: $wk}]')"
     else
-      lib_tprintf '%-28s %-6s %-18s %4s%% %9s %8s %8s\n' "$d" "$APP_PORT" "$state" "${cpu:-0}" "$(( ${mem:-0} / 1048576 )) MB" "$(_app_age_ms "${up:-0}")" "${rs:-0}"
+      lib_tprintf '%-28s %-6s %-18s %4s%% %9s %8s %10s\n' "$d" "$APP_PORT" "$state" "${cpu:-0}" "$(( ${mem:-0} / 1048576 )) MB" "$(_app_age_ms "${up:-0}")" "${rs:-0}"
       # one line per worker under its site; a job shows its schedule
       jq -r '.[] | [("  - " + .name), (if .kind == "job" then "job" else ((.port // "-") | tostring) end),
                     (if .kind == "job" then .schedule else .status end), (.cpu | tostring),
                     ((.memory_bytes / 1048576 | floor | tostring) + " MB"), (if .kind == "job" then "-" else (.restarts | tostring) end)] | @tsv' <<<"$wstat" \
         | while IFS=$'\t' read -r wname wport wstate wcpu wmem wrs; do
-            lib_tprintf '%-28s %-6s %-18s %4s%% %9s %8s %8s\n' "$wname" "$wport" "$wstate" "$wcpu" "$wmem" "-" "$wrs"
+            lib_tprintf '%-28s %-6s %-18s %4s%% %9s %8s %10s\n' "$wname" "$wport" "$wstate" "$wcpu" "$wmem" "-" "$wrs"
           done || true
     fi
   done < <(lib_domains_list)
@@ -1169,7 +1169,7 @@ lib_app_status() {   # domain
   lib_print_kv "Logs"         "${D_HOME}/.pm2/logs/web-out.log, web-error.log (setup.sh app logs ${D_DOMAIN})"
   lib_print_kv "Environment"  "$(jq -r 'keys | length' <<<"$(lib_app_env_json "$D_DOMAIN")") variable(s) (setup.sh app env ${D_DOMAIN} list)"
   if [[ "$(lib_app_workers_json "$D_DOMAIN")" != "[]" ]]; then
-    lib_tprintf '\n%s%-16s %-8s %-14s %-12s %8s  %s%s\n' "$C_BLD" WORKER KIND PORT/SCHEDULE STATUS RESTARTS START "$C_RST"
+    lib_tprintf '\n%s%-16s %-8s %-14s %-12s %10s  %s%s\n' "$C_BLD" WORKER KIND PORT/SCHEDULE STATUS RESTARTS START "$C_RST"
     info=""; if lib_service_active "$unit"; then info="$(_app_jlist)"; fi
     _app_worker_rows "$(_app_workers_status "$(lib_app_workers_json "$D_DOMAIN")" "$info")"
   fi
@@ -1527,7 +1527,7 @@ _app_worker_rows() {   # workers status JSON
   jq -r '.[] | [.name, .kind, (if .kind == "job" then .schedule else ((.port // "-") | tostring) end), .status,
                 (if .kind == "job" then "-" else (.restarts | tostring) end), .start] | @tsv' <<<"$1" \
     | while IFS=$'\t' read -r n k w s r c; do
-        lib_tprintf '%-16s %-8s %-14s %-12s %8s  %s\n' "$n" "$k" "$w" "$s" "$r" "$c"
+        lib_tprintf '%-16s %-8s %-14s %-12s %10s  %s\n' "$n" "$k" "$w" "$s" "$r" "$c"
       done || true
 }
 
@@ -1540,7 +1540,7 @@ lib_app_worker_list() {   # [--json]   (the site in D_*)
     lib_tr "(no workers - add one with: setup.sh app worker ${D_DOMAIN} add NAME --start CMD [--cron SCHEDULE])"; printf '%s\n' "$LIB_TR"
     return 0
   fi
-  lib_tprintf '%s%-16s %-8s %-14s %-12s %8s  %s%s\n' "$C_BLD" NAME KIND PORT/SCHEDULE STATUS RESTARTS START "$C_RST"
+  lib_tprintf '%s%-16s %-8s %-14s %-12s %10s  %s%s\n' "$C_BLD" NAME KIND PORT/SCHEDULE STATUS RESTARTS START "$C_RST"
   _app_worker_rows "$(_app_workers_status "$workers" "$jl")"
   lib_note "logs: setup.sh app logs ${D_DOMAIN} --process NAME (jobs: ${D_HOME}/.pm2/logs/NAME-job.log)"
 }
