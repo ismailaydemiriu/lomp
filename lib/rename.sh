@@ -485,6 +485,8 @@ _domain_rename_undo() {   # old new saved-domain.json had-wpcron(0/1)
   if [[ "$D_MODE" == "wordpress" ]]; then lib_mkdir "${OLS_CACHE_DIR}/${old}" 0750 "$(lib_ols_user):$(lib_ols_group)"; fi
   lib_domain_apply_config "put ${old} back"
   if (( wpcron )); then lib_domain_wpcron_set; fi
+  lib_import_cron_apply "$old" || true
+  lib_domain_state_load "$old" || return 1
   # its PM2 service was taken down under the old name, and nothing was built under the new one
   if lib_app_state_load "$old"; then lib_app_apply; _app_jobs_sync; fi
   lib_domain_logrotate_regen
@@ -880,6 +882,8 @@ lib_domain_rename_main() {
   if lib_cron_has "wpcron:${old}"; then wpcron=1; fi
   lib_rollback_push "_domain_rename_undo '${old}' '${new}' '${saved}' '${wpcron}'"
   lib_cron_remove "wpcron:${old}"
+  # the jobs an import gave it name its user and its home; they come back under the new ones
+  lib_cron_remove_prefix "imported:${old}:"
   lib_ols_vhost_purge "$old" 1
   # the PM2 service is named after the user and runs out of the home: both are about to change
   if (( app )); then lib_cron_remove_prefix "job:${old}:"; lib_app_teardown; fi
@@ -985,6 +989,8 @@ lib_domain_rename_main() {
     fi
   fi
   if (( wpcron )); then lib_domain_wpcron_set; fi
+  lib_import_cron_apply "$new" || lib_warn "the imported cron jobs of ${new} could not be written again (setup.sh import cron ${new})"
+  lib_domain_state_load "$new"
   lib_domain_logrotate_regen
   lib_domain_fail2ban_regen
   if [[ "$D_MODE" == "php" || "$D_MODE" == "wordpress" ]]; then lib_ols_htaccess_watch_ensure; fi

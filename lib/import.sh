@@ -7,14 +7,18 @@
 #                 points wp-config.php at the database it has here. The mailboxes of a
 #                 domain follow it: the addresses the other server's Dovecot knows, with the
 #                 passwords they had where the hashes can be read, the mail itself, and the
-#                 domain's aliases and forwarders.
+#                 domain's aliases and forwarders. A new site gets the PHP version it ran
+#                 there, and its cron jobs run here as the site's own user.
 #                 Nothing is changed on the other server.
 
 IMP_SSH_TARGET=""
 IMP_REMOTE_USER=""
 declare -ga IMP_SSH_OPTS=()
 # one entry per site found, the same index in each ("mail": a domain with mailboxes and no site)
-declare -ga IMP_DOMAIN=() IMP_ROOT=() IMP_KB=() IMP_KIND=() IMP_DB=() IMP_WWW=() IMP_CONF=()
+declare -ga IMP_DOMAIN=() IMP_ROOT=() IMP_KB=() IMP_KIND=() IMP_DB=() IMP_WWW=() IMP_CONF=() IMP_PHP=()
+# one entry per cron job found: the document root it belongs to, when it runs, what it runs
+declare -ga IMP_CRON_ROOT=() IMP_CRON_WHEN=() IMP_CRON_CMD=()
+IMP_OPT_NO_CRON=0
 # directories that are served there under no name this server could give a site
 declare -ga IMP_NAMELESS=()
 # one entry per mailbox found: address, its Maildir there, size, password hash ("-": not known)
@@ -51,6 +55,7 @@ Kullanım: setup.sh import <[user@]host> [options]
   --db NAME              Seçenek --path ise: getirilecek veritabanı, WordPress olmayan site için
   --no-db  --no-files    Veritabanları ya da dosyalar dışarıda bırakılır
   --no-mail              Posta kutuları dışarıda bırakılır
+  --no-cron              Cron işleri dışarıda bırakılır
   --only-mail            Yalnızca posta kutuları getirilir: burada site olmayan alan adı bir
                          posta alan adı olur (yalnızca posta için kurulmuş sunucuda hep böyledir)
   Bu sunucuda posta kuruluysa seçilen alan adının posta kutuları da onunla gelir: öteki
@@ -61,9 +66,16 @@ Kullanım: setup.sh import <[user@]host> [options]
   Postfix'in sanal takma ad dosyaları); burada zaten olan bir takma ad olduğu gibi kalır.
   DNS kayıtlarına dokunulmaz: MX'i siz taşıyana kadar posta orada alınmaya devam eder
   (setup.sh mail dns <domain>).
-  Kullanıcı (varsayılan root) sitelerin dosyalarını okuyabilmelidir; posta kutularını yalnızca
-  root görür. Kopyalanmayanlar: sieve filtreleri, sertifikalar, cron işleri ve --db ile adı
-  verilmedikçe WordPress dışındaki uygulamaların veritabanları.
+  Eklenen site, öteki sunucuda çalıştığı PHP sürümünü alır (OpenLiteSpeed yapılandırmasından
+  okunur), bu sunucu o sürümü kurabiliyorsa; burada zaten olan site kendi sürümünü korur.
+  Sitenin cron işleri de onunla gelir ve burada sitenin kendi kullanıcısı olarak çalışır:
+  dosyalarının sahibi olan hesabın crontab'ı ile root'un crontab'ında ve /etc/cron.d içinde
+  sitenin dizinini ya da alan adını anan satırlar; yollar bu sunucuya göre yeniden yazılır.
+  Siz oradan kaldırana kadar öteki sunucuda da çalışmaya devam ederler.
+  "setup.sh import cron <domain>" bir siteye verilenleri listeler, --clear hepsini kaldırır.
+  Kullanıcı (varsayılan root) sitelerin dosyalarını okuyabilmelidir; posta kutularını ve öteki
+  hesapların crontab'larını yalnızca root görür. Kopyalanmayanlar: sieve filtreleri,
+  sertifikalar ve --db ile adı verilmedikçe WordPress dışındaki uygulamaların veritabanları.
 EOF
     return 0
   fi
@@ -90,6 +102,7 @@ Usage: setup.sh import <[user@]host> [options]
   --db NAME              With --path: the database to bring, for a site that is no WordPress
   --no-db  --no-files    Leave the databases, or the files, out
   --no-mail              Leave the mailboxes out
+  --no-cron              Leave the cron jobs out
   --only-mail            Bring only the mailboxes: a domain that is no site here becomes a
                          mail domain (this is what happens on a server installed for mail alone)
   The mailboxes of a chosen domain come with it when this server runs mail: the addresses the
@@ -99,9 +112,16 @@ Usage: setup.sh import <[user@]host> [options]
   come too (lomp's own, CyberPanel's, and the ones in Postfix's virtual alias files); one
   that exists here already stays as it is. The DNS records are not touched: mail goes on
   arriving there until you move the MX (setup.sh mail dns <domain>).
+  A site that is added gets the PHP version it runs there (read from OpenLiteSpeed's
+  configuration) when this server can install it; a site that is here keeps its own.
+  The cron jobs of a site come with it and run here as the site's user: the crontab of the
+  account that owns its files, and the lines of root's crontab and /etc/cron.d that name its
+  directory or its domain, with the paths rewritten for this server. They go on running on
+  the other server too until you take them out there. "setup.sh import cron <domain>" lists
+  the ones a site was given, and --clear removes them.
   The user (default root) has to be able to read the sites' files, and only root sees the
-  mailboxes. Not copied: sieve filters, certificates, cron jobs, and the databases of
-  applications other than WordPress unless --db names one.
+  mailboxes and the other accounts' crontabs. Not copied: sieve filters, certificates, and
+  the databases of applications other than WordPress unless --db names one.
 EOF
 }
 
@@ -128,6 +148,105 @@ _import_boxes_of() {   # domain
     if [[ "${IMP_BOX[k]#*@}" == "$1" ]]; then printf '%d\n' "$k"; fi
   done
   return 0
+}
+
+# A cron job as another server lists it: when (five fields, or @daily and its kind - not
+# @reboot, which is no schedule) and a command of printable characters on one line. Cron
+# ignores a whole file that holds one line it cannot read, and the file these go into also
+# carries the backups and the certificate renewals.
+_import_cron_ok() {   # when command
+  local w='^(@(yearly|annually|monthly|weekly|daily|midnight|hourly)|[0-9*/,-]+( [0-9*/,-]+){2}( [0-9A-Za-z*/,-]+){2})$'
+  [[ "$1" =~ $w ]] || return 1
+  [[ -n "${2// /}" && ${#2} -le 1000 ]] || return 1
+  # (the mark this server's own entries end in is not something a job may carry)
+  [[ "$2" != *"# server-setup:"* ]] || return 1
+  [[ "$2" != *[![:print:]]* ]]
+}
+
+# The cron jobs found for one document root, as indexes into IMP_CRON_*, one per line.
+_import_cron_of() {   # document root
+  local k=0
+  for (( k = 0; k < ${#IMP_CRON_ROOT[@]}; k++ )); do
+    if [[ "${IMP_CRON_ROOT[k]}" == "$1" ]]; then printf '%d\n' "$k"; fi
+  done
+  return 0
+}
+
+# Can this server run a site on that PHP: it is installed, or the package is there to install.
+_import_php_available() {   # version
+  lib_php_installed "$1" || apt-cache show "$(lib_php_tag "$1")" >/dev/null 2>&1
+}
+
+# ---- the cron jobs a site was given ------------------------------------------------
+# They are kept with the site's state, one "when<TAB>command" a line, with {HOME} for the
+# site's home and {PHP} for its PHP: what is written into cron is made from that, so a site
+# that is renamed, or moved to another PHP, has its jobs follow.
+lib_import_cron_file() { printf '%s/cron.imported' "$(lib_domain_state_dir "$1")"; }
+
+lib_import_cron_apply() {   # domain  (nothing kept for it: its entries, if any, go)
+  local domain="$1" f="" when="" cmd="" n=0 php="php" entries=""
+  f="$(lib_import_cron_file "$domain")"
+  if [[ ! -s "$f" ]]; then lib_cron_remove_prefix "imported:${domain}:"; return 0; fi
+  lib_domain_state_load "$domain" || return 1
+  if [[ -n "$D_PHP" ]]; then php="$(lib_php_cli "$D_PHP")"; fi
+  while IFS=$'\t' read -r when cmd; do
+    _import_cron_ok "$when" "$cmd" || continue
+    cmd="${cmd//"{HOME}"/"$D_HOME"}"; cmd="${cmd//"{PHP}"/"$php"}"
+    n=$((n + 1))
+    entries+="$(printf 'imported:%s:%d\t%s %s %s' "$domain" "$n" "$when" "$D_USER" "$cmd")"$'\n'
+  done <"$f"
+  printf '%s' "$entries" | lib_cron_replace_prefix "imported:${domain}:"
+}
+
+# A command of the other server, for this one: the site's directory there becomes its
+# directory here, and an LSPHP named by its version becomes the site's own.
+_import_cron_rewrite() {   # command, document root there
+  local cmd="$1" root="$2" up=""
+  cmd="${cmd//"$root"/"{HOME}/public_html"}"
+  up="${root%/*}"
+  if [[ "${root##*/}" == "public_html" && "$up" == /*/* ]]; then cmd="${cmd//"$up"/"{HOME}"}"; fi
+  sed -E 's#/usr/local/lsws/lsphp[0-9]+/bin/(ls)?php#{PHP}#g' <<<"$cmd"
+}
+
+lib_import_cron() {   # index, domain
+  local i="$1" domain="$2" k="" f="" n=0 tmp=""
+  local -a mine=()
+  mapfile -t mine < <(_import_cron_of "${IMP_ROOT[i]}")
+  ((${#mine[@]} > 0)) || return 0
+  f="$(lib_import_cron_file "$domain")"
+  tmp="$(lib_mktemp)"
+  for k in "${mine[@]}"; do
+    printf '%s\t%s\n' "${IMP_CRON_WHEN[k]}" "$(_import_cron_rewrite "${IMP_CRON_CMD[k]}" "${IMP_ROOT[i]}")" >>"$tmp"
+    n=$((n + 1))
+  done
+  # the other server is what says which jobs there are: a second run replaces the first one's
+  lib_write_file "$f" 0600 root:root <"$tmp"
+  rm -f "$tmp"
+  lib_import_cron_apply "$domain" || { lib_warn "the cron jobs of ${domain} could not be written (setup.sh doctor)"; return 0; }
+  lib_domain_state_load "$domain"
+  lib_ok "${n} cron job(s) of ${domain} now run here as ${D_USER}:"
+  grep -F -- "# server-setup:imported:${domain}:" "$CRON_FILE" 2>/dev/null | sed -e 's/ # server-setup:imported:.*$//' -e 's/^/        /' || true
+  lib_warn "They still run on the other server as well: take them out there once ${domain} has moved, or here with: setup.sh import cron ${domain} --clear"
+}
+
+# "import cron <domain> [--clear]": the jobs a site was given, or none of them any more.
+lib_import_cron_main() {   # domain [--clear]
+  local domain="${1:-}" clear=0 f=""
+  domain="${domain,,}"
+  [[ "${2:-}" != "--clear" ]] || clear=1
+  [[ -z "${2:-}" || "$clear" == 1 ]] || lib_die "Unknown option for import cron: ${2}" "" "setup.sh import cron <domain> [--clear]"
+  lib_domain_arg_ok "$domain" && lib_domain_registered "$domain" \
+    || lib_die "Site ${domain:-(none)} is not registered" "" "setup.sh import cron <domain> [--clear]"
+  f="$(lib_import_cron_file "$domain")"
+  if [[ ! -s "$f" ]]; then lib_info "${domain} was given no cron jobs by an import"; return 0; fi
+  if (( clear )); then
+    if (( OPT_DRY_RUN )); then lib_info "[dry-run] would remove the imported cron jobs of ${domain}"; return 0; fi
+    rm -f -- "$f"
+    lib_import_cron_apply "$domain"
+    lib_ok "The imported cron jobs of ${domain} are gone"
+    return 0
+  fi
+  grep -F -- "# server-setup:imported:${domain}:" "$CRON_FILE" 2>/dev/null | sed -e 's/ # server-setup:imported:.*$//' || true
 }
 
 # The aliases found for one domain, as indexes into IMP_ALIAS, one per line.
@@ -168,7 +287,8 @@ _import_mb() {   # kilobytes -> "12 MB"
 # =============================================================================
 # Lists what is served there, one line each:
 #   U <user it runs as>
-#   S <domain|-> <document root> <kilobytes> <static|php|wordpress> <database|-> <www 0|1> <wp-config.php|-> <ols|dir|path>
+#   S <domain|-> <document root> <kilobytes> <static|php|wordpress> <database|-> <www 0|1> <wp-config.php|-> <ols|dir|path> <PHP version|->
+#   C <document root> <when: five fields or @word> <command>
 #   M <address> <its Maildir|-> <kilobytes> <password hash|->
 #   A <alias address, or @domain> <where it goes, addresses divided by commas>
 # Plain sh, awk and sed: the other server is whatever it is. LOMP_IMPORT_ONLY names one
@@ -179,7 +299,50 @@ R="${LOMP_IMPORT_ROOT:-}"
 ONLY="${LOMP_IMPORT_ONLY:-}"
 TAB="$(printf '\t')"
 printf 'U\t%s\n' "$(id -un 2>/dev/null || echo unknown)"
-row() {   # domain docroot www source
+# The cron jobs of one site: every line of the crontab of the account that owns its files when
+# that account is the site's own (its files lie in its home), and from anybody else's crontab
+# - root's, /etc/cron.d - the lines that name the site's directory or its domain. What lomp
+# itself schedules on a server it runs is not among them: this server schedules its own.
+cron_lines() {   # file, 1 when each line names its user, 1 when every line counts, docroot, domain
+  [ -r "$1" ] || return 0
+  awk -v sys="$2" -v all="$3" -v root="$4" -v dom="$5" '
+    /^[ \t]*#/ || /^[ \t]*$/ || /^[ \t]*[A-Za-z_][A-Za-z0-9_]*[ \t]*=/ { next }
+    {
+      line = $0; gsub(/\t/, " ", line); sub(/^ +/, "", line)
+      n = (substr(line, 1, 1) == "@") ? 1 : 5
+      when = ""
+      for (i = 1; i <= n; i++) {
+        if (!match(line, /^[^ ]+ +/)) next
+        f = substr(line, 1, RLENGTH); sub(/ +$/, "", f)
+        when = when (i > 1 ? " " : "") f
+        line = substr(line, RLENGTH + 1)
+      }
+      if (sys == 1) { if (!match(line, /^[^ ]+ +/)) next; line = substr(line, RLENGTH + 1) }
+      if (line == "") next
+      if (all != 1 && index(line, root) == 0 && (dom == "-" || index(line, dom) == 0)) next
+      print "C\t" root "\t" when "\t" line
+    }' "$1" 2>/dev/null
+}
+cron_rows() {   # domain docroot
+  owner="$(stat -c %U "$2" 2>/dev/null)"
+  ohome=""
+  [ -z "$owner" ] || ohome="$(awk -F: -v u="$owner" '$1 == u { print $6; exit }' "$R/etc/passwd" 2>/dev/null)"
+  own=0
+  case "$owner" in ''|root|UNKNOWN) ;; *) case "$2/" in "${ohome:-/nowhere}"/*) [ "$ohome" = / ] || own=1 ;; esac ;; esac
+  for sp in "$R/var/spool/cron/crontabs" "$R/var/spool/cron"; do
+    [ -d "$sp" ] || continue
+    for f in "$sp"/*; do
+      [ -f "$f" ] || continue
+      if [ "$own" = 1 ] && [ "${f##*/}" = "$owner" ]; then cron_lines "$f" 0 1 "$2" "$1"
+      else cron_lines "$f" 0 0 "$2" "$1"; fi
+    done
+  done
+  for f in "$R/etc/crontab" "$R/etc/cron.d"/*; do
+    case "${f##*/}" in server-setup|lompstack*) continue ;; esac
+    cron_lines "$f" 1 0 "$2" "$1"
+  done
+}
+row() {   # domain docroot www source [PHP version]
   root="${2%/}"
   [ -d "$root" ] || return 0
   kind=static; conf=-; db=-
@@ -191,7 +354,13 @@ row() {   # domain docroot www source
     [ -n "$db" ] || db=-
   fi
   kb="$(du -sk "$root" 2>/dev/null | cut -f1)"
-  printf 'S\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$1" "$root" "${kb:-0}" "$kind" "$db" "$3" "$conf" "$4"
+  printf 'S\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$1" "$root" "${kb:-0}" "$kind" "$db" "$3" "$conf" "$4" "${5:--}"
+  cron_rows "$1" "$root"
+}
+# "lsphp74" somewhere in a configuration file -> 7.4
+php_of() {   # file
+  [ -r "$1" ] || return 0
+  sed -n 's/.*lsphp\([0-9]\)\([0-9]\).*/\1.\2/p' "$1" 2>/dev/null | head -n 1
 }
 # Mailboxes: the addresses Dovecot knows and where the mail of each lies. The password hashes
 # are read where they are kept in a place that is known: lomp's own file, CyberPanel's table.
@@ -286,6 +455,9 @@ if [ -r "$L/conf/httpd_config.conf" ]; then
     [ -n "$dr" ] || continue
     dr="$(printf '%s' "$dr" | sed -e "s|\$SERVER_ROOT|$L|g" -e "s|\$VH_NAME|$v|g" -e "s|\$VH_ROOT|$vr|g")"
     case "$dr" in /*) ;; *) dr="$vr/$dr" ;; esac
+    # the PHP this virtual host runs: its own processor, or the one the server gives everybody
+    pv="$(php_of "$cf")"
+    [ -n "$pv" ] || pv="$(awk '/^[ \t]*extprocessor[ \t]/ { e = 1 } e && $1 == "path" { print; exit }' "$L/conf/httpd_config.conf" 2>/dev/null | sed -n 's/.*lsphp\([0-9]\)\([0-9]\).*/\1.\2/p')"
     dml=" $(printf '%s' "$dm" | tr 'A-Z' 'a-z') "
     seen=" "
     set -f
@@ -295,10 +467,10 @@ if [ -r "$L/conf/httpd_config.conf" ]; then
       case "$seen" in *" $b "*) continue ;; esac
       seen="$seen$b "
       case "$dml" in *" www.$b "*) w=1 ;; *) w=0 ;; esac
-      row "$b" "$dr" "$w" ols
+      row "$b" "$dr" "$w" ols "$pv"
     done
     set +f
-    [ "$seen" != " " ] || row - "$dr" 0 ols
+    [ "$seen" != " " ] || row - "$dr" 0 ols "$pv"
   done
 fi
 
@@ -409,11 +581,26 @@ lib_import_disconnect() {
 # The list the other server gave, into IMP_*. It is somebody else's output: a line counts only
 # when every field is what it should be, and a domain or a directory only once.
 lib_import_scan_parse() {   # reads the listing from stdin
-  local tag="" domain="" root="" kb="" kind="" db="" www="" conf="" x="" dup=0
-  IMP_DOMAIN=() IMP_ROOT=() IMP_KB=() IMP_KIND=() IMP_DB=() IMP_WWW=() IMP_CONF=() IMP_NAMELESS=()
+  local tag="" domain="" root="" kb="" kind="" db="" www="" conf="" php="" x="" dup=0 k=0
+  IMP_DOMAIN=() IMP_ROOT=() IMP_KB=() IMP_KIND=() IMP_DB=() IMP_WWW=() IMP_CONF=() IMP_PHP=() IMP_NAMELESS=()
+  IMP_CRON_ROOT=() IMP_CRON_WHEN=() IMP_CRON_CMD=()
   IMP_BOX=() IMP_BOX_DIR=() IMP_BOX_KB=() IMP_BOX_HASH=() IMP_ALIAS=() IMP_ALIAS_TO=()
   IMP_REMOTE_USER=""
-  while IFS=$'\t' read -r tag domain root kb kind db www conf _; do
+  while IFS=$'\t' read -r tag domain root kb kind db www conf _ php _; do
+    if [[ "$tag" == "C" ]]; then
+      # document root, when, command - in the variables of a site line. The command is the
+      # rest of the line, tabs and all, and is taken only when cron here could run it as it is.
+      _import_path_ok "$domain" || continue
+      kb="${kb}${kind:+ ${kind}}${db:+ ${db}}${www:+ ${www}}${conf:+ ${conf}}"
+      _import_cron_ok "$root" "$kb" || continue
+      dup=0
+      for (( k = 0; k < ${#IMP_CRON_ROOT[@]}; k++ )); do
+        if [[ "${IMP_CRON_ROOT[k]}" == "$domain" && "${IMP_CRON_WHEN[k]}" == "$root" && "${IMP_CRON_CMD[k]}" == "$kb" ]]; then dup=1; break; fi
+      done
+      (( dup )) && continue
+      IMP_CRON_ROOT+=("$domain"); IMP_CRON_WHEN+=("$root"); IMP_CRON_CMD+=("$kb")
+      continue
+    fi
     if [[ "$tag" == "U" ]]; then
       if [[ "$domain" =~ ^[A-Za-z0-9._-]+$ ]]; then IMP_REMOTE_USER="$domain"; fi
       continue
@@ -472,6 +659,7 @@ lib_import_scan_parse() {   # reads the listing from stdin
     (( dup )) && continue
     IMP_DOMAIN+=("$domain"); IMP_ROOT+=("$root"); IMP_KB+=("$kb"); IMP_KIND+=("$kind")
     IMP_DB+=("$db"); IMP_WWW+=("$www"); IMP_CONF+=("$conf")
+    if lib_php_valid_version "${php:-}"; then IMP_PHP+=("$php"); else IMP_PHP+=("-"); fi
   done
   # a domain that has mailboxes or aliases there and no site: an entry of its own, of the kind "mail"
   (( IMP_MAIL_ROWS )) || return 0
@@ -482,7 +670,7 @@ lib_import_scan_parse() {   # reads the listing from stdin
     done
     (( dup )) && continue
     IMP_DOMAIN+=("$domain"); IMP_ROOT+=("-"); IMP_KB+=(0); IMP_KIND+=("mail")
-    IMP_DB+=("-"); IMP_WWW+=(0); IMP_CONF+=("-")
+    IMP_DB+=("-"); IMP_WWW+=(0); IMP_CONF+=("-"); IMP_PHP+=("-")
   done
   return 0
 }
@@ -786,7 +974,12 @@ lib_import_site_part() {   # index
   # ---- the site ------------------------------------------------------------
   if ! lib_domain_registered "$domain"; then
     args=(--no-ssl)
-    if [[ "$kind" == "static" && "$db" == "-" ]]; then args+=(--static --no-db); fi
+    if [[ "$kind" == "static" && "$db" == "-" ]]; then args+=(--static --no-db)
+    elif [[ "${IMP_PHP[i]}" != "-" ]]; then
+      # the PHP it runs there, when this server can have it
+      if _import_php_available "${IMP_PHP[i]}"; then args+=(--php "${IMP_PHP[i]}")
+      else lib_warn "${domain} runs PHP ${IMP_PHP[i]} there, which this server cannot install: it gets PHP ${PHP_VERSION}"; fi
+    fi
     if (( www )); then args+=(--www); fi
     lib_info "Adding the site ${domain}"
     _import_add "$domain" "${args[@]}" \
@@ -899,6 +1092,10 @@ lib_import_site_part() {   # index
   fi
   rm -f -- "${work}/wp-config.in" "${work}/wp-config.out" 2>/dev/null || true
   lib_rollback_clear
+  if (( ! created )) && [[ "${IMP_PHP[i]}" != "-" && -n "$D_PHP" && "${IMP_PHP[i]}" != "$D_PHP" ]]; then
+    lib_note "${domain} runs PHP ${IMP_PHP[i]} there and PHP ${D_PHP} here; the site here keeps its own"
+  fi
+  if (( ! IMP_OPT_NO_CRON )); then lib_import_cron "$i" "$domain"; fi
   lib_log_write INFO "imported ${domain} from ${IMP_SSH_TARGET}:${root} (database: ${db})"
   lib_ok "${domain} is here: ${docroot}"
 }
@@ -907,10 +1104,11 @@ lib_import_site_part() {   # index
 #  import command
 # =============================================================================
 lib_import_main() {
+  if [[ "${1:-}" == "cron" ]]; then shift; lib_require_tools; lib_require_installed; lib_import_cron_main "$@"; return 0; fi
   local a="" target="" port="22" key="" pwfile="" list=0 all=0 only="" no_create=0 path="" as="" dbname=""
-  local i=0 n=0 here="" ans="" x="" total_kb=0 avail_kb=0 found=0 okc=0 what="" mkb=0 mail_kb=0
+  local i=0 n=0 here="" ans="" x="" total_kb=0 avail_kb=0 found=0 okc=0 what="" mkb=0 mail_kb=0 crons=0
   local -a chosen=() todo=() failed=()
-  IMP_OPT_NO_DB=0; IMP_OPT_NO_FILES=0; IMP_OPT_NO_MAIL=0; IMP_OPT_ONLY_MAIL=0
+  IMP_OPT_NO_DB=0; IMP_OPT_NO_FILES=0; IMP_OPT_NO_MAIL=0; IMP_OPT_ONLY_MAIL=0; IMP_OPT_NO_CRON=0
   while (($# > 0)); do
     a="$1"; shift
     case "$a" in
@@ -927,6 +1125,7 @@ lib_import_main() {
       --db)            dbname="${1:-}"; shift || true ;;
       --no-db)         IMP_OPT_NO_DB=1 ;;
       --no-files)      IMP_OPT_NO_FILES=1 ;;
+      --no-cron)       IMP_OPT_NO_CRON=1 ;;
       --no-mail)       IMP_OPT_NO_MAIL=1 ;;
       --only-mail)     IMP_OPT_ONLY_MAIL=1 ;;
       -*)              lib_import_usage >&2; lib_die "Unknown option for import: ${a}" "" "see the usage above" ;;
@@ -1049,6 +1248,13 @@ lib_import_main() {
       *) lib_warn "${x}: left out, it is ${here}"; continue ;;
     esac
     todo+=("$i"); total_kb=$(( total_kb + IMP_KB[i] ))
+    if [[ "$here" == "new" && "${IMP_PHP[i]}" != "-" && "${IMP_KIND[i]}" != "static" ]]; then
+      lib_note "${x}: it runs PHP ${IMP_PHP[i]} there, and gets that here"
+    fi
+    crons="$(_import_cron_of "${IMP_ROOT[i]}" | wc -l | tr -d ' ')"
+    if (( crons > 0 && ! IMP_OPT_NO_CRON )); then
+      lib_note "${x}: and its ${crons} cron job(s), which will run here as well as there"
+    fi
     if [[ -n "$what" ]] && (( ! IMP_OPT_NO_MAIL )); then
       lib_note "${x}: and its ${what}"
       mail_kb=$(( mail_kb + mkb ))
@@ -1098,7 +1304,7 @@ lib_import_main() {
     lib_ok "${okc} site(s) imported from ${IMP_SSH_TARGET}"
     lib_note "They answer over HTTP here. To see one before its DNS moves, put this server's address and the domain into your own computer's hosts file."
     lib_note "Once a domain's DNS points here, its certificate: setup.sh renew-ssl <domain>"
-    lib_note "Not copied: certificates, cron jobs, sieve filters of the mail. The other server was only read."
+    lib_note "Not copied: certificates, sieve filters of the mail. The other server was only read."
   fi
   if ((${#failed[@]} > 0)); then
     lib_die "Not imported: ${failed[*]}" "see the errors above" "clear them up and run the import again for those: --only $(IFS=,; printf '%s' "${failed[*]}")"

@@ -461,7 +461,30 @@ sudo lomp import root@203.0.113.10 --all --no-mail                  # the sites 
   with mailboxes;
 - sieve filters and what a webmail keeps (address books) are not copied.
 
-The other server is only read. Certificates and cron jobs are not copied, and neither is
+**A site that is added gets the PHP version it runs there** - read from the other server's
+OpenLiteSpeed configuration, so known for a lomp, a CyberPanel or a plain OpenLiteSpeed and not
+for a site found by its directory alone - when this server has that LSPHP or can install it;
+otherwise it gets the usual one and the run says so. A site that is here already keeps its own,
+and the run names the difference.
+
+**Its cron jobs come with it** and run here as the site's own user, never as root:
+
+- every line of the crontab of the account that owns the site's files, when the site lies in
+  that account's home (CyberPanel, a lomp, a user's `public_html`);
+- from every other crontab - root's, `/etc/crontab`, the files in `/etc/cron.d` - the lines
+  that name the site's directory or its domain. What lomp schedules itself on a server it
+  runs is left out;
+- the site's directory there becomes its directory here, and an LSPHP named by its version
+  (`/usr/local/lsws/lsphp74/bin/php`) becomes the site's own PHP; anything else in a command
+  is taken as it is, so a job that reaches for a path outside the site will fail here;
+- `@reboot` lines and lines cron here could not read are not taken;
+- **they go on running on the other server too.** Until the site has moved, a job runs in both
+  places against two copies of the site - take a job that sends mail or charges somebody out
+  on one side first. `sudo lomp import cron <domain>` lists what a site was given and
+  `--clear` removes it; `--no-cron` brings a site without them. A second import replaces the
+  list with what the other server has then; `rename` and `remove` take the jobs along.
+
+The other server is only read. Certificates are not copied, and neither is
 anything outside a site's document root. The sites answer over HTTP here until the DNS of a
 domain points to this server; then `sudo lomp renew-ssl <domain>` gets its certificate. Running
 the import again for a site brings what changed in the meantime - worth doing once more just

@@ -9477,10 +9477,11 @@ section "import: the sites of another server, brought here over SSH"
 # The other server is a directory tree under $TMP, and what would run there through ssh runs
 # here through sh: the listing, tar and the dump script are the real ones. mysqldump and the
 # client are stand-ins that say how they were called.
-_im_saved="$(declare -p STATE_DIR OPT_DRY_RUN MAIL_PASSWD_FILE MAIL_ALIAS_DIR)"
+_im_saved="$(declare -p STATE_DIR OPT_DRY_RUN MAIL_PASSWD_FILE MAIL_ALIAS_DIR CRON_FILE)"
+CRON_FILE="$TMP/im-cron"
 _im_orig="$(declare -f _domain_fix_owner_ids lib_require_tools lib_require_installed lib_server_mail_only lib_backup_domain \
   lib_db_create_for_domain lib_db_restore_domain lib_db_sql lib_domain_apply_config lib_ols_htaccess_reload \
-  lib_import_connect _import_ssh _import_add _import_mail_on _import_mail_sync lib_mail_installed lib_mail_domain_enabled lib_mail_hash_password lib_mail_tables_apply lib_mail_domain_aliases_seed _mail_stage_dir _mail_stage_drop _mail_sendas_current)"
+  lib_import_connect _import_ssh _import_add _import_php_available _import_mail_on _import_mail_sync lib_mail_installed lib_mail_domain_enabled lib_mail_hash_password lib_mail_tables_apply lib_mail_domain_aliases_seed _mail_stage_dir _mail_stage_drop _mail_sendas_current)"
 STATE_DIR="$TMP/im-state"; mkdir -p "$STATE_DIR"
 _im_r="$TMP/im-remote"; _im_l="$_im_r/usr/local/lsws"; _im_bin="$TMP/im-bin"; _im_log="$TMP/im.log"; _im_out="$TMP/im.out"
 _im_shop="$_im_r/home/shop.example/public_html"
@@ -9490,6 +9491,10 @@ mkdir -p "$_im_l/conf/vhosts/Example" "$_im_l/conf/vhosts/shop.example" "$_im_l/
   "$_im_r/home/odd name.example/public_html" "$_im_r/home/empty.example" "$_im_bin"
 cat >"$_im_l/conf/httpd_config.conf" <<EOF
 serverName                lsws
+extprocessor lsphp {
+  type                    lsapi
+  path                    $_im_l/lsphp81/bin/lsphp
+}
 virtualhost Example {
   vhRoot                  Example/
   configFile              conf/vhosts/Example/vhconf.conf
@@ -9505,7 +9510,18 @@ listener Default {
 }
 EOF
 printf 'docRoot                   $VH_ROOT/html/\n' >"$_im_l/conf/vhosts/Example/vhconf.conf"
-printf 'docRoot                   $VH_ROOT/public_html\n' >"$_im_l/conf/vhosts/shop.example/vhconf.conf"
+printf 'docRoot                   $VH_ROOT/public_html\nextprocessor shop {\n  path  /usr/local/lsws/lsphp74/bin/lsphp\n}\n' >"$_im_l/conf/vhosts/shop.example/vhconf.conf"
+# its cron jobs: the crontab of the account the shop's files belong to (whose home the shop is),
+# root's crontab, a file in /etc/cron.d, and the file lomp itself keeps on a server it runs
+_im_me="$(id -un)"
+mkdir -p "$_im_r/etc/cron.d" "$_im_r/var/spool/cron/crontabs"
+printf '%s:x:1000:1000::%s:/bin/sh\n' "$_im_me" "$_im_r/home/shop.example" >"$_im_r/etc/passwd"
+printf '%s\n' '# the shop' 'MAILTO=owner@shop.example' \
+  "*/5 * * * * /usr/local/lsws/lsphp74/bin/php $_im_shop/cron.php >/dev/null 2>&1" \
+  "@daily	cd $_im_r/home/shop.example && ./nightly.sh" '@reboot /bin/true' >"$_im_r/var/spool/cron/crontabs/$_im_me"
+printf '%s\n' '0 3 * * * curl -s https://blog.example/cron.php' '1 1 * * * /bin/unrelated --flag' >"$_im_r/var/spool/cron/crontabs/root"
+printf '%s\n' 'PATH=/usr/bin' "30 2 * * mon www-data php $_im_r/home/blog.example/public_html/job.php" >"$_im_r/etc/cron.d/site-jobs"
+printf '%s\n' "* * * * * root /usr/local/sbin/lompstack htaccess-check blog.example" >"$_im_r/etc/cron.d/server-setup"
 cat >"$_im_shop/wp-config.php" <<'EOF'
 <?php
 define( 'DB_NAME', 'shopdb' );
@@ -9581,6 +9597,21 @@ assert_has "a catch-all"                                       $'A\t@shop.exampl
 assert_has "a forwarder from a file Postfix reads, its targets in one list" $'A\tfwd@fwdonly.example\ta@one.example,b@two.example' "$_im_scan"
 assert_lacks "the file lomp renders is not read a second time" "rendered@shop.example" "$_im_scan"
 _im_row() { awk -F'\t' -v d="$1" '$1 == "S" && $2 == d { print $3 "|" $5 "|" $6 "|" $7 "|" $8 "|" $9; exit }' <<<"$_im_scan"; }
+_im_php() { awk -F'\t' -v d="$1" -v r="$2" '$1 == "S" && ($2 == d || $3 == r) { print $10; exit }' <<<"$_im_scan"; }
+assert_eq  "the PHP a virtual host runs, from its own processor"      "7.4" "$(_im_php shop.example -)"
+assert_eq  "or the one the server gives every virtual host"           "8.1" "$(_im_php none "$_im_l/Example/html")"
+assert_eq  "a directory that is no virtual host has none to name"     "-"   "$(_im_php blog.example -)"
+_im_crow() { awk -F'\t' -v r="$1" '$1 == "C" && $2 == r { print $3 "|" $4 }' <<<"$_im_scan" | sort -u; }
+assert_has "the crontab of the account whose home the site is: every line" \
+  "*/5 * * * *|/usr/local/lsws/lsphp74/bin/php $_im_shop/cron.php >/dev/null 2>&1" "$(_im_crow "$_im_shop")"
+assert_has "a tab between when and what is a blank"                   "@daily|cd $_im_r/home/shop.example && ./nightly.sh" "$(_im_crow "$_im_shop")"
+assert_lacks "a setting is no job"                                    "MAILTO" "$(_im_crow "$_im_shop")"
+assert_has "a line of root's that names the domain"                   "0 3 * * *|curl -s https://blog.example/cron.php" "$(_im_crow "$_im_r/home/blog.example/public_html")"
+assert_has "a line of /etc/cron.d that names the directory, without its user" \
+  "30 2 * * mon|php $_im_r/home/blog.example/public_html/job.php" "$(_im_crow "$_im_r/home/blog.example/public_html")"
+assert_lacks "what lomp schedules itself is not a job of the site"    "htaccess-check" "$_im_scan"
+assert_lacks "a line of root's that names no site is nobody's"        "/bin/unrelated" "$_im_scan"
+assert_lacks "the shop's jobs are not the blog's"                     "nightly" "$(_im_crow "$_im_r/home/blog.example/public_html")"
 assert_has "the listing says who it ran as"                    $'U\t' "$_im_scan"
 assert_eq  "a virtual host goes by the names its listener maps to it" \
   "$_im_shop|wordpress|shopdb|1|$_im_shop/wp-config.php|ols" "$(_im_row shop.example)"
@@ -9597,6 +9628,10 @@ assert_eq  "each site once, the virtual hosts first"           "shop.example blo
 assert_eq  "with what it is"                                   "wordpress static php mail mail" "${IMP_KIND[*]}"
 assert_eq  "its database"                                      "shopdb - - - -" "${IMP_DB[*]}"
 assert_eq  "and whether www is served"                         "1 0 0 0 0" "${IMP_WWW[*]}"
+assert_eq  "the PHP each runs, where that is known"                "7.4 - - - -" "${IMP_PHP[*]}"
+assert_eq  "the shop's jobs, without the one that is no schedule"  "2" "$(_import_cron_of "$_im_shop" | wc -l | tr -d ' ')"
+assert_eq  "the blog's two"                                        "2" "$(_import_cron_of "$_im_r/home/blog.example/public_html" | wc -l | tr -d ' ')"
+assert_lacks "@reboot is not taken"                                "@reboot" "${IMP_CRON_WHEN[*]}"
 assert_eq  "the aliases, each once: the first place that names one counts" "sales2@shop.example info@shop.example @shop.example postmaster@shop.example fwd@fwdonly.example" "${IMP_ALIAS[*]}"
 assert_eq  "with where they go"                                "info@shop.example|a@one.example,b@two.example" "${IMP_ALIAS_TO[0]}|${IMP_ALIAS_TO[4]}"
 assert_eq  "the mailboxes, each with its domain"               "info@shop.example sales@shop.example boss@mailonly.example" "${IMP_BOX[*]}"
@@ -9613,6 +9648,21 @@ assert_eq  "a database name with a quote in it is no database" "-|0|0|-" "${IMP_
 assert_eq  "a name that is no domain name names no site"       "/srv/a" "${IMP_NAMELESS[*]}"
 assert_eq  "nor is that a user name"                           "" "$IMP_REMOTE_USER"
 
+printf '%s\n' $'S\tphp.example\t/srv/p\t1\tphp\t-\t0\t-\tols\t5.6' $'S\tphp2.example\t/srv/q\t1\tphp\t-\t0\t-\tols\t8.2;id' \
+  $'C\t/srv/p\t* * * * *\ttrue' $'C\t/srv/p\t* * * * *\ttrue' $'C\t/srv/p\t61 * *\tshort' $'C\t/srv/p\t* * * * * root\tsix' \
+  $'C\t/srv/p\t$(id) * * * *\tx' $'C\t/srv/it\'s\t* * * * *\tpath' $'C\t/srv/p\t@reboot\tboot' $'C\t/srv/p\t@hourly\t' \
+  $'C\t/srv/p\t0 0 * * *\tbackup # server-setup:backup' $'C\t/srv/p\t0 0 * jan sun\tls -l\t/tmp' $'C\t/srv/p\t0 1 * * *\tbell\a' \
+  | lib_import_scan_parse
+assert_eq  "a PHP version that is none is not known"            "- -" "${IMP_PHP[*]}"
+assert_eq  "a job counts once, and only one cron here could read" "* * * * *=true 0 0 * jan sun=ls -l /tmp" \
+  "${IMP_CRON_WHEN[0]}=${IMP_CRON_CMD[0]} ${IMP_CRON_WHEN[1]}=${IMP_CRON_CMD[1]}"
+assert_eq  "nothing else of them does"                          "2" "${#IMP_CRON_ROOT[@]}"
+assert_eq  "a command for this server: its PHP and its directory" "{PHP} {HOME}/public_html/cron.php -q" \
+  "$(_import_cron_rewrite '/usr/local/lsws/lsphp74/bin/php /home/x.example/public_html/cron.php -q' /home/x.example/public_html)"
+assert_eq  "the home above a public_html too"                   "cd {HOME} && ./nightly.sh {HOME}/public_html" \
+  "$(_import_cron_rewrite 'cd /home/x.example && ./nightly.sh /home/x.example/public_html' /home/x.example/public_html)"
+assert_eq  "but not the directory above any other document root" "ls /var/www {HOME}/public_html" \
+  "$(_import_cron_rewrite 'ls /var/www /var/www/html' /var/www/html)"
 # ---- the choice ----------------------------------------------------------------
 assert_eq  "numbers"                    "0 2"   "$(lib_import_pick "1,3" 3 | tr '\n' ' ' | sed 's/ $//')"
 assert_eq  "a range, and each once"     "1 2 0" "$(lib_import_pick "2-3 1 2" 3 | tr '\n' ' ' | sed 's/ $//')"
@@ -9655,7 +9705,7 @@ assert_eq  "no access and no wp-config.php is an error of its own" "4" \
   "$(lib_import_remote_dump | env PATH="$_im_bin:$PATH" DB=shopdb CONF= IM_CLIENT_RC=1 bash -s >/dev/null 2>&1 && printf 0 || printf '%s' "$?")"
 
 # ---- the command -----------------------------------------------------------------
-_im_home="https://www.shop.example"; _im_add_ok=1; _im_dump_mode=""; _im_mail=0
+_im_home="https://www.shop.example"; _im_add_ok=1; _im_dump_mode=""; _im_mail=0; _im_php_ok=1
 _im_site() {   # domain mode
   lib_domain_state_reset
   D_DOMAIN="$1"; D_IDENT="$(lib_domain_ident "$1")"; D_USER="$D_IDENT"; D_GROUP="$D_IDENT"
@@ -9682,6 +9732,7 @@ eval '_import_ssh() { env PATH="$_im_bin:$PATH" LOMP_IMPORT_ROOT="$_im_r" IM_CLI
       lib_db_restore_domain() { lib_db_info_load "$1" || return 1; gzip -dc "$2" >"$TMP/im-restored-$1.sql"; }
       lib_db_sql() { printf "%s\n" "$_im_home"; }
       _domain_fix_owner_ids() { printf "%s" "$_im_ids"; }
+      _import_php_available() { (( _im_php_ok )); }
       _import_add() {
         printf "add %s\n" "$*" >>"$_im_log"
         (( _im_add_ok )) || return 1
@@ -9714,7 +9765,19 @@ assert_has "by name"                                    "nope.example was not fo
 : >"$_im_log"; : >"$RUNUSER_LOG"
 _im_d1="$SITES_ROOT/shop.example/public_html"; _im_d2="$SITES_ROOT/blog.example/public_html"
 assert_eq  "two sites that are not here yet"            "0" "$(_imf user@old.example --only shop.example,blog.example)"
-assert_has "the WordPress is added without a certificate, with www" "add shop.example --no-ssl --www" "$(cat "$_im_log")"
+assert_has "the WordPress is added without a certificate, on the PHP it ran, with www" "add shop.example --no-ssl --php 7.4 --www" "$(cat "$_im_log")"
+assert_has "which the plan said"                        "shop.example: it runs PHP 7.4 there, and gets that here" "$(cat "$_im_out")"
+_im_ct="$(cat "$CRON_FILE" 2>/dev/null || true)"; _im_su="$(lib_domain_ident shop.example)"; _im_bu="$(lib_domain_ident blog.example)"
+assert_has "its cron job runs here as the site user, with the PHP and the directory it has here" \
+  "*/5 * * * * ${_im_su} ${LSWS_HOME}/lsphp83/bin/php ${_im_d1}/cron.php >/dev/null 2>&1 # server-setup:imported:shop.example:1" "$_im_ct"
+assert_has "the one that works in its home too"         "@daily ${_im_su} cd ${SITES_ROOT}/shop.example && ./nightly.sh # server-setup:imported:shop.example:2" "$_im_ct"
+assert_has "a job of root's becomes the site's"         "0 3 * * * ${_im_bu} curl -s https://blog.example/cron.php # server-setup:imported:blog.example:" "$_im_ct"
+assert_has "one of /etc/cron.d too, under the directory here" "30 2 * * mon ${_im_bu} php ${_im_d2}/job.php # server-setup:imported:blog.example:" "$_im_ct"
+assert_lacks "nothing runs as root"                     " root " "$(grep imported: <<<"$_im_ct")"
+assert_has "how many is said, and as whom"              "2 cron job(s) of shop.example now run here as ${_im_su}" "$(cat "$_im_out")"
+assert_has "and that they run in two places now"        "They still run on the other server as well" "$(cat "$_im_out")"
+assert_has "which the plan said too"                    "shop.example: and its 2 cron job(s)" "$(cat "$_im_out")"
+assert_true "what a site was given is kept with it"     test -s "$(lib_import_cron_file shop.example)"
 assert_has "the static one without PHP or a database"   "add blog.example --no-ssl --static --no-db" "$(cat "$_im_log")"
 assert_true "the files are in its document root"        test -f "$_im_d1/index.php"
 assert_true "the hidden ones too"                       test -f "$_im_d1/.htaccess"
@@ -9744,6 +9807,8 @@ assert_has "and what comes next"                        "renew-ssl" "$(cat "$_im
 printf 'changed there\n' >"$_im_shop/wp-content/uploads/a.txt"; printf 'mine\n' >"$_im_d1/kept.txt"
 assert_eq  "a site that is here already"                "0" "$(_imf old.example --only shop.example)"
 assert_lacks "is not added again"                       "add " "$(cat "$_im_log")"
+assert_has "keeps the PHP it has here, which is said"   "shop.example runs PHP 7.4 there and PHP 8.3 here" "$(cat "$_im_out")"
+assert_eq  "has its jobs once, not twice"               "2" "$(grep -c 'imported:shop.example:' "$CRON_FILE")"
 assert_has "is backed up as it is first"                "backup shop.example --tag pre-import --keep 0 --no-mail" "$(cat "$_im_log")"
 assert_has "which the plan says"                        "A backup is taken first" "$(cat "$_im_out")"
 assert_eq  "a file of the same name is replaced"        "changed there" "$(cat "$_im_d1/wp-content/uploads/a.txt")"
@@ -9944,6 +10009,32 @@ _im_site prox.example proxy
 assert_eq  "a proxy site here takes no files"           "0" "$(_imf old.example --path "$_im_r/var/www/html" --as prox.example)"
 assert_has "and is left out"                            "prox.example: left out, it is a proxy site here" "$(cat "$_im_out")"
 
+# the jobs a site was given, afterwards
+assert_eq  "import cron lists them"                     "0" "$(_imf cron shop.example)"
+assert_has "as cron has them"                           "@daily ${_im_su} cd ${SITES_ROOT}/shop.example" "$(cat "$_im_out")"
+( lib_domain_state_load shop.example; D_PHP="8.2"; lib_domain_state_save ) >/dev/null 2>&1
+lib_import_cron_apply shop.example
+assert_has "written again, they follow the site's PHP"  "${_im_su} ${LSWS_HOME}/lsphp82/bin/php ${_im_d1}/cron.php" "$(cat "$CRON_FILE")"
+assert_has "rename writes them again under the new name" 'lib_import_cron_apply "$new"' "$(declare -f lib_domain_rename_main)"
+assert_has "after taking them out under the old one"    'lib_cron_remove_prefix "imported:${old}:"' "$(declare -f lib_domain_rename_main)"
+assert_has "remove takes them with the site"            'lib_cron_remove_prefix "imported:${domain}:"' "$(declare -f lib_domain_remove_main)"
+assert_eq  "--clear removes them"                       "0" "$(_imf cron shop.example --clear)"
+assert_lacks "from cron"                                "imported:shop.example:" "$(cat "$CRON_FILE")"
+assert_has "and leaves the other site's"                "imported:blog.example:" "$(cat "$CRON_FILE")"
+assert_false "and from what is kept"                    test -e "$(lib_import_cron_file shop.example)"
+assert_eq  "a site that was given none"                 "0" "$(_imf cron shop.example)"
+assert_has "is said to have none"                       "was given no cron jobs" "$(cat "$_im_out")"
+assert_eq  "a site that is not here"                    "1" "$(_imf cron nope.example)"
+assert_eq  "--no-cron brings the site without them"     "0" "$(_imf old.example --only shop.example --no-mail --no-db --no-cron)"
+assert_lacks "none is written"                          "imported:shop.example:" "$(cat "$CRON_FILE")"
+assert_lacks "and the plan names none"                  "cron job(s)" "$(cat "$_im_out")"
+# a PHP this server cannot install
+rm -rf "$STATE_DIR/domains/shop.example"; _im_php_ok=0; : >"$_im_log"
+assert_eq  "a site whose PHP this server cannot have"   "0" "$(_imf old.example --only shop.example --no-mail --no-db --no-cron)"
+assert_has "is added on the usual one"                  "add shop.example --no-ssl --www" "$(cat "$_im_log")"
+assert_has "which is said"                              "shop.example runs PHP 7.4 there, which this server cannot install: it gets PHP ${PHP_VERSION}" "$(cat "$_im_out")"
+_im_php_ok=1
+
 # what is refused before anything is asked of the other server
 : >"$_im_log"
 assert_eq  "a server name with a command in it"         "1" "$(_imf 'root@old.example;id' --list)"
@@ -9963,9 +10054,8 @@ assert_has "the command is in the reference"            "import <[user@]host>" "
 assert_has "setup.sh knows it"                          'import)         lib_import_main' "$(cat "$ROOT/setup.sh")"
 
 eval "$_im_orig"; eval "$_im_saved"
-unset -f _im_row _im_mrow _im_dump _im_site _imf
+unset -f _im_row _im_mrow _im_php _im_crow _im_dump _im_site _imf
 
-# =============================================================================
 section "renew-ssl: a WordPress installed before its certificate stops calling itself http://"
 # The WordPress is a stand-in for wp-cli that keeps "home" and "siteurl" in two files.
 _wh="$TMP/wphttps"; _wh_d="late-ssl.example"

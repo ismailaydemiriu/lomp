@@ -167,10 +167,13 @@ KOMUTLAR
                                 wp-config.php dosyasını buradaki veritabanına yöneltir. Bu
                                 sunucuda posta kuruluysa alan adının posta kutuları da gelir
                                 (öteki sunucu lomp ya da CyberPanel ise şifreleriyle), takma
-                                adları ve yönlendirmeleri de; DNS'e dokunulmaz. Diğer sunucu
-                                yalnızca okunur (--list --all --only a.com,b.com --no-create
-                                --no-mail --only-mail --port N --key FILE --password-file FILE
+                                adları ve yönlendirmeleri de; DNS'e dokunulmaz. Yeni site orada
+                                çalıştığı PHP sürümünü alır, cron işleri burada sitenin
+                                kullanıcısı olarak çalışır. Diğer sunucu yalnızca okunur
+                                (--list --all --only a.com,b.com --no-create --no-mail
+                                --only-mail --no-cron --port N --key FILE --password-file FILE
                                 --path DIR --as DOMAIN --db NAME)
+  import cron <domain> [--clear]  Bir aktarımın siteye verdiği cron işleri; kaldırır
   list                          Site tablosu (--json)
   status                        Servisler, sürümler, kaynaklar, siteler (--json)
   doctor                        Derin sağlık kontrolü (--json, --quiet)
@@ -421,10 +424,13 @@ COMMANDS
                                 wp-config.php at the database here. The mailboxes of a domain
                                 come with it when this server runs mail - with their passwords
                                 where the other server is a lomp or a CyberPanel - and so do
-                                its aliases and forwarders; DNS is not touched. The other
-                                server is only read (--list --all
-                                --only a.com,b.com --no-create --no-mail --only-mail --port N
-                                --key FILE --password-file FILE --path DIR --as DOMAIN --db NAME)
+                                its aliases and forwarders; DNS is not touched. A new site
+                                gets the PHP version it ran there, and its cron jobs run here
+                                as the site's user. The other server is only read (--list
+                                --all --only a.com,b.com --no-create --no-mail --only-mail
+                                --no-cron --port N --key FILE --password-file FILE --path DIR
+                                --as DOMAIN --db NAME)
+  import cron <domain> [--clear]  The cron jobs an import gave a site; remove them
   list                          Table of sites (--json)
   status                        Services, versions, resources, sites (--json)
   doctor                        Deep health check (--json, --quiet)
