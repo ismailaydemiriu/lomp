@@ -585,6 +585,16 @@ assert_has "www redirect" 'RewriteCond %{HTTP_HOST} ^www\.example\.com$ [NC]' "$
 assert_has "www redirect spares .well-known" 'RewriteCond %{HTTP_HOST} ^www\.example\.com$ [NC]
 RewriteCond %{REQUEST_URI} !^/\.well-known/
 RewriteRule ^(.*)$ https://example.com$1 [R=301,L]' "$out"
+# ...and in the other direction: with --www-primary it is the bare name that redirects, and an
+# app's association file is fetched from that name too, by a client that follows no redirect
+D_WWW_PRIMARY=1; _wk="$(lib_ols_render_vhconf)"; D_WWW_PRIMARY=0
+assert_has "the redirect to www spares .well-known as well" 'RewriteCond %{HTTP_HOST} ^example\.com$ [NC]
+RewriteCond %{REQUEST_URI} !^/\.well-known/
+RewriteRule ^(.*)$ https://www.example.com$1 [R=301,L]' "$_wk"
+# (the whole line: the https redirect has a condition of its own that only begins the same way,
+# for the ACME challenge)
+assert_eq "once in each direction, on the www redirect and nowhere else" "1 1" \
+  "$(grep -cxF 'RewriteCond %{REQUEST_URI} !^/\.well-known/' <<<"$out" || true) $(grep -cxF 'RewriteCond %{REQUEST_URI} !^/\.well-known/' <<<"$_wk" || true)"
 assert_has "https redirect" 'RewriteRule ^(.*)$ https://%{HTTP_HOST}$1 [R=301,L]' "$out"
 assert_has "hsts" "Strict-Transport-Security: max-age=31536000; includeSubDomains" "$out"
 assert_lacks "no preload" "preload" "$out"
