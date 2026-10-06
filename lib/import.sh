@@ -52,7 +52,8 @@ Kullanım: setup.sh import <[user@]host> [options]
   --no-create            Yalnızca burada zaten var olan siteler (ötekileri önce kendiniz ekleyin)
   --path DIR --as DOMAIN Öteki sunucunun bir dizini bu alan adı olarak; orada bir ad altında
                          sunulmayan site için (örneğin /usr/local/lsws/Example/html)
-  --db NAME              Seçenek --path ise: getirilecek veritabanı, WordPress olmayan site için
+  --db NAME              Seçenek --path ise: getirilecek veritabanı, sitenin kendi dosyaları
+                         hangisi olduğunu söylemiyorsa
   --no-db  --no-files    Veritabanları ya da dosyalar dışarıda bırakılır
   --no-mail              Posta kutuları dışarıda bırakılır
   --no-cron              Cron işleri dışarıda bırakılır
@@ -99,7 +100,8 @@ Usage: setup.sh import <[user@]host> [options]
   --no-create            Only the sites that already exist here (add the others yourself first)
   --path DIR --as DOMAIN One directory of the other server as this domain, for a site that is
                          served there under no name (such as /usr/local/lsws/Example/html)
-  --db NAME              With --path: the database to bring, for a site that is no WordPress
+  --db NAME              With --path: the database to bring, when the site's own files do not
+                         say which
   --no-db  --no-files    Leave the databases, or the files, out
   --no-mail              Leave the mailboxes out
   --no-cron              Leave the cron jobs out
@@ -291,9 +293,162 @@ _import_mb() {   # kilobytes -> "12 MB"
 #   C <document root> <when: five fields or @word> <command>
 #   M <address> <its Maildir|-> <kilobytes> <password hash|->
 #   A <alias address, or @domain> <where it goes, addresses divided by commas>
-# Plain sh, awk and sed: the other server is whatever it is. LOMP_IMPORT_ONLY names one
-# directory to describe instead; LOMP_IMPORT_ROOT stands in front of the fixed paths (tests).
+# The database of a site that is no WordPress is the one its own configuration files name
+# (lib_import_remote_lib). Plain sh, awk and sed: the other server is whatever it is. LOMP_IMPORT_ONLY names one
+# directory to describe instead; LOMP_IMPORT_ROOT stands in front of the fixed paths, and
+# LOMP_IMPORT_OWNER is the account every site's files are said to belong to (both for tests).
+# What both scripts that run on the other server share - and what this server runs on the
+# files once they are here: where an application keeps its database login, and what it is.
+#   dbconf FILE [NAME]  F <name|user|pass|host> <line> <column> <length> <the value as written>
+#                       (NAME: what the file is called, when FILE is a copy of it)
+#   dbconf_val FILE F   one of them, as PHP reads it
+#   dbconf_cnf FILE     a client option file with that login
+#   dbconf_files DIR    the files worth looking into, the ones nearest the top first
+#   dbconf_pick DIR     the file to take the login from
+# The login is looked for the ways PHP applications write it: define('DB_NAME', ...), a
+# variable or an array key (db_name, dbname, database, veritabani ...; user, kullanici ...;
+# password, sifre ...; host, sunucu ...), KEY=value in a .env, a PDO "mysql:host=...;dbname=...",
+# and the arguments of mysqli_connect() or new mysqli(). A name that says "database" outright
+# (db_user) counts before one that could be anything's (user). Plain sh and awk; no single
+# quote inside the awk program, which the shell holds in a pair of them.
+lib_import_remote_lib() {
+  cat <<'IMPORT_LIB'
+TAB="$(printf '\t')"
+dbconf() {
+  awk -v fn="${2:-$1}" '
+  function ok(f, v) {
+    if (f == "name") return v ~ /^[A-Za-z0-9_-]+$/
+    if (f == "user") return v ~ /^[A-Za-z0-9_.@-]+$/
+    if (f == "host") return v ~ /^[A-Za-z0-9_.:\/-]+$/
+    return 1
+  }
+  function put(f, prio, col, len,   v) {
+    v = substr(L, col, len)
+    if (!ok(f, v)) return
+    if ((f in best) && best[f] <= prio) return
+    best[f] = prio; rec[f] = NR "\t" col "\t" len "\t" v
+  }
+  function quoted(p, q,   i, c) {
+    for (i = p; i <= length(L); i++) {
+      c = substr(L, i, 1)
+      if (c == "\\") { i++; continue }
+      if (c == q) { VLEN = i - p; return 1 }
+    }
+    return 0
+  }
+  function key(f, prio, keys,   re, p) {
+    re = "(^|[^a-z0-9_])(" keys ")[\047\"]?[ \t]*\\]?[ \t]*(=>|=|:|,)[ \t]*[\047\"]"
+    if (!match(LOW, re)) return
+    p = RSTART + RLENGTH
+    if (quoted(p, substr(L, p - 1, 1))) put(f, prio, p, VLEN)
+  }
+  function bare(f, prio, keys,   re, p, v) {
+    re = "^[ \t]*(export[ \t]+)?(" keys ")[ \t]*=[ \t]*"
+    if (!match(LOW, re)) return
+    p = RSTART + RLENGTH
+    v = substr(L, p); sub(/[ \t\r]+$/, "", v)
+    if (v ~ /^[\047"]/) return
+    sub(/[ \t]+#.*$/, "", v)
+    put(f, prio, p, length(v))
+  }
+  function dsn(f, word,   p, rest, n) {
+    if (!match(LOW, word "=")) return
+    p = RSTART + RLENGTH; rest = substr(L, p)
+    n = match(rest, /[;\047" )]/)
+    put(f, 2, p, (n ? n - 1 : length(rest)))
+  }
+  function call(   p, n, rest, col, len) {
+    if (!match(LOW, /(mysqli_connect|mysqli_real_connect|new[ \t]+mysqli|mysql_p?connect)[ \t]*\(/)) return
+    p = RSTART + RLENGTH; n = 0
+    while (n < 4) {
+      rest = substr(L, p)
+      if (!match(rest, /^[ \t]*[\047"]/)) break
+      p += RLENGTH
+      if (!quoted(p, substr(L, p - 1, 1))) break
+      n++; col[n] = p; len[n] = VLEN
+      p += VLEN + 1
+      rest = substr(L, p)
+      if (!match(rest, /^[ \t]*,/)) break
+      p += RLENGTH
+    }
+    if (n < 3) return
+    put("host", 2, col[1], len[1]); put("user", 2, col[2], len[2]); put("pass", 2, col[3], len[3])
+    if (n == 4) put("name", 2, col[4], len[4])
+  }
+  function seldb(   p, rest) {
+    if (!match(LOW, /mysqli?_select_db[ \t]*\(/)) return
+    p = RSTART + RLENGTH; rest = substr(L, p)
+    if (!match(rest, /[\047"]/)) return
+    p += RSTART
+    if (quoted(p, substr(L, p - 1, 1))) put("name", 2, p, VLEN)
+  }
+  BEGIN {
+    K["name", 1] = "db_name|dbname|db_database|database_name|db_adi|dbadi|veritabani|vt_adi|mysql_database|mysql_db"
+    K["user", 1] = "db_username|db_user|dbusername|dbuser|db_kullanici|mysql_username|mysql_user"
+    K["pass", 1] = "db_password|db_pass|dbpassword|dbpass|db_sifre|db_pwd|mysql_password|mysql_pass"
+    K["host", 1] = "db_hostname|db_host|dbhost|db_server|dbserver|mysql_host"
+    K["name", 3] = "database|db"
+    K["user", 3] = "username|kullanici_adi|kullanici|user|kadi"
+    K["pass", 3] = "password|passwd|pass|pwd|sifre|parola"
+    K["host", 3] = "hostname|host|server|sunucu"
+    env = (fn ~ /\.env[^\/]*$/ || fn ~ /\.ini$/)
+  }
+  /^[ \t]*(\/\/|#|\*|\/\*|;)/ { next }
+  {
+    L = $0; LOW = tolower($0)
+    key("name", 1, K["name", 1]); key("user", 1, K["user", 1]); key("pass", 1, K["pass", 1]); key("host", 1, K["host", 1])
+    if (env) { bare("name", 1, K["name", 1]); bare("user", 1, K["user", 1]); bare("pass", 1, K["pass", 1]); bare("host", 1, K["host", 1]) }
+    if (index(LOW, "mysql:")) { dsn("name", "dbname"); dsn("host", "host") }
+    call(); seldb()
+    key("name", 3, K["name", 3]); key("user", 3, K["user", 3]); key("pass", 3, K["pass", 3]); key("host", 3, K["host", 3])
+    if (env) { bare("name", 3, K["name", 3]); bare("user", 3, K["user", 3]); bare("pass", 3, K["pass", 3]); bare("host", 3, K["host", 3]) }
+  }
+  END { for (f in rec) print "F\t" f "\t" rec[f] }
+  ' "$1" 2>/dev/null
+}
+dbconf_val() {
+  dbconf "$1" | awk -F"$TAB" -v f="$2" '$2 == f { print $6; exit }' | sed -e "s/\\\\\\(['\"\\\\]\\)/\\1/g"
+}
+dbconf_esc() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }
+dbconf_cnf() {
+  cu="$(dbconf_val "$1" user)"; cp="$(dbconf_val "$1" pass)"; ch="$(dbconf_val "$1" host)"
+  [ -n "$cu" ] || return 1
+  printf '[client]\nuser="%s"\npassword="%s"\n' "$(dbconf_esc "$cu")" "$(dbconf_esc "$cp")"
+  case "$ch" in
+    ''|localhost) ;;
+    *:/*) printf 'socket="%s"\n' "${ch#*:}" ;;
+    *:*)  printf 'host="%s"\nport=%s\n' "${ch%%:*}" "${ch##*:}" ;;
+    *)    printf 'host="%s"\n' "$ch" ;;
+  esac
+}
+dbconf_files() {
+  {
+    find "$1" -maxdepth 3 \( -name node_modules -o -name vendor -o -name cache -o -name uploads -o -name .git \) -prune -o -type f -size -200k \
+      \( -iname 'config*.php' -o -iname 'configuration.php' -o -iname 'settings*.php' -o -iname 'db*.php' -o -iname 'database*.php' \
+         -o -iname 'conn*.php' -o -iname 'baglan*.php' -o -iname 'ayar*.php' -o -iname 'vt*.php' -o -iname 'veritabani*.php' \
+         -o -iname 'local*.php' -o -iname 'env.php' -o -iname '*.inc.php' -o -iname 'config*.inc' -o -name '.env' \) -print 2>/dev/null
+    [ ! -f "${1%/*}/.env" ] || printf '%s\n' "${1%/*}/.env"
+  } | awk '{ n = gsub(/\//, "/"); print n "\t" $0 }' | sort -n | cut -f2- | head -n 60
+}
+dbconf_pick() {
+  pclient="$(command -v mariadb 2>/dev/null || command -v mysql 2>/dev/null || true)"
+  dbconf_files "$1" | while IFS= read -r pf; do
+    pn="$(dbconf_val "$pf" name)"; pu="$(dbconf_val "$pf" user)"
+    [ -n "$pn" ] && [ -n "$pu" ] || continue
+    if [ -n "$pclient" ]; then
+      pc="$(umask 077; mktemp)" || continue
+      dbconf_cnf "$pf" >"$pc"
+      if "$pclient" --defaults-extra-file="$pc" -N -B -e 'SELECT 1' "$pn" >/dev/null 2>&1; then rm -f "$pc"; printf 'T\t%s\n' "$pf"; break; fi
+      rm -f "$pc"
+    fi
+    printf 'N\t%s\n' "$pf"
+  done | awk -F"$TAB" '$1 == "T" { print $2; t = 1; exit } $1 == "N" && n == "" { n = $2 } END { if (!t && n != "") print n }'
+}
+IMPORT_LIB
+}
+
 lib_import_remote_scan() {
+  lib_import_remote_lib
   cat <<'IMPORT_SCAN'
 R="${LOMP_IMPORT_ROOT:-}"
 ONLY="${LOMP_IMPORT_ONLY:-}"
@@ -324,7 +479,7 @@ cron_lines() {   # file, 1 when each line names its user, 1 when every line coun
     }' "$1" 2>/dev/null
 }
 cron_rows() {   # domain docroot
-  owner="$(stat -c %U "$2" 2>/dev/null)"
+  owner="${LOMP_IMPORT_OWNER:-$(stat -c %U "$2" 2>/dev/null)}"
   ohome=""
   [ -z "$owner" ] || ohome="$(awk -F: -v u="$owner" '$1 == u { print $6; exit }' "$R/etc/passwd" 2>/dev/null)"
   own=0
@@ -349,9 +504,16 @@ row() {   # domain docroot www source [PHP version]
   if [ -f "$root/wp-config.php" ]; then kind=wordpress; conf="$root/wp-config.php"
   elif [ -f "$root/wp-settings.php" ] && [ -f "${root%/*}/wp-config.php" ]; then kind=wordpress; conf="${root%/*}/wp-config.php"
   elif [ -n "$(find "$root" -maxdepth 1 -name '*.php' 2>/dev/null | head -n 1)" ]; then kind=php; fi
-  if [ "$conf" != - ]; then
+  if [ "$kind" = wordpress ]; then
     db="$(sed -n "s/^[[:space:]]*define([[:space:]]*['\"]DB_NAME['\"][[:space:]]*,[[:space:]]*['\"]\([^'\"]*\)['\"].*/\1/p" "$conf" 2>/dev/null | head -n 1)"
     [ -n "$db" ] || db=-
+  elif [ "$kind" = php ]; then
+    # some other application: the file that holds its database login, if one can be told
+    c="$(dbconf_pick "$root")"
+    if [ -n "$c" ]; then
+      n="$(dbconf_val "$c" name)"
+      if [ -n "$n" ]; then conf="$c"; db="$n"; fi
+    fi
   fi
   kb="$(du -sk "$root" 2>/dev/null | cut -f1)"
   printf 'S\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$1" "$root" "${kb:-0}" "$kind" "$db" "$3" "$conf" "$4" "${5:--}"
@@ -501,10 +663,12 @@ exit 0
 IMPORT_SCAN
 }
 
-# Writes one database to stdout, gzipped. DB names it; CONF, when given, is the wp-config.php
-# whose login is used if the account that runs this cannot read the database by itself. That
+# Writes one database to stdout, gzipped. DB names it; CONF, when given, is the file - a
+# wp-config.php, or another application's configuration - whose login is used if the account
+# that runs this cannot read the database by itself. That
 # login goes into a file only this account can read, never onto a command line.
 lib_import_remote_dump() {
+  lib_import_remote_lib
   cat <<'IMPORT_DUMP'
 set -u
 set -o pipefail 2>/dev/null || true
@@ -518,26 +682,11 @@ if [ -n "$client" ] && "$client" -N -B -e 'SELECT 1' "$DB" >/dev/null 2>&1; then
   "$dumper" $opts --routines "$DB" | gzip -c
   exit $?
 fi
-[ -n "$CONF" ] && [ -r "$CONF" ] || { echo "lomp-import: this account cannot open the database $DB, and there is no wp-config.php to take a login from" >&2; exit 4; }
-get() {
-  sed -n "s/^[[:space:]]*define([[:space:]]*['\"]$1['\"][[:space:]]*,[[:space:]]*\(['\"]\)\(.*\)\1[[:space:]]*)[[:space:]]*;.*/\2/p" "$CONF" \
-    | head -n 1 | sed -e "s/\\\\\\(['\\\\]\\)/\\1/g"
-}
-esc() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }
-u="$(get DB_USER)"; p="$(get DB_PASSWORD)"; h="$(get DB_HOST)"
-[ -n "$u" ] || { echo "lomp-import: no DB_USER in $CONF" >&2; exit 4; }
+[ -n "$CONF" ] && [ -r "$CONF" ] || { echo "lomp-import: this account cannot open the database $DB, and there is no configuration file to take a login from" >&2; exit 4; }
 umask 077
 cnf="$(mktemp)" || exit 5
 trap 'rm -f "$cnf"' EXIT
-{
-  printf '[client]\nuser="%s"\npassword="%s"\n' "$(esc "$u")" "$(esc "$p")"
-  case "$h" in
-    ''|localhost) ;;
-    *:/*) printf 'socket="%s"\n' "${h#*:}" ;;
-    *:*)  printf 'host="%s"\nport=%s\n' "${h%%:*}" "${h##*:}" ;;
-    *)    printf 'host="%s"\n' "$h" ;;
-  esac
-} >"$cnf"
+dbconf_cnf "$CONF" >"$cnf" || { echo "lomp-import: no database user in $CONF" >&2; exit 4; }
 "$dumper" --defaults-extra-file="$cnf" $opts "$DB" | gzip -c
 IMPORT_DUMP
 }
@@ -778,6 +927,54 @@ lib_import_wpconfig_rewrite() {   # stdin -> stdout; name user password
       print
     }
     END { if (!(("DB_NAME" in done) && ("DB_USER" in done) && ("DB_PASSWORD" in done))) exit 3 }'
+}
+
+# The database login in a file that is here, found the way it was found there.
+lib_import_dbconf() {   # file [the name it goes by] -> the F lines
+  sh -c "$(lib_import_remote_lib)"'
+dbconf "$1" "$2"' sh "$1" "${2:-$1}"
+}
+
+# That file with the login of this server in its place: only the values change, each where it
+# stands, and everything around them stays as it was written. Status 3: name, user and
+# password were not all there.
+lib_import_dbconf_rewrite() {   # file, its F lines (a file); name user password -> stdout
+  LOMP_DB_NAME="$3" LOMP_DB_USER="$4" LOMP_DB_PASS="$5" awk '
+    BEGIN { FS = "\t"; new["name"] = ENVIRON["LOMP_DB_NAME"]; new["user"] = ENVIRON["LOMP_DB_USER"]; new["pass"] = ENVIRON["LOMP_DB_PASS"]; new["host"] = "localhost" }
+    FILENAME == ARGV[1] { if ($1 == "F") { n++; f[n] = $2; ln[n] = $3 + 0; col[n] = $4 + 0; len[n] = $5 + 0 } next }
+    {
+      line = $0
+      # the values of this line, the rightmost first, so that the columns of the others hold
+      do {
+        pick = 0
+        for (i = 1; i <= n; i++) if (ln[i] == FNR && !used[i] && (!pick || col[i] > col[pick])) pick = i
+        if (pick) { line = substr(line, 1, col[pick] - 1) new[f[pick]] substr(line, col[pick] + len[pick]); used[pick] = 1; did[f[pick]] = 1 }
+      } while (pick)
+      print line
+    }
+    END { if (!(("name" in did) && ("user" in did) && ("pass" in did))) exit 3 }' "$2" "$1"
+}
+
+# Every configuration file of a site that names the database it had there, pointed at the one
+# it has here. The names of the files that were changed come back in IMP_FIXED.
+IMP_FIXED=""
+_import_dbconf_fix() {   # document root, the database's name there, a work directory
+  local docroot="$1" old="$2" work="$3" f="" name=""
+  IMP_FIXED=""
+  [[ "${DBI_NAME}${DBI_USER}${DBI_PASS}" =~ ^[A-Za-z0-9_]+$ ]] || return 0
+  while IFS= read -r f; do
+    [[ -n "$f" && "$f" == "$docroot"/* ]] || continue
+    lib_domain_as_user cat "$f" >"${work}/conf.in" 2>/dev/null || continue
+    lib_import_dbconf "${work}/conf.in" "$f" >"${work}/conf.pos" 2>/dev/null || continue
+    name="$(awk -F'\t' '$2 == "name" { print $6; exit }' "${work}/conf.pos")"
+    [[ -n "$name" && "$name" == "$old" ]] || continue
+    lib_import_dbconf_rewrite "${work}/conf.in" "${work}/conf.pos" "$DBI_NAME" "$DBI_USER" "$DBI_PASS" >"${work}/conf.out" || continue
+    lib_domain_as_user tee "$f" <"${work}/conf.out" >/dev/null || continue
+    IMP_FIXED+="${IMP_FIXED:+, }${f#"$docroot"/}"
+  done < <(lib_domain_as_user sh -c "$(lib_import_remote_lib)"'
+dbconf_files "$1"' sh "$docroot" 2>/dev/null || true)
+  rm -f -- "${work}/conf.in" "${work}/conf.pos" "${work}/conf.out"
+  return 0
 }
 
 _import_add() {   # domain add-options...
@@ -1021,7 +1218,7 @@ lib_import_site_part() {   # index
            "the connection dropped, the disk is full, or ${IMP_SSH_TARGET} cannot read everything in ${root} (see the log)" \
            "what was copied stays; run the import again to complete it"
     # a wp-config.php kept one directory above the document root there
-    if [[ "$conf" != "-" && "$conf" != "${root}/wp-config.php" ]]; then
+    if [[ "$kind" == "wordpress" && "$conf" != "-" && "$conf" != "${root}/wp-config.php" ]]; then
       _import_ssh "cat '${conf}'" </dev/null 2>>"$LOG_FILE" | lib_domain_as_user tee "${docroot}/wp-config.php" >/dev/null \
         || lib_warn "${conf} could not be copied: ${docroot}/wp-config.php is missing"
     fi
@@ -1088,7 +1285,12 @@ lib_import_site_part() {   # index
       lib_warn "This WordPress says its address is ${home}, not ${domain}: its pages will send visitors there"
     fi
   elif (( imported )); then
-    lib_note "The application's own settings still name the database of the other server; the one here: setup.sh credentials ${domain}"
+    _import_dbconf_fix "$docroot" "$db" "$work"
+    if [[ -n "$IMP_FIXED" ]]; then
+      lib_ok "The application's database login is now the one of this server (${DBI_NAME}), in: ${IMP_FIXED}"
+    else
+      lib_warn "The application's own settings still name the database of the other server: put in the one of this server (setup.sh credentials ${domain})"
+    fi
   fi
   rm -f -- "${work}/wp-config.in" "${work}/wp-config.out" 2>/dev/null || true
   lib_rollback_clear

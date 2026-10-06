@@ -9513,7 +9513,9 @@ printf 'docRoot                   $VH_ROOT/html/\n' >"$_im_l/conf/vhosts/Example
 printf 'docRoot                   $VH_ROOT/public_html\nextprocessor shop {\n  path  /usr/local/lsws/lsphp74/bin/lsphp\n}\n' >"$_im_l/conf/vhosts/shop.example/vhconf.conf"
 # its cron jobs: the crontab of the account the shop's files belong to (whose home the shop is),
 # root's crontab, a file in /etc/cron.d, and the file lomp itself keeps on a server it runs
-_im_me="$(id -un)"
+# (an account of the fixture's own, named to the listing: whoever runs the suite - root, too -
+# is then not the one whose crontab this is)
+_im_me="shopowner"
 mkdir -p "$_im_r/etc/cron.d" "$_im_r/var/spool/cron/crontabs"
 printf '%s:x:1000:1000::%s:/bin/sh\n' "$_im_me" "$_im_r/home/shop.example" >"$_im_r/etc/passwd"
 printf '%s\n' '# the shop' 'MAILTO=owner@shop.example' \
@@ -9549,7 +9551,44 @@ echo "-- ARGS $*"
 echo "CREATE TABLE t (c text) COLLATE=utf8mb4_0900_ai_ci;"
 [ "${IM_DUMP_MODE:-}" = cut ] || echo "-- Dump completed on 2026-10-05"
 EOF
-printf '#!/bin/sh\nexit "${IM_CLIENT_RC:-1}"\n' >"$_im_bin/mysql"
+cat >"$_im_bin/mysql" <<'EOF'
+#!/bin/sh
+# lets in whoever logs in as $IM_CLIENT_USER through an option file; otherwise $IM_CLIENT_RC
+for a in "$@"; do
+  case "$a" in --defaults-extra-file=*)
+    if [ -n "${IM_CLIENT_USER:-}" ] && grep -q "^user=\"$IM_CLIENT_USER\"\$" "${a#*=}"; then exit 0; fi ;;
+  esac
+done
+exit "${IM_CLIENT_RC:-1}"
+EOF
+# an application that is no WordPress: its login in two files, the nearer one out of date
+_im_crm="$_im_r/home/crm.example/public_html"; _im_cf="$TMP/im-conf"
+mkdir -p "$_im_crm/include" "$_im_crm/vendor" "$_im_crm/admin" "$_im_cf"
+printf '<?php // crm\n' >"$_im_crm/index.php"
+cat >"$_im_crm/config.php" <<'EOF'
+<?php
+// $db_name = 'commented_out';
+$db_host = "localhost";
+$db_name = 'crmdb';   // the database
+$db_user = 'stale';
+$db_pass = 'old\'s "pw"';
+$smtp_host = 'smtp.example.org'; $password = 'smtp-secret';
+EOF
+cat >"$_im_crm/include/db.php" <<'EOF'
+<?php
+$baglanti = mysqli_connect("localhost", "crmuser", "crm-pw", "crmdb");
+EOF
+printf '<?php\n$db_name = "otherdb"; $db_user = "other"; $db_pass = "x";\n' >"$_im_crm/admin/config.php"
+printf '<?php\n$db_name = "crmdb"; $db_user = "vendored"; $db_pass = "x";\n' >"$_im_crm/vendor/config.php"
+# the ways a login is written
+printf '%s\n' '<?php' 'define("DB_HOST", "db.internal:3307");' "define( 'DB_DATABASE', 'defdb' );" "define('DB_USERNAME','defuser');" "define('DB_PASSWORD', 'def;pw');" >"$_im_cf/define.php"
+printf '%s\n' '<?php' '$db["default"] = array(' "  'hostname' => 'localhost'," "  'username' => 'ciuser'," "  'password' => 'ci pw'," "  'database' => 'cidb'," ');' >"$_im_cf/array.php"
+printf '%s\n' '# settings' 'APP_NAME=shop' 'DB_HOST="127.0.0.1"' 'DB_DATABASE=envdb' 'DB_USERNAME=envuser' 'DB_PASSWORD=env-pw1   # the password' >"$_im_cf/.env"
+printf '%s\n' '<?php' '$c = new mysqli("localhost", "same", "pw5", "same");' >"$_im_cf/call.php"
+printf '%s\n' '<?php' "\$pdo = new PDO(\"mysql:host=dbhost;dbname=pdodb;charset=utf8\", \$u, \$p);" >"$_im_cf/pdo.php"
+printf '%s\n' '<?php' '$sunucu = "localhost"; ' '$veritabani = "trdb";' '$kullanici = "truser";' '$sifre = "tr$ifre";' >"$_im_cf/turkce.php"
+printf '%s\n' '<?php' '$mail = array("host" => "smtp.example.org", "username" => "mailer", "password" => "mail-pw");' \
+  '$db_name = "realdb"; $db_user = "realuser"; $db_pass = "real-pw";' >"$_im_cf/mixed.php"
 cp "$_im_bin/mysqldump" "$_im_bin/mariadb-dump"; cp "$_im_bin/mysql" "$_im_bin/mariadb"
 # the other server's mail: three addresses Dovecot knows, the Maildir of two of them, and the
 # hashes of lomp's own password file - one that can be taken over, one that cannot
@@ -9587,7 +9626,7 @@ EOF
 chmod +x "$_im_bin"/*
 
 # ---- the listing, as the other server writes it ------------------------------
-_im_scan="$(lib_import_remote_scan | env PATH="$_im_bin:$PATH" LOMP_IMPORT_ROOT="$_im_r" IM_MAIL_USERS="$_im_users" sh -s)"
+_im_scan="$(lib_import_remote_scan | env PATH="$_im_bin:$PATH" LOMP_IMPORT_ROOT="$_im_r" LOMP_IMPORT_OWNER="$_im_me" IM_MAIL_USERS="$_im_users" sh -s)"
 _im_mrow() { awk -F'\t' -v a="$1" '$1 == "M" && $2 == a { print $3 "|" $5; exit }' <<<"$_im_scan"; }
 assert_eq  "a mailbox Dovecot knows, where its mail lies and the hash it logs in with" "$_im_md|$_im_hash" "$(_im_mrow info@shop.example)"
 assert_eq  "one whose Maildir is not there, and whose hash is not known" "-|-" "$(_im_mrow sales@shop.example)"
@@ -9624,11 +9663,11 @@ assert_eq  "one directory on request"  "S|-|$_im_l/Example/html|static|path" \
   "$(lib_import_remote_scan | LOMP_IMPORT_ONLY="$_im_l/Example/html" sh -s | awk -F'\t' '$1 == "S" { print $1 "|" $2 "|" $3 "|" $5 "|" $9 }')"
 
 lib_import_scan_parse <<<"$_im_scan"
-assert_eq  "each site once, the virtual hosts first"           "shop.example blog.example panel.example mailonly.example fwdonly.example" "${IMP_DOMAIN[*]}"
-assert_eq  "with what it is"                                   "wordpress static php mail mail" "${IMP_KIND[*]}"
-assert_eq  "its database"                                      "shopdb - - - -" "${IMP_DB[*]}"
-assert_eq  "and whether www is served"                         "1 0 0 0 0" "${IMP_WWW[*]}"
-assert_eq  "the PHP each runs, where that is known"                "7.4 - - - -" "${IMP_PHP[*]}"
+assert_eq  "each site once, the virtual hosts first"           "shop.example blog.example crm.example panel.example mailonly.example fwdonly.example" "${IMP_DOMAIN[*]}"
+assert_eq  "with what it is"                                   "wordpress static php php mail mail" "${IMP_KIND[*]}"
+assert_eq  "its database"                                      "shopdb - crmdb - - -" "${IMP_DB[*]}"
+assert_eq  "and whether www is served"                         "1 0 0 0 0 0" "${IMP_WWW[*]}"
+assert_eq  "the PHP each runs, where that is known"                "7.4 - - - - -" "${IMP_PHP[*]}"
 assert_eq  "the shop's jobs, without the one that is no schedule"  "2" "$(_import_cron_of "$_im_shop" | wc -l | tr -d ' ')"
 assert_eq  "the blog's two"                                        "2" "$(_import_cron_of "$_im_r/home/blog.example/public_html" | wc -l | tr -d ' ')"
 assert_lacks "@reboot is not taken"                                "@reboot" "${IMP_CRON_WHEN[*]}"
@@ -9663,6 +9702,43 @@ assert_eq  "the home above a public_html too"                   "cd {HOME} && ./
   "$(_import_cron_rewrite 'cd /home/x.example && ./nightly.sh /home/x.example/public_html' /home/x.example/public_html)"
 assert_eq  "but not the directory above any other document root" "ls /var/www {HOME}/public_html" \
   "$(_import_cron_rewrite 'ls /var/www /var/www/html' /var/www/html)"
+# ---- the login an application keeps in its own files ------------------------------
+_im_f() { lib_import_dbconf "$1" | sort | awk -F'\t' '{ printf "%s=%s ", $2, $6 }'; }
+assert_eq  "variables, and not the line that is commented out"   'host=localhost name=crmdb pass=old\'"'"'s "pw" user=stale ' "$(_im_f "$_im_crm/config.php")"
+assert_eq  "define(), whatever the constants are called"         "host=db.internal:3307 name=defdb pass=def;pw user=defuser " "$(_im_f "$_im_cf/define.php")"
+assert_eq  "the keys of an array"                                "host=localhost name=cidb pass=ci pw user=ciuser " "$(_im_f "$_im_cf/array.php")"
+assert_eq  "a .env, quoted or not, without the comment after it" "host=127.0.0.1 name=envdb pass=env-pw1 user=envuser " "$(_im_f "$_im_cf/.env")"
+cp "$_im_cf/.env" "$_im_cf/copy.in"
+assert_has "a copy of a .env is read as one when it is said to be one" "name=envdb" "$(lib_import_dbconf "$_im_cf/copy.in" "/srv/site/.env" | awk -F'	' '{ printf "%s=%s ", $2, $6 }')"
+assert_lacks "and not when it is not"                            "name=envdb" "$(_im_f "$_im_cf/copy.in")"
+assert_eq  "the arguments of mysqli, user and database alike"    "host=localhost name=same pass=pw5 user=same " "$(_im_f "$_im_cf/call.php")"
+assert_eq  "a PDO address gives the database and the host"       "host=dbhost name=pdodb " "$(_im_f "$_im_cf/pdo.php")"
+assert_eq  "Turkish names"                                       'host=localhost name=trdb pass=tr$ifre user=truser ' "$(_im_f "$_im_cf/turkce.php")"
+assert_eq  "a name that says database counts before one that is the mail's" "name=realdb pass=real-pw user=realuser " \
+  "$(_im_f "$_im_cf/mixed.php" | sed 's/host=[^ ]* //')"
+_im_rw() {   # file name user password -> the file with them in place
+  lib_import_dbconf "$1" >"$TMP/im-pos"
+  lib_import_dbconf_rewrite "$1" "$TMP/im-pos" "$2" "$3" "$4"
+}
+_im_new="$(_im_rw "$_im_crm/config.php" newdb newuser NewPw9)"
+assert_has "the name where it stood, the comment behind it kept" "\$db_name = 'newdb';   // the database" "$_im_new"
+assert_has "the user"                                            "\$db_user = 'newuser';" "$_im_new"
+assert_has "the password, whatever was between its quotes"       "\$db_pass = 'NewPw9';" "$_im_new"
+assert_has "the mail settings on the next line are not touched"  "\$smtp_host = 'smtp.example.org'; \$password = 'smtp-secret';" "$_im_new"
+assert_has "nor the line that is commented out"                  "// \$db_name = 'commented_out';" "$_im_new"
+assert_eq  "as many lines as before"                             "7" "$(wc -l <<<"$_im_new" | tr -d ' ')"
+assert_has "four values on one line, each in its own place"      '$c = new mysqli("localhost", "newuser", "NewPw9", "newdb");' "$(_im_rw "$_im_cf/call.php" newdb newuser NewPw9)"
+assert_has "a .env keeps its comment"                            "DB_PASSWORD=NewPw9   # the password" "$(_im_rw "$_im_cf/.env" newdb newuser NewPw9)"
+assert_has "and its host becomes this server"                    'DB_HOST="localhost"' "$(_im_rw "$_im_cf/.env" newdb newuser NewPw9)"
+assert_has "a host with a port becomes this server too"          'define("DB_HOST", "localhost");' "$(_im_rw "$_im_cf/define.php" newdb newuser NewPw9)"
+assert_eq  "a file without a whole login is said to be one"      "3" "$(_im_rw "$_im_cf/pdo.php" a b c >/dev/null && printf 0 || printf '%s' "$?")"
+_im_pick() { ( eval "$(lib_import_remote_lib)"; PATH="$_im_bin:$PATH" IM_CLIENT_RC=1 IM_CLIENT_USER="$1" dbconf_pick "$_im_crm" ); }
+assert_eq  "of two files, the one whose login the database takes" "$_im_crm/include/db.php" "$(_im_pick crmuser)"
+assert_eq  "when none can be tried, the one nearest the top"     "$_im_crm/config.php" "$(_im_pick nobody)"
+assert_lacks "a library's own files are not looked into"         "vendor" "$( ( eval "$(lib_import_remote_lib)"; dbconf_files "$_im_crm" ) )"
+assert_eq  "the listing names the application's database and the file it is in" \
+  "$_im_crm|php|crmdb|0|$_im_crm/config.php|dir" "$(_im_row crm.example)"
+
 # ---- the choice ----------------------------------------------------------------
 assert_eq  "numbers"                    "0 2"   "$(lib_import_pick "1,3" 3 | tr '\n' ' ' | sed 's/ $//')"
 assert_eq  "a range, and each once"     "1 2 0" "$(lib_import_pick "2-3 1 2" 3 | tr '\n' ' ' | sed 's/ $//')"
@@ -9705,7 +9781,7 @@ assert_eq  "no access and no wp-config.php is an error of its own" "4" \
   "$(lib_import_remote_dump | env PATH="$_im_bin:$PATH" DB=shopdb CONF= IM_CLIENT_RC=1 bash -s >/dev/null 2>&1 && printf 0 || printf '%s' "$?")"
 
 # ---- the command -----------------------------------------------------------------
-_im_home="https://www.shop.example"; _im_add_ok=1; _im_dump_mode=""; _im_mail=0; _im_php_ok=1
+_im_home="https://www.shop.example"; _im_add_ok=1; _im_dump_mode=""; _im_mail=0; _im_php_ok=1; _im_client_user=""
 _im_site() {   # domain mode
   lib_domain_state_reset
   D_DOMAIN="$1"; D_IDENT="$(lib_domain_ident "$1")"; D_USER="$D_IDENT"; D_GROUP="$D_IDENT"
@@ -9714,7 +9790,7 @@ _im_site() {   # domain mode
   mkdir -p "$D_HOME/public_html" "$D_HOME/private/tmp"
   printf '<body><p>This site was %s.</p></body>\n' "$DOMAIN_PLACEHOLDER_MARK" >"$D_HOME/public_html/index.html"
 }
-eval '_import_ssh() { env PATH="$_im_bin:$PATH" LOMP_IMPORT_ROOT="$_im_r" IM_CLIENT_RC=1 IM_DUMP_MODE="$_im_dump_mode" IM_MAIL_USERS="$_im_users" sh -c "$1"; }
+eval '_import_ssh() { env PATH="$_im_bin:$PATH" LOMP_IMPORT_ROOT="$_im_r" LOMP_IMPORT_OWNER="$_im_me" IM_CLIENT_RC=1 IM_DUMP_MODE="$_im_dump_mode" IM_MAIL_USERS="$_im_users" IM_CLIENT_USER="$_im_client_user" sh -c "$1"; }
       lib_mail_installed() { (( _im_mail )); }
       lib_import_connect() { IMP_SSH_OPTS=(); printf "connect %s port=%s key=%s pw=%s\n" "$IMP_SSH_TARGET" "$1" "$2" "$3" >>"$_im_log"; }
       lib_require_tools() { return 0; }
@@ -9822,7 +9898,7 @@ assert_lacks "without adding it"                        "add " "$(cat "$_im_log"
 OPT_DRY_RUN=1
 assert_eq  "a dry run"                                  "0" "$(_imf old.example --all)"
 OPT_DRY_RUN=0
-assert_has "says what it would bring"                   "[dry-run] would import 3 site(s)" "$(cat "$_im_out")"
+assert_has "says what it would bring"                   "[dry-run] would import 4 site(s)" "$(cat "$_im_out")"
 assert_lacks "and brings nothing"                       "add " "$(cat "$_im_log")"
 
 : >"$_im_log"
@@ -9992,6 +10068,24 @@ assert_has "mail enable takes --no-dns"                         "--no-dns)" "$(d
 assert_has "and then writes no record"                          'if (( no_dns )); then' "$(declare -f lib_mail_enable_main)"
 _im_mail=0
 
+# an application that is no WordPress
+: >"$_im_log"; _im_client_user="crmuser"; _im_d3="$SITES_ROOT/crm.example/public_html"
+assert_eq  "an application with its login in its own files"    "0" "$(_imf old.example --only crm.example)"
+assert_has "has its database named in the plan"                "crm.example: a new site" "$(grep 'database crmdb' "$_im_out")"
+assert_has "which is dumped with the login the database takes" 'user="crmuser"' "$(cat "$TMP/im-restored-crm.example.sql")"
+assert_has "and its password"                                  'password="crm-pw"' "$(cat "$TMP/im-restored-crm.example.sql")"
+assert_has "the file near the top now has the login of this server" "\$db_name = 'crm_db';   // the database" "$(cat "$_im_d3/config.php")"
+assert_has "its user and password too"                         "\$db_user = 'crm_user';" "$(cat "$_im_d3/config.php")$(grep -c "db_pass = 'LocalPass9';" "$_im_d3/config.php")"
+assert_has "and so has the other file that named that database" '$baglanti = mysqli_connect("localhost", "crm_user", "LocalPass9", "crm_db");' "$(cat "$_im_d3/include/db.php")"
+assert_has "a file that names another database is left alone"  '$db_name = "otherdb"; $db_user = "other";' "$(cat "$_im_d3/admin/config.php")"
+assert_has "and so is a library's"                             '$db_user = "vendored"' "$(cat "$_im_d3/vendor/config.php")"
+assert_has "which files were changed is said"                  "is now the one of this server (crm_db), in: config.php, include/db.php" "$(cat "$_im_out")"
+assert_lacks "no password is in what is printed"               "LocalPass9" "$(cat "$_im_out")"
+assert_lacks "nor the old one"                                 "crm-pw" "$(cat "$_im_out")$(cat "$LOG_FILE")"
+assert_has "the files are written by the site's user"          "-u $(lib_domain_ident crm.example) -- env -C / tee $_im_d3/config.php" "$(cat "$RUNUSER_LOG")"
+assert_false "no wp-config.php is made up for it"              test -e "$_im_d3/wp-config.php"
+_im_client_user=""
+
 # what goes wrong
 : >"$_im_log"; _im_add_ok=0
 assert_eq  "a site that cannot be added fails"          "1" "$(_imf old.example --only panel.example)"
@@ -10054,7 +10148,7 @@ assert_has "the command is in the reference"            "import <[user@]host>" "
 assert_has "setup.sh knows it"                          'import)         lib_import_main' "$(cat "$ROOT/setup.sh")"
 
 eval "$_im_orig"; eval "$_im_saved"
-unset -f _im_row _im_mrow _im_php _im_crow _im_dump _im_site _imf
+unset -f _im_row _im_mrow _im_php _im_crow _im_f _im_rw _im_pick _im_dump _im_site _imf
 
 section "renew-ssl: a WordPress installed before its certificate stops calling itself http://"
 # The WordPress is a stand-in for wp-cli that keeps "home" and "siteurl" in two files.

@@ -405,7 +405,7 @@ FILE`, `--password-file FILE` and `--port N` are there for the rest - and looks 
 serves: the virtual hosts of an OpenLiteSpeed (lomp, CyberPanel, a plain install), by the names
 its listeners map to them, and the directories under `/home`, `/var/www`, `/www/wwwroot` and
 `/var/www/vhosts` that are named after a domain. It lists them with their size, what they are
-(static, PHP, WordPress), the database a WordPress names and whether a site of that name is
+(static, PHP, WordPress), the database its own files name and whether a site of that name is
 here already, and asks which ones to bring. Then, for each:
 
 - a site that is not here yet is added, without a certificate - the DNS still points to the
@@ -420,12 +420,26 @@ here already, and asks which ones to bring. Then, for each:
   and imported into the site's database here; `wp-config.php` then gets the name, user and
   password of the database on this server. Tables in MySQL 8's `utf8mb4_0900_ai_ci` become
   `utf8mb4_unicode_520_ci`, which MariaDB has;
-- a WordPress whose own address is `www.<domain>` gets a site that answers there.
+- a WordPress whose own address is `www.<domain>` gets a site that answers there;
+- the database of any other PHP application is found the same way, from the file it keeps its
+  login in. The document root is searched three directories deep (not `vendor`,
+  `node_modules`, `cache`, `uploads`) for files named like `config*.php`, `configuration.php`,
+  `settings*.php`, `db*.php`, `database*.php`, `conn*.php`, `baglan*.php`, `ayar*.php`,
+  `*.inc.php` and `.env` - the one beside the document root too - and each is read for a login
+  the ways applications write one: `define('DB_NAME', ...)`, a variable or an array key
+  (`$db_name`, `'database' =>`, `$veritabani`, `$kullanici`, `$sifre` ...), `KEY=value` in a
+  `.env`, a PDO `mysql:host=...;dbname=...`, and the arguments of `mysqli_connect()` or
+  `new mysqli()`. Of several files, the one whose login the database there accepts is taken;
+- after the import **every one of those files that names that database** gets the name, user
+  and password of the database on this server, and `localhost` as its host. Only the values
+  change, each where it stands - the rest of the file is as it was written - and the run names
+  the files it changed. A login that is put together in code, kept in a file of another name,
+  or deeper than three directories is not found: the run says so, and `lomp credentials
+  <domain>` prints what to put in.
 
 A directory that is served under no name - `/usr/local/lsws/Example/html`, `/var/www/html`, a
 user's `public_html` - is listed apart; `--path DIR --as DOMAIN` brings it as that domain, and
-`--db NAME` with it the database of an application that is no WordPress (its own configuration
-file is yours to point at the new database: `lomp credentials <domain>`).
+`--db NAME` with it a database the site's own files do not name.
 
 **The mailboxes of a domain come with it** when this server runs mail (`install --with-mail`)
 and you logged in there as root:

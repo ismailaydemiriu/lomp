@@ -2293,6 +2293,8 @@ LIB_TR_PAIRS=(
   '{1} site(s) imported from {2}' '{2} sunucusundan {1} site aktarıldı'
   'They answer over HTTP here. To see one before its DNS moves, put this server'\''s address and the domain into your own computer'\''s hosts file.' 'Siteler burada HTTP üzerinden yanıt veriyor. DNS taşınmadan önce birine bakmak için bu sunucunun adresini ve alan adını kendi bilgisayarınızın hosts dosyasına yazın.'
   'Once a domain'\''s DNS points here, its certificate: setup.sh renew-ssl <domain>' 'Bir alan adının DNS kaydı buraya yönlenince sertifikası: setup.sh renew-ssl <alan adı>'
+  'The application'\''s database login is now the one of this server ({1}), in: {2}' 'Uygulamanın veritabanı girişi artık bu sunucununki ({1}); değişen dosyalar: {2}'
+  'The application'\''s own settings still name the database of the other server: put in the one of this server (setup.sh credentials {1})' 'Uygulamanın kendi ayarları hâlâ diğer sunucunun veritabanını gösteriyor: bu sunucununkini yazın (setup.sh credentials {1})'
   'Not copied: certificates, sieve filters of the mail. The other server was only read.' 'Kopyalanmayanlar: sertifikalar, postanın sieve filtreleri. Diğer sunucu yalnızca okundu.'
   '{1} runs PHP {2} there, which this server cannot install: it gets PHP {3}' '{1} orada PHP {2} ile çalışıyor, bu sunucu o sürümü kuramıyor: PHP {3} veriliyor'
   '{1} runs PHP {2} there and PHP {3} here; the site here keeps its own' '{1} orada PHP {2}, burada PHP {3} ile çalışıyor; buradaki site kendi sürümünü koruyor'

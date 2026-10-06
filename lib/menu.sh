@@ -163,8 +163,10 @@ KOMUTLAR
   redirect list | del <from>    Yönlendirmeler; birine yanıt vermeyi bırakır (--keep-ssl)
   import <[user@]host> [opts]   Başka bir sunucudan SSH ile site getirir: sunduklarını listeler,
                                 hangilerini istediğinizi sorar, burada henüz olmayan siteleri
-                                ekler, bir WordPress'in dosyalarını ve veritabanını kopyalar ve
-                                wp-config.php dosyasını buradaki veritabanına yöneltir. Bu
+                                ekler, dosyaları ve sitenin kendi dosyalarının gösterdiği
+                                veritabanını (WordPress, ya da başka bir uygulamanın
+                                config.php, .env ... dosyası) kopyalar ve
+                                o dosyaları buradaki veritabanına yöneltir. Bu
                                 sunucuda posta kuruluysa alan adının posta kutuları da gelir
                                 (öteki sunucu lomp ya da CyberPanel ise şifreleriyle), takma
                                 adları ve yönlendirmeleri de; DNS'e dokunulmaz. Yeni site orada
@@ -420,8 +422,9 @@ COMMANDS
   redirect list | del <from>    The redirects; stop answering for one (--keep-ssl)
   import <[user@]host> [opts]   Bring sites from another server over SSH: lists what it serves,
                                 asks which ones, adds the sites that are not here yet, copies
-                                the files and the database of a WordPress, and points
-                                wp-config.php at the database here. The mailboxes of a domain
+                                the files and the database the site's own files name (a
+                                WordPress, or the config.php, .env ... of another application),
+                                and points those files at the database here. The mailboxes of a domain
                                 come with it when this server runs mail - with their passwords
                                 where the other server is a lomp or a CyberPanel - and so do
                                 its aliases and forwarders; DNS is not touched. A new site
