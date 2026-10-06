@@ -16,6 +16,9 @@ IMP_REMOTE_USER=""
 declare -ga IMP_SSH_OPTS=()
 # one entry per site found, the same index in each ("mail": a domain with mailboxes and no site)
 declare -ga IMP_DOMAIN=() IMP_ROOT=() IMP_KB=() IMP_KIND=() IMP_DB=() IMP_WWW=() IMP_CONF=() IMP_PHP=()
+# ... and the two PHP limits this server keeps per site, as megabytes ("-": not known)
+declare -ga IMP_MEM=() IMP_UPL=()
+IMP_DEF_MEM=0 IMP_DEF_UPL=0
 # one entry per cron job found: the document root it belongs to, when it runs, what it runs
 declare -ga IMP_CRON_ROOT=() IMP_CRON_WHEN=() IMP_CRON_CMD=()
 IMP_OPT_NO_CRON=0
@@ -68,7 +71,8 @@ Kullanım: setup.sh import <[user@]host> [options]
   DNS kayıtlarına dokunulmaz: MX'i siz taşıyana kadar posta orada alınmaya devam eder
   (setup.sh mail dns <domain>).
   Eklenen site, öteki sunucuda çalıştığı PHP sürümünü alır (OpenLiteSpeed yapılandırmasından
-  okunur), bu sunucu o sürümü kurabiliyorsa; burada zaten olan site kendi sürümünü korur.
+  okunur), bu sunucu o sürümü kurabiliyorsa; memory_limit ve upload_max_filesize değerleri de
+  bu sunucunun verdiğinden büyükse korunur. Burada zaten olan site kendi ayarlarını korur.
   Sitenin cron işleri de onunla gelir ve burada sitenin kendi kullanıcısı olarak çalışır:
   dosyalarının sahibi olan hesabın crontab'ı ile root'un crontab'ında ve /etc/cron.d içinde
   sitenin dizinini ya da alan adını anan satırlar; yollar bu sunucuya göre yeniden yazılır.
@@ -115,7 +119,9 @@ Usage: setup.sh import <[user@]host> [options]
   that exists here already stays as it is. The DNS records are not touched: mail goes on
   arriving there until you move the MX (setup.sh mail dns <domain>).
   A site that is added gets the PHP version it runs there (read from OpenLiteSpeed's
-  configuration) when this server can install it; a site that is here keeps its own.
+  configuration) when this server can install it, and its memory_limit and
+  upload_max_filesize where they are above what this server gives; a site that is here
+  keeps its own.
   The cron jobs of a site come with it and run here as the site's user: the crontab of the
   account that owns its files, and the lines of root's crontab and /etc/cron.d that name its
   directory or its domain, with the paths rewritten for this server. They go on running on
@@ -171,6 +177,35 @@ _import_cron_of() {   # document root
   for (( k = 0; k < ${#IMP_CRON_ROOT[@]}; k++ )); do
     if [[ "${IMP_CRON_ROOT[k]}" == "$1" ]]; then printf '%d\n' "$k"; fi
   done
+  return 0
+}
+
+# A size as php.ini writes one (128M, 1G, 65536K, a number of bytes) -> megabytes, or "-" for
+# what is no limit to carry over: nothing, "-1" (none at all), or more than this server would
+# ever give one request.
+_import_size_mb() {   # value
+  local v="${1^^}" mb=0
+  case "$v" in
+    [0-9]*G) v="${v%G}"; [[ "$v" =~ ^[0-9]{1,3}$ ]] || { printf -- '-'; return 0; }; mb=$(( v * 1024 )) ;;
+    [0-9]*M) v="${v%M}"; [[ "$v" =~ ^[0-9]{1,6}$ ]] || { printf -- '-'; return 0; }; mb=$(( 10#$v )) ;;
+    [0-9]*K) v="${v%K}"; [[ "$v" =~ ^[0-9]{1,10}$ ]] || { printf -- '-'; return 0; }; mb=$(( 10#$v / 1024 )) ;;
+    *)       [[ "$v" =~ ^[0-9]{1,13}$ ]] || { printf -- '-'; return 0; }; mb=$(( 10#$v / 1048576 )) ;;
+  esac
+  if (( mb >= 1 && mb <= 16384 )); then printf '%d' "$mb"; else printf -- '-'; fi
+}
+
+# What a new site gets on this server when nothing is said, in megabytes.
+_import_php_defaults() {
+  lib_system_profile
+  IMP_DEF_MEM="$CALC_PHP_MEMORY_MB"; IMP_DEF_UPL="$CALC_PHP_UPLOAD_MB"
+}
+
+# The limits a site that is added is given: the ones it had there where they are larger than
+# what this server gives by itself - a site is not made smaller by moving. Prints the options
+# for "add", one word a line.
+_import_php_limits() {   # index
+  if [[ "${IMP_MEM[$1]}" != "-" ]] && (( IMP_MEM[$1] > IMP_DEF_MEM )); then printf -- '--memory\n%dM\n' "${IMP_MEM[$1]}"; fi
+  if [[ "${IMP_UPL[$1]}" != "-" ]] && (( IMP_UPL[$1] > IMP_DEF_UPL )); then printf -- '--upload\n%dM\n' "${IMP_UPL[$1]}"; fi
   return 0
 }
 
@@ -289,7 +324,7 @@ _import_mb() {   # kilobytes -> "12 MB"
 # =============================================================================
 # Lists what is served there, one line each:
 #   U <user it runs as>
-#   S <domain|-> <document root> <kilobytes> <static|php|wordpress> <database|-> <www 0|1> <wp-config.php|-> <ols|dir|path> <PHP version|->
+#   S <domain|-> <document root> <kilobytes> <static|php|wordpress> <database|-> <www 0|1> <wp-config.php|-> <ols|dir|path> <PHP version|-> <memory_limit|-> <upload_max_filesize|->
 #   C <document root> <when: five fields or @word> <command>
 #   M <address> <its Maildir|-> <kilobytes> <password hash|->
 #   A <alias address, or @domain> <where it goes, addresses divided by commas>
@@ -497,7 +532,7 @@ cron_rows() {   # domain docroot
     cron_lines "$f" 1 0 "$2" "$1"
   done
 }
-row() {   # domain docroot www source [PHP version]
+row() {   # domain docroot www source [PHP version, memory_limit, upload_max_filesize]
   root="${2%/}"
   [ -d "$root" ] || return 0
   kind=static; conf=-; db=-
@@ -516,8 +551,19 @@ row() {   # domain docroot www source [PHP version]
     fi
   fi
   kb="$(du -sk "$root" 2>/dev/null | cut -f1)"
-  printf 'S\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$1" "$root" "${kb:-0}" "$kind" "$db" "$3" "$conf" "$4" "${5:--}"
+  printf 'S\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$1" "$root" "${kb:-0}" "$kind" "$db" "$3" "$conf" "$4" "${5:--}" "${6:--}" "${7:--}"
   cron_rows "$1" "$root"
+}
+# One PHP setting as a site has it: what its virtual host overrides, else its .user.ini, else
+# the php.ini of the PHP it runs.
+ini_of() {   # setting, virtual host configuration, document root, PHP version
+  iv="$(awk -v k="$1" '($1 == "php_admin_value" || $1 == "php_value") && $2 == k { print $3; exit }' "$2" 2>/dev/null)"
+  for ini in "$3/.user.ini" "$(find "$L/lsphp$(printf '%s' "$4" | tr -d .)/etc" -name php.ini 2>/dev/null | head -n 1)"; do
+    [ -z "$iv" ] || break
+    [ -r "$ini" ] || continue
+    iv="$(awk -F= -v k="$1" '!/^[ \t]*[;#]/ { key = $1; gsub(/[ \t]/, "", key); if (key == k) { v = $2; sub(/;.*/, "", v); gsub(/[ \t"\r]/, "", v); print v; exit } }' "$ini" 2>/dev/null)"
+  done
+  printf '%s' "${iv:--}"
 }
 # "lsphp74" somewhere in a configuration file -> 7.4
 php_of() {   # file
@@ -620,6 +666,7 @@ if [ -r "$L/conf/httpd_config.conf" ]; then
     # the PHP this virtual host runs: its own processor, or the one the server gives everybody
     pv="$(php_of "$cf")"
     [ -n "$pv" ] || pv="$(awk '/^[ \t]*extprocessor[ \t]/ { e = 1 } e && $1 == "path" { print; exit }' "$L/conf/httpd_config.conf" 2>/dev/null | sed -n 's/.*lsphp\([0-9]\)\([0-9]\).*/\1.\2/p')"
+    pm="$(ini_of memory_limit "$cf" "$dr" "$pv")"; pu="$(ini_of upload_max_filesize "$cf" "$dr" "$pv")"
     dml=" $(printf '%s' "$dm" | tr 'A-Z' 'a-z') "
     seen=" "
     set -f
@@ -629,10 +676,10 @@ if [ -r "$L/conf/httpd_config.conf" ]; then
       case "$seen" in *" $b "*) continue ;; esac
       seen="$seen$b "
       case "$dml" in *" www.$b "*) w=1 ;; *) w=0 ;; esac
-      row "$b" "$dr" "$w" ols "$pv"
+      row "$b" "$dr" "$w" ols "$pv" "$pm" "$pu"
     done
     set +f
-    [ "$seen" != " " ] || row - "$dr" 0 ols "$pv"
+    [ "$seen" != " " ] || row - "$dr" 0 ols "$pv" "$pm" "$pu"
   done
 fi
 
@@ -730,12 +777,13 @@ lib_import_disconnect() {
 # The list the other server gave, into IMP_*. It is somebody else's output: a line counts only
 # when every field is what it should be, and a domain or a directory only once.
 lib_import_scan_parse() {   # reads the listing from stdin
-  local tag="" domain="" root="" kb="" kind="" db="" www="" conf="" php="" x="" dup=0 k=0
+  local tag="" domain="" root="" kb="" kind="" db="" www="" conf="" php="" mem="" upl="" x="" dup=0 k=0
   IMP_DOMAIN=() IMP_ROOT=() IMP_KB=() IMP_KIND=() IMP_DB=() IMP_WWW=() IMP_CONF=() IMP_PHP=() IMP_NAMELESS=()
+  IMP_MEM=() IMP_UPL=()
   IMP_CRON_ROOT=() IMP_CRON_WHEN=() IMP_CRON_CMD=()
   IMP_BOX=() IMP_BOX_DIR=() IMP_BOX_KB=() IMP_BOX_HASH=() IMP_ALIAS=() IMP_ALIAS_TO=()
   IMP_REMOTE_USER=""
-  while IFS=$'\t' read -r tag domain root kb kind db www conf _ php _; do
+  while IFS=$'\t' read -r tag domain root kb kind db www conf _ php mem upl _; do
     if [[ "$tag" == "C" ]]; then
       # document root, when, command - in the variables of a site line. The command is the
       # rest of the line, tabs and all, and is taken only when cron here could run it as it is.
@@ -809,6 +857,7 @@ lib_import_scan_parse() {   # reads the listing from stdin
     IMP_DOMAIN+=("$domain"); IMP_ROOT+=("$root"); IMP_KB+=("$kb"); IMP_KIND+=("$kind")
     IMP_DB+=("$db"); IMP_WWW+=("$www"); IMP_CONF+=("$conf")
     if lib_php_valid_version "${php:-}"; then IMP_PHP+=("$php"); else IMP_PHP+=("-"); fi
+    IMP_MEM+=("$(_import_size_mb "${mem:-}")"); IMP_UPL+=("$(_import_size_mb "${upl:-}")")
   done
   # a domain that has mailboxes or aliases there and no site: an entry of its own, of the kind "mail"
   (( IMP_MAIL_ROWS )) || return 0
@@ -819,7 +868,7 @@ lib_import_scan_parse() {   # reads the listing from stdin
     done
     (( dup )) && continue
     IMP_DOMAIN+=("$domain"); IMP_ROOT+=("-"); IMP_KB+=(0); IMP_KIND+=("mail")
-    IMP_DB+=("-"); IMP_WWW+=(0); IMP_CONF+=("-"); IMP_PHP+=("-")
+    IMP_DB+=("-"); IMP_WWW+=(0); IMP_CONF+=("-"); IMP_PHP+=("-"); IMP_MEM+=("-"); IMP_UPL+=("-")
   done
   return 0
 }
@@ -1178,6 +1227,9 @@ lib_import_site_part() {   # index
       if _import_php_available "${IMP_PHP[i]}"; then args+=(--php "${IMP_PHP[i]}")
       else lib_warn "${domain} runs PHP ${IMP_PHP[i]} there, which this server cannot install: it gets PHP ${PHP_VERSION}"; fi
     fi
+    if [[ "$kind" != "static" || "$db" != "-" ]]; then
+      mapfile -t -O "${#args[@]}" args < <(_import_php_limits "$i")
+    fi
     if (( www )); then args+=(--www); fi
     lib_info "Adding the site ${domain}"
     _import_add "$domain" "${args[@]}" \
@@ -1298,6 +1350,14 @@ lib_import_site_part() {   # index
   if (( ! created )) && [[ "${IMP_PHP[i]}" != "-" && -n "$D_PHP" && "${IMP_PHP[i]}" != "$D_PHP" ]]; then
     lib_note "${domain} runs PHP ${IMP_PHP[i]} there and PHP ${D_PHP} here; the site here keeps its own"
   fi
+  if (( ! created )) && [[ -n "$D_PHP" ]]; then
+    if [[ "${IMP_MEM[i]}" != "-" && -n "$D_MEMORY" ]] && (( IMP_MEM[i] > $(lib_size_to_mb "$D_MEMORY") )); then
+      lib_note "${domain} has a memory_limit of ${IMP_MEM[i]}M there and ${D_MEMORY} here; the site here keeps its own"
+    fi
+    if [[ "${IMP_UPL[i]}" != "-" && -n "$D_UPLOAD" ]] && (( IMP_UPL[i] > $(lib_size_to_mb "$D_UPLOAD") )); then
+      lib_note "${domain} takes uploads of ${IMP_UPL[i]}M there and ${D_UPLOAD} here; the site here keeps its own"
+    fi
+  fi
   if (( ! IMP_OPT_NO_CRON )); then lib_import_cron "$i" "$domain"; fi
   lib_log_write INFO "imported ${domain} from ${IMP_SSH_TARGET}:${root} (database: ${db})"
   lib_ok "${domain} is here: ${docroot}"
@@ -1309,7 +1369,7 @@ lib_import_site_part() {   # index
 lib_import_main() {
   if [[ "${1:-}" == "cron" ]]; then shift; lib_require_tools; lib_require_installed; lib_import_cron_main "$@"; return 0; fi
   local a="" target="" port="22" key="" pwfile="" list=0 all=0 only="" no_create=0 path="" as="" dbname=""
-  local i=0 n=0 here="" ans="" x="" total_kb=0 avail_kb=0 found=0 okc=0 what="" mkb=0 mail_kb=0 crons=0
+  local i=0 n=0 here="" ans="" x="" total_kb=0 avail_kb=0 found=0 okc=0 what="" mkb=0 mail_kb=0 crons=0 limits=""
   local -a chosen=() todo=() failed=()
   IMP_OPT_NO_DB=0; IMP_OPT_NO_FILES=0; IMP_OPT_NO_MAIL=0; IMP_OPT_ONLY_MAIL=0; IMP_OPT_NO_CRON=0
   while (($# > 0)); do
@@ -1422,6 +1482,7 @@ lib_import_main() {
     fi
   fi
 
+  _import_php_defaults
   # ---- what will happen ------------------------------------------------------
   lib_heading "Import from ${IMP_SSH_TARGET}"
   for i in "${chosen[@]}"; do
@@ -1453,6 +1514,10 @@ lib_import_main() {
     todo+=("$i"); total_kb=$(( total_kb + IMP_KB[i] ))
     if [[ "$here" == "new" && "${IMP_PHP[i]}" != "-" && "${IMP_KIND[i]}" != "static" ]]; then
       lib_note "${x}: it runs PHP ${IMP_PHP[i]} there, and gets that here"
+    fi
+    if [[ "$here" == "new" && "${IMP_KIND[i]}" != "static" ]]; then
+      limits="$(_import_php_limits "$i" | tr '\n' ' ')"
+      if [[ -n "$limits" ]]; then lib_note "${x}: it keeps the PHP limits it has there, which are above this server's own (${limits% })"; fi
     fi
     crons="$(_import_cron_of "${IMP_ROOT[i]}" | wc -l | tr -d ' ')"
     if (( crons > 0 && ! IMP_OPT_NO_CRON )); then

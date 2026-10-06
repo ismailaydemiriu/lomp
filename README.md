@@ -478,8 +478,13 @@ sudo lomp import root@203.0.113.10 --all --no-mail                  # the sites 
 **A site that is added gets the PHP version it runs there** - read from the other server's
 OpenLiteSpeed configuration, so known for a lomp, a CyberPanel or a plain OpenLiteSpeed and not
 for a site found by its directory alone - when this server has that LSPHP or can install it;
-otherwise it gets the usual one and the run says so. A site that is here already keeps its own,
-and the run names the difference.
+otherwise it gets the usual one and the run says so. Its `memory_limit` and
+`upload_max_filesize` come along where they are above what this server gives a site by itself -
+read from what the virtual host overrides, then its `.user.ini`, then the `php.ini` of its PHP;
+a limit below this server's own is not carried over, so no site is made smaller by moving.
+The other PHP settings (`max_execution_time`, `max_input_vars`, extensions) are this server's
+for every site and are not changed. A site that is here already keeps its own, and the run
+names what is larger on the other server.
 
 **Its cron jobs come with it** and run here as the site's own user, never as root:
 
@@ -496,7 +501,8 @@ and the run names the difference.
   places against two copies of the site - take a job that sends mail or charges somebody out
   on one side first. `sudo lomp import cron <domain>` lists what a site was given and
   `--clear` removes it; `--no-cron` brings a site without them. A second import replaces the
-  list with what the other server has then; `rename` and `remove` take the jobs along.
+  list with what the other server has then; `rename` and `remove` take the jobs along, a
+  backup of the site carries them, and `restore` writes them into cron again.
 
 The other server is only read. Certificates are not copied, and neither is
 anything outside a site's document root. The sites answer over HTTP here until the DNS of a

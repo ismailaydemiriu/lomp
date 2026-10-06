@@ -163,7 +163,8 @@ lib_backup_domain() {   # domain [--keep N] [--encrypt] [--remote] [--tag T]
   mkdir -p "${work}/conf" "${work}/state"
   vh="${LSWS_VHOSTS_DIR}/${domain}/vhconf.conf"
   [[ -f "$vh" ]] && cp "$vh" "${work}/conf/vhconf.conf" && parts+=("conf/vhconf.conf")
-  for a in domain.json db.info wp.info ssl.info app-env.json; do
+  # (cron.imported: the cron jobs an import gave the site - lib/import.sh)
+  for a in domain.json db.info wp.info ssl.info app-env.json cron.imported; do
     [[ -f "$(lib_domain_state_dir "$domain")/${a}" ]] && cp "$(lib_domain_state_dir "$domain")/${a}" "${work}/state/${a}" && parts+=("state/${a}")
   done
   # ---- manifest + checksums ------------------------------------------------
@@ -526,6 +527,17 @@ lib_restore_main() {
   # ---- wp.info -----------------------------------------------------------------
   if [[ -s "${work}/x/state/wp.info" && ! -s "$(lib_domain_state_dir "$domain")/wp.info" ]] && (( ! OPT_DRY_RUN )); then
     cp "${work}/x/state/wp.info" "$(lib_domain_state_dir "$domain")/wp.info" && chmod 0600 "$(lib_domain_state_dir "$domain")/wp.info"
+  fi
+  # ---- the cron jobs an import gave it ---------------------------------------
+  # The archive says which ones the site has: they are written for the user and the home it
+  # has now. An archive from before they were kept in it says nothing, and changes nothing.
+  if [[ -s "${work}/x/state/cron.imported" ]]; then
+    if (( OPT_DRY_RUN )); then lib_info "[dry-run] would put back the cron jobs an import gave ${domain}"
+    else
+      cp "${work}/x/state/cron.imported" "$(lib_import_cron_file "$domain")" && chmod 0600 "$(lib_import_cron_file "$domain")"
+      if lib_import_cron_apply "$domain"; then lib_ok "The cron jobs an import gave ${domain} are back (setup.sh import cron ${domain})"
+      else lib_warn "the imported cron jobs of ${domain} could not be written again (setup.sh import cron ${domain})"; fi
+    fi
   fi
   if (( ! OPT_DRY_RUN )); then
     lib_json_set "$(lib_domain_json "$domain")" '.status = "active" | .restored_at = $ts | .restored_from = $f' --arg ts "$(lib_iso_now)" --arg f "$file"

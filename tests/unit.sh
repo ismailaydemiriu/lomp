@@ -9498,7 +9498,7 @@ _im_saved="$(declare -p STATE_DIR OPT_DRY_RUN MAIL_PASSWD_FILE MAIL_ALIAS_DIR CR
 CRON_FILE="$TMP/im-cron"
 _im_orig="$(declare -f _domain_fix_owner_ids lib_require_tools lib_require_installed lib_server_mail_only lib_backup_domain \
   lib_db_create_for_domain lib_db_restore_domain lib_db_sql lib_domain_apply_config lib_ols_htaccess_reload \
-  lib_import_connect _import_ssh _import_add _import_php_available _import_mail_on _import_mail_sync lib_mail_installed lib_mail_domain_enabled lib_mail_hash_password lib_mail_tables_apply lib_mail_domain_aliases_seed _mail_stage_dir _mail_stage_drop _mail_sendas_current)"
+  lib_import_connect _import_ssh _import_add _import_php_available _import_php_defaults _import_mail_on _import_mail_sync lib_mail_installed lib_mail_domain_enabled lib_mail_hash_password lib_mail_tables_apply lib_mail_domain_aliases_seed _mail_stage_dir _mail_stage_drop _mail_sendas_current)"
 STATE_DIR="$TMP/im-state"; mkdir -p "$STATE_DIR"
 _im_r="$TMP/im-remote"; _im_l="$_im_r/usr/local/lsws"; _im_bin="$TMP/im-bin"; _im_log="$TMP/im.log"; _im_out="$TMP/im.out"
 _im_shop="$_im_r/home/shop.example/public_html"
@@ -9527,7 +9527,11 @@ listener Default {
 }
 EOF
 printf 'docRoot                   $VH_ROOT/html/\n' >"$_im_l/conf/vhosts/Example/vhconf.conf"
-printf 'docRoot                   $VH_ROOT/public_html\nextprocessor shop {\n  path  /usr/local/lsws/lsphp74/bin/lsphp\n}\n' >"$_im_l/conf/vhosts/shop.example/vhconf.conf"
+printf 'docRoot                   $VH_ROOT/public_html\nextprocessor shop {\n  path  /usr/local/lsws/lsphp74/bin/lsphp\n}\nphpIniOverride  {\n  php_admin_value memory_limit 1G\n  php_value upload_max_filesize 16M\n}\n' >"$_im_l/conf/vhosts/shop.example/vhconf.conf"
+# the limits of a virtual host that overrides nothing: its .user.ini, then the php.ini of its PHP
+mkdir -p "$_im_l/lsphp81/etc/php/8.1/litespeed"
+printf '%s\n' '[PHP]' '; memory_limit = 32M' 'memory_limit = 768M ; plenty' 'upload_max_filesize=8388608' >"$_im_l/lsphp81/etc/php/8.1/litespeed/php.ini"
+printf 'upload_max_filesize = 300M\n' >"$_im_l/Example/html/.user.ini"
 # its cron jobs: the crontab of the account the shop's files belong to (whose home the shop is),
 # root's crontab, a file in /etc/cron.d, and the file lomp itself keeps on a server it runs
 # (an account of the fixture's own, named to the listing: whoever runs the suite - root, too -
@@ -9657,6 +9661,19 @@ _im_php() { awk -F'\t' -v d="$1" -v r="$2" '$1 == "S" && ($2 == d || $3 == r) { 
 assert_eq  "the PHP a virtual host runs, from its own processor"      "7.4" "$(_im_php shop.example -)"
 assert_eq  "or the one the server gives every virtual host"           "8.1" "$(_im_php none "$_im_l/Example/html")"
 assert_eq  "a directory that is no virtual host has none to name"     "-"   "$(_im_php blog.example -)"
+_im_lim() { awk -F'\t' -v d="$1" -v r="$2" '$1 == "S" && ($2 == d || $3 == r) { print $11 "|" $12; exit }' <<<"$_im_scan"; }
+assert_eq  "the limits a virtual host sets for itself"                "1G|16M" "$(_im_lim shop.example -)"
+assert_eq  "or its .user.ini, or the php.ini of the PHP it runs"      "768M|300M" "$(_im_lim none "$_im_l/Example/html")"
+assert_eq  "a directory that is no virtual host has none to name"     "-|-" "$(_im_lim blog.example -)"
+assert_eq  "megabytes"                 "128"  "$(_import_size_mb 128M)"
+assert_eq  "gigabytes, in any case"    "1024" "$(_import_size_mb 1g)"
+assert_eq  "kilobytes"                 "64"   "$(_import_size_mb 65536K)"
+assert_eq  "a number of bytes"         "256"  "$(_import_size_mb 268435456)"
+assert_eq  "no limit at all is not one to carry over" "-" "$(_import_size_mb -1)"
+assert_eq  "nor is nothing"            "-"    "$(_import_size_mb "")"
+assert_eq  "nor a word"                "-"    "$(_import_size_mb '8M;id')"
+assert_eq  "nor less than a megabyte"  "-"    "$(_import_size_mb 4096)"
+assert_eq  "nor more than any request gets" "-" "$(_import_size_mb 64G)"
 _im_crow() { awk -F'\t' -v r="$1" '$1 == "C" && $2 == r { print $3 "|" $4 }' <<<"$_im_scan" | sort -u; }
 assert_has "the crontab of the account whose home the site is: every line" \
   "*/5 * * * *|/usr/local/lsws/lsphp74/bin/php $_im_shop/cron.php >/dev/null 2>&1" "$(_im_crow "$_im_shop")"
@@ -9685,6 +9702,7 @@ assert_eq  "with what it is"                                   "wordpress static
 assert_eq  "its database"                                      "shopdb - crmdb - - -" "${IMP_DB[*]}"
 assert_eq  "and whether www is served"                         "1 0 0 0 0 0" "${IMP_WWW[*]}"
 assert_eq  "the PHP each runs, where that is known"                "7.4 - - - - -" "${IMP_PHP[*]}"
+assert_eq  "its limits, in megabytes"                              "1024 16 - -" "${IMP_MEM[0]} ${IMP_UPL[0]} ${IMP_MEM[1]} ${IMP_UPL[1]}"
 assert_eq  "the shop's jobs, without the one that is no schedule"  "2" "$(_import_cron_of "$_im_shop" | wc -l | tr -d ' ')"
 assert_eq  "the blog's two"                                        "2" "$(_import_cron_of "$_im_r/home/blog.example/public_html" | wc -l | tr -d ' ')"
 assert_lacks "@reboot is not taken"                                "@reboot" "${IMP_CRON_WHEN[*]}"
@@ -9802,7 +9820,7 @@ _im_home="https://www.shop.example"; _im_add_ok=1; _im_dump_mode=""; _im_mail=0;
 _im_site() {   # domain mode
   lib_domain_state_reset
   D_DOMAIN="$1"; D_IDENT="$(lib_domain_ident "$1")"; D_USER="$D_IDENT"; D_GROUP="$D_IDENT"
-  D_HOME="$SITES_ROOT/$1"; D_MODE="$2"; D_PHP="8.3"; D_STATUS="active"
+  D_HOME="$SITES_ROOT/$1"; D_MODE="$2"; D_PHP="8.3"; D_MEMORY="256M"; D_UPLOAD="64M"; D_STATUS="active"
   lib_domain_state_save
   mkdir -p "$D_HOME/public_html" "$D_HOME/private/tmp"
   printf '<body><p>This site was %s.</p></body>\n' "$DOMAIN_PLACEHOLDER_MARK" >"$D_HOME/public_html/index.html"
@@ -9826,6 +9844,7 @@ eval '_import_ssh() { env PATH="$_im_bin:$PATH" LOMP_IMPORT_ROOT="$_im_r" LOMP_I
       lib_db_sql() { printf "%s\n" "$_im_home"; }
       _domain_fix_owner_ids() { printf "%s" "$_im_ids"; }
       _import_php_available() { (( _im_php_ok )); }
+      _import_php_defaults() { IMP_DEF_MEM=256; IMP_DEF_UPL=64; }
       _import_add() {
         printf "add %s\n" "$*" >>"$_im_log"
         (( _im_add_ok )) || return 1
@@ -9858,7 +9877,10 @@ assert_has "by name"                                    "nope.example was not fo
 : >"$_im_log"; : >"$RUNUSER_LOG"
 _im_d1="$SITES_ROOT/shop.example/public_html"; _im_d2="$SITES_ROOT/blog.example/public_html"
 assert_eq  "two sites that are not here yet"            "0" "$(_imf user@old.example --only shop.example,blog.example)"
-assert_has "the WordPress is added without a certificate, on the PHP it ran, with www" "add shop.example --no-ssl --php 7.4 --www" "$(cat "$_im_log")"
+assert_has "the WordPress is added without a certificate, on the PHP it ran, with www" "add shop.example --no-ssl --php 7.4 --memory 1024M --www" "$(cat "$_im_log")"
+assert_has "a limit above this server's own comes along, which the plan said" \
+  "shop.example: it keeps the PHP limits it has there, which are above this server's own (--memory 1024M)" "$(cat "$_im_out")"
+assert_lacks "one below it does not"                    "--upload" "$(cat "$_im_log")"
 assert_has "which the plan said"                        "shop.example: it runs PHP 7.4 there, and gets that here" "$(cat "$_im_out")"
 _im_ct="$(cat "$CRON_FILE" 2>/dev/null || true)"; _im_su="$(lib_domain_ident shop.example)"; _im_bu="$(lib_domain_ident blog.example)"
 assert_has "its cron job runs here as the site user, with the PHP and the directory it has here" \
@@ -9901,6 +9923,8 @@ printf 'changed there\n' >"$_im_shop/wp-content/uploads/a.txt"; printf 'mine\n' 
 assert_eq  "a site that is here already"                "0" "$(_imf old.example --only shop.example)"
 assert_lacks "is not added again"                       "add " "$(cat "$_im_log")"
 assert_has "keeps the PHP it has here, which is said"   "shop.example runs PHP 7.4 there and PHP 8.3 here" "$(cat "$_im_out")"
+assert_has "and its limits, with the larger one there named" "shop.example has a memory_limit of 1024M there and 256M here" "$(cat "$_im_out")"
+assert_lacks "a smaller one is nothing to say"          "takes uploads of" "$(cat "$_im_out")"
 assert_eq  "has its jobs once, not twice"               "2" "$(grep -c 'imported:shop.example:' "$CRON_FILE")"
 assert_has "is backed up as it is first"                "backup shop.example --tag pre-import --keep 0 --no-mail" "$(cat "$_im_log")"
 assert_has "which the plan says"                        "A backup is taken first" "$(cat "$_im_out")"
@@ -10128,6 +10152,8 @@ lib_import_cron_apply shop.example
 assert_has "written again, they follow the site's PHP"  "${_im_su} ${LSWS_HOME}/lsphp82/bin/php ${_im_d1}/cron.php" "$(cat "$CRON_FILE")"
 assert_has "rename writes them again under the new name" 'lib_import_cron_apply "$new"' "$(declare -f lib_domain_rename_main)"
 assert_has "after taking them out under the old one"    'lib_cron_remove_prefix "imported:${old}:"' "$(declare -f lib_domain_rename_main)"
+assert_has "a backup carries them"                      "domain.json db.info wp.info ssl.info app-env.json cron.imported; do" "$(grep -A70 '^lib_backup_domain() {' "$ROOT/lib/backup.sh")"
+assert_has "and a restore writes them into cron again"  'lib_import_cron_apply "$domain"' "$(declare -f lib_restore_main)"
 assert_has "remove takes them with the site"            'lib_cron_remove_prefix "imported:${domain}:"' "$(declare -f lib_domain_remove_main)"
 assert_eq  "--clear removes them"                       "0" "$(_imf cron shop.example --clear)"
 assert_lacks "from cron"                                "imported:shop.example:" "$(cat "$CRON_FILE")"
@@ -10142,7 +10168,7 @@ assert_lacks "and the plan names none"                  "cron job(s)" "$(cat "$_
 # a PHP this server cannot install
 rm -rf "$STATE_DIR/domains/shop.example"; _im_php_ok=0; : >"$_im_log"
 assert_eq  "a site whose PHP this server cannot have"   "0" "$(_imf old.example --only shop.example --no-mail --no-db --no-cron)"
-assert_has "is added on the usual one"                  "add shop.example --no-ssl --www" "$(cat "$_im_log")"
+assert_has "is added on the usual one"                  "add shop.example --no-ssl --memory 1024M --www" "$(cat "$_im_log")"
 assert_has "which is said"                              "shop.example runs PHP 7.4 there, which this server cannot install: it gets PHP ${PHP_VERSION}" "$(cat "$_im_out")"
 _im_php_ok=1
 
@@ -10165,7 +10191,7 @@ assert_has "the command is in the reference"            "import <[user@]host>" "
 assert_has "setup.sh knows it"                          'import)         lib_import_main' "$(cat "$ROOT/setup.sh")"
 
 eval "$_im_orig"; eval "$_im_saved"
-unset -f _im_row _im_mrow _im_php _im_crow _im_f _im_rw _im_pick _im_dump _im_site _imf
+unset -f _im_row _im_mrow _im_php _im_lim _im_crow _im_f _im_rw _im_pick _im_dump _im_site _imf
 
 section "renew-ssl: a WordPress installed before its certificate stops calling itself http://"
 # The WordPress is a stand-in for wp-cli that keeps "home" and "siteurl" in two files.

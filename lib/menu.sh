@@ -170,7 +170,8 @@ KOMUTLAR
                                 sunucuda posta kuruluysa alan adının posta kutuları da gelir
                                 (öteki sunucu lomp ya da CyberPanel ise şifreleriyle), takma
                                 adları ve yönlendirmeleri de; DNS'e dokunulmaz. Yeni site orada
-                                çalıştığı PHP sürümünü alır, cron işleri burada sitenin
+                                çalıştığı PHP sürümünü alır (bu sunucunun verdiğinden büyük
+                                memory_limit ya da yükleme boyutu da korunur), cron işleri burada sitenin
                                 kullanıcısı olarak çalışır. Diğer sunucu yalnızca okunur
                                 (--list --all --only a.com,b.com --no-create --no-mail
                                 --only-mail --no-cron --port N --key FILE --password-file FILE
@@ -428,7 +429,8 @@ COMMANDS
                                 come with it when this server runs mail - with their passwords
                                 where the other server is a lomp or a CyberPanel - and so do
                                 its aliases and forwarders; DNS is not touched. A new site
-                                gets the PHP version it ran there, and its cron jobs run here
+                                gets the PHP version it ran there (and a memory_limit or upload
+                                size above this server's own), and its cron jobs run here
                                 as the site's user. The other server is only read (--list
                                 --all --only a.com,b.com --no-create --no-mail --only-mail
                                 --no-cron --port N --key FILE --password-file FILE --path DIR
