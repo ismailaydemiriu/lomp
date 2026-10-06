@@ -8,6 +8,7 @@
 #  "renew-ssl": http:// becomes https://, an address somebody set is left alone, an address
 #  pinned in wp-config.php and a WordPress that wp-cli cannot run are warnings and never fail
 #  the certificate. The same after "rename" to a name that is the first with a certificate.
+#  A site added with --www --www-primary keeps its www name through the change.
 #  Then "renew-ssl --all" and "renew-ssl --missing" with two such sites: each takes the one
 #  that is its to take, and no other site of the server is changed.
 #
@@ -261,6 +262,30 @@ check "F: with the www name stored, renew-ssl succeeds" "[ $RC -eq 0 ]"
 A="$(stored "$DM")"; echo "   stored after:  $A"; echo "   wp.info after:  $(wpurl "$DM")"
 check "F: the www is kept, only the scheme changed" "[ '$A' = 'home=https://www.$DM siteurl=https://www.$DM' ]"
 check "F: in lomp's record too" "[ \"\$(wpurl $DM)\" = 'https://www.$DM' ]"
+
+echo; echo "===== G: a site added with --www --www-primary: WordPress is installed under the www name"
+drop
+lomp add "$DM" --wordpress --no-ssl --www --www-primary >"$SRC/addG.out" 2>&1; RC=$?; echo "add rc=$RC"; (( RC == 0 )) || tail -n 15 "$SRC/addG.out"
+check "G: add succeeded" "[ $RC -eq 0 ]"
+B="$(stored "$DM")"; echo "   stored before: $B"; echo "   wp.info before: $(wpurl "$DM")"
+check "G: before the certificate the database says http://www." "[ '$B' = 'home=http://www.$DM siteurl=http://www.$DM' ]"
+check "G: and so does lomp's record" "[ \"\$(wpurl $DM)\" = 'http://www.$DM' ]"
+lomp renew-ssl "$DM" >"$SRC/renewG.out" 2>&1; RC=$?; echo "renew-ssl rc=$RC"; grep -E 'WordPress: |SSL active|\[error\]' "$SRC/renewG.out" | cut -c1-200 | sed 's/^/   | /'
+O="$(cat "$SRC/renewG.out")"
+check "G: renew-ssl succeeded" "[ $RC -eq 0 ]"
+A="$(stored "$DM")"; echo "   stored after:  $A"; echo "   wp.info after:  $(wpurl "$DM")"
+check "G: after it https://www., the www kept" "[ '$A' = 'home=https://www.$DM siteurl=https://www.$DM' ]"
+check "G: in lomp's record too" "[ \"\$(wpurl $DM)\" = 'https://www.$DM' ]"
+has   "G: it is said" "WordPress: its home is now https://www.$DM (was http://www.$DM)" "$O"
+lacks "G: no warning about WordPress" "[warn]  WordPress" "$O"
+sleep 2
+WR=(--resolve "www.$DM:443:127.0.0.1" --resolve "www.$DM:80:127.0.0.1" -k)
+R="$(get "${WR[@]}" -o /dev/null -w '%{http_code}' "https://www.$DM/")"
+check "G: the front page answers 200 at https://www." "[ '$R' = 200 ]"
+R="$(get $(rs "$DM") -o /dev/null -w '%{http_code} %{redirect_url}' "https://$DM/")"; echo "   https://$DM/ -> $R"
+check "G: the bare name goes to the www name with one 301" "[ '$R' = '301 https://www.$DM/' ]"
+J="$(get "${WR[@]}" "https://www.$DM/wp-json/" | jq -c '{url, home}' 2>/dev/null)"; echo "   REST index: $J"
+check "G: the REST index names the site with https://www." "[ '$J' = '{\"url\":\"https://www.$DM\",\"home\":\"https://www.$DM\"}' ]"
 
 # ---- renew-ssl --all and --missing: they walk over every site of the server ----------------
 #   DM   added with --no-ssl          (no certificate wanted: --all passes it by, --missing takes it)
