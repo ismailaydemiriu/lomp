@@ -7169,6 +7169,28 @@ if lib_have openssl; then
   : >"$_sc/stuck-origin.test"; : >"$_sc/child.log"
   assert_eq   "a redirect that holds one is passed over: no run fails for a certificate that is fine" 0 "$(run_isolated _sc_tee lib_ssl_renew_main --missing)"
   assert_eq   "nothing is asked for it"                                  "" "$(cat "$_sc/child.log")"
+  # ... and so is a SITE that answers with one "import" brought (its record has the mark)
+  mkdir -p "$STATE_DIR/domains/osite.test"
+  printf '{"ssl":{"enabled":true,"wanted":true,"imported":true}}\n' >"$(lib_domain_json osite.test)"
+  _sc_mk "$SSL_DEPLOY_DIR/osite.test" "CloudFlare Origin SSL Certificate Authority" 60 osite.test
+  eval 'lib_domains_list() { printf "%s\n" has.test asked.test never.test bad.test osite.test; }'
+  : >"$_sc/child.log"
+  assert_eq   "a site that came with one is passed over too"             0 "$(run_isolated _sc_tee lib_ssl_renew_main --missing)"
+  assert_eq   "nothing is asked for it either"                           "" "$(cat "$_sc/child.log")"
+  _r="$(lib_ssl_lineage_check osite.test osite.test)"
+  assert_has  "the check calls it what it is, and good"                  "|1|a Cloudflare origin certificate: fine behind Cloudflare, nothing here renews it" "$_r"
+  assert_eq   "not a failure for want of a renewal file"                 "OK" "${_r%%|*}"
+  _sc_mk "$SSL_DEPLOY_DIR/osite.test" "CloudFlare Origin SSL Certificate Authority" 12 osite.test
+  _r="$(lib_ssl_lineage_check osite.test osite.test)"
+  assert_eq   "one that runs out within a month is a warning"            "WARN a Cloudflare origin certificate that runs out soon: nothing here renews it" "${_r%%|*} ${_r##*|}"
+  assert_has  "a name it does not cover is still a failure"              "FAIL|" "$(lib_ssl_lineage_check osite.test other.test)"
+  # the same site with a copied certificate of another CA: that one is asked for, as before
+  _sc_mk "$SSL_DEPLOY_DIR/osite.test" "Some Other CA" 60 osite.test
+  : >"$_sc/child.log"; run_isolated _sc_tee lib_ssl_renew_main --missing >/dev/null
+  assert_has  "a copy of any other issuer is still asked for"            "renew-ssl osite.test --yes" "$(cat "$_sc/child.log")"
+  assert_has  "and is still said to renew by nobody"                     "FAIL|" "$(lib_ssl_lineage_check osite.test osite.test)"
+  rm -rf "${STATE_DIR:?}/domains/osite.test" "${SSL_DEPLOY_DIR:?}/osite.test"
+  eval 'lib_domains_list() { printf "%s\n" has.test asked.test never.test bad.test; }'
   rm -rf "${STATE_DIR:?}/domains/origin.test" "${SSL_DEPLOY_DIR:?}/origin.test" "$_sc/stuck-origin.test"
 fi
 unset -f _sc_red
@@ -10931,6 +10953,9 @@ if _is_ca good "Test Trust" && _is_ca other "Somebody Else" && _is_ca cf "CloudF
   cp "$_is/origin.pem" "$_im_r/etc/letsencrypt/live/blog.example/fullchain.pem"; cp "$_is/origin.key" "$_im_r/etc/letsencrypt/live/blog.example/privkey.pem"
   assert_eq  "a certificate that was only brought is replaced by the one there now" "0" "$(_imf old.example --only blog.example --no-mail --no-cron)"
   assert_eq  "which is in place"                          "$(cksum <"$_is/origin.pem")" "$(cksum <"$_is_dst/fullchain.pem")"
+  # (that one is Cloudflare's origin certificate: nothing to ask certbot for)
+  assert_has "a Cloudflare origin certificate is said to be one" "It is a Cloudflare origin certificate: fine for as long as blog.example is behind Cloudflare" "$(cat "$_im_out")"
+  assert_lacks "and no renewal is asked of the operator"  "Nobody renews that one" "$(cat "$_im_out")"
   # a certificate of its own: the site keeps it
   lib_json_set "$(lib_domain_json blog.example)" 'del(.ssl.imported)'
   cp "$_is/blog.pem" "$_im_r/etc/letsencrypt/live/blog.example/fullchain.pem"; cp "$_is/blog.key" "$_im_r/etc/letsencrypt/live/blog.example/privkey.pem"

@@ -389,6 +389,11 @@ lib_ssl_renew_main() {
         # nobody renews that one
         [[ "$(lib_json_get_raw "$(lib_domain_json "$d")" '.ssl.enabled')" == "true" \
            && "$(lib_json_get_raw "$(lib_domain_json "$d")" '.ssl.imported')" != "true" ]] && continue
+        # ... but not one whose certificate is a Cloudflare origin certificate: it is meant to
+        # stand for years, and where certbot cannot get another (the name is behind the proxy,
+        # no token) every such run would end as failed over a certificate that is fine.
+        # "renew-ssl <domain>" still asks.
+        lib_ssl_cert_origin "$d" && continue
       else
         # lib_json_get would turn a literal false into "" (jq's // treats false like null)
         [[ "$(lib_json_get_raw "$(lib_domain_json "$d")" '.ssl.wanted')" == "false" ]] && continue
@@ -498,6 +503,12 @@ lib_ssl_lineage_check() {   # cert-name [name...]
   for n in "$@"; do lib_ssl_cert_covers "$cert" "$n" || missing+="${missing:+, }${n}"; done
   if [[ -n "$missing" ]]; then printf 'FAIL|%s|0|does not cover %s\n' "$days" "$missing"; return 0; fi
   # trusted today; what follows is about tomorrow
+  # (a Cloudflare origin certificate has no tomorrow at certbot and needs none: Cloudflare
+  # accepts it, under Full (strict) too, until it runs out years from now)
+  if [[ ! -s "${LE_RENEWAL}/${cert}.conf" ]] && lib_ssl_cert_origin "$cert"; then
+    if (( days < 30 )); then printf 'WARN|%s|1|a Cloudflare origin certificate that runs out soon: nothing here renews it\n' "$days"; return 0; fi
+    printf 'OK|%s|1|a Cloudflare origin certificate: fine behind Cloudflare, nothing here renews it\n' "$days"; return 0
+  fi
   if [[ ! -s "${LE_RENEWAL}/${cert}.conf" ]]; then
     printf 'FAIL|%s|1|certbot has no renewal file for it: it will not renew by itself\n' "$days"; return 0
   fi

@@ -1442,7 +1442,11 @@ lib_import_ssl() {   # domain  (the site is here)
     || { lib_warn "The certificate of ${domain} is in place, but the web server did not take it (setup.sh doctor)"; return 0; }
   lib_log_write INFO "certificate of ${domain} imported from ${IMP_SSH_TARGET} (expires ${exp})"
   lib_ok "${domain} answers over HTTPS with the certificate it had there (it runs out ${exp})"
-  lib_note "Nobody renews that one. Once the DNS of ${domain} points here: setup.sh renew-ssl ${domain}   (or --missing, for every such site)"
+  if lib_ssl_cert_origin "$domain"; then
+    lib_note "It is a Cloudflare origin certificate: fine for as long as ${domain} is behind Cloudflare, and nothing here renews it or needs to (renew-ssl --missing passes it over)"
+  else
+    lib_note "Nobody renews that one. Once the DNS of ${domain} points here: setup.sh renew-ssl ${domain}   (or --missing, for every such site)"
+  fi
 }
 
 _import_add() {   # domain add-options...

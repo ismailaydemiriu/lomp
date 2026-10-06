@@ -574,6 +574,10 @@ what Cloudflare in Full (strict) asks of the new server from the first request.
   counts every such site - gets the site one of its own, which then takes its place. A site
   that is renamed while it still answers with one leaves it to its old name, the redirect:
   `--missing` counts that redirect too, and `lomp ssl` and `lomp doctor` name it;
+- a Cloudflare origin certificate that came this way is left alone: it stands for years and
+  is fine for as long as the name stays behind Cloudflare, so `renew-ssl --missing` passes
+  the site over and `lomp ssl` shows it as what it is (a warning in its last 30 days).
+  `sudo lomp renew-ssl <domain>` still asks for one from Let's Encrypt;
 - `--no-ssl` leaves the certificates where they are. The key travels over the SSH connection
   and is never printed or logged.
 
