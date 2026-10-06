@@ -8204,7 +8204,7 @@ done
 assert_eq    "nothing of it is left in English" "" "$_rn_left"
 _rn_app_site
 _rn_case _rn_rename_tr alpha.example beta.example
-assert_has   "a Node.js site: what happens to the application" "Node.js  PM2 servisi yeni kullanıcıyla yeniden kurulur: bağımlılıklar yeniden yüklenir, uygulama derlenir ve başlatılır" "$(_rn_out)"
+assert_has   "a Node.js site: what happens to the application" "Node.js  PM2 servisi yeni kullanıcı altında yeniden ayarlanır: bağımlılıklar yeniden kurulur, uygulama derlenir ve başlatılır" "$(_rn_out)"
 assert_has   "and its step" "Node.js uygulaması" "$(_rn_out)"
 assert_has   "the variable that still names the old domain" "Uygulamanın bir değişkeni hâlâ alpha.example adını içeriyor: setup.sh app env beta.example list" "$(_rn_out)"
 _rn_fresh
@@ -8216,7 +8216,7 @@ _rn_case _rn_rename_tr alpha.example beta.example --keep-mail
 : >"$_rn/mail-installed"
 _rn_mail_site
 _rn_case _rn_rename_tr alpha.example beta.example --keep-mail
-assert_has   "--keep-mail: the mail that stays" "posta    @alpha.example alanında kalır: her posta kutusu, takma ad ve anahtar olduğu gibi; alpha.example kendi başına bir posta alanı olur" "$(_rn_out)"
+assert_has   "--keep-mail: the mail that stays" "posta    @alpha.example alanında kalır: her posta kutusu, takma ad ve anahtar olduğu gibi; alpha.example kendi başına bir posta alan adı olur" "$(_rn_out)"
 _rn_fresh
 _rn_case _rn_redirect_tr add old.example alpha.example --www --no-ssl
 assert_has   "redirect add in Turkish" "old.example ve www.old.example artık https://alpha.example adresine gidiyor (yalnızca HTTP)" "$(_rn_out)"
@@ -9188,7 +9188,7 @@ assert_eq "every Turkish text has the values of its English one" "" "$_lt_bad"
 _lt() {   # text -> its Turkish
   ( LIB_LANG="tr"; lib_lang_build; lib_tr "$1"; printf '%s' "$LIB_TR" )
 }
-assert_eq "a message without values"              "Düzenleme işleri tamam" "$(_lt "Housekeeping done")"
+assert_eq "a message without values"              "Bakım işleri tamam" "$(_lt "Housekeeping done")"
 assert_eq "one with a value"                      "a.example sitesi kayıtlı değil" "$(_lt "Site a.example is not registered")"
 assert_eq "values may change places" \
   "b.example sitesinin queue worker'ı durdurulmuş" "$(_lt "Worker queue of b.example is stopped")"
@@ -9215,7 +9215,7 @@ _lt_out="$( ( LIB_LANG="tr"; lib_lang_build; OPT_QUIET=0
              lib_ok "Housekeeping done"; lib_info "Cloning https://h/o/r.git"; lib_warn "the mail tables could not be rebuilt: x"
              lib_note "this site had no mail"; lib_steps_begin 2; lib_step "Scheduled tasks"
              lib_print_kv "Document root" "/home/a.example/public_html"; lib_print_kv "Port" "127.0.0.1:3000 (given to the app as PORT)" ) 2>&1 )"
-assert_has "lib_ok"                               "[ ok ]  Düzenleme işleri tamam" "$_lt_out"
+assert_has "lib_ok"                               "[ ok ]  Bakım işleri tamam" "$_lt_out"
 assert_has "lib_info"                             "[info]  https://h/o/r.git klonlanıyor" "$_lt_out"
 assert_has "lib_warn"                             "[warn]  posta tabloları yeniden oluşturulamadı: x" "$_lt_out"
 assert_has "lib_note"                             "        bu sitenin postası yoktu" "$_lt_out"
@@ -9344,7 +9344,7 @@ assert_eq   "--json is English whatever the language" "site a.example: files|/ho
 # ssl status: the rows, the headings and the commands that put things right
 _st() { ( LIB_LANG="tr"; lib_lang_build; C_GRN=""; C_YEL=""; C_RED=""; C_DIM=""; C_RST=""; "$@" ); }
 assert_has  "a row: the days and what is wrong, in line with the English column" "3 gün      yenileme gerçekleşmiyor" "$(_st _ssl_row a.example FAIL 3 "renewal is not getting through")"
-assert_has  "a certificate that expired"          "4 gün önce süresi doldu" "$(_st _ssl_row a.example FAIL -4 "expired 4 day(s) ago")"
+assert_has  "a certificate that expired"          "süresi 4 gün önce doldu" "$(_st _ssl_row a.example FAIL -4 "expired 4 day(s) ago")"
 assert_has  "one that lacks a name"               "www.a.example adını kapsamıyor" "$(_st _ssl_row a.example FAIL 60 "does not cover www.a.example")"
 assert_has  "one that is not there"               "sertifika yok" "$(_st _ssl_row a.example NONE "" "no certificate")"
 assert_has  "an issuer is a name and stays one"   "Let's Encrypt" "$(_st _ssl_row a.example OK 60 "Let's Encrypt")"
@@ -9401,8 +9401,8 @@ assert_eq   "its reason"         "oradaki bir dizin buradaki bir site olur" "$(_
 assert_eq   "a site that cannot be taken" "a.example burada bir proxy sitesi" "$(_dt_plain "a.example is a proxy site here")"
 assert_eq   "a copy that failed" "a.example kopyalanamadı: /var/www/a/wp-config.php yok" "$(_dt_plain "a.example could not be copied: /var/www/a/wp-config.php is missing")"
 assert_eq   "a mailbox that could not be made" "info@a.example posta kutusu oluşturulamadı" "$(_dt_plain "The mailbox info@a.example could not be made")"
-assert_eq   "the choice that is none" "\"9\" listeden bir seçim değil" "$(_dt_plain "\"9\" is not a choice from the list")"
-assert_eq   "what to run again"  "bunları giderip yalnızca onlar için içe aktarmayı yeniden çalıştırın: --only a.example,b.example" "$(_dt_plain "clear them up and run the import again for those: --only a.example,b.example")"
+assert_eq   "the choice that is none" "\"9\" listedeki seçeneklerden biri değil" "$(_dt_plain "\"9\" is not a choice from the list")"
+assert_eq   "what to run again"  "bunları giderip aktarımı yalnızca onlar için yeniden çalıştırın: --only a.example,b.example" "$(_dt_plain "clear them up and run the import again for those: --only a.example,b.example")"
 if declare -F lib_import_list_print >/dev/null; then
   _il() {   # tr|en -> the list of what was found on the other server
     (
