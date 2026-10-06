@@ -861,16 +861,17 @@ lib_import_list_print() {
   if (( n > 0 )); then
     lib_tr "Sites on ${IMP_SSH_TARGET}"
     printf '\n%s%s%s\n' "$C_BLD" "$LIB_TR" "$C_RST"
-    lib_tprintf '  %3s  %-34s %9s  %-9s  %-20s  %-9s  %-8s  %-8s  %s\n' "#" "DOMAIN" "SIZE" "TYPE" "DATABASE" "MAILBOXES" "ALIASES" "HERE" "DIRECTORY THERE"
+    lib_tprintf '  %3s  %-34s %9s  %-9s  %-20s  %-9s  %-8s  %-12s  %s\n' "#" "DOMAIN" "SIZE" "TYPE" "DATABASE" "MAILBOXES" "ALIASES" "HERE" "DIRECTORY THERE"
     for (( i = 0; i < n; i++ )); do
       what=""; kb="${IMP_KB[i]}"
       if [[ "${IMP_KIND[i]}" == "mail" ]] || (( IMP_OPT_ONLY_MAIL )); then what="mail"; fi
-      here="$(lib_import_here "${IMP_DOMAIN[i]}" "$what")"
+      # the cell says it in a word or two: "a proxy site here" under HERE is "proxy site"
+      here="$(lib_import_here "${IMP_DOMAIN[i]}" "$what")"; here="${here#a }"; here="${here% here}"
       boxes="$(_import_boxes_of "${IMP_DOMAIN[i]}" | wc -l | tr -d ' ')"
       if (( boxes > 0 )); then kb=$(( kb + $(_import_mail_kb "${IMP_DOMAIN[i]}") )); else boxes="-"; fi
       als="$(_import_aliases_of "${IMP_DOMAIN[i]}" | wc -l | tr -d ' ')"
       (( als > 0 )) || als="-"
-      lib_tprintf '  %3d  %-34s %9s  %-9s  %-20s  %-9s  %-8s  %-8s  %s\n' "$((i + 1))" "${IMP_DOMAIN[i]}" "$(_import_mb "$kb")" \
+      lib_tprintf '  %3d  %-34s %9s  %-9s  %-20s  %-9s  %-8s  %-12s  %s\n' "$((i + 1))" "${IMP_DOMAIN[i]}" "$(_import_mb "$kb")" \
         "${IMP_KIND[i]}" "${IMP_DB[i]}" "$boxes" "$als" "$here" "${IMP_ROOT[i]}"
     done
   else

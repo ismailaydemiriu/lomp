@@ -9406,9 +9406,9 @@ assert_eq   "what to run again"  "bunları giderip yalnızca onlar için içe ak
 if declare -F lib_import_list_print >/dev/null; then
   _il() {   # tr|en -> the list of what was found on the other server
     (
-      IMP_SSH_TARGET="root@old.example"; IMP_DOMAIN=(a.example b.example); IMP_KB=(2048 1024); IMP_KIND=(wordpress php)
-      IMP_DB=(a_db -); IMP_ROOT=(/var/www/a /var/www/b); IMP_NAMELESS=(); IMP_OPT_ONLY_MAIL=0; C_BLD=""; C_RST=""
-      eval 'lib_import_here() { if [[ "$1" == a.example ]]; then printf "new"; else printf "exists"; fi; }
+      IMP_SSH_TARGET="root@old.example"; IMP_DOMAIN=(a.example b.example c.example d.example); IMP_KB=(2048 1024 512 512); IMP_KIND=(wordpress php php php)
+      IMP_DB=(a_db - - -); IMP_ROOT=(/var/www/a /var/www/b /var/www/c /var/www/d); IMP_NAMELESS=(); IMP_OPT_ONLY_MAIL=0; C_BLD=""; C_RST=""
+      eval 'lib_import_here() { case "$1" in a.example) printf "new" ;; b.example) printf "exists" ;; c.example) printf "a redirect here" ;; *) printf "a proxy site here" ;; esac; }
             _import_boxes_of() { if [[ "$1" == a.example ]]; then printf "info@a.example\nsales@a.example\n"; fi; }
             _import_aliases_of() { :; }
             _import_mail_kb() { printf 0; }'
@@ -9419,12 +9419,29 @@ if declare -F lib_import_list_print >/dev/null; then
   _o="$(_il tr)"
   assert_has  "import --list: the headings in Turkish" "ALAN ADI" "$_o"
   assert_has  "its kinds and databases" "TÜR        VERİTABANI            KUTULAR  " "$_o"
-  assert_has  "to the last column"  "KUTULAR    TAKMA AD  BURADA    ORADAKİ DİZİN" "$_o"
-  assert_has  "a site that would be new, with its mailboxes counted" "a_db                  2          -         yeni      /var/www/a" "$_o"
-  assert_has  "one that is here already, its columns in line" "-                     -          -         var       /var/www/b" "$_o"
-  assert_has  "in English the list is what it was" "TYPE       DATABASE              MAILBOXES  ALIASES   HERE      DIRECTORY THERE" "$(_il en)"
-  assert_has  "row and all"         "a_db                  2          -         new       /var/www/a" "$(_il en)"
+  assert_has  "to the last column"  "KUTULAR    TAKMA AD  BURADA        ORADAKİ DİZİN" "$_o"
+  assert_has  "a site that would be new, with its mailboxes counted" "a_db                  2          -         yeni          /var/www/a" "$_o"
+  assert_has  "one that is here already, its columns in line" "-                     -          -         var           /var/www/b" "$_o"
+  assert_has  "a name that redirects here, in a word that fits the column" "-         yönlendirme   /var/www/c" "$_o"
+  assert_has  "and a site of another kind" "-         proxy sitesi  /var/www/d" "$_o"
+  assert_has  "in English too"      "-         redirect      /var/www/c" "$(_il en)"
+  assert_has  "both of them"        "-         proxy site    /var/www/d" "$(_il en)"
+  assert_has  "in English the list is what it was" "TYPE       DATABASE              MAILBOXES  ALIASES   HERE          DIRECTORY THERE" "$(_il en)"
+  assert_has  "row and all"         "a_db                  2          -         new           /var/www/a" "$(_il en)"
   unset -f _il
+fi
+# a worker's states are words of the table as well
+if declare -F _app_worker_rows >/dev/null; then
+  _wr() { ( if [[ "$1" == "tr" ]]; then LIB_LANG="tr"; lib_lang_build; fi
+            _app_worker_rows '[{"name":"queue","kind":"process","port":null,"status":"not running","restarts":0,"start":"npm run queue"},
+                               {"name":"mailer","kind":"job","schedule":"*/5 * * * *","status":"scheduled","restarts":0,"start":"npm run mail"},
+                               {"name":"sync","kind":"process","port":3101,"status":"stopping","restarts":2,"start":"npm run sync"}]' ) 2>&1 || true; }
+  _o="$(_wr tr)"
+  assert_has  "a worker that does not run, in Turkish" "queue            süreç    -              çalışmıyor          0  npm run queue" "$_o"
+  assert_has  "a job that waits for its time"          "mailer           iş       */5 * * * *    zamanlanmış         -  npm run mail" "$_o"
+  assert_has  "one on its way down"                    "sync             süreç    3101           durduruluyor        2  npm run sync" "$_o"
+  assert_has  "in English they are what they were"     "queue            process  -              not running         0  npm run queue" "$(_wr en)"
+  unset -f _wr
 fi
 # lib_tprintf: printf for a table
 _tp() { ( LIB_LANG="tr"; lib_lang_build; lib_tprintf "$@" ); }

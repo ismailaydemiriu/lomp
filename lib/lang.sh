@@ -2491,4 +2491,12 @@ LIB_TR_PAIRS=(
   'exists' 'var'
   'a redirect here' 'burada yönlendirme'
   'ssh is not installed' 'ssh kurulu değil'
+  # ---- cells: what a name is here (import), and the states of a worker
+  'redirect' 'yönlendirme'
+  'proxy site' 'proxy sitesi'
+  'node site' 'node sitesi'
+  'scheduled' 'zamanlanmış'
+  'not running' 'çalışmıyor'
+  'stopping' 'durduruluyor'
+  'launching' 'başlatılıyor'
 )
