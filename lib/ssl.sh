@@ -496,9 +496,9 @@ ssl [status]   Her sertifika (siteler, yönlendirmeler, posta): var mı, ne kada
                ve kendiliğinden yenileniyor mu - certbot'u çalıştıran timer ya da cron satırı,
                deploy kancası, her biri için certbot'un yenileme dosyası. Hiçbir şeyi
                değiştirmez. Düzeltilmesi gereken bir şey varsa çıkış kodu 1 olur.
-ssl test       Her sertifikanın yenilenmesini Let's Encrypt'in staging sunucusuna karşı
+ssl test       Her sertifikanın yenilenmesini Let's Encrypt'in staging sunucusunda
                dener (certbot renew --dry-run). Hiçbir sertifika değiştirilmez.
-ssl fix        Otomatik yenilemeyi geri kurar: deploy kancası ve timer (ya da cron satırı).
+ssl fix        Otomatik yenilemeyi yeniden kurar: deploy kancası ve timer (ya da cron satırı).
 EOF
     return 0
   fi

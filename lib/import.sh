@@ -36,10 +36,10 @@ lib_import_usage() {
   # a usage text is no single message lib/lang.sh could look up: its Turkish is here
   if [[ "${LIB_LANG:-en}" == "tr" ]]; then
     cat <<'EOF'
-Kullanım: setup.sh import <[user@]host> [options]
+Kullanım: setup.sh import <[user@]host> [seçenekler]
   Siteleri başka bir sunucudan SSH üzerinden bu sunucuya getirir: dosyalar sitenin
   public_html dizinine, sitenin kendi kullanıcısı olarak; bir WordPress'in veritabanı da
-  buradaki site veritabanına aktarılır ve wp-config.php ona yönlendirilir. Henüz burada
+  buradaki site veritabanına aktarılır ve wp-config.php ona göre ayarlanır. Henüz burada
   olmayan site önce eklenir (sertifikasız: DNS hâlâ öteki sunucuyu gösterir). Öteki sunucu
   yalnızca okunur.
 
@@ -56,7 +56,7 @@ Kullanım: setup.sh import <[user@]host> [options]
   --no-create            Yalnızca burada zaten var olan siteler (ötekileri önce kendiniz ekleyin)
   --path DIR --as DOMAIN Öteki sunucunun bir dizini bu alan adı olarak; orada bir ad altında
                          sunulmayan site için (örneğin /usr/local/lsws/Example/html)
-  --db NAME              Seçenek --path ise: getirilecek veritabanı, sitenin kendi dosyaları
+  --db NAME              --path ile: getirilecek veritabanı, sitenin kendi dosyaları
                          hangisi olduğunu söylemiyorsa
   --no-db  --no-files    Veritabanları ya da dosyalar dışarıda bırakılır
   --no-mail              Posta kutuları dışarıda bırakılır
@@ -72,12 +72,12 @@ Kullanım: setup.sh import <[user@]host> [options]
   Postfix'in sanal takma ad dosyaları); burada zaten olan bir takma ad olduğu gibi kalır.
   DNS kayıtlarına dokunulmaz: MX'i siz taşıyana kadar posta orada alınmaya devam eder
   (setup.sh mail dns <domain>).
-  Eklenen site, öteki sunucuda çalıştığı PHP sürümünü alır (OpenLiteSpeed yapılandırmasından
-  okunur), bu sunucu o sürümü kurabiliyorsa; memory_limit ve upload_max_filesize değerleri de
+  Eklenen site, bu sunucu kurabiliyorsa öteki sunucuda çalıştığı PHP sürümünü alır (OpenLiteSpeed
+  yapılandırmasından okunur); memory_limit ve upload_max_filesize değerleri de
   bu sunucunun verdiğinden büyükse korunur. Burada zaten olan site kendi ayarlarını korur.
   Sitenin cron işleri de onunla gelir ve burada sitenin kendi kullanıcısı olarak çalışır:
   dosyalarının sahibi olan hesabın crontab'ı ile root'un crontab'ında ve /etc/cron.d içinde
-  sitenin dizinini ya da alan adını anan satırlar; yollar bu sunucuya göre yeniden yazılır.
+  sitenin dizinini ya da alan adını içeren satırlar; yollar bu sunucuya göre yeniden yazılır.
   Siz oradan kaldırana kadar öteki sunucuda da çalışmaya devam ederler.
   "setup.sh import cron <domain>" bir siteye verilenleri listeler, --clear hepsini kaldırır.
   Daha önce aktarılmış bir site için yalnızca o zamandan beri öteki sunucuda oluşturulan ya da

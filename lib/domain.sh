@@ -156,7 +156,7 @@ lib_domain_add_usage() {
   # a usage text is no single message lib/lang.sh could look up: its Turkish is here
   if [[ "${LIB_LANG:-en}" == "tr" ]]; then
     cat <<'EOF'
-Kullanım: setup.sh add <domain> [options]
+Kullanım: setup.sh add <domain> [seçenekler]
   --email a@b.c        İletişim e-postası (Let's Encrypt, vhost adminEmails)
   --no-ssl             Sertifika istenmez (sonradan renew-ssl ile eklenir)
   --www                www.<domain> da sunulur; www -> apex yönlendirilir
@@ -168,7 +168,7 @@ Kullanım: setup.sh add <domain> [options]
   --node               Node.js sitesi: uygulamayı PM2, sitenin kullanıcısı olarak çalıştırır
                        (bkz. setup.sh app help)
   --port N             --node ile: uygulamanın portu (varsayılan: 3000'den itibaren ilk boş)
-  --start "npm start"  --node ile: kabuksuz çalışan başlatma komutu  (ya da --script dist/main.js)
+  --start "npm start"  --node ile: kabuk olmadan çalıştırılan başlatma komutu  (ya da --script dist/main.js)
   --git URL            --node ile: hemen bu depodan dağıtım yapılır (--branch B)
   --static-paths "/static/,/assets/"   Proxy modunda OLS'nin sunduğu yollar
   --ws-path PATH       Artık gerekmez: WebSocket yükseltmeleri her yolda proxy'lenir
@@ -176,8 +176,8 @@ Kullanım: setup.sh add <domain> [options]
   --wordpress          WordPress kurulur (veritabanı kendiliğinden oluşturulur)
   --no-db              Veritabanı oluşturulmaz (varsayılan olarak bir tane oluşturulur)
   --with-db            Veritabanı oluşturulur - varsayılan budur, eski betikler için korunur
-  --cloudflare         Cloudflare gerçek IP modu açılır (genel)
-  --wildcard           *.<domain> için de istenir (DNS-01, --cf-api-token gerekir)
+  --cloudflare         Cloudflare gerçek IP modu açılır (tüm sunucu için)
+  --wildcard           *.<domain> için de sertifika istenir (DNS-01, --cf-api-token gerekir)
   --staging            Let's Encrypt staging CA kullanılır
   --hsts-preload       HSTS başlığına "preload" eklenir (geri alınamaz)
   --wp-title "Site"  --wp-admin admin  --wp-email a@b.c  --wp-locale en_US
@@ -1242,7 +1242,7 @@ Kullanım: setup.sh wordpress <domain>
   yüklediği dosyalar, fix-owner'ın yaptığı gibi, önce sitenin kullanıcısına devredilir.
   wp-config.php dosyası olan bir siteye dokunulmaz. Seçenek olarak --dry-run verilirse hiçbir
   şey indirilmez ya da yazılmaz.
-  WordPress'in kurucusu wp-config.php dosyasını 0666 bırakır; bir dakika içinde 0640 olur.
+  WordPress'in kurulum aracı wp-config.php dosyasını 0666 bırakır; bir dakika içinde 0640 olur.
 EOF
     return 0
   fi
@@ -1641,7 +1641,7 @@ Kullanım: setup.sh fix-owner <domain>... | --all
           setup.sh fix-owner --auto on|off
   root olarak yüklemeden sonra (WinSCP, scp, root'un açtığı bir arşiv) bir sitenin dosyalarını
   kendi kullanıcısına ve grubuna geri verir. Yalnızca başkasına ait olanlar değişir; logs/
-  root'ta kalır, dosya izinleri de olduğu gibi kalır. Seçenek --dry-run ise yalnızca sayar.
+  root'ta kalır, dosya izinleri de olduğu gibi kalır. Seçenek olarak --dry-run verilirse yalnızca sayar.
   Aynısı her sitede, yüklemeden sonraki bir dakika içinde kendiliğinden olur: bu komut, bir
   dakika beklemeden hemen yapmak ve bir sitenin dosyalarının neden devredilmediğini görmek
   içindir. Bunu --auto off durdurur; root'un bir sitede bilerek kendi dosyalarını tuttuğu

@@ -194,13 +194,13 @@ lib_redirect_usage() {
     cat <<'EOF'
 Kullanım: setup.sh redirect <komut>
   add <kimden> <nereye> [--www] [--no-ssl]   <kimden> için gelen her isteği 301 ile <nereye>
-                                       adresine gönderir; yol ve sorgu korunur. <kimden> bir
-                                       site değildir: kullanıcısı ve dosyası olmaz, yalnızca
-                                       kendi sertifikası olur. --www, www.<kimden> adını da
-                                       alır. <kimden> alan adının DNS kaydı buraya yönlendikten
-                                       sonra yeniden çalıştırılırsa sertifikayı alır
-  list                                 Yönlendirmeler ve nereye gittikleri
-  del <kimden> [--keep-ssl]            <kimden> için yanıt vermeyi bırakır
+                                             adresine gönderir; yol ve sorgu korunur. <kimden> bir
+                                             site değildir: kullanıcısı ve dosyası olmaz, yalnızca
+                                             kendi sertifikası olur. --www, www.<kimden> adını da
+                                             alır. <kimden> için DNS kaydı bu sunucuyu gösterdikten
+                                             sonra yeniden çalıştırılırsa sertifikayı alır
+  list                                       Yönlendirmeler ve nereye gittikleri
+  del <kimden> [--keep-ssl]                  <kimden> için yanıt vermeyi bırakır
 Bir siteyi başka bir ada taşıyıp geride yönlendirme bırakmak için: setup.sh rename <eski> <yeni>
 EOF
     return 0
@@ -347,10 +347,10 @@ Kullanım: setup.sh rename <eski-alan-adı> <yeni-alan-adı> [seçenekler]
   Alan adı olmayan bir adla kayıtlı site de ("shop_old": eski bir geri yükleme böyle kayıtlar
   bırakırdı) alan adını bu yolla alır. O adla kimse gelemeyeceği için geride yönlendirme
   bırakılmaz; WordPress ise veritabanının verdiği ad yeniden yazılır.
-  --no-redirect        Eski adı yönlendirme olarak bırakma (sertifikası da silinir)
-  --no-ssl             Yeni ad için şimdi sertifika isteme (sonra: renew-ssl)
-  --no-search-replace  WordPress veritabanındaki adresleri olduğu gibi bırak
-  --keep-mail          Posta kutularını taşımak yerine eski alan adında bırak
+  --no-redirect        Eski ad yönlendirme olarak bırakılmaz (sertifikası da silinir)
+  --no-ssl             Yeni ad için şimdi sertifika istenmez (sonra: renew-ssl)
+  --no-search-replace  WordPress veritabanındaki adresler olduğu gibi bırakılır
+  --keep-mail          Posta kutuları taşınmaz, eski alan adında bırakılır
 EOF
     return 0
   fi

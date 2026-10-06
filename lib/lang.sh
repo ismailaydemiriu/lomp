@@ -2258,6 +2258,10 @@ LIB_TR_PAIRS=(
   '{1} is not a directory on {2}' '{1}, {2} üzerinde bir dizin değil'
   'Import from {1}' '{1} sunucusundan aktarım'
   '{1}: left out, it is not a site here (--no-create)' '{1}: atlandı, burada böyle bir site yok (--no-create)'
+  # what a name is here arrives as part of the message: each kind has its own line, and before
+  # the general one, which would leave that part in English (the first line that fits is taken)
+  '{1}: left out, it is a redirect here' '{1}: atlandı; burada bir yönlendirme'
+  '{1}: left out, it is a {2} site here' '{1}: atlandı; burada bir {2} sitesi'
   '{1}: left out, it is {2}' '{1}: atlandı; burada: {2}'
   '{1}: a new site; {2} ({3}), database {4}' '{1}: yeni site; {2} ({3}), veritabanı {4}'
   '{1}: a new site; {2} ({3})' '{1}: yeni site; {2} ({3})'

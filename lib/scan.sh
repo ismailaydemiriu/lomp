@@ -131,11 +131,11 @@ lib_scan_usage() {
     cat <<'EOF'
 Kullanım: lomp scan <domain>... | --all [--wide]
 
-  Bir sitenin PHP dosyalarında web shell'lerin yapıldığı şeyleri arar ve açılıp bakılacak
+  Bir sitenin PHP dosyalarında web shell'lerde görülen kalıpları arar ve açılıp bakılacak
   dosyaları listeler. Hiçbir şeyi değiştirmez.
-    STRONG  çözülmüş verinin ya da isteğin gönderdiğinin eval edilmesi, isteğin gönderdiğinden
+    STRONG  çözülmüş verinin ya da istekle gelen verinin eval edilmesi, istekle gelen veriden
             oluşan bir komut ya da include, bir ikon içinde PHP kodu, bilinen bir shell'in adı
-    LOOK    paketlenmiş ya da gizlenmiş kod (iç içe çözme, uzun kodlanmış dizgeler, \x kaçışları,
+    LOOK    paketlenmiş ya da gizlenmiş kod (iç içe çözme, kodlanmış uzun dizgeler, \x kaçışları,
             chr() zincirleri), yükleme dizininde bir betik, bir dosyaya yazılan istek verisi,
             .htaccess ya da .user.ini içinde auto_prepend_file
 

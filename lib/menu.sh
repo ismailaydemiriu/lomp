@@ -39,7 +39,7 @@ KOMUTLAR
                                 Yalnızca posta için sunucu: aynı posta sunucusu; web yığını
                                 yalnızca webmail gerektirdiği için kurulur. Alan adları site
                                 değil posta alır ("mail domain add"). --role web bunu geri alır
-      --cloudflare              Cloudflare vekillerine güvenir (gerçek istemci IP'si)
+      --cloudflare              Cloudflare proxy'lerine güvenir (gerçek istemci IP'si)
       --cf-api-token TOKEN      Cloudflare API token'ını saklar (DNS-01 / fail2ban); "-" onu
                                 stdin'den okur, böylece süreç listesinde görünmez
       --mariadb 11.4            MariaDB'yi resmi depodan kurar
@@ -47,7 +47,7 @@ KOMUTLAR
       --backup-schedule "daily 03:00"
       --auto-reboot             unattended-upgrades'in yeniden başlatmasına izin verir
       --skip-upgrade            Kurulum sırasında apt upgrade adımını atlar
-  add <domain> [opts]           Site oluşturur (kullanıcı, dizinler, vhost, SSL)
+  add <domain> [opts]           Site oluşturur (kullanıcı, dizinler, sanal konak, SSL)
       --email a@b.c  --no-ssl  --www  --www-primary  --php 8.3
       --memory 256M  --upload 64M  --php-children N
       --proxy 127.0.0.1:3000  --static  --wordpress  --cloudflare  --no-db
@@ -57,23 +57,23 @@ KOMUTLAR
       --wp-title "Title" --wp-admin admin --wp-email a@b.c --wp-locale en_US
       --node [--port N] [--start "npm start" | --script dist/main.js] [--git URL [--branch B]]
                                 Node.js sitesi: PM2 uygulamayı sitenin kullanıcısı olarak
-                                çalıştırır, OpenLiteSpeed ona vekillik eder (3000'den itibaren
+                                çalıştırır, OpenLiteSpeed ona proxy olur (3000'den itibaren
                                 boş bir port); --git ile uygulama hemen yayına alınır
                                 --no-db verilmedikçe her site kendi veritabanını ve
                                 MariaDB kullanıcısını alır.
   wordpress <domain>            En güncel WordPress'in dosyalarını (wordpress.org/latest.zip)
                                 var olan bir PHP sitesinin public_html dizinine, sitenin kendi
                                 kullanıcısı olarak koyar; kurulum tarayıcıda tamamlanır ve
-                                yazdığı wp-config.php bir dakika içinde 0640'a kapatılır
+                                yazdığı wp-config.php bir dakika içinde 0640'a çekilir
                                 ("add --wordpress" ise tamamını kurar)
   db <domain>                   Sitenin MariaDB veritabanını oluşturur (veya gösterir)
   db list                       Her sitenin veritabanı, kullanıcısı ve boyutu (şifreler yok)
   db passwd <domain>            Sitenin veritabanı kullanıcısına yeni, rastgele bir şifre
-  proxy list [<domain>]         Her sitenin yol vekilleri ve uygulamaları yanıt veriyor mu
+  proxy list [<domain>]         Her sitenin yol proxy'leri ve uygulamalarının yanıt verip vermediği
   proxy add <domain> <path> <host:port>
                                 Var olan bir sitenin bir yolu altında bir uygulama yayınlar,
                                 her modda: proxy add example.com /api/ 127.0.0.1:3001
-  proxy remove <domain> <path>  O yolun vekilliğini durdurur
+  proxy remove <domain> <path>  O yola proxy yapmayı bırakır
   app list                      Node.js uygulamaları: durum, CPU, bellek, yeniden başlatma
                                 sayısı (--json)
   app status <domain>
@@ -82,7 +82,7 @@ KOMUTLAR
   app worker <domain> list | remove NAME | run NAME
   app worker <domain> add NAME --start CMD [--cwd DIR] [--port N] [--memory 256M]
   app worker <domain> add NAME --cron "*/5 * * * *" --start CMD [--timeout 1h]
-                                İşçiler (kuyruk tüketicileri, botlar) uygulamanın yanında, onun
+                                Worker'lar (kuyruk tüketicileri, botlar) uygulamanın yanında, onun
                                 PM2'si altında çalışır; --cron ile işi cron başlatır, aynı anda
                                 tek çalıştırma olur
   app deploy <domain> [--git URL [--branch B]]
@@ -95,7 +95,7 @@ KOMUTLAR
                                 asla gelmez; import-db DB_* ve DATABASE_URL ekler
   mail domain add <domain> [--mailbox info] [--quota 2G]
                                 Bu sunucunun sitesi olmayan bir alan adı için posta (web
-                                sitesi başka yerdedir veya yoktur): Linux kullanıcısı, vhost yok
+                                sitesi başka yerdedir veya yoktur): Linux kullanıcısı da sanal konak da yok
   mail domain add <domain> --to <you@example.com> [--address info,sales] [--catch-all]
                                 Aynısı, kendi posta kutusu olmadan: adresleri var olan bir
                                 posta kutusuna teslim edilir - birkaç alan adı için tek gelen
@@ -113,8 +113,8 @@ KOMUTLAR
                                 Şifreler stdin'den veya gizli bir istemden gelir, komut satırından
                                 asla gelmez; "kick" posta kutusunun açık oturumlarını sonlandırır
   mail alias add|del|list <alias@domain> [target,...]
-                                Başka bir yere giden adres; gittiği buradaki bir posta kutusu
-                                onun adına da gönderebilir. Takma ad olarak "@<domain>" bir
+                                Başka bir yere giden adres; buradaki bir posta kutusuna gidiyorsa
+                                o kutu onun adına da gönderebilir. Takma ad olarak "@<domain>" bir
                                 catch-all olur: alan adının kendi satırı olmayan her adresi
   mail dns <domain> [--check] [--json]   DNS'e ne yazılacağı ve orada olup olmadığı
   mail dns <domain> --apply [--replace-mx]
@@ -127,7 +127,7 @@ KOMUTLAR
                                 yeniden başlatır
   mail webmail on|off <domain>  webmail.<domain> adresinde webmail. Webmaili olan her alan adı
                                 tek bir Roundcube'u ve tek bir PHP sürecini paylaşır; yirmincisi
-                                bir vhost'a mal olur, başka bir şeye değil
+                                bir sanal konağa mal olur, başka bir şeye değil
   webmail status                Ne çalışıyor ve hangi alan adları için (herkes kendi şifresini
                                 orada, Ayarlar (Settings) altında değiştirir)
   webmail update [version]      Daha yeni bir Roundcube alır (bu her gün kendiliğinden de olur)
@@ -135,24 +135,24 @@ KOMUTLAR
                                 Artık olmayan bir posta kutusu için webmail tarafında kalanları
                                 kaldırır (adres defteri, kimlikler, ayarlar). Bir posta kutusu
                                 silinince bu kendiliğinden olur; komut, lomp bunu yapmaya
-                                başlamadan önce veya veritabanı kapalıyken giden kutular içindir.
+                                başlamadan önce veya veritabanı kapalıyken silinen kutular içindir.
                                 --gone böyle adreslerin hepsidir: onları listeler (doctor ilk
                                 birkaçını söyler) ve kaldırmadan önce sorar
   webmail uninstall | purge     Kaldırır; "purge" veritabanını da siler
   mail dkim status <domain>     Bu alan adının hangi anahtarla imzaladığı
   mail dkim rotate <domain> [--abort]
-                                İkinci bir anahtar üretir ve kaydını yayınlar; DNS onu taşıyınca
+                                İkinci bir anahtar üretir ve kaydını yayınlar; kayıt DNS'te görününce
                                 imzalama kendiliğinden ona geçer, eski anahtar ise gönderilmiş
                                 postalar doğrulanabilsin diye bir hafta saklanır
   mail backup <domain> [--keep N]     Yalnızca posta: posta kutuları, takma adlar, DKIM anahtarı
   mail restore <domain> [--file A]    ve postanın kendisi; aynı posta kutularına, aynı şifreler
-                                ve aynı anahtarla geri gelir. Boş olmayan bir posta kutusu
+                                ve aynı anahtarla geri gelir. Boş olmayan bir posta kutusu için
                                 önce sorulur: kopya oradakinin yerini alır. Bir betikte
                                 yanıtlamak için --yes ekleyin
   mail relay set --host H [--port 587] --user U [--spf-include NAME] [--tls LEVEL] | relay off
                                 25 numaralı portun kapalı olduğu yerde giden postayı başka bir
                                 sunucu üzerinden gönderir; şifre stdin'den okunur
-  remove <domain> [opts]        Site kaldırır (--keep-db --keep-files --keep-ssl; takma ad: delete)
+  remove <domain> [opts]        Site kaldırır (--keep-db --keep-files --keep-ssl; diğer adı: delete)
   rename <old> <new> [opts]     Siteyi başka bir alan adına taşır: dosyalar, kullanıcı, loglar
                                 ve ayarlar onunla gelir, veritabanı kalır, yeni ad sertifikasını
                                 alır, WordPress'in adresleri yeniden yazılır ve eski ad her şeyi
@@ -160,7 +160,7 @@ KOMUTLAR
                                 (--no-redirect --no-ssl --no-search-replace)
   redirect add <from> <to>      Site olmayan, ziyaretçilerini yalnızca başka bir ada gönderen
                                 bir ad (301, yol korunur; --www --no-ssl)
-  redirect list | del <from>    Yönlendirmeler; birine yanıt vermeyi bırakır (--keep-ssl)
+  redirect list | del <from>    Yönlendirmeler; biri için yanıt vermeyi bırakır (--keep-ssl)
   import <[user@]host> [opts]   Başka bir sunucudan SSH ile site getirir: sunduklarını listeler,
                                 hangilerini istediğinizi sorar, burada henüz olmayan siteleri
                                 ekler, dosyaları ve sitenin kendi dosyalarının gösterdiği
@@ -172,11 +172,11 @@ KOMUTLAR
                                 adları ve yönlendirmeleri de; DNS'e dokunulmaz. Yeni site orada
                                 çalıştığı PHP sürümünü alır (bu sunucunun verdiğinden büyük
                                 memory_limit ya da yükleme boyutu da korunur), cron işleri burada sitenin
-                                kullanıcısı olarak çalışır. Diğer sunucu yalnızca okunur
+                                kullanıcısı olarak çalışır. Öteki sunucu yalnızca okunur
                                 (--list --all --only a.com,b.com --no-create --no-mail
                                 --only-mail --no-cron --port N --key FILE --password-file FILE
                                 --path DIR --as DOMAIN --db NAME)
-  import cron <domain> [--clear]  Bir aktarımın siteye verdiği cron işleri; kaldırır
+  import cron <domain> [--clear]  Aktarımla siteye gelen cron işleri; istenirse kaldırır
   list                          Site tablosu (--json)
   status                        Servisler, sürümler, kaynaklar, siteler (--json)
   doctor                        Derin sağlık kontrolü (--json, --quiet)
@@ -184,7 +184,7 @@ KOMUTLAR
   fix-owner <domain>|--all      root olarak yüklemeden sonra (WinSCP, scp) sitenin dosyalarını
                                 kendi kullanıcısına geri verir. Yalnızca başkasına ait olan
                                 değişir; logs/ ve dosya izinleri aynı kalır. Yüklemeden sonra
-                                bir dakika içinde kendiliğinden olur; komut hemen şimdi içindir
+                                bir dakika içinde kendiliğinden olur; komut beklemeden yapmak içindir
   fix-owner --auto on|off       Bunu durdurur (root sitede kendi dosyalarını tutar) veya başlatır
   optimize                      Sistemi yeniden ölçer ve yeniden ayarlar (fark gösterir)
   harden <domain>|--all         Bir sitedeki PHP shell'in yapabileceklerini sınırlar: PHP'den
@@ -192,13 +192,13 @@ KOMUTLAR
                                 yok, bu makinede yalnızca DNS, web, MariaDB, Redis ve kendi
                                 uygulaması erişilebilir (site başına --allow-exec,
                                 --allow-upload-php; "harden status"; --firewall on|off)
-  scan <domain>|--all [--wide]  Sitenin PHP dosyalarında web shell'lerin yapıldığı şeyleri arar
+  scan <domain>|--all [--wide]  Sitenin PHP dosyalarında web shell'lerin yapı taşlarını arar
                                 (çözülmüş veya istekten gelen verinin eval edilmesi, istekten
-                                kurulan komutlar, paketlenmiş kod) ve açılacak dosyaları
+                                kurulan komutlar, paketlenmiş kod) ve bakılacak dosyaları
                                 listeler. Hiçbir şeyi değiştirmez; --wide ayrıca her eval,
                                 base64_decode ve exec kullanımını listeler
-  php-cleanup [--php 8.3]       Bir "apt-get install lsphp83*" işlemini geri alır: lomp'un kendi
-                                PHP paketlerinin ötesinde eklediklerini siler (derleyici, hata
+  php-cleanup [--php 8.3]       Bir "apt-get install lsphp83*" işlemini geri alır: onun, lomp'un kendi
+                                PHP paketleri dışında eklediklerini siler (derleyici, hata
                                 ayıklama sembolleri, kaynaklar, dağıtımın PHP'si). Listeyi
                                 gösterir ve önce sorar
   backup <domain>|--all [opts]  --remote --encrypt --keep N --no-mail --dry-run
@@ -230,14 +230,14 @@ KOMUTLAR
   update-cf-ips                 Cloudflare IP aralıklarını yeniler
   firewall [status]             Web portları herkese mi yoksa yalnızca Cloudflare'e mi yanıt verir
   firewall --web-cloudflare-only   80/443'ü Cloudflare aralıkları dışında her şeye kapatır;
-                                böylece kimse sunucunun adresini kullanarak korumayı dolanamaz.
+                                böylece kimse sunucunun adresini kullanarak korumayı atlatamaz.
                                 Cloudflare token'ı gerekir: sertifikalar o zaman DNS-01 ile gelir
   firewall --web-open           Onları yeniden açar
   htaccess-check                Bir sitenin .htaccess dosyası değişince OpenLiteSpeed'i yeniden
                                 yükler (cron her dakika çalıştırır; OpenLiteSpeed onu yalnızca
                                 yüklenirken okur), root'un siteye yüklediklerini sitenin
                                 kullanıcısına verir ve WordPress'in daha açık bıraktığı
-                                wp-config.php dosyasını 0640'a kapatır
+                                wp-config.php dosyasını 0640'a çeker
   notify [opts]                 --email a@b.c [--smtp-host H --smtp-port P
                                 --smtp-user U --smtp-pass P --smtp-from F]
                                 --telegram-token T --telegram-chat ID
@@ -1756,7 +1756,7 @@ _menu_restore() {
 # its %s and \n, in the same order), and the Turkish for it. A text that is missing here is
 # shown in English alone; tests/unit.sh fails when one is missing or has other placeholders.
 declare -gA MENU_TR=()
-MENU_TR['\n  Turkish or English, for the menu and for what the commands print. Now: %s\n']='\n  Menü ve komut çıktıları için Türkçe ya da İngilizce. Şimdi: %s\n'
+MENU_TR['\n  Turkish or English, for the menu and for what the commands print. Now: %s\n']='\n  Menü ve komut çıktıları için Türkçe ya da İngilizce. Şu an: %s\n'
 MENU_TR['Choice']='Seçim'
 MENU_TR['Press Enter to go back to the menu...']='Menüye dönmek için Enter'\''a basın...'
 MENU_TR['\n%sStopped.%s\n']='\n%sDurduruldu.%s\n'
@@ -1769,9 +1769,9 @@ MENU_TR['cancel']='vazgeç'
 MENU_TR['Number']='Numara'
 MENU_TR['\n %s%slompstack%s  this server is not provisioned yet\n']='\n %s%slompstack%s  bu sunucu henüz kurulmadı\n'
 MENU_TR['Install the server (OpenLiteSpeed, PHP, MariaDB, Redis, firewall)']='Sunucuyu kur (OpenLiteSpeed, PHP, MariaDB, Redis, güvenlik duvarı)'
-MENU_TR['Show what the installation would do, changing nothing (dry run)']='Kurulumun ne yapacağını göster, hiçbir şeyi değiştirmeden (deneme)'
-MENU_TR['Command reference']='Komut başvurusu'
-MENU_TR['Install a mail-only server (mail and webmail for your domains, no web sites)']='Yalnızca posta sunucusu kur (alan adlarınız için posta ve webmail, web sitesi yok)'
+MENU_TR['Show what the installation would do, changing nothing (dry run)']='Hiçbir şeyi değiştirmeden kurulumun ne yapacağını göster (deneme)'
+MENU_TR['Command reference']='Komut kılavuzu'
+MENU_TR['Install a mail-only server (mail and webmail for your domains, no web sites)']='Yalnızca posta için sunucu kur (alan adlarınız için posta ve webmail, web sitesi yok)'
 MENU_TR['Language: Türkçe or English']='Dil: Türkçe ya da English'
 MENU_TR['Exit']='Çıkış'
 MENU_TR['E-mail for Let'\''s Encrypt and alerts']='Let'\''s Encrypt ve uyarılar için e-posta'
@@ -1788,7 +1788,7 @@ MENU_TR['Rename a site (new domain name; the old one redirects to it)']='Siteyi 
 MENU_TR['Redirects (a domain that only sends visitors on to another)']='Yönlendirmeler (ziyaretçiyi yalnızca başka bir alan adına gönderen alan adı)'
 MENU_TR['Mail: domains, mailboxes, DNS']='Posta: alan adları, posta kutuları, DNS'
 MENU_TR['Fix file ownership (after uploading as root)']='Dosya sahipliğini düzelt (root olarak yükledikten sonra)'
-MENU_TR['Harden sites against PHP shells']='Siteleri PHP shell'\''lerine karşı sıkılaştır'
+MENU_TR['Harden sites against PHP shells']='Siteleri PHP shell'\''lere karşı sıkılaştır'
 MENU_TR['Scan sites for PHP shells (eval, base64, exec)']='Sitelerde PHP shell tara (eval, base64, exec)'
 MENU_TR['Download WordPress into a site (you finish the setup in the browser)']='Bir siteye WordPress indir (kurulumu tarayıcıda siz bitirirsiniz)'
 MENU_TR['SERVER']='SUNUCU'
@@ -1797,7 +1797,7 @@ MENU_TR['Health check']='Sağlık kontrolü'
 MENU_TR['Open WebAdmin panel']='WebAdmin panelini aç'
 MENU_TR['Certificates (which exist, automatic renewal, a site'\''s first one)']='Sertifikalar (hangileri var, otomatik yenileme, bir sitenin ilk sertifikası)'
 MENU_TR['Back up sites (now, or automatically)']='Siteleri yedekle (şimdi ya da otomatik)'
-MENU_TR['Restore a site']='Bir siteyi geri yükle'
+MENU_TR['Restore a site']='Site geri yükle'
 MENU_TR['MAINTENANCE']='BAKIM'
 MENU_TR['Update packages']='Paketleri güncelle'
 MENU_TR['Update lompstack']='lompstack'\''i güncelle'
@@ -1820,19 +1820,19 @@ MENU_TR['Port the app listens on (it gets it as PORT)']='Uygulamanın dinleyece�
 MENU_TR['Start command (runs without a shell)']='Başlatma komutu (kabuk olmadan çalışır)'
 MENU_TR['Everything that asks for this domain is passed to the address below, on this server.']='Bu alan adına gelen her istek, bu sunucudaki aşağıdaki adrese iletilir.'
 MENU_TR['lomp does not start that app: you do. While it is down the site answers 503.']='O uygulamayı lomp başlatmaz, siz başlatırsınız. Uygulama kapalıyken site 503 yanıtı verir.'
-MENU_TR['Only one path of a site (example.com/api/) instead: menu 6 -> 11 (Path proxies).']='Bir sitenin yalnızca tek bir yolu (example.com/api/) için: menü 6 -> 11 (Yol yönlendirmeleri).'
+MENU_TR['Only one path of a site (example.com/api/) instead: menu 6 -> 11 (Path proxies).']='Bir sitenin yalnızca tek bir yolu (example.com/api/) için: menü 6 -> 11 (Yol proxy'\''leri).'
 MENU_TR['Where the app listens (host:port)']='Uygulamanın dinlediği adres (host:port)'
 MENU_TR['Also serve www.%s? (y/n)']='www.%s adresi de sunulsun mu? (y/n)'
 MENU_TR['Request a Let'\''s Encrypt certificate now? DNS must already point here (y/n)']='Şimdi Let'\''s Encrypt sertifikası istensin mi? DNS zaten buraya yönlenmiş olmalı (y/n)'
 MENU_TR['Contact e-mail']='İletişim e-postası'
-MENU_TR['Give this site its own mail (mailboxes at @%s)? (y/n)']='Bu siteye kendi postası verilsin mi (@%s posta kutuları)? (y/n)'
+MENU_TR['Give this site its own mail (mailboxes at @%s)? (y/n)']='Bu sitenin kendi postası olsun mu (@%s posta kutuları)? (y/n)'
 MENU_TR['First mailbox name (before the @)']='İlk posta kutusunun adı (@ işaretinden önceki kısım)'
 MENU_TR['\n %sDATABASES%s\n']='\n %sVERİTABANLARI%s\n'
-MENU_TR['List databases (sizes, no passwords)']='Veritabanlarını listele (boyutlar, şifre yok)'
+MENU_TR['List databases (sizes, no passwords)']='Veritabanlarını listele (boyutlar, şifreler hariç)'
 MENU_TR['Create or show the database of a site']='Bir sitenin veritabanını oluştur ya da göster'
 MENU_TR['Give a site'\''s database a new random password']='Bir sitenin veritabanına yeni rastgele şifre ver'
 MENU_TR['Back']='Geri'
-MENU_TR['\n %sCERTIFICATES%s   renewal is automatic; item 1 shows whether it is working\n']='\n %sSERTİFİKALAR%s   yenileme otomatiktir; 1. madde çalışıp çalışmadığını gösterir\n'
+MENU_TR['\n %sCERTIFICATES%s   renewal is automatic; item 1 shows whether it is working\n']='\n %sSERTİFİKALAR%s   yenileme otomatiktir; 1. seçenek çalışıp çalışmadığını gösterir\n'
 MENU_TR['Check: which certificates exist, days left, is renewal automatic']='Kontrol: hangi sertifikalar var, kalan gün, yenileme otomatik mi'
 MENU_TR['Get a certificate for a site (its DNS must point here)']='Bir site için sertifika al (DNS'\''i buraya yönlenmiş olmalı)'
 MENU_TR['Renew every certificate now']='Tüm sertifikaları şimdi yenile'
@@ -1841,8 +1841,8 @@ MENU_TR['Switch automatic renewal back on (timer or cron, deploy hook)']='Otomat
 MENU_TR['Get a certificate for every site that has none']='Sertifikası olmayan her site için sertifika al'
 MENU_TR['\n %sNODE.JS APPS (PM2)%s   every site runs its own PM2 as its own user\n']='\n %sNODE.JS UYGULAMALARI (PM2)%s   her site kendi PM2'\''sini kendi kullanıcısıyla çalıştırır\n'
 MENU_TR['How it works: the domain -> OpenLiteSpeed -> the app on its own local port (3000, 3001...).']='Nasıl çalışır: alan adı -> OpenLiteSpeed -> kendi yerel portundaki uygulama (3000, 3001...).'
-MENU_TR['PM2 keeps the app running: it starts at boot and comes back after a crash.']='PM2 uygulamayı ayakta tutar: açılışta başlatır, çökerse yeniden kaldırır.'
-MENU_TR['A new app: 2 (add the site), copy the code into /home/<domain>/app, then 3 (deploy).']='Yeni uygulama: 2 (siteyi ekle), kodu /home/<alan-adı>/app içine kopyala, sonra 3 (deploy).'
+MENU_TR['PM2 keeps the app running: it starts at boot and comes back after a crash.']='PM2 uygulamayı ayakta tutar: açılışta başlatır, çökerse yeniden başlatır.'
+MENU_TR['A new app: 2 (add the site), copy the code into /home/<domain>/app, then 3 (deploy).']='Yeni uygulama: 2 (siteyi ekle), kodu /home/<alan-adı>/app içine kopyalayın, sonra 3 (deploy).'
 MENU_TR['An app you start yourself, or one path of a site sent to a port: 2 (kind 5), or 11.']='Kendi başlattığınız bir uygulama ya da bir sitenin tek bir yolu için: 2 (tür 5) veya 11.'
 MENU_TR['List applications']='Uygulamaları listele'
 MENU_TR['Add a site (choose '\''Node.js app'\'')']='Site ekle (Node.js uygulaması türünü seçin)'
@@ -1854,15 +1854,15 @@ MENU_TR['Follow the logs']='Logları izle'
 MENU_TR['Status of one application']='Tek bir uygulamanın durumu'
 MENU_TR['Environment variables']='Ortam değişkenleri'
 MENU_TR['Port, start command, memory limit']='Port, başlatma komutu, bellek sınırı'
-MENU_TR['Path proxies (example.com/api -> an app)']='Yol yönlendirmeleri (example.com/api -> bir uygulama)'
-MENU_TR['Deploy from a Git repository (URL, branch)']='Git deposundan deploy (URL, dal)'
+MENU_TR['Path proxies (example.com/api -> an app)']='Yol proxy'\''leri (example.com/api -> bir uygulama)'
+MENU_TR['Deploy from a Git repository (URL, branch)']='Git deposundan deploy et (URL, dal)'
 MENU_TR['Deploy key for a private repository']='Özel depo için deploy anahtarı'
 MENU_TR['Workers and scheduled jobs (queues, bots, cron)']='Worker'\''lar ve zamanlanmış işler (kuyruklar, botlar, cron)'
 MENU_TR['%sThere is nothing to choose from here yet.%s\n']='%sBurada henüz seçilecek bir şey yok.%s\n'
 MENU_TR['\n%sWhich one?%s\n']='\n%sHangisi?%s\n'
-MENU_TR['\n %sWORKERS AND JOBS OF %s%s   run as the site user, next to the application\n']='\n %sWORKER VE İŞLER: %s%s   site kullanıcısıyla, uygulamanın yanında çalışır\n'
+MENU_TR['\n %sWORKERS AND JOBS OF %s%s   run as the site user, next to the application\n']='\n %sWORKER'\''LAR VE İŞLER: %s%s   site kullanıcısıyla, uygulamanın yanında çalışır\n'
 MENU_TR['List']='Listele'
-MENU_TR['Add a background worker (queue consumer, bot)']='Arka plan worker'\''ı ekle (kuyruk tüketici, bot)'
+MENU_TR['Add a background worker (queue consumer, bot)']='Arka plan worker'\''ı ekle (kuyruk tüketicisi, bot)'
 MENU_TR['Add a scheduled job (cron)']='Zamanlanmış iş ekle (cron)'
 MENU_TR['Run a scheduled job now']='Zamanlanmış bir işi şimdi çalıştır'
 MENU_TR['Follow the logs of one']='Birinin loglarını izle'
@@ -1872,37 +1872,37 @@ MENU_TR['Start one']='Birini başlat'
 MENU_TR['Remove one']='Birini kaldır'
 MENU_TR['Name (a-z, 0-9 and -)']='Ad (a-z, 0-9 ve -)'
 MENU_TR['Command, run without a shell (e.g. node worker.js)']='Komut, kabuk olmadan çalışır (örn. node worker.js)'
-MENU_TR['Directory, inside the site'\''s home']='Dizin, sitenin home dizini içinde'
+MENU_TR['Directory, inside the site'\''s home']='Dizin, sitenin ev dizini içinde'
 MENU_TR['Port, only if it listens on one']='Port, yalnızca bir port dinliyorsa'
 MENU_TR['Schedule: minute hour day month weekday']='Zamanlama: dakika saat gün ay haftanın-günü'
 MENU_TR['Command, run without a shell (e.g. npm run cleanup)']='Komut, kabuk olmadan çalışır (örn. npm run cleanup)'
-MENU_TR['\n%sA private repository needs the deploy key first (item 13).%s\n']='\n%sÖzel bir depo için önce deploy anahtarı gerekir (13. madde).%s\n'
+MENU_TR['\n%sA private repository needs the deploy key first (item 13).%s\n']='\n%sÖzel bir depo için önce deploy anahtarı gerekir (13. seçenek).%s\n'
 MENU_TR['Repository URL (https://host/owner/repo.git or git@host:owner/repo.git)']='Depo URL'\''si (https://host/owner/repo.git ya da git@host:owner/repo.git)'
 MENU_TR['Branch (empty: the repository'\''s default)']='Dal (boş: deponun varsayılanı)'
 MENU_TR['\n %sENVIRONMENT OF %s%s   stored root-only, never logged\n']='\n %sORTAM DEĞİŞKENLERİ: %s%s   yalnızca root okuyabilir, loglara yazılmaz\n'
 MENU_TR['List the names']='Adları listele'
 MENU_TR['Set a variable (the value is typed hidden)']='Değişken ata (değer gizli yazılır)'
 MENU_TR['Remove a variable']='Değişken kaldır'
-MENU_TR['Add this site'\''s database login (DB_*, DATABASE_URL)']='Bu sitenin veritabanı girişini ekle (DB_*, DATABASE_URL)'
+MENU_TR['Add this site'\''s database login (DB_*, DATABASE_URL)']='Bu sitenin veritabanı giriş bilgilerini ekle (DB_*, DATABASE_URL)'
 MENU_TR['Name (A-Z, 0-9 and _)']='Ad (A-Z, 0-9 ve _)'
 MENU_TR['Value (hidden)']='Değer (gizli)'
 MENU_TR['Name to remove']='Kaldırılacak ad'
-MENU_TR['\n%sPress Enter to keep a value.%s\n']='\n%sBir değeri korumak için Enter'\''a basın.%s\n'
+MENU_TR['\n%sPress Enter to keep a value.%s\n']='\n%sBir değeri değiştirmeden bırakmak için Enter'\''a basın.%s\n'
 MENU_TR['Port']='Port'
 MENU_TR['Start command, or a file such as dist/main.js']='Başlatma komutu ya da dist/main.js gibi bir dosya'
 MENU_TR['Memory limit (e.g. 512M, or none)']='Bellek sınırı (örn. 512M ya da none)'
 MENU_TR['%sNothing changed.%s\n']='%sHiçbir şey değişmedi.%s\n'
-MENU_TR['\n %sPATH PROXIES%s   example.com/api/... -> an application, the rest of the site stays\n']='\n %sYOL YÖNLENDİRMELERİ%s   example.com/api/... -> bir uygulama, sitenin geri kalanı yerinde kalır\n'
+MENU_TR['\n %sPATH PROXIES%s   example.com/api/... -> an application, the rest of the site stays\n']='\n %sYOL PROXY'\''LERİ%s   example.com/api/... -> bir uygulama, sitenin geri kalanı yerinde kalır\n'
 MENU_TR['Sends one path of a site you already have to a port on this server,']='Var olan bir sitenin tek bir yolunu bu sunucudaki bir porta gönderir,'
 MENU_TR['e.g. /api/ -> 127.0.0.1:3001. The app must be listening there; lomp does not start it.']='örn. /api/ -> 127.0.0.1:3001. Uygulama orada dinliyor olmalı; lomp onu başlatmaz.'
 MENU_TR['The app gets the full path: /api/users arrives as /api/users, not as /users.']='Uygulamaya yolun tamamı gider: /api/users, /users olarak değil /api/users olarak gelir.'
 MENU_TR['A whole domain to a port instead: main menu 2 (Add a site), kind 5.']='Bir alan adının tamamını bir porta göndermek için: ana menü 2 (Site ekle), tür 5.'
-MENU_TR['List path proxies']='Yol yönlendirmelerini listele'
-MENU_TR['Add a path proxy']='Yol yönlendirmesi ekle'
-MENU_TR['Remove a path proxy']='Yol yönlendirmesi kaldır'
+MENU_TR['List path proxies']='Yol proxy'\''lerini listele'
+MENU_TR['Add a path proxy']='Yol proxy'\''si ekle'
+MENU_TR['Remove a path proxy']='Yol proxy'\''si kaldır'
 MENU_TR['Path of the site that goes to the app']='Sitenin uygulamaya gidecek yolu'
-MENU_TR['%s%s has no path proxies.%s\n']='%s%s sitesinde yol yönlendirmesi yok.%s\n'
-MENU_TR['\n%sPath proxies of %s:%s\n']='\n%s%s sitesinin yol yönlendirmeleri:%s\n'
+MENU_TR['%s%s has no path proxies.%s\n']='%s%s sitesinde yol proxy'\''si yok.%s\n'
+MENU_TR['\n%sPath proxies of %s:%s\n']='\n%s%s sitesinin yol proxy'\''leri:%s\n'
 MENU_TR['Path to remove (e.g. /api/)']='Kaldırılacak yol (örn. /api/)'
 MENU_TR['\n%sRemoving %s deletes its files, database and certificate.%s\n%sA safety backup is taken first.%s\n']='\n%s%s kaldırılınca dosyaları, veritabanı ve sertifikası silinir.%s\n%sÖnce bir güvenlik yedeği alınır.%s\n'
 MENU_TR['Keep the database? (y/n)']='Veritabanı kalsın mı? (y/n)'
@@ -1914,21 +1914,21 @@ MENU_TR['New domain for %s (without www, e.g. example.net)']='%s için yeni alan
 MENU_TR['Keep %s as a redirect (301) to %s? (y/n)']='%s, %s adresine yönlendirme (301) olarak kalsın mı? (y/n)'
 MENU_TR['List the redirects']='Yönlendirmeleri listele'
 MENU_TR['Add one (or fetch the certificate of one whose DNS points here now)']='Ekle (ya da DNS'\''i artık buraya yönlenen birinin sertifikasını al)'
-MENU_TR['Domain that redirects (without www, e.g. old-name.com)']='Yönlenecek alan adı (www olmadan, örn. old-name.com)'
+MENU_TR['Domain that redirects (without www, e.g. old-name.com)']='Yönlendirilecek alan adı (www olmadan, örn. old-name.com)'
 MENU_TR['Where to (a site here, or any other domain)']='Nereye (buradaki bir site ya da başka herhangi bir alan adı)'
 MENU_TR['Also redirect www.%s? (y/n)']='www.%s de yönlendirilsin mi? (y/n)'
 MENU_TR['Which one (its name, empty to cancel)']='Hangisi (adı; vazgeçmek için boş bırakın)'
 MENU_TR['Files uploaded as root go to their site'\''s own user; what already is the site'\''s stays as it is.']='Root olarak yüklenen dosyalar sitenin kendi kullanıcısına geçer; zaten sitenin olanlar olduğu gibi kalır.'
-MENU_TR['It happens by itself within a minute of an upload; this does it right now.']='Bu, yüklemeden sonra bir dakika içinde kendiliğinden olur; bu seçenek hemen şimdi yapar.'
+MENU_TR['It happens by itself within a minute of an upload; this does it right now.']='Yüklemeden sonra bir dakika içinde kendiliğinden olur; bu seçenek hemen yapar.'
 MENU_TR['Every site']='Tüm siteler'
 MENU_TR['One site']='Tek site'
 MENU_TR['Stop doing it automatically (root keeps files of its own in a site)']='Otomatik yapmayı bırak (root sitede kendi dosyalarını tutar)'
-MENU_TR['Do it automatically again, within a minute of an upload (now: off)']='Yeniden otomatik yap, yüklemeden sonra bir dakika içinde (şimdi: kapalı)'
-MENU_TR['PHP in a site can then start no process, read only its own files and run no script in an upload directory;']='Sitedeki PHP artık süreç başlatamaz, yalnızca kendi dosyalarını okur ve yükleme dizininde betik çalıştıramaz;'
+MENU_TR['Do it automatically again, within a minute of an upload (now: off)']='Yeniden otomatik yap, yüklemeden sonra bir dakika içinde (şu an: kapalı)'
+MENU_TR['PHP in a site can then start no process, read only its own files and run no script in an upload directory;']='Bundan sonra sitedeki PHP süreç başlatamaz, yalnızca kendi dosyalarını okuyabilir ve yükleme dizininde betik çalıştıramaz;'
 MENU_TR['its user reaches only DNS, the web server, MariaDB and Redis on this machine.']='kullanıcısı bu makinede yalnızca DNS, web sunucusu, MariaDB ve Redis'\''e ulaşır.'
-MENU_TR['Show what is set']='Ayarlı olanı göster'
+MENU_TR['Show what is set']='Geçerli ayarları göster'
 MENU_TR['Does this site need exec/proc_open (y/N)']='Bu sitenin exec/proc_open'\''a ihtiyacı var mı (y/N)'
-MENU_TR['Reads the PHP files for what web shells are made of and lists the files to open. It changes nothing.']='PHP dosyalarında web shell'\''lerin yapıtaşlarını arar ve açıp bakılacak dosyaları listeler. Hiçbir şeyi değiştirmez.'
+MENU_TR['Reads the PHP files for what web shells are made of and lists the files to open. It changes nothing.']='PHP dosyalarında web shell'\''lerin yapı taşlarını arar ve açıp bakılacak dosyaları listeler. Hiçbir şeyi değiştirmez.'
 MENU_TR['Also list every use of eval, base64_decode and exec? Plugins use them too (y/N)']='eval, base64_decode ve exec'\''in her kullanımı da listelensin mi? Eklentiler de bunları kullanır (y/N)'
 MENU_TR['The latest WordPress (wordpress.org/latest.zip) goes straight into the site'\''s public_html, as the']='En güncel WordPress (wordpress.org/latest.zip) doğrudan sitenin public_html dizinine, sitenin kendi'
 MENU_TR['site'\''s own user. You finish the installation in the browser; the database login is printed for it.']='kullanıcısıyla konur. Kurulumu tarayıcıda bitirirsiniz; veritabanı giriş bilgileri bunun için yazdırılır.'
@@ -1940,8 +1940,8 @@ MENU_TR['Into a mailbox of its own (info@%s, with a password of its own)']='Kend
 MENU_TR['Into a mailbox that exists already - one inbox for several domains']='Zaten var olan bir posta kutusuna - birkaç alan adı için tek gelen kutusu'
 MENU_TR['%sThere is no mailbox on this server yet: the first domain needs one of its own.%s\n']='%sBu sunucuda henüz posta kutusu yok: ilk alan adının kendi kutusu olmalı.%s\n'
 MENU_TR['Deliver into which mailbox']='Hangi posta kutusuna teslim edilsin'
-MENU_TR['Which addresses of %s? Names with commas (info,sales), or * for every address']='%s alan adının hangi adresleri? Virgülle adlar (info,sales) ya da her adres için *'
-MENU_TR['Mailbox name (before the @), or a dash for none']='Posta kutusu adı (@ işaretinden önceki kısım) ya da olmasın diye tire'
+MENU_TR['Which addresses of %s? Names with commas (info,sales), or * for every address']='%s alan adının hangi adresleri? Virgülle ayrılmış adlar (info,sales) ya da her adres için *'
+MENU_TR['Mailbox name (before the @), or a dash for none']='Posta kutusu adı (@ işaretinden önceki kısım) ya da istemiyorsanız tire'
 MENU_TR['Mailbox size']='Posta kutusu boyutu'
 MENU_TR['What runs, and for which domains']='Ne çalışıyor ve hangi alan adları için'
 MENU_TR['Switch it on for a domain (it answers at webmail.<domain>)']='Bir alan adı için aç (webmail.<alan-adı> adresinde yanıt verir)'
@@ -1951,7 +1951,7 @@ MENU_TR['Remove the domain with all of its mail (a last backup is taken first)']
 MENU_TR['\n  The mail server is not installed yet. Optional components (18) installs it.\n']='\n  Posta sunucusu henüz kurulu değil. İsteğe bağlı bileşenler (18) onu kurar.\n'
 MENU_TR['\n %sMAIL%s   (this server sends as %s)\n']='\n %sPOSTA%s   (bu sunucu %s adıyla gönderir)\n'
 MENU_TR['Domains that have mail here']='Burada postası olan alan adları'
-MENU_TR['Add a domain (a mailbox of its own, or into one that exists)']='Alan adı ekle (kendi posta kutusu ya da var olan birine)'
+MENU_TR['Add a domain (a mailbox of its own, or into one that exists)']='Alan adı ekle (kendi posta kutusuyla ya da var olan birine)'
 MENU_TR['Mailboxes: who has one, its size, how full it is']='Posta kutuları: kimin var, boyutu, ne kadar dolu'
 MENU_TR['Add a mailbox']='Posta kutusu ekle'
 MENU_TR['Change a mailbox password']='Posta kutusu şifresini değiştir'
@@ -1971,14 +1971,14 @@ MENU_TR['Restore a domain'\''s mail from a backup']='Bir alan adının postasın
 MENU_TR['Certificates: which exist, is renewal automatic']='Sertifikalar: hangileri var, yenileme otomatik mi'
 MENU_TR['Every domain, now']='Tüm alan adları, şimdi'
 MENU_TR['One domain, now']='Tek alan adı, şimdi'
-MENU_TR['Automatic backups (now: %s)']='Otomatik yedekler (şimdi: %s)'
+MENU_TR['Automatic backups (now: %s)']='Otomatik yedekler (şu an: %s)'
 MENU_TR['Encrypt the archive? (y/n)']='Arşiv şifrelensin mi? (y/n)'
 MENU_TR['Domain whose mail to restore']='Postası geri yüklenecek alan adı'
 MENU_TR['\n%sMail archives of %s:%s\n']='\n%s%s posta arşivleri:%s\n'
-MENU_TR['  (none found under %s - copy the archive there, or give its path below)\n']='  (%s altında bulunamadı - arşivi oraya kopyalayın ya da yolunu aşağıya yazın)\n'
+MENU_TR['  (none found under %s - copy the archive there, or give its path below)\n']='  (%s altında arşiv bulunamadı - arşivi oraya kopyalayın ya da yolunu aşağıya yazın)\n'
 MENU_TR['Full path of the archive (empty: the newest one above)']='Arşivin tam yolu (boş: yukarıdaki en yenisi)'
 MENU_TR['A server for mail alone: Postfix, Dovecot, Rspamd and a webmail. Your domains get their']='Yalnızca posta için bir sunucu: Postfix, Dovecot, Rspamd ve bir webmail. Alan adlarınızın postası'
-MENU_TR['mail here; their web sites stay where they are. It needs a name of its own, like']='buraya gelir; web siteleri oldukları yerde kalır. Kendine ait bir ada ihtiyacı var, örneğin'
+MENU_TR['mail here; their web sites stay where they are. It needs a name of its own, like']='buraya gelir; web siteleri oldukları yerde kalır. Sunucunun kendine ait bir ada ihtiyacı var, örneğin'
 MENU_TR['mail.example.com, with an A record pointing here and a PTR record your provider sets.']='mail.example.com; buraya yönlenen bir A kaydı ve sağlayıcınızın ayarladığı bir PTR kaydıyla.'
 MENU_TR['Name this server sends mail as']='Bu sunucunun posta gönderirken kullanacağı ad'
 MENU_TR['\n %sOPTIONAL COMPONENTS%s   (nothing here is installed by default)\n']='\n %sİSTEĞE BAĞLI BİLEŞENLER%s   (buradaki hiçbir şey varsayılan olarak kurulmaz)\n'
@@ -1988,7 +1988,7 @@ MENU_TR['installed, sends as %s']='kurulu, %s adıyla gönderir'
 MENU_TR['Node.js major version']='Node.js ana sürümü'
 MENU_TR['The mail server needs a name of its own (mail.example.com), an A record']='Posta sunucusunun kendine ait bir adı (mail.example.com), buraya yönlenen bir A kaydı'
 MENU_TR['pointing here, and a PTR record your provider sets to the same name.']='ve sağlayıcınızın aynı ada ayarladığı bir PTR kaydı olmalıdır.'
-MENU_TR['\n  Every site gets an archive of its own under %s/<domain>/:\n  files, database, vhost and state. Older archives are removed as new ones arrive.\n']='\n  Her site %s/<alan-adı>/ altında kendi arşivini alır:\n  dosyalar, veritabanı, vhost ve durum. Yeni arşivler geldikçe eskileri silinir.\n'
+MENU_TR['\n  Every site gets an archive of its own under %s/<domain>/:\n  files, database, vhost and state. Older archives are removed as new ones arrive.\n']='\n  Her sitenin %s/<alan-adı>/ altında kendi arşivi olur:\n  dosyalar, veritabanı, vhost ve durum. Yeni arşivler geldikçe eskileri silinir.\n'
 MENU_TR['Every day']='Her gün'
 MENU_TR['Once a week']='Haftada bir'
 MENU_TR['Every hour']='Her saat'
@@ -1998,14 +1998,14 @@ MENU_TR['On which day (mon tue wed thu fri sat sun)']='Hangi gün (mon tue wed t
 MENU_TR['%s"%s" is not a time like 03:00.%s\n']='%s"%s" 03:00 gibi bir saat değil.%s\n'
 MENU_TR['%s"%s" is not one of mon tue wed thu fri sat sun.%s\n']='%s"%s" mon tue wed thu fri sat sun günlerinden biri değil.%s\n'
 MENU_TR['Archives to keep per site']='Site başına saklanacak arşiv sayısı'
-MENU_TR['%s"%s" is not a number of archives.%s\n']='%s"%s" bir arşiv sayısı değil.%s\n'
+MENU_TR['%s"%s" is not a number of archives.%s\n']='%s"%s" geçerli bir arşiv sayısı değil.%s\n'
 MENU_TR['Encrypt the archives? (y/n)']='Arşivler şifrelensin mi? (y/n)'
 MENU_TR['Also upload each one to %s %s? (y/n)']='Her biri %s %s hedefine de yüklensin mi? (y/n)'
 MENU_TR['%s  They stay on this server only: "%s backup --configure-remote" adds a second place.%s\n']='%s  Yalnızca bu sunucuda kalırlar: "%s backup --configure-remote" ikinci bir yer ekler.%s\n'
 MENU_TR['Every site, now']='Tüm siteler, şimdi'
 MENU_TR['One site, now']='Tek site, şimdi'
 MENU_TR['\n%sAvailable archives for %s:%s\n']='\n%s%s için mevcut arşivler:%s\n'
-MENU_TR['  (none found under %s)\n']='  (%s altında bulunamadı)\n'
+MENU_TR['  (none found under %s)\n']='  (%s altında arşiv bulunamadı)\n'
 MENU_TR['Full path of the archive to restore']='Geri yüklenecek arşivin tam yolu'
 MENU_TR['Import sites from another server (files and databases, over SSH)']='Başka bir sunucudan site aktar (dosyalar ve veritabanları, SSH ile)'
 MENU_TR['Looks at what another server serves and asks which sites to bring here: their files, and the']='Başka bir sunucunun yayınladığı sitelere bakar ve hangilerinin buraya getirileceğini sorar: dosyaları ve'

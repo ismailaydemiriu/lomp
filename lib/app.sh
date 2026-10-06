@@ -56,10 +56,10 @@ Kullanım: setup.sh app list [--json]
           setup.sh app worker <domain> add NAME --cron "*/5 * * * *" --start CMD [--cwd DIR] [--timeout 1h]
           setup.sh app worker <domain> remove NAME | run NAME
           setup.sh app deploy <domain> [--git URL [--branch B]]
-                                        çeker (git), bağımlılıkları kurar, derler, yeniden başlatır
-       setup.sh app deploy-key <domain> özel bir depo için anahtar (açık anahtarı yazdırır)
-       setup.sh app set <domain> [--port N] [--start "npm start" | --script dist/main.js] [--memory 512M|none] [--no-git]
-       setup.sh app env <domain> list [--show] | set NAME | unset NAME... | import-db
+                                           çeker (git), bağımlılıkları kurar, derler, yeniden başlatır
+          setup.sh app deploy-key <domain> özel bir depo için anahtar (açık anahtarı yazdırır)
+          setup.sh app set <domain> [--port N] [--start "npm start" | --script dist/main.js] [--memory 512M|none] [--no-git]
+          setup.sh app env <domain> list [--show] | set NAME | unset NAME... | import-db
   Bir Node.js sitesi şu komutla oluşturulur:
   setup.sh add app.example.com --node [--port N] [--start CMD] [--git URL]
   Uygulama $PORT içindeki portu dinlemelidir. "env set" değeri standart girdiden okur ya da
@@ -68,8 +68,8 @@ Kullanım: setup.sh app list [--json]
   içinde asla şifre ya da token olmamalıdır - bunun yerine bir deploy anahtarı kullanın.
   Worker'lar uygulamanın yanında, aynı PM2 altında, site kullanıcısı olarak ve onun ortamıyla
   çalışır: kuyruk tüketicileri, botlar (uygulamanın kendi sürecinin adı "web" olur). Seçenek
-  olarak --cron verilirse worker, cron'un başlattığı bir zamanlanmış iş olur: bir çalıştırma
-  öncekiyle asla çakışmaz ve --timeout sonunda durdurulur. "worker run" bir işi hemen başlatır.
+  olarak --cron verilirse worker, cron'un başlattığı zamanlanmış bir iş olur: bir çalıştırma
+  öncekiyle asla çakışmaz ve --timeout süresi dolunca durdurulur. "worker run" bir işi hemen başlatır.
   Dizin, sitenin ev dizinine göredir (varsayılan: app). Gizli değerler başlatma komutuna değil,
   "app env" içine konur.
 EOF

@@ -8242,7 +8242,7 @@ assert_has   "or of this one" "posta kutusu olarak kalıyor: /var/vmail/alpha.ex
 _rn_case _rn_usage_tr
 _o="$(_rn_out)"
 assert_has   "rename --help in Turkish" "Kullanım: setup.sh rename <eski-alan-adı> <yeni-alan-adı> [seçenekler]" "$_o"
-assert_has   "with every option" "--keep-mail          Posta kutularını taşımak yerine eski alan adında bırak" "$_o"
+assert_has   "with every option" "--keep-mail          Posta kutuları taşınmaz, eski alan adında bırakılır" "$_o"
 for _rn_opt in --no-redirect --no-ssl --no-search-replace --keep-mail; do
   assert_eq  "the Turkish usage names ${_rn_opt} once, as the English one does" "1 1" \
     "$(grep -c -- "^  ${_rn_opt} " <<<"$_o") $(lib_domain_rename_usage | grep -c -- "^  ${_rn_opt} ")"
@@ -9103,7 +9103,7 @@ assert_eq "values go into both languages" \
 assert_eq "and into the one asked for"            "www.a.example adresi de sunulsun mu? (y/n)" \
   "$(_ml tr _menu_tf 'Also serve www.%s? (y/n)' a.example)"
 assert_eq "whole lines: the English one, then the Turkish one" \
-  $'a.example has no path proxies.\na.example sitesinde yol yönlendirmesi yok.' \
+  $'a.example has no path proxies.\na.example sitesinde yol proxy'\''si yok.' \
   "$(_ml both _menu_printf '%s%s has no path proxies.%s\n' "" a.example "")"
 assert_eq "the blank line in front is not said twice" \
   $'\nWhich site?\nHangi site?' "$(_ml both _menu_printf '\n%sWhich site?%s\n' "" "")"
@@ -9117,7 +9117,7 @@ _ml_long="Node.js app that lomp keeps running (PM2: starts at boot, comes back a
 assert_eq "two long texts take a line each"       2 "$(_ml both _menu_opt 4 "$_ml_long" | wc -l | tr -d ' ')"
 assert_eq "one language never does"               1 "$(_ml tr _menu_opt 4 "$_ml_long" | wc -l | tr -d ' ')"
 _ml_h1="PM2 keeps the app running: it starts at boot and comes back after a crash."
-_ml_h1tr="PM2 uygulamayı ayakta tutar: açılışta başlatır, çökerse yeniden kaldırır."
+_ml_h1tr="PM2 uygulamayı ayakta tutar: açılışta başlatır, çökerse yeniden başlatır."
 assert_eq "an explanation: Turkish block, then English block" \
   "  ${_ml_h1tr}"$'\n'"  ${_ml_h1}" "$(_ml both _menu_hint "$_ml_h1")"
 assert_eq "or Turkish alone"                      "  ${_ml_h1tr}" "$(_ml tr _menu_hint "$_ml_h1")"
@@ -9357,7 +9357,7 @@ assert_eq   "the closing line"                    "2 sorun, 1 uyarı. Düzeltmek
 assert_eq   "what Cloudflare would say"           "Cloudflare: 3 siteden 1 tanesi Full (strict) altında 526 yanıtı verir. Bu liste temizlenene kadar Full modunda kalın." "$(_dt_plain "Cloudflare: 1 of 3 site(s) would answer 526 under Full (strict). Stay on Full until this list is clean.")"
 assert_eq   "renew-ssl: a request"                "a.example + www için sertifika isteniyor (webroot ile)" "$(_dt_plain "Requesting certificate for a.example + www via webroot")"
 assert_eq   "and for names that belong to no site" "mail.a.example için _mail_a sertifikası isteniyor (dns ile)" "$(_dt_plain "Requesting certificate _mail_a for mail.a.example via dns")"
-assert_has  "ssl help in Turkish"                 "ssl fix        Otomatik yenilemeyi geri kurar" "$(_st lib_ssl_usage)"
+assert_has  "ssl help in Turkish"                 "ssl fix        Otomatik yenilemeyi yeniden kurar" "$(_st lib_ssl_usage)"
 assert_has  "and in English as before"            "ssl fix        Put automatic renewal back" "$(lib_ssl_usage)"
 for _dt_h in '"CERTIFICATES"' '"Sites"' '"Redirects"' '"Mail"' '"AUTOMATIC RENEWAL"' '"(no sites yet)"'; do
   assert_has "ssl status sends its heading ${_dt_h} through the table" "lib_tr ${_dt_h}" "$(declare -f lib_ssl_status_main)"
@@ -9399,6 +9399,9 @@ unset -f _uo
 assert_eq   "import: a refusal"  "--path ve --as birlikte verilir" "$(_dt_plain "--path and --as go together")"
 assert_eq   "its reason"         "oradaki bir dizin buradaki bir site olur" "$(_dt_plain "one directory there becomes one site here")"
 assert_eq   "a site that cannot be taken" "a.example burada bir proxy sitesi" "$(_dt_plain "a.example is a proxy site here")"
+assert_eq   "a name left out for what it is here" "old.example: atlandı; burada bir yönlendirme" "$(_dt_plain "old.example: left out, it is a redirect here")"
+assert_eq   "a site of another kind"  "prox.example: atlandı; burada bir proxy sitesi" "$(_dt_plain "prox.example: left out, it is a proxy site here")"
+assert_eq   "one that is no site"     "x.example: atlandı, burada böyle bir site yok (--no-create)" "$(_dt_plain "x.example: left out, it is not a site here (--no-create)")"
 assert_eq   "a copy that failed" "a.example kopyalanamadı: /var/www/a/wp-config.php yok" "$(_dt_plain "a.example could not be copied: /var/www/a/wp-config.php is missing")"
 assert_eq   "a mailbox that could not be made" "info@a.example posta kutusu oluşturulamadı" "$(_dt_plain "The mailbox info@a.example could not be made")"
 assert_eq   "the choice that is none" "\"9\" listedeki seçeneklerden biri değil" "$(_dt_plain "\"9\" is not a choice from the list")"

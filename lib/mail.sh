@@ -3677,8 +3677,8 @@ Kullanım: lomp mail <command>
   box quota <user@domain> <2G|0>
   box list [domain] | box del <user@domain> | box kick <user@domain>
 
-  alias add <alias@domain> <target[,target]>   başka yere giden bir adres; gittiği buradaki
-                                        posta kutusu bu adresle de gönderebilir
+  alias add <alias@domain> <target[,target]>   başka yere giden bir adres; buradaki bir posta
+                                        kutusuna gidiyorsa o kutu bu adresle de gönderebilir
   alias add @<domain> <target>          tümünü yakala: alan adının posta kutusu da kendi takma
                                         adı da olmayan her adresi
   alias del <alias@domain> | alias list [domain]
@@ -3691,17 +3691,17 @@ Kullanım: lomp mail <command>
                                         olduğu her alan adına hizmet verir
 
   dkim rotate <domain>                  ikinci bir imzalama anahtarı ve yayımlanacak kayıt;
-  dkim rotate <domain> --abort          saatlik bir iş, DNS kaydı taşıyınca imzalamayı ona
+  dkim rotate <domain> --abort          saatlik bir iş, kayıt DNS'te görününce imzalamayı ona
   dkim status <domain>                  geçirir ve eski anahtarı bir hafta sonra kaldırır
 
   backup <domain> [--keep N]            posta kutuları, takma adlar, anahtarlar ve posta
-  restore <domain> [--file ARCHIVE]     bunları geri koyar; içinde hâlâ posta olan posta kutusu
+  restore <domain> [--file ARCHIVE]     bunları geri yükler; içinde hâlâ posta olan posta kutusu
                                         için önce sorulur, boş olan için sorulmaz
 
-  status                 posta yığınının ne yaptığı ve gönderip gönderemediği
+  status                 posta hizmetlerinin ne yaptığı ve posta gönderip gönderemediği
   test                   ters DNS'i ve giden 25 numaralı portun açık olup olmadığını denetler
   queue                  Postfix kuyruğunu gösterir
-  regenerate             her posta yapılandırma dosyasını yeniden yazar, yığını yeniden başlatır
+  regenerate             her posta yapılandırma dosyasını yeniden yazar, hizmetleri yeniden başlatır
   relay set --host H [--port 587] --user U [--spf-include NAME] [--tls secure|encrypt]
                          giden postayı başka bir sunucu üzerinden gönderir; şifre standart
                          girdiden okunur, asla bir argümandan alınmaz
