@@ -100,7 +100,7 @@ _ss_load_module() {
   # shellcheck source=/dev/null
   source "$file"
 }
-for _m in common lang system ols php db ssl domain harden scan proxy app mail webmail cloudflare backup monitor install import rename menu; do
+for _m in common lang system ols php db ssl domain harden scan proxy app mail webmail cloudflare backup monitor install importapp import rename menu; do
   _ss_load_module "$_m"
 done
 unset _m

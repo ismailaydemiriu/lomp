@@ -172,7 +172,9 @@ KOMUTLAR
                                 adları ve iletmeleri de; DNS'e dokunulmaz. Yeni site orada
                                 çalıştığı PHP sürümünü alır (bu sunucunun verdiğinden büyük
                                 memory_limit ya da yükleme boyutu da korunur), cron işleri burada sitenin
-                                kullanıcısı olarak çalışır. Öteki sunucu yalnızca okunur
+                                kullanıcısı olarak çalışır. Bir porta iletilen ad, uygulamasıyla
+                                bir Node.js sitesi ya da bir proxy olarak gelir. Öteki sunucu
+                                yalnızca okunur
                                 (--list --all --only a.com,b.com --no-create --no-mail
                                 --only-mail --no-cron --port N --key FILE --password-file FILE
                                 --path DIR --as DOMAIN --db NAME)
@@ -431,7 +433,9 @@ COMMANDS
                                 its aliases and forwarders; DNS is not touched. A new site
                                 gets the PHP version it ran there (and a memory_limit or upload
                                 size above this server's own), and its cron jobs run here
-                                as the site's user. The other server is only read (--list
+                                as the site's user. A name that is passed on to a port
+                                comes as a Node.js site with its application, or as a proxy.
+                                The other server is only read (--list
                                 --all --only a.com,b.com --no-create --no-mail --only-mail
                                 --no-cron --port N --key FILE --password-file FILE --path DIR
                                 --as DOMAIN --db NAME)

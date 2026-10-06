@@ -84,6 +84,11 @@ Kullanım: setup.sh import <[user@]host> [seçenekler]
   sitenin dizinini ya da alan adını içeren satırlar; yollar bu sunucuya göre yeniden yazılır.
   Siz oradan kaldırana kadar öteki sunucuda da çalışmaya devam ederler.
   "setup.sh import cron <domain>" bir siteye verilenleri listeler, --clear hepsini kaldırır.
+  Öteki sunucunun bir porta ilettiği ad da gelir: portunu bir Node.js uygulaması (package.json
+  bulunan bir dizin) dinliyorsa o uygulamayla bir Node.js sitesi olarak eklenir - node_modules
+  olmadan kodu, portu, başlatılma biçimi; kaynak bir lomp ise ortam değişkenleri, worker ve
+  zamanlanmış işleri de - ve burada kurulur, derlenir, başlatılır; başka her ad aynı adrese
+  bir proxy olur ve orada yanıt veren şey getirilmez.
   Daha önce aktarılmış bir site için yalnızca o zamandan beri öteki sunucuda oluşturulan ya da
   değişen dosyalar gelir (öteki sunucunun her dosya için tuttuğu zamana göre); bu arada burada
   değiştirilen ya da silinen dosya burada olduğu gibi kalır, --full ise her şeyi yeniden kopyalar.
@@ -144,6 +149,11 @@ Usage: setup.sh import <[user@]host> [options]
   directory or its domain, with the paths rewritten for this server. They go on running on
   the other server too until you take them out there. "setup.sh import cron <domain>" lists
   the ones a site was given, and --clear removes them.
+  A name that the other server passes on to a port comes too: one whose port a Node.js
+  application listens on (a directory with a package.json) is added as a Node.js site with
+  that application - its code without node_modules, the port, the way it is started; from a
+  lomp also its environment values, workers and jobs - and is installed, built and started
+  here; any other becomes a proxy to the same address, and what answers there is not brought.
   A site that was imported before gets only the files that were made or changed on the other
   server since then (by the time the other server itself noted for each file); a file that
   was changed or deleted here in the meantime is left as it is here, and --full copies
@@ -508,6 +518,7 @@ IMPORT_LIB
 
 lib_import_remote_scan() {
   lib_import_remote_lib
+  lib_importapp_remote_lib
   cat <<'IMPORT_SCAN'
 R="${LOMP_IMPORT_ROOT:-}"
 ONLY="${LOMP_IMPORT_ONLY:-}"
@@ -657,6 +668,8 @@ alias_rows() {
 }
 alias_rows
 if [ -n "$ONLY" ]; then row - "$ONLY" 0 path; exit 0; fi
+# the names that are passed on to a port instead (lib/importapp.sh)
+app_rows
 
 # OpenLiteSpeed (lomp, CyberPanel, a plain install): the names are in the listeners' maps
 L="$R/usr/local/lsws"
@@ -691,6 +704,7 @@ if [ -r "$L/conf/httpd_config.conf" ]; then
     pv="$(php_of "$cf")"
     [ -n "$pv" ] || pv="$(awk '/^[ \t]*extprocessor[ \t]/ { e = 1 } e && $1 == "path" { print; exit }' "$L/conf/httpd_config.conf" 2>/dev/null | sed -n 's/.*lsphp\([0-9]\)\([0-9]\).*/\1.\2/p')"
     pm="$(ini_of memory_limit "$cf" "$dr" "$pv")"; pu="$(ini_of upload_max_filesize "$cf" "$dr" "$pv")"
+    app_ols "$cf" "$dm"
     dml=" $(printf '%s' "$dm" | tr 'A-Z' 'a-z') "
     seen=" "
     set -f
@@ -807,7 +821,11 @@ lib_import_scan_parse() {   # reads the listing from stdin
   IMP_CRON_ROOT=() IMP_CRON_WHEN=() IMP_CRON_CMD=()
   IMP_BOX=() IMP_BOX_DIR=() IMP_BOX_KB=() IMP_BOX_HASH=() IMP_ALIAS=() IMP_ALIAS_TO=()
   IMP_REMOTE_USER=""
+  lib_importapp_reset
   while IFS=$'\t' read -r tag domain root kb kind db www conf _ php mem upl _; do
+    # a name that is passed on to a port, and its database (lib/importapp.sh)
+    if [[ "$tag" == "P" ]]; then lib_importapp_row "$domain" "$root" "$kb" "$kind" "$db" "$www" "$conf" "$php" "$mem" "$upl"; continue; fi
+    if [[ "$tag" == "Q" ]]; then lib_importapp_db_row "$domain" "$root" "$kb"; continue; fi
     if [[ "$tag" == "C" ]]; then
       # document root, when, command - in the variables of a site line. The command is the
       # rest of the line, tabs and all, and is taken only when cron here could run it as it is.
@@ -883,6 +901,7 @@ lib_import_scan_parse() {   # reads the listing from stdin
     if lib_php_valid_version "${php:-}"; then IMP_PHP+=("$php"); else IMP_PHP+=("-"); fi
     IMP_MEM+=("$(_import_size_mb "${mem:-}")"); IMP_UPL+=("$(_import_size_mb "${upl:-}")")
   done
+  lib_importapp_merge
   # a domain that has mailboxes or aliases there and no site: an entry of its own, of the kind "mail"
   (( IMP_MAIL_ROWS )) || return 0
   for x in ${IMP_BOX[@]+"${IMP_BOX[@]}"} ${IMP_ALIAS[@]+"${IMP_ALIAS[@]}"}; do
@@ -915,8 +934,17 @@ lib_import_scan() {   # [one directory, the domain it is to be]
 
 # What this server would do with a site of that name: "new", "exists", or why it cannot be one.
 # With "mail" only its mailboxes are asked about, and any domain can have those.
-lib_import_here() {   # domain [mail]
+lib_import_here() {   # domain [mail | node | proxy]
   local mode=""
+  # a name that is passed on to a port goes into a site that is passed on, and into no other
+  if [[ "${2:-}" == "node" || "${2:-}" == "proxy" ]]; then
+    if lib_domain_registered "$1"; then
+      mode="$(lib_json_get "$(lib_domain_json "$1")" '.mode')"
+      if [[ "$mode" == "proxy" ]]; then printf 'exists'; else printf 'a %s site here' "${mode:-php}"; fi
+    elif lib_redirect_exists "$1"; then printf 'a redirect here'
+    else printf 'new'; fi
+    return 0
+  fi
   if [[ "${2:-}" == "mail" ]]; then
     if lib_domain_registered "$1" || { lib_mail_installed && lib_mail_domain_standalone "$1"; }; then printf 'exists'
     else printf 'new'; fi
@@ -937,7 +965,8 @@ lib_import_list_print() {
     lib_tprintf '  %3s  %-34s %9s  %-9s  %-20s  %-9s  %-8s  %-12s  %s\n' "#" "DOMAIN" "SIZE" "TYPE" "DATABASE" "MAILBOXES" "ALIASES" "HERE" "DIRECTORY THERE"
     for (( i = 0; i < n; i++ )); do
       what=""; kb="${IMP_KB[i]}"
-      if [[ "${IMP_KIND[i]}" == "mail" ]] || (( IMP_OPT_ONLY_MAIL )); then what="mail"; fi
+      if [[ "${IMP_KIND[i]}" == "mail" ]] || (( IMP_OPT_ONLY_MAIL )); then what="mail"
+      elif [[ "${IMP_KIND[i]}" == "node" || "${IMP_KIND[i]}" == "proxy" ]]; then what="${IMP_KIND[i]}"; fi
       # the cell says it in a word or two: "a proxy site here" under HERE is "proxy site"
       here="$(lib_import_here "${IMP_DOMAIN[i]}" "$what")"; here="${here#a }"; here="${here% here}"
       boxes="$(_import_boxes_of "${IMP_DOMAIN[i]}" | wc -l | tr -d ' ')"
@@ -1195,6 +1224,33 @@ _import_check_site() {   # index, fix 0|1
   return "$bad"
 }
 
+# One database of the other server into the site's own here: dumped there, checked for being
+# whole, and imported. Dies - with nothing imported - when any of that fails.
+lib_import_db() {   # domain, database there, the file that names its login ("-": none), work directory, 1 when the site is new
+  local domain="$1" db="$2" conf="$3" work="$4" created="$5" dump="" n=0
+  if ! lib_db_info_load "$domain"; then lib_db_create_for_domain "$domain"; fi
+  dump="${work}/dump.sql.gz"
+  lib_info "Fetching the database ${db} ..."
+  [[ "$conf" != "-" ]] || conf=""
+  lib_import_remote_dump | _import_ssh "DB='${db}' CONF='${conf}' bash -s" >"$dump" 2>"${work}/dump.err" \
+    || { cat "${work}/dump.err" >>"$LOG_FILE" 2>/dev/null || true
+         lib_die "The database ${db} could not be fetched" "$(tail -n 1 "${work}/dump.err" 2>/dev/null | tr -c '[:print:]' ' ' || true)" \
+           "the database here was not touched; the files are in place. Bring it yourself (setup.sh credentials ${domain}), or run the import again"; }
+  n="$(gzip -dc "$dump" 2>/dev/null | tail -n 5 | grep -c 'Dump completed' || true)"
+  (( n > 0 )) || lib_die "The copy of the database ${db} is not complete" "it does not end the way a dump ends: the connection dropped, or the disk there is full" \
+    "the database here was not touched; run the import again"
+  # MySQL 8's default collation is one MariaDB does not have
+  n="$(gzip -dc "$dump" | grep -c 'utf8mb4_0900_ai_ci' || true)"
+  if (( n > 0 )); then
+    lib_info "The tables use MySQL 8's utf8mb4_0900_ai_ci, which MariaDB does not have: they become utf8mb4_unicode_520_ci"
+    gzip -dc "$dump" | sed -e 's/utf8mb4_0900_ai_ci/utf8mb4_unicode_520_ci/g' | gzip -c >"${work}/dump2.sql.gz"
+    dump="${work}/dump2.sql.gz"
+  fi
+  lib_db_restore_domain "$domain" "$dump" \
+    || lib_die "The database of ${domain} could not be imported" "an SQL error (see the log)" \
+         "its tables may be half replaced: run the import again$( (( created )) || printf ', or go back with: setup.sh restore %s --file <the pre-import archive>' "$domain")"
+}
+
 _import_add() {   # domain add-options...
   SERVER_SETUP_LOCKED=1 "$SCRIPT_PATH" add "$@" --yes --quiet
 }
@@ -1227,6 +1283,8 @@ lib_import_site() {   # index
   if [[ "${IMP_KIND[i]}" == "mail" ]] || (( IMP_OPT_ONLY_MAIL )); then
     lib_heading "${domain}  <-  ${IMP_SSH_TARGET}: its mailboxes"
     lib_rollback_clear
+  elif [[ "${IMP_KIND[i]}" == "node" || "${IMP_KIND[i]}" == "proxy" ]]; then
+    lib_importapp_site "$i"
   else
     lib_import_site_part "$i"
   fi
@@ -1496,27 +1554,7 @@ lib_import_site_part() {   # index
     if [[ "$D_MODE" == "static" ]]; then
       lib_warn "${domain} is a static site here: its database ${db} was left where it is"
     else
-      if ! lib_db_info_load "$domain"; then lib_db_create_for_domain "$domain"; fi
-      dump="${work}/dump.sql.gz"
-      lib_info "Fetching the database ${db} ..."
-      [[ "$conf" != "-" ]] || conf=""
-      lib_import_remote_dump | _import_ssh "DB='${db}' CONF='${conf}' bash -s" >"$dump" 2>"${work}/dump.err" \
-        || { cat "${work}/dump.err" >>"$LOG_FILE" 2>/dev/null || true
-             lib_die "The database ${db} could not be fetched" "$(tail -n 1 "${work}/dump.err" 2>/dev/null | tr -c '[:print:]' ' ' || true)" \
-               "the database here was not touched; the files are in place. Bring it yourself (setup.sh credentials ${domain}), or run the import again"; }
-      n="$(gzip -dc "$dump" 2>/dev/null | tail -n 5 | grep -c 'Dump completed' || true)"
-      (( n > 0 )) || lib_die "The copy of the database ${db} is not complete" "it does not end the way a dump ends: the connection dropped, or the disk there is full" \
-        "the database here was not touched; run the import again"
-      # MySQL 8's default collation is one MariaDB does not have
-      n="$(gzip -dc "$dump" | grep -c 'utf8mb4_0900_ai_ci' || true)"
-      if (( n > 0 )); then
-        lib_info "The tables use MySQL 8's utf8mb4_0900_ai_ci, which MariaDB does not have: they become utf8mb4_unicode_520_ci"
-        gzip -dc "$dump" | sed -e 's/utf8mb4_0900_ai_ci/utf8mb4_unicode_520_ci/g' | gzip -c >"${work}/dump2.sql.gz"
-        dump="${work}/dump2.sql.gz"
-      fi
-      lib_db_restore_domain "$domain" "$dump" \
-        || lib_die "The database of ${domain} could not be imported" "an SQL error (see the log)" \
-             "its tables may be half replaced: run the import again$( (( created )) || printf ', or go back with: setup.sh restore %s --file <the pre-import archive>' "$domain")"
+      lib_import_db "$domain" "$db" "$conf" "$work" "$created"
       imported=1
       lib_ok "Database ${db} imported into ${DBI_NAME}"
     fi
@@ -1703,6 +1741,7 @@ lib_import_main() {
   if (( IMP_OPT_CHECK )); then
     for i in "${chosen[@]}"; do
       if [[ "${IMP_KIND[i]}" == "mail" ]]; then lib_note "${IMP_DOMAIN[i]}: mailboxes only, no files to compare"; continue; fi
+      if [[ "${IMP_KIND[i]}" == "node" || "${IMP_KIND[i]}" == "proxy" ]]; then lib_note "${IMP_DOMAIN[i]}: passed on to a port there; --check compares the files of sites only"; continue; fi
       if _import_check_site "$i" "$(( IMP_OPT_FIX && ! OPT_DRY_RUN ))"; then okc=$((okc + 1)); else failed+=("${IMP_DOMAIN[i]}"); fi
     done
     lib_import_disconnect
@@ -1729,6 +1768,23 @@ lib_import_main() {
         lib_note "${x}: ${what}, added to the mail it has here"
       fi
       todo+=("$i"); mail_kb=$(( mail_kb + mkb ))
+      continue
+    fi
+    if [[ "${IMP_KIND[i]}" == "node" || "${IMP_KIND[i]}" == "proxy" ]]; then
+      # a name that is passed on to a port (lib/importapp.sh)
+      here="$(lib_import_here "$x" "${IMP_KIND[i]}")"
+      case "$here" in
+        new)    if (( no_create )); then lib_note "${x}: left out, it is not a site here (--no-create)"; continue; fi ;;
+        exists) ;;
+        *)      lib_warn "${x}: left out, it is ${here}"; continue ;;
+      esac
+      if [[ "${IMP_KIND[i]}" == "node" ]]; then
+        lib_note "${x}: a Node.js application; ${IMP_ROOT[i]} ($(_import_mb "${IMP_KB[i]}"), without node_modules)$( [[ "${IMP_DB[i]}" == "-" ]] || printf ', database %s' "${IMP_DB[i]}")$( [[ "$here" == "new" ]] || printf '. It is here already: a backup is taken first')"
+      else
+        lib_note "${x}: passed on to a port there; here it becomes a proxy to the same address, and what answers there is not brought"
+      fi
+      todo+=("$i"); total_kb=$(( total_kb + IMP_KB[i] ))
+      if [[ -n "$what" ]] && (( ! IMP_OPT_NO_MAIL )); then lib_note "${x}: and its ${what}"; mail_kb=$(( mail_kb + mkb )); fi
       continue
     fi
     here="$(lib_import_here "$x")"

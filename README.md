@@ -478,6 +478,34 @@ sudo lomp import root@203.0.113.10 --all --no-mail                  # the sites 
   with mailboxes;
 - sieve filters and what a webmail keeps (address books) are not copied.
 
+**A name the other server passes on to a port comes too** - a Node.js application, or a proxy.
+Such a name is found in a lomp's own record of the site, in an OpenLiteSpeed virtual host
+that has a proxy, in an nginx `server` block with `proxy_pass` (an `upstream` by its first
+server) and in an Apache virtual host with `ProxyPass /`. What happens to it depends on what
+listens on the port there:
+
+- **a Node.js application** - the process `ss` names for the port runs in, or below, a
+  directory with a `package.json` - is added here as a Node.js site (`add --node`) with the
+  same port and the way it is started there: `node <file>` becomes its script, `npm ...` its
+  start command, and a process that gives no usable command line (Next.js renames itself) is
+  left to `npm start`. Its code comes without `node_modules`; then its dependencies are
+  installed, it is built and PM2 starts it, exactly as after a `restore`. A database its
+  `.env` or configuration file names comes the way a PHP application's does, and that file is
+  pointed at the database here;
+- from **a lomp** the record says all of it, and more comes: the environment values (never
+  printed), the workers and scheduled jobs, the memory limit, the repository it is deployed
+  from, and what `public_html` holds beside the application;
+- **anything else** - a Python or Go program, a container, another machine - becomes a proxy
+  site to the same address (`add --proxy`), and the run says that what answers there was not
+  brought: that part of the move is yours.
+
+A port that is taken on this server is not asked for: the application gets a free one and has
+to take its port from the `PORT` variable, as lomp's applications do. Values the application
+was given outside its own files - a PM2 ecosystem file, a systemd unit - are not brought
+except from a lomp: `sudo lomp app env <domain> set NAME`. A name that is a PHP or static site
+here is left out rather than turned into something else, and `--check` compares the files of
+sites only.
+
 **A site that is added gets the PHP version it runs there** - read from the other server's
 OpenLiteSpeed configuration, so known for a lomp, a CyberPanel or a plain OpenLiteSpeed and not
 for a site found by its directory alone - when this server has that LSPHP or can install it;
@@ -1351,6 +1379,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
 | `lib/monitor.sh` | `status`, `doctor`, health check, notifications |
 | `lib/rename.sh` | `rename`: a site under another domain name; `redirect`: a name that only sends its visitors on |
 | `lib/import.sh` | `import`: the sites of another server, brought here over SSH |
+| `lib/importapp.sh` | `import`: the names another server passes on to a port - Node.js applications and proxies |
 | `lib/menu.sh` | Command reference and the interactive menu |
 
 ---

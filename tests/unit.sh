@@ -23,7 +23,7 @@ INSTALL_DIR="$TMP/install"; BIN_LINK="$TMP/lompstack"; BIN_SHORT="$TMP/lomp"; LO
 OPT_YES=1 OPT_DRY_RUN=0 OPT_QUIET=1 OPT_VERBOSE=0 OPT_NO_COLOR=1 OPT_JSON=0 OPT_NON_INTERACTIVE=1
 SCRIPT_PATH="$ROOT/setup.sh"; SCRIPT_DIR="$ROOT"
 export TMPDIR="$TMP"
-for m in common lang system ols php db ssl domain harden scan proxy app mail webmail cloudflare backup monitor install import rename menu; do
+for m in common lang system ols php db ssl domain harden scan proxy app mail webmail cloudflare backup monitor install importapp import rename menu; do
   # shellcheck source=/dev/null
   source "$ROOT/lib/$m.sh"
 done
@@ -10345,6 +10345,208 @@ assert_eq  "no server at all"                           "1" "$(_imf --all)"
 assert_eq  "none of them reached the other server"      "" "$(cat "$_im_log")"
 assert_has "the command is in the reference"            "import <[user@]host>" "$(lib_usage)"
 assert_has "setup.sh knows it"                          'import)         lib_import_main' "$(cat "$ROOT/setup.sh")"
+
+# ---- names that are passed on to a port: Node.js applications and proxies -----------------
+# A second "other server": a lomp's record of two sites, nginx and Apache passing names on, a
+# stand-in ss and /proc for what listens. (lib/importapp.sh)
+_ia_keep="$(declare -f lib_app_restore lib_app_port_conflict _app_site_lock lib_app_env_import_db _import_ssh _import_add)"
+_ia_r="$TMP/im-remote2"; _ia_s="$_ia_r/root/.server-setup/domains"; _ia_api="$_ia_r/home/api.example"
+mkdir -p "$_ia_s/api.example" "$_ia_s/px.example" "$_ia_api/app/dist" "$_ia_api/app/node_modules/x" "$_ia_api/public_html/static" \
+  "$_ia_r/etc/nginx/sites-enabled" "$_ia_r/etc/apache2/sites-enabled" "$_ia_r/srv/next/node_modules" "$_ia_r/srv/pyapp" \
+  "$_ia_r/proc/4242" "$_ia_r/proc/4343" "$_ia_r/etc/cron.d"
+cat >"$_ia_s/api.example/domain.json" <<EOF
+{"domain": "api.example", "mode": "proxy", "home": "$_ia_api",
+ "proxy": {"target": "127.0.0.1:3005", "static_paths": "/static/,/assets/"},
+ "app": {"port": 3005, "start": "", "script": "dist/main.js", "memory": "512M", "git": {"url": "git@github.com:acme/api.git", "branch": "main"}},
+ "workers": [{"name": "queue", "start": "node worker.js", "enabled": true, "junk": "x"}, {"name": 7, "start": "x"}],
+ "db": {"name": "apidb"}}
+EOF
+printf '{"API_KEY": "s3cret-value", "DB_NAME": "apidb", "PORT": "9", "PM2_HOME": "/x", "lower": "x", "NUM": 5}\n' >"$_ia_s/api.example/app-env.json"
+printf '{"domain": "px.example", "mode": "proxy", "home": "%s/home/px.example", "proxy": {"target": "10.0.0.5:8080"}}\n' "$_ia_r" >"$_ia_s/px.example/domain.json"
+printf '{"scripts": {"start": "node dist/main.js"}}\n' >"$_ia_api/app/package.json"
+printf '// main\n' >"$_ia_api/app/dist/main.js"; printf '// dep\n' >"$_ia_api/app/node_modules/x/index.js"
+printf 'logo\n' >"$_ia_api/public_html/static/logo.txt"
+cat >"$_ia_r/etc/nginx/sites-enabled/apps" <<'EOF'
+upstream nextapp { server 127.0.0.1:3010; server 127.0.0.1:3011; }
+server {
+  listen 80;
+  server_name Next.example www.next.example;   # the shop front
+  location / { proxy_pass http://nextapp; }
+}
+server { server_name py.example *.py.example; location / { proxy_pass http://localhost:8000/; } }
+server { server_name _; root /var/www/html; }
+server { server_name sock.example; location / { proxy_pass http://unix:/run/app.sock; } }
+EOF
+printf '%s\n' '<VirtualHost *:80>' '  ServerName ap.example' '  ServerAlias www.ap.example' '  ProxyPass /static !' '  ProxyPass / http://127.0.0.1:9000/' '</VirtualHost>' >"$_ia_r/etc/apache2/sites-enabled/old.conf"
+printf '{"scripts": {"start": "next start"}}\n' >"$_ia_r/srv/next/package.json"
+printf '// server\n' >"$_ia_r/srv/next/server.js"; printf '// dep\n' >"$_ia_r/srv/next/node_modules/m.js"
+printf '%s\n' 'NODE_ENV=production' 'DB_DATABASE=nextdb' 'DB_USERNAME=nextuser' 'DB_PASSWORD=next-secret' >"$_ia_r/srv/next/.env"
+{ printf 'node\0'; printf '%s\0' "$_ia_r/srv/next/server.js"; printf -- '--flag\0'; } >"$_ia_r/proc/4242/cmdline"
+printf 'gunicorn\0app:app\0' >"$_ia_r/proc/4343/cmdline"
+ln -sfn "$_ia_r/srv/next" "$_ia_r/proc/4242/cwd" 2>/dev/null || true
+ln -sfn "$_ia_r/srv/pyapp" "$_ia_r/proc/4343/cwd" 2>/dev/null || true
+cat >"$_im_bin/ss" <<'EOF'
+#!/bin/sh
+case "$*" in
+  *":3010") echo 'LISTEN 0 511 127.0.0.1:3010 0.0.0.0:* users:(("PM2 v5",pid=99,fd=3),("node",pid=4242,fd=20))' ;;
+  *":8000") echo 'LISTEN 0 128 127.0.0.1:8000 0.0.0.0:* users:(("gunicorn",pid=4343,fd=5))' ;;
+esac
+EOF
+chmod +x "$_im_bin/ss"
+_ia_scan="$(lib_import_remote_scan | env PATH="$_im_bin:$PATH" LOMP_IMPORT_ROOT="$_ia_r" LOMP_IMPORT_PROC="$_ia_r/proc" sh -s)"
+_ia_p() { awk -F'\t' -v d="$1" '$1 == "P" && $2 == d { print $3 "|" $4 "|" $6 "|" $8 "|" $10 "|" $12; exit }' <<<"$_ia_scan"; }
+_ia_q() { awk -F'\t' -v d="$1" '$1 == "Q" && $2 == d { print $3 "|" $4; exit }' <<<"$_ia_scan"; }
+assert_eq  "a lomp's own record: the port, the application, its memory, what is served from disk, how it starts" \
+  "127.0.0.1:3005|$_ia_api/app|lomp|512M|/static/,/assets/|node dist/main.js" "$(_ia_p api.example)"
+assert_eq  "and the database of the site"                        "apidb|-" "$(_ia_q api.example)"
+assert_eq  "a site that is only passed on has no application"    "10.0.0.5:8080|-|lomp|-|-|-" "$(_ia_p px.example)"
+assert_eq  "Apache: the virtual host whose whole address is passed on" "127.0.0.1:9000|-|apache|-|-|-" "$(_ia_p ap.example)"
+assert_lacks "a name that is no name is none"                    $'P\t_\t' "$_ia_scan"
+assert_eq  "nor a wildcard"                                      "0" "$(grep -c $'^P\t[^\t]*[*]' <<<"$_ia_scan" || true)"
+assert_lacks "a socket is no port"                               "sock.example" "$_ia_scan"
+assert_eq  "nginx: the server block's names once, without www"   "1" "$(grep -c $'^P\tnext.example\t' <<<"$_ia_scan")"
+if (( CAN_SYMLINK )); then
+  assert_eq  "nginx: the upstream's first server, and the Node.js application that listens there" \
+    "127.0.0.1:3010|$_ia_r/srv/next|nginx|-|-|node $_ia_r/srv/next/server.js --flag" "$(_ia_p next.example)"
+  assert_eq  "its database, from the .env it keeps the login in" "nextdb|$_ia_r/srv/next/.env" "$(_ia_q next.example)"
+  assert_eq  "what listens but is no Node.js application is passed on only" "127.0.0.1:8000|-|nginx|-|-|-" "$(_ia_p py.example)"
+fi
+printf 'docRoot $VH_ROOT/html\nextprocessor app {\n  type                    proxy\n  address                 127.0.0.1:4100\n}\n' >"$TMP/ia-vh1.conf"
+printf 'docRoot $VH_ROOT/html\nrewrite  {\n  rules <<<END\n  RewriteRule ^(.*)$ http://127.0.0.1:4200/$1 [P,L]\n  END\n}\n' >"$TMP/ia-vh2.conf"
+printf 'docRoot $VH_ROOT/html\nextprocessor lsphp {\n  type                    lsapi\n  address                 127.0.0.1:9001\n}\n' >"$TMP/ia-vh3.conf"
+_ia_ols() { ( eval "$(lib_import_remote_lib)"; eval "$(lib_importapp_remote_lib)"; app_ols "$1" " Ols.example www.ols.example * " ) | awk -F'\t' '$1 == "P" { printf "%s=%s ", $2, $3 }'; }
+assert_eq  "OpenLiteSpeed: a processor of the kind proxy"        "ols.example=127.0.0.1:4100 " "$(_ia_ols "$TMP/ia-vh1.conf")"
+assert_eq  "or a rewrite that passes on"                         "ols.example=127.0.0.1:4200 " "$(_ia_ols "$TMP/ia-vh2.conf")"
+assert_eq  "a PHP processor is no proxy"                         "" "$(_ia_ols "$TMP/ia-vh3.conf")"
+
+lib_import_scan_parse <<<"$_ia_scan"
+if (( CAN_SYMLINK )); then
+  assert_eq  "the names, a site that was listed among them once" "api.example px.example next.example py.example ap.example" "${IMP_DOMAIN[*]}"
+  assert_eq  "each what it is"                                   "node proxy node proxy proxy" "${IMP_KIND[*]}"
+  assert_eq  "with its database"                                 "apidb - nextdb - -" "${IMP_DB[*]}"
+  assert_eq  "a Node.js application is listed by its directory"  "$_ia_api/app $_ia_r/srv/next" "${IMP_ROOT[0]} ${IMP_ROOT[2]}"
+fi
+assert_eq  "what the web server served beside it is remembered"  "$_ia_api/public_html" "${IMPA_DOCROOT[0]}"
+printf '%s\n' $'P\tgood.example\t127.0.0.1:3000\t/srv/it\'s\t/srv/x\tnginx\t12\t9000X\t-\t/a b\tv20.1.0;id\tnode a\x01b' $'Q\tgood.example\ta\';b\t/srv/c onf' \
+  $'P\tbad.example\t127.0.0.1\t-\t-\tnginx\t0\t-\t-\t-\t-\t-' $'P\tsrc.example\t127.0.0.1:3000\t-\t-\tcaddy\t0\t-\t-\t-\t-\t-' \
+  $'P\tcwd.example\t127.0.0.1:3001\t/srv/app\t/etc\tnginx\t5\t256M\t-\t/static/\tv18.2.0\tnode /srv/app/a.js' $'Q\tother.example\tstolendb\t-' \
+  $'P\ttwo.example\t127.0.0.1:3002\t-\t-\tnginx\t0\t-\t-\t-\t-\t-' $'P\ttwo.example\t127.0.0.1:3003\t/srv/two\t/srv/two\tlomp\t1\t-\t-\t-\t-\tnpm start' \
+  $'P\ttwo.example\t127.0.0.1:3004\t-\t-\tapache\t0\t-\t-\t-\t-\t-' $'Q\tcwd.example\tlatedb\t-' | lib_import_scan_parse
+assert_eq  "a line counts only when its target and its source are what they should be" "good.example cwd.example two.example" "${IMPA_DOMAIN[*]}"
+assert_eq  "a directory with a quote in it is none, and the rest of the line with it" "-|-|-|-|-|-|-" \
+  "${IMPA_DIR[0]}|${IMPA_CWD[0]}|${IMPA_MEM[0]}|${IMPA_STATIC[0]}|${IMPA_NODE[0]}|${IMPA_DB[0]}|${IMPA_CONF[0]}"
+assert_eq  "a command line with a control character is none"    "-" "${IMPA_CMD[0]}"
+assert_eq  "where it runs is inside the application, or is the application" "/srv/app|256M|/static/|v18.2.0" "${IMPA_CWD[1]}|${IMPA_MEM[1]}|${IMPA_STATIC[1]}|${IMPA_NODE[1]}"
+assert_eq  "a lomp's record counts before a web server's, and nothing after it" "127.0.0.1:3003 lomp" "${IMPA_TARGET[2]} ${IMPA_SRC[2]}"
+assert_eq  "a database line belongs to the name just before it, and to no other" "--" "${IMPA_DB[1]}${IMPA_DB[2]}"
+
+_ia_cmd() { if _importapp_command "$@"; then printf 'script=%s start=%s' "$IMPA_SCRIPT" "$IMPA_START"; else printf 'npm'; fi; }
+assert_eq  "node and a file: a script"                 "script=dist/main.js start=" "$(_ia_cmd /a/app /a/app "node /a/app/dist/main.js")"
+assert_eq  "a file named from where it runs, with arguments: a start command" "script= start=node dist/main.js --x 1" "$(_ia_cmd /a/app /a/app/dist "/usr/bin/node main.js --x 1")"
+assert_eq  "npm with its words"                        "script= start=npm run prod" "$(_ia_cmd /a/app /a/app "npm run prod")"
+assert_eq  "options before the file are kept"          "script= start=node --max-old-space-size=512 dist/main.js" "$(_ia_cmd /a/app /a/app "node --max-old-space-size=512 /a/app/dist/main.js")"
+assert_eq  "an option alone is no file"                "npm" "$(_ia_cmd /a/app /a/app "node --inspect")"
+assert_eq  "a process that renamed itself is left to npm start" "npm" "$(_ia_cmd /a/app /a/app "next-server (v14.1.0)")"
+assert_eq  "so is a file outside the application"      "npm" "$(_ia_cmd /a/app /a/app "node /etc/passwd")"
+assert_eq  "code on the command line"                  "npm" "$(_ia_cmd /a/app /a/app "node -e process.exit()")"
+assert_eq  "words no start command is made of"         "npm" "$(_ia_cmd /a/app /a/app 'node a.js ;rm -rf /')"
+assert_eq  "a path that climbs"                        "npm" "$(_ia_cmd /a/app /a/app "node ../x.js")"
+assert_eq  "nothing"                                   "npm" "$(_ia_cmd /a/app /a/app "-")"
+
+# the command
+_ia_busy=""; _ia_rc=0; _ia_cuser=""
+eval '_import_ssh() { env PATH="$_im_bin:$PATH" LOMP_IMPORT_ROOT="$_ia_r" LOMP_IMPORT_PROC="$_ia_r/proc" IM_CLIENT_RC="$_ia_rc" IM_CLIENT_USER="$_ia_cuser" IM_DUMP_MODE="" sh -c "$(sed "s#/root/.server-setup/#$_ia_r/root/.server-setup/#g" <<<"$1")"; }
+      lib_app_restore() { printf "apprestore %s port=%s script=%s start=%s\n" "$D_DOMAIN" "$APP_PORT" "$APP_SCRIPT" "$APP_START" >>"$_im_log"; }
+      lib_app_port_conflict() { if [[ "$1" == "$_ia_busy" ]]; then printf "port %s is in use by something" "$1"; return 0; fi; return 1; }
+      _app_site_lock() { return 0; }
+      lib_app_env_import_db() { printf "envimportdb %s\n" "$D_DOMAIN" >>"$_im_log"; }
+      _import_add() {
+        local d="$1" a="" port="3999" start="" script="" proxy="" node=0
+        printf "add %s\n" "$*" >>"$_im_log"
+        shift
+        while (($# > 0)); do
+          a="$1"; shift
+          case "$a" in
+            --node) node=1 ;; --port) port="$1"; shift ;; --start) start="$1"; shift ;; --script) script="$1"; shift ;;
+            --proxy) proxy="$1"; shift ;; --static-paths) shift ;;
+          esac
+        done
+        _im_site "$d" proxy
+        if (( node )); then
+          APP_PORT="$port"; APP_START="$start"; APP_SCRIPT="$script"; APP_MEMORY=""; APP_ENABLED=1; APP_GIT_URL=""; APP_GIT_BRANCH=""
+          lib_app_state_write "$d"
+        fi
+      }'
+assert_eq  "a site that is passed on goes into one that is, and into no other" "new|a php site here|exists" \
+  "$(lib_import_here api.example node)|$(lib_import_here shop.example node)|$(_im_site ia-px.example proxy >/dev/null; lib_import_here ia-px.example proxy)"
+assert_eq  "and a site that is none of that does not go into one" "a proxy site here" "$(lib_import_here ia-px.example)"
+: >"$_im_log"; : >"$RUNUSER_LOG"; _ia_h="$SITES_ROOT/api.example"
+assert_eq  "a Node.js site of a lomp"                  "0" "$(_imf old.example --only api.example)"
+assert_has "is added with its port and the script it runs" "add api.example --no-ssl --node --port 3005 --script dist/main.js" "$(cat "$_im_log")"
+assert_has "which the plan said"                       "api.example: a Node.js application; $_ia_api/app" "$(cat "$_im_out")"
+assert_true "its code is in app/"                      test -f "$_ia_h/app/dist/main.js"
+assert_true "with what says what it needs"             test -f "$_ia_h/app/package.json"
+assert_false "node_modules stays behind"               test -e "$_ia_h/app/node_modules"
+assert_has "unpacked by the site's user"               "-u $(lib_domain_ident api.example) -- env -C / tar -C $_ia_h/app --no-overwrite-dir -xzpf -" "$(cat "$RUNUSER_LOG")"
+assert_eq  "what the web server served beside it came too" "logo" "$(cat "$_ia_h/public_html/static/logo.txt" 2>/dev/null)"
+_ia_env="$(cat "$(lib_app_env_file api.example)" 2>/dev/null || true)"
+assert_eq  "its environment: the values that are values, by the names that are names" "API_KEY DB_NAME" "$(jq -r 'keys | join(" ")' <<<"$_ia_env")"
+assert_lacks "none of them is printed"                 "s3cret-value" "$(cat "$_im_out")"
+assert_lacks "or logged"                               "s3cret-value" "$(cat "$LOG_FILE")"
+if (( CAN_CHMOD )); then assert_eq "and the file is root's alone" "600" "$(stat -c %a "$(lib_app_env_file api.example)")"; fi
+assert_eq  "its workers: the fields this server knows, of the ones that are workers" '[{"name":"queue","start":"node worker.js","enabled":true}]' \
+  "$(jq -c '.workers' "$(lib_domain_json api.example)")"
+assert_eq  "the memory at which it is started again"   "512M" "$(jq -r '.app.memory' "$(lib_domain_json api.example)")"
+assert_eq  "the repository it is deployed from"        "git@github.com:acme/api.git main" "$(jq -r '"\(.app.git.url) \(.app.git.branch)"' "$(lib_domain_json api.example)")"
+assert_has "its database is imported"                  "CREATE TABLE t" "$(cat "$TMP/im-restored-api.example.sql" 2>/dev/null)"
+assert_has "and the environment told about the one here" "envimportdb api.example" "$(cat "$_im_log")"
+assert_has "then it is installed, built and started the way a restore does it" "apprestore api.example port=3005 script=dist/main.js" "$(cat "$_im_log")"
+assert_lacks "no backup before a site that is new"     "backup " "$(cat "$_im_log")"
+: >"$_im_log"
+assert_eq  "again"                                     "0" "$(_imf old.example --only api.example --no-db)"
+assert_lacks "it is not added twice"                   "add " "$(cat "$_im_log")"
+assert_has "it is backed up as it is first"            "backup api.example --tag pre-import --keep 0 --no-mail" "$(cat "$_im_log")"
+assert_has "and started again"                         "apprestore api.example" "$(cat "$_im_log")"
+rm -rf "$STATE_DIR/domains/api.example"; _ia_busy=3005; : >"$_im_log"
+sed -i 's#git@github.com:acme/api.git#https://user:token@github.com/acme/api.git#' "$_ia_s/api.example/domain.json"
+assert_eq  "a port that is taken here"                 "0" "$(_imf old.example --only api.example --no-db)"
+assert_has "is not asked for"                          "add api.example --no-ssl --node --script dist/main.js" "$(cat "$_im_log")"
+assert_eq  "a repository address with a login in it is not taken over" "false" "$(jq -r '.app | has("git")' "$(lib_domain_json api.example)")"
+assert_has "which is said, with the reason"            "listens on port 3005 there, which cannot be its port here (port 3005 is in use by something)" "$(cat "$_im_out")"
+_ia_busy=""; : >"$_im_log"
+assert_eq  "a site that is only passed on"             "0" "$(_imf old.example --only px.example)"
+assert_has "becomes a proxy to the same address"       "add px.example --no-ssl --proxy 10.0.0.5:8080" "$(cat "$_im_log")"
+assert_has "and what answers there is said not to have come" "What answers on that port there was not brought" "$(cat "$_im_out")"
+assert_lacks "nothing is installed for it"             "apprestore" "$(cat "$_im_log")"
+if (( CAN_SYMLINK )); then
+  : >"$_im_log"; _ia_rc=1; _ia_cuser="nextuser"; _ia_n="$SITES_ROOT/next.example"
+  assert_eq  "a Node.js application behind nginx"      "0" "$(_imf old.example --only next.example)"
+  assert_has "is added with its port and the command it runs by" "add next.example --no-ssl --node --port 3010 --start node server.js --flag" "$(cat "$_im_log")"
+  assert_true "its code is here"                       test -f "$_ia_n/app/server.js"
+  assert_false "without node_modules"                  test -e "$_ia_n/app/node_modules"
+  assert_eq  "its .env names the database here"        "DB_DATABASE=next_db DB_USERNAME=next_user DB_PASSWORD=LocalPass9" "$(grep '^DB_' "$_ia_n/app/.env" | tr '\n' ' ' | sed 's/ $//')"
+  assert_has "the rest of it stays"                    "NODE_ENV=production" "$(cat "$_ia_n/app/.env")"
+  assert_has "the dump used the login the .env had"    'user="nextuser"' "$(cat "$TMP/im-restored-next.example.sql" 2>/dev/null)"
+  assert_has "what was set outside its files is said not to have come" "were not brought: setup.sh app env next.example set NAME" "$(cat "$_im_out")"
+  assert_lacks "no password is printed"                "next-secret" "$(cat "$_im_out")"
+  assert_has "it is started"                           "apprestore next.example port=3010 script= start=node server.js --flag" "$(cat "$_im_log")"
+  : >"$_im_log"
+  assert_eq  "what listens but is no Node.js application" "0" "$(_imf old.example --only py.example)"
+  assert_has "is a proxy to its port"                  "add py.example --no-ssl --proxy 127.0.0.1:8000" "$(cat "$_im_log")"
+  _ia_rc=0; _ia_cuser=""
+fi
+: >"$_im_log"
+assert_eq  "--no-create leaves a name that is not here" "0" "$(_imf old.example --only ap.example --no-create)"
+assert_has "which is said"                             "ap.example: left out, it is not a site here" "$(cat "$_im_out")"
+_im_site ap.example php
+assert_eq  "a name that is a PHP site here"            "0" "$(_imf old.example --only ap.example)"
+assert_has "is left out, and why"                      "ap.example: left out, it is a php site here" "$(cat "$_im_out")"
+assert_lacks "nothing was added for either"            "add " "$(cat "$_im_log")"
+assert_eq  "--check has nothing to compare for it"     "0" "$(_imf old.example --only px.example --check)"
+assert_has "and says so"                               "px.example: passed on to a port there" "$(cat "$_im_out")"
+assert_has "setup.sh loads the module"                 "importapp import rename menu; do" "$(cat "$ROOT/setup.sh")"
+eval "$_ia_keep"
+unset -f _ia_p _ia_q _ia_ols _ia_cmd
 
 eval "$_im_orig"; eval "$_im_saved"
 unset -f _im_row _im_mrow _im_php _im_lim _im_crow _im_f _im_rw _im_pick _im_dump _im_site _imf
