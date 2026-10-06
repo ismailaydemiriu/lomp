@@ -6,7 +6,8 @@
 #  A real WordPress site is added with --www --www-primary on a real OpenLiteSpeed: the
 #  PHP probe has to ask www.<domain> (the bare name only redirects), WordPress has to
 #  store that address, and an "add" that fails after PHP has run for the site has to
-#  take the Linux user back although the site's lsphp is still running.
+#  take the Linux user back although the site's lsphp is still running. Such a site is
+#  renamed too: "rename" asks the same probe.
 #
 #  RUN ONLY ON A THROWAWAY SERVER, AS ROOT. It adds and removes real sites (names under
 #  .invalid, which no DNS answers for), reloads OpenLiteSpeed several times and leaves
@@ -44,8 +45,8 @@ mkdir -p "$T/src" "$T/shim"
 cp -r "$SRC/setup.sh" "$SRC/lib" "$SRC/tests" "$T/src/"
 L="bash $T/src/setup.sh"
 # WWW: the site that is added. FAILW: the same options, and the WordPress download fails.
-# FAILB: no www at all, and the download fails.
-WWW=wwwp.lomp-e2e.invalid; FAILW=wwwpf.lomp-e2e.invalid; FAILB=wwwpb.lomp-e2e.invalid
+# FAILB: no www at all, and the download fails. NEW: what FAILW, added after all, is renamed to.
+WWW=wwwp.lomp-e2e.invalid; FAILW=wwwpf.lomp-e2e.invalid; FAILB=wwwpb.lomp-e2e.invalid; NEW=wwwpn.lomp-e2e.invalid
 ST=/root/.server-setup/domains
 T0=$(date +%s)
 ident() { printf '%s' "${1//[.-]/_}"; }
@@ -58,8 +59,9 @@ loc()   { curl -s -o /dev/null -w '%{redirect_url}' --max-time 15 -H "Host: $1" 
 wp_as() { local d="$1" u=""; shift; u="$(jq -r .user "$ST/$d/domain.json")"; runuser -u "$u" -- env HOME="/home/$d" /usr/local/bin/wp --path="/home/$d/public_html" --skip-plugins --skip-themes "$@" 2>/dev/null; }
 cleanup() {
   local d="" u=""
-  for d in "$WWW" "$FAILW" "$FAILB"; do
+  for d in "$WWW" "$FAILW" "$FAILB" "$NEW"; do
     u="$(ident "$d")"
+    [ -s "$ST/$d/redirect.json" ] && $L redirect del "$d" --yes >/dev/null 2>&1
     [ -s "$ST/$d/domain.json" ] && $L remove "$d" --yes >/dev/null 2>&1
     # what a release with the bug leaves behind, so that this test can be run against one
     if getent passwd "$u" >/dev/null 2>&1; then
@@ -163,6 +165,24 @@ sec "the name of a failed add is free: the same command, and the download works"
 out="$(lomp add "$FAILW" --wordpress --no-ssl --www --www-primary --email e2e@example.org --yes --no-color 2>&1)"; rc=$?
 eq    "the site is added"                         0 "$rc"
 eq    "WordPress under www"                       "http://www.$FAILW" "$(wp_as "$FAILW" option get home)"
+
+sec "rename of a www-primary site"
+: >"$T/probe.log"
+out="$(lomp rename "$FAILW" "$NEW" --no-ssl --yes --no-color 2>&1)"; rc=$?
+eq    "the site is renamed"                       0 "$rc"
+[ "$rc" = 0 ] || { printf '%s\n' "$out" | tail -n 14; cat "$T/probe.log"; } | sed 's/^/   | /'
+has   "the PHP probe asked www of the new name"   "Host: www.$NEW -> 200" "$(cat "$T/probe.log")"
+lacks "and not the name that redirects"           "Host: $NEW ->" "$(cat "$T/probe.log")"
+eq    "the bare new name redirects to its www"    "http://www.$NEW/x" "$(loc "$NEW" /x)"
+eq    "WordPress has the new www address"         "http://www.$NEW" "$(wp_as "$NEW" option get home)"
+eq    "the old name goes on to the new www"       "http://www.$NEW/x" "$(loc "$FAILW" /x)"
+eq    "and so does its www"                       "http://www.$NEW/x" "$(loc "www.$FAILW" /x)"
+page="$(curl -s --max-time 15 -H "Host: www.$NEW" http://127.0.0.1/)"
+has   "the page a visitor gets links to the new www" "http://www.$NEW/" "$page"
+# (the title still says the old name: it was the default title, and a title is no address)
+lacks "and nowhere to the old name"               "//$FAILW" "$page"
+lacks "nor to its www"                            "//www.$FAILW" "$page"
+nope  "the old Linux user is gone"                getent passwd "$(ident "$FAILW")"
 
 sec "remove"
 : >"$T/users.log"
