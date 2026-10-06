@@ -523,6 +523,10 @@ time. What follows from that:
 - a file you changed or deleted here in the meantime stays as it is here, unless it changed
   there too;
 - a file deleted there is not deleted here - nothing here is ever deleted by an import;
+- A Laravel-style application (the document root there is `.../public` and `artisan` sits above it):
+  the rest of the application (`app`, `vendor`, `storage`, `.env`, ...) comes along into the site's
+  home, beside `public_html`, and `public` there is a link to `public_html`; `--check` looks above
+  `public` too. Directories named `cache`, `.cache` and `caches` never come.
 - `--check` changes nothing: it lists every file and directory of the site there and names what is
   missing here (the topmost paths) and what has another size; `--check --fix` brings the missing
   ones and overwrites nothing. Directories named `cache`, `.cache` and `caches` are left out of the copy and of the check;

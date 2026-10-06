@@ -87,6 +87,9 @@ Kullanım: setup.sh import <[user@]host> [seçenekler]
   Daha önce aktarılmış bir site için yalnızca o zamandan beri öteki sunucuda oluşturulan ya da
   değişen dosyalar gelir (öteki sunucunun her dosya için tuttuğu zamana göre); bu arada burada
   değiştirilen ya da silinen dosya burada olduğu gibi kalır, --full ise her şeyi yeniden kopyalar.
+  Oradaki belge kökü, üstünde "artisan" dosyası olan bir "public" dizini ise (Laravel), üstündeki
+  uygulama da sitenin ana dizinine, public_html'in yanına gelir. cache, .cache ve caches adlı dizinler
+  hiç kopyalanmaz.
   Kullanıcı (varsayılan root) sitelerin dosyalarını okuyabilmelidir; posta kutularını ve öteki
   hesapların crontab'larını yalnızca root görür. Kopyalanmayanlar: sieve filtreleri,
   sertifikalar ve --db ile adı verilmedikçe WordPress dışındaki uygulamaların veritabanları.
@@ -145,6 +148,9 @@ Usage: setup.sh import <[user@]host> [options]
   server since then (by the time the other server itself noted for each file); a file that
   was changed or deleted here in the meantime is left as it is here, and --full copies
   everything again.
+  When the document root there is a "public" directory with an "artisan" file above it (Laravel),
+  the application above it comes into the site's home too, beside public_html. Directories named
+  cache, .cache and caches are never copied.
   The user (default root) has to be able to read the sites' files, and only root sees the
   mailboxes and the other accounts' crontabs. Not copied: sieve filters, certificates, and
   the databases of applications other than WordPress unless --db names one.
@@ -1031,14 +1037,14 @@ _import_dbconf_fix() {   # document root, the database's name there, a work dire
   IMP_FIXED=""
   [[ "${DBI_NAME}${DBI_USER}${DBI_PASS}" =~ ^[A-Za-z0-9_]+$ ]] || return 0
   while IFS= read -r f; do
-    [[ -n "$f" && "$f" == "$docroot"/* ]] || continue
+    [[ -n "$f" && ( "$f" == "$docroot"/* || "$f" == "${docroot%/*}/.env" ) ]] || continue
     lib_domain_as_user cat "$f" >"${work}/conf.in" 2>/dev/null || continue
     lib_import_dbconf "${work}/conf.in" "$f" >"${work}/conf.pos" 2>/dev/null || continue
     name="$(awk -F'\t' '$2 == "name" { print $6; exit }' "${work}/conf.pos")"
     [[ -n "$name" && "$name" == "$old" ]] || continue
     lib_import_dbconf_rewrite "${work}/conf.in" "${work}/conf.pos" "$DBI_NAME" "$DBI_USER" "$DBI_PASS" >"${work}/conf.out" || continue
     lib_domain_as_user tee "$f" <"${work}/conf.out" >/dev/null || continue
-    IMP_FIXED+="${IMP_FIXED:+, }${f#"$docroot"/}"
+    IMP_FIXED+="${IMP_FIXED:+, }$( [[ "$f" == "$docroot"/* ]] && printf '%s' "${f#"$docroot"/}" || printf '%s' "${f##*/}" )"
   done < <(lib_domain_as_user sh -c "$(lib_import_remote_lib)"'
 dbconf_files "$1"' sh "$docroot" 2>/dev/null || true)
   rm -f -- "${work}/conf.in" "${work}/conf.pos" "${work}/conf.out"
@@ -1079,32 +1085,39 @@ _import_unpack() {   # document root  (the archive on stdin)
 }
 
 # What is in a directory, one line each: "<type> <size, files only> <path>", tab-divided, the
-# paths as "./x/y". Whoever runs find has to be able to read the directory.
-# (cache directories are left out: this server builds its own)
-_IMP_LIST_FIND="find . -mindepth 1 \( -name cache -o -name .cache -o -name caches \) -prune -o -type f -printf 'f\t%s\t%p\n' -o -printf '%y\t0\t%p\n'"
+# paths as "./x/y". Whoever runs find has to be able to read the directory. Cache directories
+# are left out (this server builds its own), and so is the directory named in $1, when given.
+_import_list_cmd() {   # [directory to leave out]
+  local skip=""
+  [[ -z "${1:-}" ]] || skip="-path ./${1} -prune -o "
+  printf '%s' "find . -mindepth 1 \( -name cache -o -name .cache -o -name caches \) -prune -o ${skip}-type f -printf 'f\t%s\t%p\n' -o -printf '%y\t0\t%p\n'"
+}
 
-# --check: what the other server has under a site's directory and this server lacks. Prints a
-# report; with fix=1 it also brings the missing ones. A file whose size differs is named and left as it is: this server may have changed it
-# (wp-config.php, on purpose). Status 1: something is missing, and still is.
-_import_check_site() {   # index, fix 0|1
-  local i="$1" fix="${2:-0}" domain="" root="" docroot="" work="" rn=0 miss=0 diff=0 denied=0
-  domain="${IMP_DOMAIN[i]}"; root="${IMP_ROOT[i]}"
-  lib_heading "${domain}  <-  ${IMP_SSH_TARGET}:${root}"
-  if ! lib_domain_registered "$domain"; then
-    lib_warn "${domain} is not a site here yet: nothing to compare (import it first)"
-    return 1
-  fi
-  lib_domain_state_load "$domain"
-  docroot="${D_HOME}/public_html"
-  [[ -d "$docroot" && ! -L "$docroot" ]] || { lib_warn "${docroot} is not a directory"; return 1; }
+# A Laravel (or Symfony-style) application is served from its public directory and keeps the rest
+# above it: the directory above, when that is what the document root there is.
+_import_app_root() {   # the document root there
+  local up=""
+  [[ "${1##*/}" == "public" ]] || return 1
+  up="${1%/*}"
+  _import_path_ok "$up" || return 1
+  _import_ssh "test -f '${up}/artisan' || test -f '${up}/bin/console'" </dev/null 2>>"$LOG_FILE" || return 1
+  printf '%s' "$up"
+}
+
+# What the other server has under one directory and this server lacks, as a report; with fix=1
+# the missing ones are brought too. A file whose size differs is named and left as it is: this
+# server may have changed it (wp-config.php, on purpose). Status 1: something is missing, and
+# still is.
+_import_compare() {   # what there, directory there, directory here, directory to leave out there, fix 0|1, there-name here-name
+  local label="$1" root="$2" here="$3" skip="$4" fix="$5" work="" rn=0 miss=0 diff=0 denied=0 top=0
   work="$(lib_mktemp -d)"
-  lib_info "Listing what is there and what is here ..."
-  _import_ssh "cd '${root}' && ${_IMP_LIST_FIND}" </dev/null >"${work}/there" 2>"${work}/there.err" \
+  lib_info "Listing ${label}: what is there and what is here ..."
+  _import_ssh "cd '${root}' && $(_import_list_cmd "$skip")" </dev/null >"${work}/there" 2>"${work}/there.err" \
     || [[ -s "${work}/there" ]] \
     || { lib_warn "The files of ${root} could not be listed: $(tail -n 1 "${work}/there.err" 2>/dev/null | tr -c '[:print:]' ' ')"; rm -rf "$work"; return 1; }
   # (find's status is 1 when it could not enter some directory: what it saw is still the list)
   denied="$(grep -c 'Permission denied' "${work}/there.err" 2>/dev/null || true)"
-  lib_domain_as_user bash -c "cd '${docroot}' && ${_IMP_LIST_FIND}" </dev/null >"${work}/here" 2>/dev/null || true
+  lib_domain_as_user bash -c "cd '${here}' && $(_import_list_cmd "${6:-}")" </dev/null >"${work}/here" 2>/dev/null || true
   rn="$(wc -l <"${work}/there" | tr -d ' ')"
   # missing = the topmost missing paths (what is inside a missing directory is missing too),
   # missing.all = the rest of them
@@ -1122,7 +1135,8 @@ _import_check_site() {   # index, fix 0|1
         print p "\t" miss[p] > ((q in miss) ? out ".all" : out)
       }
     }' "${work}/here" "${work}/there"
-  miss="$(( $(wc -l <"${work}/missing") + $(wc -l <"${work}/missing.all") ))"
+  top="$(wc -l <"${work}/missing" | tr -d ' ')"
+  miss="$(( top + $(wc -l <"${work}/missing.all") ))"
   diff="$(wc -l <"${work}/differs" | tr -d ' ')"
   lib_info "There: ${rn} file(s) and director(ies). Missing here: ${miss}. Different size: ${diff}."
   if (( denied > 0 )); then
@@ -1132,8 +1146,8 @@ _import_check_site() {   # index, fix 0|1
   if (( miss > 0 )); then
     lib_warn "Not here (the topmost ones, up to 40):"
     sort "${work}/missing" | head -n 40 | awk -F'\t' '{ printf "        %s%s\n", $1, ($2 == "d" ? "/" : "") }'
-    if (( $(wc -l <"${work}/missing") > 40 )); then lib_note "... and $(( $(wc -l <"${work}/missing") - 40 )) more; the whole list is in ${LOG_FILE}"; fi
-    cat "${work}/missing" "${work}/missing.all" | cut -f1 | sed "s|^|missing in ${domain}: |" >>"$LOG_FILE" 2>/dev/null || true
+    if (( top > 40 )); then lib_note "... and $(( top - 40 )) more; the whole list is in ${LOG_FILE}"; fi
+    cat "${work}/missing" "${work}/missing.all" | cut -f1 | sed "s|^|missing: ${root}/|" >>"$LOG_FILE" 2>/dev/null || true
   fi
   if (( diff > 0 )); then
     lib_note "${diff} file(s) have another size here than there (changed on either side since, or half copied). Left alone; the first ones:"
@@ -1142,22 +1156,43 @@ _import_check_site() {   # index, fix 0|1
   fi
   if (( miss == 0 )); then
     rm -rf "$work"
-    lib_ok "Everything that is there is here: ${domain}"
+    lib_ok "Everything that is there is here: ${label}"
     return 0
   fi
   if (( ! fix )); then
     rm -rf "$work"
-    lib_note "Bring what is missing, and nothing else: setup.sh import ${IMP_SSH_TARGET} --only ${domain} --check --fix"
     return 1
   fi
-  lib_info "Copying the ${miss} missing path(s) into ${docroot} as ${D_USER} ..."
+  lib_info "Copying the ${miss} missing path(s) into ${here} as ${D_USER} ..."
   cat "${work}/missing" "${work}/missing.all" | cut -f1 | tr '\n' '\0' \
     | _import_ssh "tar -C '${root}' --null --no-recursion -T - -czf - ; r=\$?; [ \"\$r\" -le 1 ]" 2>>"$LOG_FILE" \
-    | _import_unpack "$docroot" \
+    | _import_unpack "$here" \
     || { rm -rf "$work"; lib_warn "What was missing could not all be copied (see ${LOG_FILE})"; return 1; }
   rm -rf "$work"
-  lib_ok "The missing files of ${domain} are here: ${docroot}"
+  lib_ok "The missing files are here: ${here}"
   return 0
+}
+
+# --check for one site: its document root, and the application above it when there is one.
+_import_check_site() {   # index, fix 0|1
+  local i="$1" fix="${2:-0}" domain="" root="" docroot="" app="" bad=0
+  domain="${IMP_DOMAIN[i]}"; root="${IMP_ROOT[i]}"
+  lib_heading "${domain}  <-  ${IMP_SSH_TARGET}:${root}"
+  if ! lib_domain_registered "$domain"; then
+    lib_warn "${domain} is not a site here yet: nothing to compare (import it first)"
+    return 1
+  fi
+  lib_domain_state_load "$domain"
+  docroot="${D_HOME}/public_html"
+  [[ -d "$docroot" && ! -L "$docroot" ]] || { lib_warn "${docroot} is not a directory"; return 1; }
+  _import_compare "$root" "$root" "$docroot" "" "$fix" || bad=1
+  if app="$(_import_app_root "$root")"; then
+    _import_compare "the application above it, ${app}" "$app" "$D_HOME" "public" "$fix" "public_html" || bad=1
+  fi
+  if (( bad && ! fix )); then
+    lib_note "Bring what is missing, and nothing else: setup.sh import ${IMP_SSH_TARGET} --only ${domain} --check --fix"
+  fi
+  return "$bad"
 }
 
 _import_add() {   # domain add-options...
@@ -1343,7 +1378,8 @@ lib_import_mail() {   # domain
 
 lib_import_site_part() {   # index
   local i="$1" domain="" root="" kind="" db="" www="" conf="" docroot="" ids="" uid="" gid="" foreign=0
-  local created=0 work="" dump="" n=0 home="" host="" imported=0 cfg="" now="" since="" list="" changed=0 got=""
+  local created=0 work="" dump="" n=0 home="" host="" imported=0 cfg="" now="" since="" list="" changed=0 got="" app=""
+  local -a newer=()
   local -a args=()
   domain="${IMP_DOMAIN[i]}"; root="${IMP_ROOT[i]}"; kind="${IMP_KIND[i]}"; db="${IMP_DB[i]}"
   www="${IMP_WWW[i]}"; conf="${IMP_CONF[i]}"
@@ -1428,6 +1464,19 @@ lib_import_site_part() {   # index
         || lib_die "The files of ${domain} could not all be copied" \
              "the connection dropped, the disk is full, or ${IMP_SSH_TARGET} cannot read everything in ${root} (see the log)" \
              "what was copied stays; run the import again to complete it"
+    fi
+    # an application that keeps the rest of itself above its public directory (Laravel): that
+    # goes into the site's home, beside public_html, which is what its public directory is here
+    if app="$(_import_app_root "$root")"; then
+      newer=(); [[ -z "$since" ]] || newer=(--newer="@${since}")
+      lib_info "Copying the application above it (${app}) into ${D_HOME}, apart from public ..."
+      _import_ssh "tar -C '${app}' --exclude=./public --exclude=./public_html --exclude=./private --exclude=./logs --exclude=cache --exclude=.cache --exclude=caches ${newer[*]:-} -czf - . ; r=\$?; [ \"\$r\" -le 1 ]" </dev/null 2>>"$LOG_FILE" \
+        | _import_unpack "$D_HOME" \
+        || lib_die "The application of ${domain} could not all be copied" \
+             "the connection dropped, the disk is full, or ${IMP_SSH_TARGET} cannot read everything in ${app} (see the log)" \
+             "what was copied stays; run the import again to complete it"
+      # what the application calls its public directory is public_html here
+      if [[ ! -e "${D_HOME}/public" && ! -L "${D_HOME}/public" ]]; then lib_domain_as_user ln -s public_html "${D_HOME}/public" || true; fi
     fi
     # the copy is whole: the next one starts from the moment this one began
     if [[ -n "$now" ]]; then
