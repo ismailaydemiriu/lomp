@@ -338,9 +338,9 @@ lib_domain_rename_usage() {
 Kullanım: setup.sh rename <eski-alan-adı> <yeni-alan-adı> [seçenekler]
   Site olduğu gibi yeni ada taşınır: dosyaları (/home/<eski>, /home/<yeni> olur; hiçbir şey
   kopyalanmaz), logları, Linux kullanıcısı, ayarları. Veritabanı adını ve şifresini korur.
-  Yeni ad kendi sertifikasını alır; WordPress ise veritabanındaki adresler yeniden yazılır.
-  Eski ad sertifikasını korur ve her isteği 301 ile yeni ada gönderir. Önce bir güvenlik
-  yedeği alınır; site yaklaşık bir dakika kapalı kalır.
+  Yeni ad kendi sertifikasını alır; WordPress ise veritabanındaki adresler yeniden yazılır,
+  başlığı hâlâ eski adsa o da yeni ad olur. Eski ad sertifikasını korur ve her isteği 301 ile
+  yeni ada gönderir. Önce bir güvenlik yedeği alınır; site yaklaşık bir dakika kapalı kalır.
   Node.js uygulaması yeni kullanıcıyla yeniden kurulur (bağımlılıklar, derleme, PM2).
   Posta kutuları postaları ve şifreleriyle yeni alan adına taşınır; her eski adres yenisinin
   takma adı olur: ona gelen posta yine ulaşır, giriş ise artık yeni adresle yapılır.
@@ -359,8 +359,9 @@ Usage: setup.sh rename <old-domain> <new-domain> [options]
   The site moves to the new name as it is: its files (/home/<old> becomes /home/<new>, nothing
   is copied), its logs, its Linux user, its settings. The database keeps its name and its
   password. The new name gets a certificate of its own, and a WordPress has the addresses in
-  its database rewritten. The old name keeps its certificate and sends every request on to
-  the new one with a 301. A safety backup is taken first; the site is away for about a minute.
+  its database rewritten, and its title when that is still the old name. The old name keeps
+  its certificate and sends every request on to the new one with a 301. A safety backup is
+  taken first; the site is away for about a minute.
   A Node.js application is set up again under the new user (dependencies, build, PM2).
   Mailboxes move to the new domain with their mail and their passwords, and every old address
   becomes an alias of its new one: mail to it still arrives, and people sign in with the new
