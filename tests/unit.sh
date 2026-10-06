@@ -10540,6 +10540,7 @@ _rt_wp() {   # old name [dry]: the rewrite, for the site that is new.example by 
   D_DOMAIN="new.example"; D_IDENT="new_example"; D_USER="new_example"; D_GROUP="new_example"
   D_HOME="$_rt/home/new.example"; D_MODE="wordpress"; D_PHP="8.3"
   if [[ "${2:-}" == "dry" ]]; then OPT_DRY_RUN=1; fi
+  OPT_QUIET=0   # what a person reads: this suite runs quiet, and a dry run notes nothing in the log
   _domain_rename_wp "$1" new.example >"$_rt/out" 2>&1
 }
 _rt_set()   { rm -f "$_rt/deaf" "$_rt/read-only" "$_rt/address"; : >"$_rt/calls"; : >"$_rt/out"; : >"$LOG_FILE"; printf '%s\n' "$1" >"$_rt/title"; }
@@ -10571,12 +10572,17 @@ assert_has   "it is said where to change it"                         "The title 
 assert_has   "and the addresses are reported as before"              "the addresses in its database now say new.example" "$(_rt_said)"
 _rt_set "old.example"
 assert_eq    "a dry run changes no title"                            "0old.example|0" "$(run_isolated _rt_wp old.example dry)$(_rt_title)|$(_rt_calls)"
+assert_lacks "nor says that it changed one"                          "its title was" "$(_rt_said)"
 # a site registered under a name that is no domain name: its title is the name its database gives
 _rt_set "shop.example"; printf 'https://shop.example\n' >"$_rt/address"
 assert_eq    "a site under a no-domain name, titled by the name its database gives" 0 "$(run_isolated _rt_wp shop_old)"
 assert_eq    "gets the new name as its title"                        "new.example" "$(_rt_title)"
 _rt_set "shop_old"; printf 'https://shop.example\n' >"$_rt/address"
 assert_eq    "and so does one titled by the name it was registered under" "0new.example" "$(run_isolated _rt_wp shop_old)$(_rt_title)"
+# renamed back to the name of its archive: the database and the title give the new name already
+_rt_set "new.example"; printf 'https://new.example\n' >"$_rt/address"
+assert_eq    "a title that is the new name already is not written again" "0new.example|0" "$(run_isolated _rt_wp shop_old)$(_rt_title)|$(_rt_calls)"
+assert_lacks "and is not said to have been the old name"             "its title was" "$(_rt_said)"
 assert_has   "--no-search-replace leaves the title with the rest"    'if (( replace )); then' "$(grep -B3 '_domain_rename_wp "\$old"' "$ROOT/lib/rename.sh")"
 assert_true  "what it says has its Turkish"                          grep -qF "'WordPress: its title was the old name, {1}; it is {2} now' '" "$ROOT/lib/lang.sh"
 assert_true  "the warning too"                                       grep -qF "'The title of the WordPress still says {1} (Settings > General changes it)' '" "$ROOT/lib/lang.sh"
