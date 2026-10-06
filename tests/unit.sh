@@ -5934,6 +5934,11 @@ unset -f _md_cred
 _mt="$(lib_mail_domain_list_main 2>/dev/null || true)"
 assert_has   "the table names the kind"                 "mail " "$(grep '^all[.]example' <<<"$_mt" || true)"
 assert_has   "and marks a catch-all"                    "+all" "$(grep '^all[.]example' <<<"$_mt" || true)"
+assert_has   "its columns in line"                      "mail  on     1      3+all" "$(grep '^all[.]example' <<<"$_mt" || true)"
+# "kapalı" is a letter longer than MAIL was wide: the column holds it
+_mt="$( ( LIB_LANG="tr"; lib_lang_build; eval 'lib_mail_domain_enabled() { [[ "$1" != all.example ]]; }'; lib_mail_domain_list_main ) 2>/dev/null || true )"
+assert_has   "in Turkish the headings"                  "TÜR   POSTA  KUTU   TAKMA AD  WEBMAIL  SERTİFİKA" "$_mt"
+assert_has   "a domain whose mail is off, in line too"  "mail  kapalı 1      3+all" "$(grep '^all[.]example' <<<"$_mt" || true)"
 # removing one: a last backup first, the mail and the lines gone, the record archived
 lib_mail_passwd_set "inbox@hub.example" "$_md_hash" "1G"
 lib_mail_alias_set col.example "x@col.example" "inbox@hub.example,me@site.example"
@@ -9414,11 +9419,11 @@ if declare -F lib_import_list_print >/dev/null; then
   _o="$(_il tr)"
   assert_has  "import --list: the headings in Turkish" "ALAN ADI" "$_o"
   assert_has  "its kinds and databases" "TÜR        VERİTABANI            KUTULAR  " "$_o"
-  assert_has  "to the last column"  "BURADA    ORADAKİ DİZİN" "$_o"
-  assert_has  "a site that would be new, with its mailboxes counted" "a_db                  2          -        yeni      /var/www/a" "$_o"
-  assert_has  "one that is here already, its columns in line" "-                     -          -        var       /var/www/b" "$_o"
-  assert_has  "in English the list is what it was" "TYPE       DATABASE              MAILBOXES  ALIASES  HERE      DIRECTORY THERE" "$(_il en)"
-  assert_has  "row and all"         "a_db                  2          -        new       /var/www/a" "$(_il en)"
+  assert_has  "to the last column"  "KUTULAR    TAKMA AD  BURADA    ORADAKİ DİZİN" "$_o"
+  assert_has  "a site that would be new, with its mailboxes counted" "a_db                  2          -         yeni      /var/www/a" "$_o"
+  assert_has  "one that is here already, its columns in line" "-                     -          -         var       /var/www/b" "$_o"
+  assert_has  "in English the list is what it was" "TYPE       DATABASE              MAILBOXES  ALIASES   HERE      DIRECTORY THERE" "$(_il en)"
+  assert_has  "row and all"         "a_db                  2          -         new       /var/www/a" "$(_il en)"
   unset -f _il
 fi
 # lib_tprintf: printf for a table

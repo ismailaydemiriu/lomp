@@ -3150,7 +3150,7 @@ lib_mail_domain_list_main() {
     } | jq -s '.'
     return 0
   fi
-  lib_tprintf '%s%-30s %-5s %-5s %-6s %-9s %-8s %s%s\n' "$C_BLD" "DOMAIN" "KIND" "MAIL" "BOXES" "ALIASES" "WEBMAIL" "CERTIFICATE" "$C_RST"
+  lib_tprintf '%s%-30s %-5s %-6s %-6s %-9s %-8s %s%s\n' "$C_BLD" "DOMAIN" "KIND" "MAIL" "BOXES" "ALIASES" "WEBMAIL" "CERTIFICATE" "$C_RST"
   while read -r d; do
     [[ -n "$d" ]] || continue
     _mail_domain_listed "$d" || continue
@@ -3163,7 +3163,7 @@ lib_mail_domain_list_main() {
     if [[ "$(lib_json_get "$(lib_mail_json "$d")" '.mail.webmail')" == "true" ]]; then wm="yes"; else wm="no"; fi
     cert="$(lib_ssl_days_left "$(lib_mail_cert_name "$d")")"
     if [[ -n "$cert" ]]; then lib_tr "days"; cert="${cert} ${LIB_TR}"; else cert="none yet"; fi
-    lib_tprintf '%-30s %-5s %-5s %-6s %-9s %-8s %s\n' "$d" "$kind" "$state" "$boxes" "${aliases}${all}" "$wm" "$cert"
+    lib_tprintf '%-30s %-5s %-6s %-6s %-9s %-8s %s\n' "$d" "$kind" "$state" "$boxes" "${aliases}${all}" "$wm" "$cert"
   done < <(lib_mail_domains_known)
   if (( n == 0 )); then
     lib_tr "(no domain has mail yet - give one its mail with: lomp mail domain add example.com --mailbox info)"; printf '%s\n' "$LIB_TR"
