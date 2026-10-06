@@ -179,9 +179,11 @@ eq    "the old name goes on to the new www"       "http://www.$NEW/x" "$(loc "$F
 eq    "and so does its www"                       "http://www.$NEW/x" "$(loc "www.$FAILW" /x)"
 page="$(curl -s --max-time 15 -H "Host: www.$NEW" http://127.0.0.1/)"
 has   "the page a visitor gets links to the new www" "http://www.$NEW/" "$page"
-# (the title still says the old name: it was the default title, and a title is no address)
 lacks "and nowhere to the old name"               "//$FAILW" "$page"
 lacks "nor to its www"                            "//www.$FAILW" "$page"
+has   "the title was the old name, and that is said" "its title was the old name, $FAILW; it is $NEW now" "$out"
+eq    "WordPress is called by the new name"       "$NEW" "$(wp_as "$NEW" option get blogname)"
+lacks "the old name is nowhere in the page"       "$FAILW" "$page"
 nope  "the old Linux user is gone"                getent passwd "$(ident "$FAILW")"
 
 sec "remove"

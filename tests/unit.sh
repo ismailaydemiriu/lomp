@@ -10470,6 +10470,78 @@ unset -f _wp_probe _wp_hosts _wp_reset _wp_calls _wp_drop _wp_left _wp_nokill _w
 lib_rollback_clear
 lib_domain_state_reset
 
+# =============================================================================
+section "rename: a WordPress title that is still the old name follows the site"
+# "add --wordpress" gives a site nobody named a title for its domain name as the title, and
+# rename rewrote addresses only: the renamed site went on calling itself by the old name.
+_rt="$TMP/rntitle"; mkdir -p "$_rt/home/new.example/public_html" "$_rt/state"
+_rt_fn="$(declare -f lib_domain_wpcli_ensure)"; _rt_bin="$WPCLI_BIN"
+WPCLI_BIN="$_rt/wp"
+cat >"$_rt/wp" <<'EOF'
+#!/bin/sh
+# wp-cli, standing in: a title in a file, and what WordPress gives as its address
+d="$(dirname "$0")"
+printf 'wp %s\n' "$*" >>"$d/calls"
+case "$*" in
+  *"option get blogname"*)    [ ! -e "$d/deaf" ] || exit 1; cat "$d/title" 2>/dev/null ;;
+  *"option get siteurl"*|*"option get home"*) cat "$d/address" 2>/dev/null ;;
+  *"option update blogname"*) [ ! -e "$d/read-only" ] || exit 1
+                              prev=""; for a in "$@"; do if [ "$prev" = blogname ]; then printf '%s\n' "$a" >"$d/title"; fi; prev="$a"; done ;;
+esac
+exit 0
+EOF
+chmod +x "$_rt/wp"
+lib_domain_wpcli_ensure() { return 0; }
+_rt_wp() {   # old name [dry]: the rewrite, for the site that is new.example by now
+  lib_domain_state_reset
+  D_DOMAIN="new.example"; D_IDENT="new_example"; D_USER="new_example"; D_GROUP="new_example"
+  D_HOME="$_rt/home/new.example"; D_MODE="wordpress"; D_PHP="8.3"
+  if [[ "${2:-}" == "dry" ]]; then OPT_DRY_RUN=1; fi
+  _domain_rename_wp "$1" new.example >"$_rt/out" 2>&1
+}
+_rt_set()   { rm -f "$_rt/deaf" "$_rt/read-only" "$_rt/address"; : >"$_rt/calls"; : >"$_rt/out"; : >"$LOG_FILE"; printf '%s\n' "$1" >"$_rt/title"; }
+_rt_title() { cat "$_rt/title"; }
+_rt_said()  { cat "$_rt/out" "$LOG_FILE"; }   # what it printed, and what it noted in the log
+_rt_calls() { grep -c 'option update blogname' "$_rt/calls" || true; }
+
+_rt_set "old.example"
+assert_eq    "a rename of a WordPress whose title is its old name"   0 "$(run_isolated _rt_wp old.example)"
+assert_eq    "the title is the new name"                             "new.example" "$(_rt_title)"
+assert_has   "it is said"                                            "its title was the old name, old.example; it is new.example now" "$(_rt_said)"
+assert_has   "the title is changed as the site user, in its home"    "-u new_example -- env HOME=$_rt/home/new.example" "$(grep 'option update blogname' "$RUNUSER_LOG" | tail -n 1)"
+assert_true  "after the addresses, and before the cache is flushed"  bash -c 's="$(grep -n "search-replace" "$1" | tail -n 1 | cut -d: -f1)"; t="$(grep -n "option update blogname" "$1" | cut -d: -f1)"; f="$(grep -n "cache flush" "$1" | cut -d: -f1)"; [ "$s" -lt "$t" ] && [ "$t" -lt "$f" ]' _ "$_rt/calls"
+_rt_set "Old Example - the shop"
+assert_eq    "a title somebody wrote"                                0 "$(run_isolated _rt_wp old.example)"
+assert_eq    "stays as it is"                                        "Old Example - the shop|0" "$(_rt_title)|$(_rt_calls)"
+assert_lacks "and nothing is said about it"                          "its title was" "$(_rt_said)"
+_rt_set "www.old.example"
+assert_eq    "one that only contains the old name stays too"         "0www.old.example|0" "$(run_isolated _rt_wp old.example)$(_rt_title)|$(_rt_calls)"
+_rt_set "other.example"
+assert_eq    "and so does another name"                              "0other.example|0" "$(run_isolated _rt_wp old.example)$(_rt_title)|$(_rt_calls)"
+_rt_set ""
+assert_eq    "no title at all: nothing to change"                    "0|0" "$(run_isolated _rt_wp old.example)|$(_rt_calls)"
+_rt_set "old.example"; : >"$_rt/deaf"
+assert_eq    "a WordPress that does not say its title is left alone" "0old.example|0" "$(run_isolated _rt_wp old.example)$(_rt_title)|$(_rt_calls)"
+_rt_set "old.example"; : >"$_rt/read-only"
+assert_eq    "a title that cannot be changed does not fail the rename" 0 "$(run_isolated _rt_wp old.example)"
+assert_has   "it is said where to change it"                         "The title of the WordPress still says old.example (Settings > General changes it)" "$(_rt_said)"
+assert_has   "and the addresses are reported as before"              "the addresses in its database now say new.example" "$(_rt_said)"
+_rt_set "old.example"
+assert_eq    "a dry run changes no title"                            "0old.example|0" "$(run_isolated _rt_wp old.example dry)$(_rt_title)|$(_rt_calls)"
+# a site registered under a name that is no domain name: its title is the name its database gives
+_rt_set "shop.example"; printf 'https://shop.example\n' >"$_rt/address"
+assert_eq    "a site under a no-domain name, titled by the name its database gives" 0 "$(run_isolated _rt_wp shop_old)"
+assert_eq    "gets the new name as its title"                        "new.example" "$(_rt_title)"
+_rt_set "shop_old"; printf 'https://shop.example\n' >"$_rt/address"
+assert_eq    "and so does one titled by the name it was registered under" "0new.example" "$(run_isolated _rt_wp shop_old)$(_rt_title)"
+assert_has   "--no-search-replace leaves the title with the rest"    'if (( replace )); then' "$(grep -B3 '_domain_rename_wp "\$old"' "$ROOT/lib/rename.sh")"
+assert_true  "what it says has its Turkish"                          grep -qF "'WordPress: its title was the old name, {1}; it is {2} now' '" "$ROOT/lib/lang.sh"
+assert_true  "the warning too"                                       grep -qF "'The title of the WordPress still says {1} (Settings > General changes it)' '" "$ROOT/lib/lang.sh"
+
+WPCLI_BIN="$_rt_bin"; eval "$_rt_fn"
+unset -f _rt_wp _rt_set _rt_title _rt_calls _rt_said
+lib_domain_state_reset
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 if (( FAIL > 0 )); then exit 1; fi
 exit 0

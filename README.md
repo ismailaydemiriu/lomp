@@ -335,8 +335,9 @@ behind as a redirect:
   `lomp renew-ssl example.net`, which a WordPress that expects HTTPS does not take well.
 - A WordPress has the addresses in its database rewritten (`wp search-replace`, serialized data
   included): `//example.com` and `//www.example.com`, and the old home directory where a plugin
-  stored it as a path. Mail addresses at the old domain are left alone. `--no-search-replace`
-  skips this.
+  stored it as a path. Mail addresses at the old domain are left alone. A site title that is
+  still exactly the old name - the one `add` gives when none is asked for - becomes the new
+  name; a title somebody wrote stays. `--no-search-replace` skips all of this.
 - `example.com` (and `www.` if the site had it) keeps its certificate and answers every request
   with a `301` to the same path on the new name, over HTTP and HTTPS. Keep its DNS pointing at
   the server for as long as that should work. `--no-redirect` drops the old name instead.

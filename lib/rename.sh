@@ -696,7 +696,7 @@ _domain_rename_wp_said() {
 # The addresses inside the database of the WordPress in D_* (new name). Never fatal: the site
 # has moved by now, and what is left over is said so that it can be done by hand.
 _domain_rename_wp() {   # old new
-  local old="$1" new="$2" a="" b="" failed=0 info="" nodom=0 said="$1" h="" from="//${1}" to="//${2}"
+  local old="$1" new="$2" a="" b="" failed=0 info="" nodom=0 said="$1" h="" from="//${1}" to="//${2}" title=""
   local -a names=("$1")
   if (( OPT_DRY_RUN )); then lib_info "[dry-run] would rewrite ${old} to ${new} in the WordPress database"; return 0; fi
   lib_domain_valid "$old" || nodom=1
@@ -721,6 +721,18 @@ _domain_rename_wp() {   # old new
     [[ -n "$a" ]] || continue
     lib_run _wp search-replace "$a" "$b" --all-tables-with-prefix --skip-columns=guid --skip-plugins --skip-themes --report-changed-only || failed=1
   done < <(_domain_rename_wp_pairs "$old" "$new" "$D_WWW" "$said")
+  # The title "add" gives a WordPress nobody named one for is the site's name. A title that is
+  # still exactly that follows the site; one somebody wrote is theirs and stays.
+  title="$(_wp option get blogname --skip-plugins --skip-themes 2>/dev/null | tail -n 1 || true)"
+  for a in "${names[@]}"; do
+    [[ -n "$title" && "$title" == "$a" && "$a" != "$new" ]] || continue
+    if lib_run _wp option update blogname "$new" --skip-plugins --skip-themes; then
+      lib_ok "WordPress: its title was the old name, ${a}; it is ${new} now"
+    else
+      lib_warn "The title of the WordPress still says ${a} (Settings > General changes it)"
+    fi
+    break
+  done
   lib_run _wp cache flush --skip-plugins --skip-themes || true
   info="$(lib_domain_state_dir "$new")/wp.info"
   if [[ -s "$info" ]]; then

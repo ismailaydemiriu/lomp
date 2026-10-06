@@ -693,6 +693,8 @@ LIB_TR_PAIRS=(
   'Not every address in the WordPress database could be rewritten (see {1})' 'WordPress veritabanındaki adreslerin hepsi yeniden yazılamadı (bkz. {1})'
   'Again: wp search-replace '\''{1}'\'' '\''{2}'\'' --all-tables-with-prefix --skip-columns=guid   (as {3}, in {4}/public_html)' 'Yeniden: wp search-replace '\''{1}'\'' '\''{2}'\'' --all-tables-with-prefix --skip-columns=guid   ({3} olarak, {4}/public_html içinde)'
   'WordPress: the addresses in its database now say {1}' 'WordPress: veritabanındaki adresler artık {1} diyor'
+  'WordPress: its title was the old name, {1}; it is {2} now' 'WordPress: başlığı eski ad olan {1} idi; artık {2}'
+  'The title of the WordPress still says {1} (Settings > General changes it)' 'WordPress başlığı hâlâ {1} diyor (Ayarlar > Genel bölümünden değiştirilir)'
   'WordPress: its database gives {1} as its address already' 'WordPress: veritabanı adres olarak zaten {1} veriyor'
   'WordPress: its database said {1}; the addresses in it now say {2}' 'WordPress: veritabanı {1} diyordu; içindeki adresler artık {2} diyor'
   'WordPress does not give {1} as its address, although its database was rewritten from {2}' 'WordPress, veritabanı {2} adından yeniden yazıldığı hâlde adres olarak {1} vermiyor'
