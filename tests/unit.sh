@@ -9986,6 +9986,33 @@ assert_eq  "nor does a copy of another directory"       "0" "$(_imf old.example 
 assert_true "of the same server"                        test -f "$_im_d1/index.php"
 assert_has "a restore forgets it: the files are the archive's again" 'rm -f -- "$(lib_import_mark_file "$domain")"' "$(declare -f lib_restore_main)"
 
+# ---- --check: what is there and not here ---------------------------------------------
+: >"$_im_log"
+assert_eq  "--check of a whole copy"                    "0" "$(_imf old.example --only shop.example --check)"
+assert_has "says it is whole"                           "Everything that is there is here" "$(cat "$_im_out")"
+assert_lacks "and asks nothing, adds nothing, backs nothing up" "backup " "$(cat "$_im_log")"
+rm -rf "$_im_d1/wp-content/uploads"
+assert_eq  "a directory that is not here"               "1" "$(_imf old.example --only shop.example --check)"
+assert_has "is named, with its slash"                   "./wp-content/uploads/" "$(cat "$_im_out")"
+assert_has "and how to bring it"                        "--check --fix" "$(cat "$_im_out")"
+assert_false "nothing was copied by looking"            test -e "$_im_d1/wp-content/uploads"
+assert_eq  "--fix"                                      "0" "$(_imf old.example --only shop.example --check --fix)"
+assert_true "brings what was missing"                   test -f "$_im_d1/wp-content/uploads/a.txt"
+assert_eq  "and then the check is clean"                "0" "$(_imf old.example --only shop.example --check)"
+printf 'mine\n' >"$_im_d1/wp-content/uploads/a.txt"
+assert_eq  "a file of another size is no failure"       "0" "$(_imf old.example --only shop.example --check)"
+assert_has "but is named"                               "another size here than there" "$(cat "$_im_out")"
+assert_eq  "--fix leaves it alone"                      "0" "$(_imf old.example --only shop.example --check --fix)"
+assert_eq  "it is still mine"                           "mine" "$(cat "$_im_d1/wp-content/uploads/a.txt")"
+printf 'changed there
+' >"$_im_d1/wp-content/uploads/a.txt"
+mkdir -p "$_im_shop/var/cache" "$_im_d1/var" && printf 'c
+' >"$_im_shop/var/cache/x.tmp"
+assert_eq  "a cache directory there that is not here is no failure" "0" "$(_imf old.example --only shop.example --check)"
+assert_has "it is not even counted"                     "Everything that is there is here" "$(cat "$_im_out")"
+rm -rf "$_im_shop/var" "$_im_d1/var"
+assert_eq  "--fix without --check"                      "1" "$(_imf old.example --only shop.example --fix)"
+
 : >"$_im_log"
 assert_eq  "--no-create leaves out what is not here"    "0" "$(_imf old.example --only panel.example --no-create)"
 assert_has "and says so"                                "panel.example: left out" "$(cat "$_im_out")"

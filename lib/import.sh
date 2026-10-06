@@ -23,6 +23,7 @@ IMP_DEF_MEM=0 IMP_DEF_UPL=0
 declare -ga IMP_CRON_ROOT=() IMP_CRON_WHEN=() IMP_CRON_CMD=()
 IMP_OPT_FULL=0
 IMP_OPT_NO_CRON=0
+IMP_OPT_CHECK=0 IMP_OPT_FIX=0
 # directories that are served there under no name this server could give a site
 declare -ga IMP_NAMELESS=()
 # one entry per mailbox found: address, its Maildir there, size, password hash ("-": not known)
@@ -62,6 +63,9 @@ Kullanım: setup.sh import <[user@]host> [seçenekler]
   --no-mail              Posta kutuları dışarıda bırakılır
   --no-cron              Cron işleri dışarıda bırakılır
   --full                 Yalnızca son aktarımdan beri orada değişenleri değil, her dosyayı yeniden kopyalar
+  --check                Hiçbir şeyi değiştirmez: sitenin orada ve burada olan her dosya ve dizinini
+                         karşılaştırır, eksik olanları (en üst yolları) ve boyutu farklı olanları söyler
+  --fix                  --check ile: eksik olanları getirir, yalnızca onları (hiçbir şey ezilmez)
   --only-mail            Yalnızca posta kutuları getirilir: burada site olmayan alan adı bir
                          posta alan adı olur (yalnızca posta için kurulmuş sunucuda hep böyledir)
   Bu sunucuda posta kuruluysa seçilen alan adının posta kutuları da onunla gelir: öteki
@@ -115,6 +119,10 @@ Usage: setup.sh import <[user@]host> [options]
   --no-mail              Leave the mailboxes out
   --no-cron              Leave the cron jobs out
   --full                 Copy every file again, not only what changed there since the last import
+  --check                Change nothing: compare every file and directory of the site there with
+                         what is here, and name what is missing (the topmost paths) and what has
+                         another size
+  --fix                  With --check: bring what is missing, and only that (nothing is overwritten)
   --only-mail            Bring only the mailboxes: a domain that is no site here becomes a
                          mail domain (this is what happens on a server installed for mail alone)
   The mailboxes of a chosen domain come with it when this server runs mail: the addresses the
@@ -1070,6 +1078,87 @@ _import_unpack() {   # document root  (the archive on stdin)
   lib_domain_as_user tar -C "$1" --no-overwrite-dir -xzpf - 2>>"$LOG_FILE"
 }
 
+# What is in a directory, one line each: "<type> <size, files only> <path>", tab-divided, the
+# paths as "./x/y". Whoever runs find has to be able to read the directory.
+# (cache directories are left out: this server builds its own)
+_IMP_LIST_FIND="find . -mindepth 1 \( -name cache -o -name .cache -o -name caches \) -prune -o -type f -printf 'f\t%s\t%p\n' -o -printf '%y\t0\t%p\n'"
+
+# --check: what the other server has under a site's directory and this server lacks. Prints a
+# report; with fix=1 it also brings the missing ones. A file whose size differs is named and left as it is: this server may have changed it
+# (wp-config.php, on purpose). Status 1: something is missing, and still is.
+_import_check_site() {   # index, fix 0|1
+  local i="$1" fix="${2:-0}" domain="" root="" docroot="" work="" rn=0 miss=0 diff=0 denied=0
+  domain="${IMP_DOMAIN[i]}"; root="${IMP_ROOT[i]}"
+  lib_heading "${domain}  <-  ${IMP_SSH_TARGET}:${root}"
+  if ! lib_domain_registered "$domain"; then
+    lib_warn "${domain} is not a site here yet: nothing to compare (import it first)"
+    return 1
+  fi
+  lib_domain_state_load "$domain"
+  docroot="${D_HOME}/public_html"
+  [[ -d "$docroot" && ! -L "$docroot" ]] || { lib_warn "${docroot} is not a directory"; return 1; }
+  work="$(lib_mktemp -d)"
+  lib_info "Listing what is there and what is here ..."
+  _import_ssh "cd '${root}' && ${_IMP_LIST_FIND}" </dev/null >"${work}/there" 2>"${work}/there.err" \
+    || [[ -s "${work}/there" ]] \
+    || { lib_warn "The files of ${root} could not be listed: $(tail -n 1 "${work}/there.err" 2>/dev/null | tr -c '[:print:]' ' ')"; rm -rf "$work"; return 1; }
+  # (find's status is 1 when it could not enter some directory: what it saw is still the list)
+  denied="$(grep -c 'Permission denied' "${work}/there.err" 2>/dev/null || true)"
+  lib_domain_as_user bash -c "cd '${docroot}' && ${_IMP_LIST_FIND}" </dev/null >"${work}/here" 2>/dev/null || true
+  rn="$(wc -l <"${work}/there" | tr -d ' ')"
+  # missing = the topmost missing paths (what is inside a missing directory is missing too),
+  # missing.all = the rest of them
+  : >"${work}/missing"; : >"${work}/missing.all"; : >"${work}/differs"
+  awk -F'\t' -v out="${work}/missing" -v dfile="${work}/differs" '
+    NR == FNR { here[$3] = $1 "\t" $2; next }
+    {
+      if (!($3 in here)) { miss[$3] = $1; next }
+      split(here[$3], h, "\t")
+      if ($1 == "f" && h[1] == "f" && h[2] != $2) print $3 "\t" $2 "\t" h[2] > dfile
+    }
+    END {
+      for (p in miss) {
+        q = p; sub(/\/[^\/]*$/, "", q)
+        print p "\t" miss[p] > ((q in miss) ? out ".all" : out)
+      }
+    }' "${work}/here" "${work}/there"
+  miss="$(( $(wc -l <"${work}/missing") + $(wc -l <"${work}/missing.all") ))"
+  diff="$(wc -l <"${work}/differs" | tr -d ' ')"
+  lib_info "There: ${rn} file(s) and director(ies). Missing here: ${miss}. Different size: ${diff}."
+  if (( denied > 0 )); then
+    lib_warn "${IMP_REMOTE_USER:-the user} could not read ${denied} place(s) there: whatever is inside them is not in this comparison either (see ${LOG_FILE})"
+    cat "${work}/there.err" >>"$LOG_FILE" 2>/dev/null || true
+  fi
+  if (( miss > 0 )); then
+    lib_warn "Not here (the topmost ones, up to 40):"
+    sort "${work}/missing" | head -n 40 | awk -F'\t' '{ printf "        %s%s\n", $1, ($2 == "d" ? "/" : "") }'
+    if (( $(wc -l <"${work}/missing") > 40 )); then lib_note "... and $(( $(wc -l <"${work}/missing") - 40 )) more; the whole list is in ${LOG_FILE}"; fi
+    cat "${work}/missing" "${work}/missing.all" | cut -f1 | sed "s|^|missing in ${domain}: |" >>"$LOG_FILE" 2>/dev/null || true
+  fi
+  if (( diff > 0 )); then
+    lib_note "${diff} file(s) have another size here than there (changed on either side since, or half copied). Left alone; the first ones:"
+    head -n 10 "${work}/differs" | awk -F'\t' '{ printf "        %s  (there %s bytes, here %s)\n", $1, $2, $3 }'
+  fi
+  if (( miss == 0 )); then
+    rm -rf "$work"
+    lib_ok "Everything that is there is here: ${domain}"
+    return 0
+  fi
+  if (( ! fix )); then
+    rm -rf "$work"
+    lib_note "Bring what is missing, and nothing else: setup.sh import ${IMP_SSH_TARGET} --only ${domain} --check --fix"
+    return 1
+  fi
+  lib_info "Copying the ${miss} missing path(s) into ${docroot} as ${D_USER} ..."
+  cat "${work}/missing" "${work}/missing.all" | cut -f1 | tr '\n' '\0' \
+    | _import_ssh "tar -C '${root}' --null --no-recursion -T - -czf - ; r=\$?; [ \"\$r\" -le 1 ]" 2>>"$LOG_FILE" \
+    | _import_unpack "$docroot" \
+    || { rm -rf "$work"; lib_warn "What was missing could not all be copied (see ${LOG_FILE})"; return 1; }
+  rm -rf "$work"
+  lib_ok "The missing files of ${domain} are here: ${docroot}"
+  return 0
+}
+
 _import_add() {   # domain add-options...
   SERVER_SETUP_LOCKED=1 "$SCRIPT_PATH" add "$@" --yes --quiet
 }
@@ -1445,7 +1534,7 @@ lib_import_main() {
   local a="" target="" port="22" key="" pwfile="" list=0 all=0 only="" no_create=0 path="" as="" dbname=""
   local i=0 n=0 here="" ans="" x="" total_kb=0 avail_kb=0 found=0 okc=0 what="" mkb=0 mail_kb=0 crons=0 limits=""
   local -a chosen=() todo=() failed=()
-  IMP_OPT_NO_DB=0; IMP_OPT_NO_FILES=0; IMP_OPT_NO_MAIL=0; IMP_OPT_ONLY_MAIL=0; IMP_OPT_NO_CRON=0; IMP_OPT_FULL=0
+  IMP_OPT_NO_DB=0; IMP_OPT_NO_FILES=0; IMP_OPT_NO_MAIL=0; IMP_OPT_ONLY_MAIL=0; IMP_OPT_NO_CRON=0; IMP_OPT_FULL=0; IMP_OPT_CHECK=0; IMP_OPT_FIX=0
   while (($# > 0)); do
     a="$1"; shift
     case "$a" in
@@ -1464,7 +1553,9 @@ lib_import_main() {
       --no-files)      IMP_OPT_NO_FILES=1 ;;
       --no-cron)       IMP_OPT_NO_CRON=1 ;;
       --full)          IMP_OPT_FULL=1 ;;
-      --no-mail)       IMP_OPT_NO_MAIL=1 ;;
+      --check)         IMP_OPT_CHECK=1 ;;
+      --fix)           IMP_OPT_FIX=1 ;;
+      --no-mail)      IMP_OPT_NO_MAIL=1 ;;
       --only-mail)     IMP_OPT_ONLY_MAIL=1 ;;
       -*)              lib_import_usage >&2; lib_die "Unknown option for import: ${a}" "" "see the usage above" ;;
       *)               [[ -z "$target" ]] || lib_die "import takes one server at a time" "" "setup.sh import ${target}"
@@ -1481,6 +1572,8 @@ lib_import_main() {
   [[ -z "$key" || -r "$key" ]] || lib_die "The key ${key} cannot be read" "" "--key /root/.ssh/id_ed25519"
   [[ -z "$pwfile" || -r "$pwfile" ]] || lib_die "The password file ${pwfile} cannot be read" "" "a file with the password on its first line, mode 0600"
   (( ! (IMP_OPT_NO_DB && IMP_OPT_NO_FILES) )) || lib_die "--no-db and --no-files together leave nothing to bring" "" "drop one of them; the mailboxes alone come with --only-mail"
+  (( ! IMP_OPT_FIX || IMP_OPT_CHECK )) || lib_die "--fix belongs to --check" "it brings what --check found missing" "setup.sh import ${target:-<server>} --only <domain> --check --fix"
+  (( ! (IMP_OPT_CHECK && (IMP_OPT_ONLY_MAIL || IMP_OPT_FULL || IMP_OPT_NO_FILES)) )) || lib_die "--check compares files, and nothing else" "it does not go with --only-mail, --full or --no-files" "leave one of them out"
   (( ! (IMP_OPT_NO_MAIL && IMP_OPT_ONLY_MAIL) )) || lib_die "--no-mail and --only-mail together leave nothing to bring" "" "drop one of them"
   if [[ -n "$path" || -n "$as" ]]; then
     [[ -n "$path" && -n "$as" ]] || lib_die "--path and --as go together" "one directory there becomes one site here" "--path /usr/local/lsws/Example/html --as example.com"
@@ -1557,6 +1650,17 @@ lib_import_main() {
     fi
   fi
 
+  if (( IMP_OPT_CHECK )); then
+    for i in "${chosen[@]}"; do
+      if [[ "${IMP_KIND[i]}" == "mail" ]]; then lib_note "${IMP_DOMAIN[i]}: mailboxes only, no files to compare"; continue; fi
+      if _import_check_site "$i" "$(( IMP_OPT_FIX && ! OPT_DRY_RUN ))"; then okc=$((okc + 1)); else failed+=("${IMP_DOMAIN[i]}"); fi
+    done
+    lib_import_disconnect
+    if ((${#failed[@]} > 0)); then
+      lib_die "Not whole: ${failed[*]}" "something of it is missing here, or could not be compared (see above)" "$( (( IMP_OPT_FIX )) && printf 'run --check again to see what is left' || printf 'bring what is missing with --check --fix')"
+    fi
+    return 0
+  fi
   _import_php_defaults
   # ---- what will happen ------------------------------------------------------
   lib_heading "Import from ${IMP_SSH_TARGET}"
