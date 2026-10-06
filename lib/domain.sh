@@ -1704,14 +1704,39 @@ _domain_mounts_below() {   # dir
 }
 
 # What this command never hands over: a device node gives its owner the disk or the memory
-# behind it, and a file with a second name may have that name outside the site. Only root makes
-# such things in a site - tar unpacking devices, pnpm or bun installing from root's store,
-# cp -al, rsync --link-dest - and sorting them out is not a job for a bulk command. logs/ is
-# searched too: something moved there before the run could be moved back under a name the run
-# is about to change. Prints the paths, NUL-separated.
-_domain_fix_owner_hazards() {   # home uid gid
-  find -P "$1" -xdev \( ! -uid "$2" -o ! -gid "$3" \) \
-    \( -type b -o -type c -o \( ! -type d -links +1 \) \) -print0 2>/dev/null || true
+# behind it, and a file with a second name may have that name outside the site - pnpm or bun
+# installing from root's store, cp -al, rsync --link-dest. A file whose every name is in this
+# home is another matter, and an everyday one: npm's esbuild (every Vite project has it) gives
+# its binary a second name inside node_modules. So the names a file has in the home are
+# counted against its link count, and it is handed over when none is missing. A name in logs/
+# is not counted: something moved there before the run could be moved back under a name the
+# run is about to change. Sets DOM_FO_HAZARDS (paths) and DOM_FO_SHARED ("inode:links" of the
+# files that may go).
+DOM_FO_HAZARDS=() DOM_FO_SHARED=()
+_domain_fix_owner_survey() {   # home uid gid
+  local rec="" y="" i="" n="" p="" k=0
+  local -a paths=() inos=()
+  local -A seen=() links=()
+  DOM_FO_HAZARDS=(); DOM_FO_SHARED=()
+  while IFS= read -r -d '' rec; do
+    y="${rec%% *}"; rec="${rec#* }"; i="${rec%% *}"; rec="${rec#* }"; n="${rec%% *}"; p="${rec#* }"
+    paths+=("$p"); inos+=("$i")
+    if [[ "$y" == [bc] || "$p" == "$1/logs" || "$p" == "$1/logs/"* ]]; then
+      links[$i]="x"
+    elif [[ "${links[$i]:-$n}" == "$n" ]]; then
+      links[$i]="$n"; seen[$i]=$(( ${seen[$i]:-0} + 1 ))
+    else
+      links[$i]="x"   # its link count changed during the walk
+    fi
+  done < <(find -P "$1" -xdev \( ! -uid "$2" -o ! -gid "$3" \) \
+    \( -type b -o -type c -o \( ! -type d -links +1 \) \) -printf '%y %i %n %p\0' 2>/dev/null || true)
+  for ((k = 0; k < ${#paths[@]}; k++)); do
+    i="${inos[k]}"
+    [[ "${links[$i]}" == "${seen[$i]:-0}" ]] || DOM_FO_HAZARDS+=("${paths[k]}")
+  done
+  for i in "${!seen[@]}"; do
+    [[ "${links[$i]}" != "${seen[$i]}" ]] || DOM_FO_SHARED+=("${i}:${links[$i]}")
+  done
 }
 
 # How many in the home belong to someone else: the home itself included, logs/ left out.
@@ -1721,16 +1746,29 @@ _domain_fix_owner_count() {   # home uid gid
   printf '%d' "$(( n ))"
 }
 
-# The change, in one pass. -execdir runs chown from the directory find holds open, on names
-# relative to it, so a directory swapped for a link while the run is under way takes chown
-# nowhere new; chown -h changes a link itself, never what it names; -xdev keeps to the home's
-# filesystem. Devices and files with a second name stay out here too, in case one was moved
-# into place after the look for them. find refuses -execdir under a PATH with a relative entry,
-# so it gets a fixed one rather than whatever the operator's is.
-_domain_fix_owner_apply() {   # home uid gid
-  PATH="$DOM_FIX_OWNER_PATH" find -P "$1" -xdev \( -path "$1/logs" -prune \) -o \
-    \( ! -uid "$2" -o ! -gid "$3" \) ! -type b ! -type c \( -type d -o -links 1 \) \
-    -execdir chown -h -- "${D_USER}:${D_GROUP}" {} +
+# The change. -execdir runs chown from the directory find holds open, on names relative to
+# it, so a directory swapped for a link while the run is under way takes chown nowhere new;
+# chown -h changes a link itself, never what it names; -xdev keeps to the home's filesystem.
+# Devices stay out here too, and so does a file with a second name unless the look before
+# found all its names in the home: it is taken by its inode number, and only while it has as
+# many names as it had then, in case one was moved into place after that look. (A thousand of
+# those to a walk: a command line has an end.) find refuses -execdir under a PATH with a
+# relative entry, so it gets a fixed one rather than whatever the operator's is.
+_domain_fix_owner_apply() {   # home uid gid [inode:links]...
+  local home="$1" uid="$2" gid="$3" k=0 rc=0
+  local -a pick=(-type d -o -links 1)
+  shift 3
+  while :; do
+    for ((k = 0; k < 1000 && $# > 0; k++)); do
+      pick+=(-o \( -inum "${1%%:*}" -links "${1##*:}" \)); shift
+    done
+    PATH="$DOM_FIX_OWNER_PATH" find -P "$home" -xdev \( -path "$home/logs" -prune \) -o \
+      \( ! -uid "$uid" -o ! -gid "$gid" \) ! -type b ! -type c \( "${pick[@]}" \) \
+      -execdir chown -h -- "${D_USER}:${D_GROUP}" {} + || rc=1
+    (($# > 0)) || break
+    pick=(-false)
+  done
+  return "$rc"
 }
 
 # One site: its home and everything below it but logs/, which leads to - or, on a server an
@@ -1740,7 +1778,7 @@ _domain_fix_owner_apply() {   # home uid gid
 # as it is. Returns 1 when not all of it could be handed over.
 lib_domain_fix_owner() {   # domain
   local domain="$1" home="" ids="" uid="" gid="" mounts="" n=0 left=0 f=""
-  local -a hazards=()
+  local -a hazards=() shared=()
   home="$(lib_domain_home "$domain")"
   lib_domain_state_load "$domain" || { lib_error "${domain} is not registered"; return 1; }
   if [[ -L "$home" || ! -d "$home" ]]; then
@@ -1757,9 +1795,10 @@ lib_domain_fix_owner() {   # domain
     lib_error "${domain}: a filesystem is mounted inside the home, at $(_domain_printable "${mounts%%$'\n'*}"); nothing changed"
     return 1
   fi
-  mapfile -d '' hazards < <(_domain_fix_owner_hazards "$home" "$uid" "$gid")
+  _domain_fix_owner_survey "$home" "$uid" "$gid"
+  hazards=("${DOM_FO_HAZARDS[@]}"); shared=("${DOM_FO_SHARED[@]}")
   if ((${#hazards[@]} > 0)); then
-    lib_error "${domain}: nothing changed - this command never hands over a device node or a file with more than one name, and the site has ${#hazards[@]} of them:"
+    lib_error "${domain}: nothing changed - this command never hands over a device node or a file that has another name outside the site, and the site has ${#hazards[@]} of them:"
     for f in "${hazards[@]:0:5}"; do lib_note "$(_domain_printable "$f")"; done
     if ((${#hazards[@]} > 5)); then lib_note "... and $(( ${#hazards[@]} - 5 )) more"; fi
     lib_note "look at them with ls -li, take away what is not this site's, then run it again"
@@ -1777,7 +1816,7 @@ lib_domain_fix_owner() {   # domain
   lib_log_write CMD "fix-owner ${domain}: chown -h ${D_USER}:${D_GROUP} what belongs to someone else in ${home} (${n})"
   # what find and chown complain about goes to the log, without the control characters a name
   # the site user chose could bring along
-  { _domain_fix_owner_apply "$home" "$uid" "$gid" 2>&1 >/dev/null || true; } \
+  { _domain_fix_owner_apply "$home" "$uid" "$gid" "${shared[@]}" 2>&1 >/dev/null || true; } \
     | tr -d '\000-\011\013-\037\177' | lib_mask_secrets >>"$LOG_FILE" 2>/dev/null || true
   left="$(_domain_fix_owner_count "$home" "$uid" "$gid")"
   if (( left > 0 )); then
@@ -1821,21 +1860,22 @@ _domain_fix_owner_stamp() { printf '%s/fix-owner.auto' "$(lib_domain_state_dir "
 # progress, not a failure.
 _domain_fix_owner_quiet() {   # domain  (its D_* are loaded)
   local home="" ids="" uid="" gid="" mounts="" n=0 left=0
-  local -a hazards=()
+  local -a hazards=() shared=()
   DOM_AUTO_N=0; DOM_AUTO_WHY=""
   home="$(lib_domain_home "$1")"
   if ! ids="$(_domain_fix_owner_ids "$home")"; then DOM_AUTO_WHY="$ids"; return 1; fi
   read -r uid gid <<<"$ids"
   mounts="$(_domain_mounts_below "$home")"
   if [[ -n "$mounts" ]]; then DOM_AUTO_WHY="a filesystem is mounted inside the home"; return 1; fi
-  mapfile -d '' hazards < <(_domain_fix_owner_hazards "$home" "$uid" "$gid")
+  _domain_fix_owner_survey "$home" "$uid" "$gid"
+  hazards=("${DOM_FO_HAZARDS[@]}"); shared=("${DOM_FO_SHARED[@]}")
   if ((${#hazards[@]} > 0)); then
-    DOM_AUTO_WHY="a device node or a file with more than one name is never handed over, and the site has ${#hazards[@]} of them"
+    DOM_AUTO_WHY="a device node or a file that has another name outside the site is never handed over, and the site has ${#hazards[@]} of them"
     return 1
   fi
   n="$(_domain_fix_owner_count "$home" "$uid" "$gid")"
   (( n > 0 )) || return 0
-  _domain_fix_owner_apply "$home" "$uid" "$gid" >/dev/null 2>&1 || true
+  _domain_fix_owner_apply "$home" "$uid" "$gid" "${shared[@]}" >/dev/null 2>&1 || true
   left="$(_domain_fix_owner_count "$home" "$uid" "$gid")"
   if (( left >= n )); then
     DOM_AUTO_WHY="$(_domain_n_entries "$left") did not change hands (made immutable? lsattr)"

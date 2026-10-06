@@ -202,9 +202,11 @@ sudo lomp fix-owner example.com     # or --all for every site; item 21 in the me
 ```
 
 Only what belongs to someone else changes; `logs` stays root's and the file modes stay as they
-are. A device node and a file that has a second name somewhere are never handed over, by
-hand or by itself: the command lists them, and `doctor` names a site the automatic hand-over
-stopped at.
+are. A device node and a file that has a second name outside the site (a hard link: pnpm
+installing from root's store, `cp -al`) are never handed over, by hand or by itself: the
+command lists them, and `doctor` names a site the automatic hand-over stopped at. A file whose
+names are all inside the site - the `esbuild` binary npm installs, say - is handed over like
+any other.
 
 If root keeps files of its own in a site on purpose - a `wp-config.php` that PHP may read but
 not change, say - the automatic hand-over would give them to the site within a minute. Switch

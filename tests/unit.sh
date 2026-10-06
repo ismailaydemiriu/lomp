@@ -4559,18 +4559,43 @@ CAN_HARDLINK=0
 ln "$_fo_h/site.zip" "$TMP/.fo-linkprobe" 2>/dev/null && [[ "$(stat -c %h "$_fo_h/site.zip")" == 2 ]] && CAN_HARDLINK=1
 rm -f "$TMP/.fo-linkprobe"
 if (( CAN_HARDLINK )); then
+  mkdir -p "$TMP/fo-outside"
   ln "$_fo_h/public_html/index.php" "$_fo_h/public_html/index-copy.php"
+  ln "$_fo_h/public_html/index.php" "$TMP/fo-outside/index.php"
   : >"$_fo_calls"
-  assert_eq    "a file with a second name stops the site" 1 "$(_fo own.example.com)"
-  assert_has   "saying why" "never hands over a device node or a file with more than one name, and the site has 2 of them" "$(cat "$_fo_out")"
+  assert_eq    "a file with a name outside the site stops the site" 1 "$(_fo own.example.com)"
+  assert_has   "saying why" "never hands over a device node or a file that has another name outside the site, and the site has 2 of them" "$(cat "$_fo_out")"
   assert_has   "and naming it" "public_html/index-copy.php" "$(cat "$_fo_out")"
   assert_eq    "before chown ever runs" "" "$(cat "$_fo_calls")"
+  rm -f "$TMP/fo-outside/index.php"
+  # every name inside the site (npm's esbuild binary has two in node_modules): handed over
+  : >"$_fo_calls"
+  _fo own.example.com >/dev/null
+  assert_lacks "a file whose names are all in the site is no reason to stop" "never hands over" "$(cat "$_fo_out")"
+  assert_has   "it is counted with the rest" "$(( _fo_all + 1 )) of $(( _fo_all + 1 )) left" "$(cat "$_fo_out")"
+  assert_has   "one of its names is handed over" "${_fo_hp}/public_html/index-copy.php" "$(cat "$_fo_calls")"
+  assert_has   "and the other" "${_fo_hp}/public_html/index.php" "$(cat "$_fo_calls")"
+  _domain_fix_owner_survey "$_fo_h" "$(( _fo_u + 1 ))" "$_fo_g"
+  assert_eq    "the look names the file by its inode and its two names" "$(stat -c '%i:2' "$_fo_h/public_html/index.php")" "${DOM_FO_SHARED[*]}"
   # and should one be moved into place after that look, the change itself passes it over
   : >"$_fo_calls"
   _domain_fix_owner_apply "$_fo_h" "$(( _fo_u + 1 ))" "$_fo_g" 2>/dev/null || true
   assert_has   "the change hands over the rest" "${_fo_hp}/public_html/wp-content" "$(cat "$_fo_calls")"
-  assert_lacks "but not a file with a second name" "index-copy.php" "$(cat "$_fo_calls")"
+  assert_lacks "but not a file with a second name the look did not pass" "index-copy.php" "$(cat "$_fo_calls")"
   assert_lacks "nor its other name" "${_fo_hp}/public_html/index.php" "$(cat "$_fo_calls")"
+  # ... nor one that got a name more since the look
+  ln "$_fo_h/public_html/index.php" "$TMP/fo-outside/index.php"
+  : >"$_fo_calls"
+  _domain_fix_owner_apply "$_fo_h" "$(( _fo_u + 1 ))" "$_fo_g" "${DOM_FO_SHARED[@]}" 2>/dev/null || true
+  assert_has   "a file that got another name after the look: the rest goes" "${_fo_hp}/public_html/wp-content" "$(cat "$_fo_calls")"
+  assert_lacks "the file does not" "index-copy.php" "$(cat "$_fo_calls")"
+  rm -f "$TMP/fo-outside/index.php"
+  # more of them than one walk takes
+  : >"$_fo_calls"
+  _fo_many=(); for (( _fo_k = 1; _fo_k <= 1500; _fo_k++ )); do _fo_many+=("${_fo_k}:9"); done
+  _domain_fix_owner_apply "$_fo_h" "$(( _fo_u + 1 ))" "$_fo_g" "${_fo_many[@]}" "${DOM_FO_SHARED[@]}" 2>/dev/null || true
+  assert_eq    "past the thousandth, a second walk takes the file, and nothing twice" "$(( _fo_all + 1 ))" "$(grep -vc '^call ' "$_fo_calls")"
+  assert_has   "(that file)" "${_fo_hp}/public_html/index-copy.php" "$(cat "$_fo_calls")"
   rm -f "$_fo_h/public_html/index-copy.php"
   if (( CAN_SYMLINK )); then
     rm -f "$_fo_h/logs"; mkdir -p "$_fo_h/logs"; printf 's' >"$_fo_h/logs/stash"; ln "$_fo_h/logs/stash" "$_fo_h/logs/stash2"
@@ -4610,11 +4635,11 @@ assert_eq  "the home as a mount of its own, or a neighbour's, is no reason" 0 "$
 _fo_ids="$_fo_other"
 if (( CAN_HARDLINK && CAN_SYMLINK )); then
   _fo_bad="$_fo_h/public_html/bad"$'\033'"]0;owned"$'\007'"name"
-  mkdir -p "$_fo_bad"; ln "$_fo_h/site.zip" "$_fo_bad/görsel.zip"
+  mkdir -p "$_fo_bad"; ln "$_fo_h/site.zip" "$_fo_bad/görsel.zip"; ln "$_fo_h/site.zip" "$TMP/fo-outside/site.zip"
   _fo own.example.com >/dev/null
   assert_lacks "an escape character in a name is not printed" $'\033' "$(cat "$_fo_out")"
   assert_has   "it is shown as a question mark, and a Turkish letter as itself" "bad?]0;owned?name/görsel.zip" "$(cat "$_fo_out")"
-  rm -rf "$_fo_bad"
+  rm -rf "$_fo_bad" "$TMP/fo-outside/site.zip"
 fi
 # ... and none reaches the log through what chown says about it either
 if (( CAN_SYMLINK )); then
@@ -4685,11 +4710,14 @@ assert_has "doctor reads the reason" "WARN|site own.example.com: ownership|what 
 assert_has "all of it" "is not handed over by itself: ${_fo_all} files and directories did not change hands" "$(_fa_doc _doc_site_fix_owner own.example.com)"
 if (( CAN_HARDLINK )); then
   ln "$_fo_h/public_html/index.php" "$_fo_h/public_html/index-copy.php"; : >"$_fo_calls"
-  assert_eq  "a file with a second name: the pass exits 0" 0 "$(_fa)"
-  assert_has "it stops the whole site, as it stops fix-owner" "a device node or a file with more than one name is never handed over, and the site has 2 of them" "$(cat "$_fo_out")"
+  _fa >/dev/null
+  assert_has "a file with two names, both in the site: the pass hands it over as fix-owner does" "${_fo_hp}/public_html/index-copy.php" "$(cat "$_fo_calls")"
+  ln "$_fo_h/public_html/index.php" "$TMP/fo-outside/index.php"; : >"$_fo_calls"
+  assert_eq  "a file with a name outside the site: the pass exits 0" 0 "$(_fa)"
+  assert_has "it stops the whole site, as it stops fix-owner" "a device node or a file that has another name outside the site is never handed over, and the site has 2 of them" "$(cat "$_fo_out")"
   assert_eq  "before chown ever runs" "" "$(cat "$_fo_calls")"
-  assert_has "the new reason takes the place of the old one" "a file with more than one name is never handed over" "$(cat "$_fa_stamp")"
-  rm -f "$_fo_h/public_html/index-copy.php"
+  assert_has "the new reason takes the place of the old one" "a file that has another name outside the site is never handed over" "$(cat "$_fa_stamp")"
+  rm -f "$_fo_h/public_html/index-copy.php" "$TMP/fo-outside/index.php"
 fi
 printf '36 25 8:1 / %s rw,relatime shared:1 - ext4 /dev/sdb1 rw\n' "$_fo_h/public_html/shared" >"$DOM_MOUNTINFO"; : >"$_fo_calls"
 assert_eq  "a mount inside the home: the pass exits 0" 0 "$(_fa)"
