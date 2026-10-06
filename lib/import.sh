@@ -68,7 +68,7 @@ Kullanım: setup.sh import <[user@]host> [seçenekler]
   sunucudaki Dovecot'un bildiği adresler ve Maildir dizinlerindeki postalar, buradakilerle
   birleştirilir - burada hiçbir şey silinmez. Öteki sunucu lomp ya da CyberPanel ise kutular
   şifrelerini korur; değilse her birine yeni şifre verilir ve bir kez gösterilir. Alan adının
-  takma adları ve yönlendirmeleri de gelir (lomp'un kendi dosyaları, CyberPanel tablosu ve
+  takma adları ve iletmeleri de gelir (lomp'un kendi dosyaları, CyberPanel tablosu ve
   Postfix'in sanal takma ad dosyaları); burada zaten olan bir takma ad olduğu gibi kalır.
   DNS kayıtlarına dokunulmaz: MX'i siz taşıyana kadar posta orada alınmaya devam eder
   (setup.sh mail dns <domain>).

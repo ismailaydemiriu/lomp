@@ -192,16 +192,16 @@ lib_redirect_ssl_ensure() {
 lib_redirect_usage() {
   if [[ "${LIB_LANG:-en}" == "tr" ]]; then
     cat <<'EOF'
-Kullanım: setup.sh redirect <komut>
-  add <kimden> <nereye> [--www] [--no-ssl]   <kimden> için gelen her isteği 301 ile <nereye>
-                                             adresine gönderir; yol ve sorgu korunur. <kimden> bir
-                                             site değildir: kullanıcısı ve dosyası olmaz, yalnızca
-                                             kendi sertifikası olur. --www, www.<kimden> adını da
-                                             alır. <kimden> için DNS kaydı bu sunucuyu gösterdikten
-                                             sonra yeniden çalıştırılırsa sertifikayı alır
-  list                                       Yönlendirmeler ve nereye gittikleri
-  del <kimden> [--keep-ssl]                  <kimden> için yanıt vermeyi bırakır
-Bir siteyi başka bir ada taşıyıp geride yönlendirme bırakmak için: setup.sh rename <eski> <yeni>
+Kullanım: setup.sh redirect <command>
+  add <from> <to> [--www] [--no-ssl]   <from> için gelen her isteği 301 ile <to> adresine
+                                       gönderir; yol ve sorgu korunur. <from> bir site
+                                       değildir: kullanıcısı ve dosyası olmaz, yalnızca
+                                       kendi sertifikası olur. --www, www.<from> adını da
+                                       alır. <from> için DNS kaydı bu sunucuyu gösterdikten
+                                       sonra yeniden çalıştırılırsa sertifikayı alır
+  list                                 Yönlendirmeler ve nereye gittikleri
+  del <from> [--keep-ssl]              <from> için yanıt vermeyi bırakır
+Bir siteyi başka bir ada taşıyıp geride yönlendirme bırakmak için: setup.sh rename <old> <new>
 EOF
     return 0
   fi
@@ -335,8 +335,8 @@ lib_domain_rename_usage() {
   # a usage text is no single message lib/lang.sh could look up: it has its Turkish here
   if [[ "${LIB_LANG:-en}" == "tr" ]]; then
     cat <<'EOF'
-Kullanım: setup.sh rename <eski-alan-adı> <yeni-alan-adı> [seçenekler]
-  Site olduğu gibi yeni ada taşınır: dosyaları (/home/<eski>, /home/<yeni> olur; hiçbir şey
+Kullanım: setup.sh rename <old-domain> <new-domain> [seçenekler]
+  Site olduğu gibi yeni ada taşınır: dosyaları (/home/<old>, /home/<new> olur; hiçbir şey
   kopyalanmaz), logları, Linux kullanıcısı, ayarları. Veritabanı adını ve şifresini korur.
   Yeni ad kendi sertifikasını alır; WordPress ise veritabanındaki adresler yeniden yazılır,
   başlığı hâlâ eski adsa o da yeni ad olur. Eski ad sertifikasını korur ve her isteği 301 ile

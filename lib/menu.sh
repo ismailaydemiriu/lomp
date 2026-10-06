@@ -169,7 +169,7 @@ KOMUTLAR
                                 o dosyaları buradaki veritabanına yöneltir. Bu
                                 sunucuda posta kuruluysa alan adının posta kutuları da gelir
                                 (öteki sunucu lomp ya da CyberPanel ise şifreleriyle), takma
-                                adları ve yönlendirmeleri de; DNS'e dokunulmaz. Yeni site orada
+                                adları ve iletmeleri de; DNS'e dokunulmaz. Yeni site orada
                                 çalıştığı PHP sürümünü alır (bu sunucunun verdiğinden büyük
                                 memory_limit ya da yükleme boyutu da korunur), cron işleri burada sitenin
                                 kullanıcısı olarak çalışır. Öteki sunucu yalnızca okunur
@@ -1815,7 +1815,7 @@ MENU_TR['Node.js app that lomp keeps running (PM2: starts at boot, comes back af
 MENU_TR['Reverse proxy: the domain goes to a port where an app you start yourself listens']='Ters proxy: alan adı, sizin başlattığınız uygulamanın dinlediği porta gider'
 MENU_TR['Visitors reach the app through this site; the app itself listens on a local port.']='Ziyaretçiler uygulamaya bu site üzerinden ulaşır; uygulamanın kendisi yerel bir portu dinler.'
 MENU_TR['It must take that port from the PORT variable (process.env.PORT), not a fixed number.']='Uygulama o portu PORT değişkeninden almalıdır (process.env.PORT), sabit bir sayıdan değil.'
-MENU_TR['Afterwards: put the code into /home/<domain>/app, then menu 6 -> 3 (Deploy).']='Sonrası: kodu /home/<alan-adı>/app içine koyun, ardından menü 6 -> 3 (Deploy).'
+MENU_TR['Afterwards: put the code into /home/<domain>/app, then menu 6 -> 3 (Deploy).']='Sonrası: kodu /home/<domain>/app içine koyun, ardından menü 6 -> 3 (Deploy).'
 MENU_TR['Port the app listens on (it gets it as PORT)']='Uygulamanın dinleyeceği port (PORT değişkeniyle verilir)'
 MENU_TR['Start command (runs without a shell)']='Başlatma komutu (kabuk olmadan çalışır)'
 MENU_TR['Everything that asks for this domain is passed to the address below, on this server.']='Bu alan adına gelen her istek, bu sunucudaki aşağıdaki adrese iletilir.'
@@ -1842,7 +1842,7 @@ MENU_TR['Get a certificate for every site that has none']='Sertifikası olmayan 
 MENU_TR['\n %sNODE.JS APPS (PM2)%s   every site runs its own PM2 as its own user\n']='\n %sNODE.JS UYGULAMALARI (PM2)%s   her site kendi PM2'\''sini kendi kullanıcısıyla çalıştırır\n'
 MENU_TR['How it works: the domain -> OpenLiteSpeed -> the app on its own local port (3000, 3001...).']='Nasıl çalışır: alan adı -> OpenLiteSpeed -> kendi yerel portundaki uygulama (3000, 3001...).'
 MENU_TR['PM2 keeps the app running: it starts at boot and comes back after a crash.']='PM2 uygulamayı ayakta tutar: açılışta başlatır, çökerse yeniden başlatır.'
-MENU_TR['A new app: 2 (add the site), copy the code into /home/<domain>/app, then 3 (deploy).']='Yeni uygulama: 2 (siteyi ekle), kodu /home/<alan-adı>/app içine kopyalayın, sonra 3 (deploy).'
+MENU_TR['A new app: 2 (add the site), copy the code into /home/<domain>/app, then 3 (deploy).']='Yeni uygulama: 2 (siteyi ekle), kodu /home/<domain>/app içine kopyalayın, sonra 3 (deploy).'
 MENU_TR['An app you start yourself, or one path of a site sent to a port: 2 (kind 5), or 11.']='Kendi başlattığınız bir uygulama ya da bir sitenin tek bir yolu için: 2 (tür 5) veya 11.'
 MENU_TR['List applications']='Uygulamaları listele'
 MENU_TR['Add a site (choose '\''Node.js app'\'')']='Site ekle (Node.js uygulaması türünü seçin)'
@@ -1944,7 +1944,7 @@ MENU_TR['Which addresses of %s? Names with commas (info,sales), or * for every a
 MENU_TR['Mailbox name (before the @), or a dash for none']='Posta kutusu adı (@ işaretinden önceki kısım) ya da istemiyorsanız tire'
 MENU_TR['Mailbox size']='Posta kutusu boyutu'
 MENU_TR['What runs, and for which domains']='Ne çalışıyor ve hangi alan adları için'
-MENU_TR['Switch it on for a domain (it answers at webmail.<domain>)']='Bir alan adı için aç (webmail.<alan-adı> adresinde yanıt verir)'
+MENU_TR['Switch it on for a domain (it answers at webmail.<domain>)']='Bir alan adı için aç (webmail.<domain> adresinde yanıt verir)'
 MENU_TR['Switch it off for a domain']='Bir alan adı için kapat'
 MENU_TR['Turn its mail off: no delivery and no login, every message stays, and it can be turned on again']='Postasını kapat: teslimat ve giriş olmaz, tüm iletiler kalır, yeniden açılabilir'
 MENU_TR['Remove the domain with all of its mail (a last backup is taken first)']='Alan adını tüm postasıyla kaldır (önce son bir yedek alınır)'
@@ -1988,7 +1988,7 @@ MENU_TR['installed, sends as %s']='kurulu, %s adıyla gönderir'
 MENU_TR['Node.js major version']='Node.js ana sürümü'
 MENU_TR['The mail server needs a name of its own (mail.example.com), an A record']='Posta sunucusunun kendine ait bir adı (mail.example.com), buraya yönlenen bir A kaydı'
 MENU_TR['pointing here, and a PTR record your provider sets to the same name.']='ve sağlayıcınızın aynı ada ayarladığı bir PTR kaydı olmalıdır.'
-MENU_TR['\n  Every site gets an archive of its own under %s/<domain>/:\n  files, database, vhost and state. Older archives are removed as new ones arrive.\n']='\n  Her sitenin %s/<alan-adı>/ altında kendi arşivi olur:\n  dosyalar, veritabanı, vhost ve durum. Yeni arşivler geldikçe eskileri silinir.\n'
+MENU_TR['\n  Every site gets an archive of its own under %s/<domain>/:\n  files, database, vhost and state. Older archives are removed as new ones arrive.\n']='\n  Her sitenin %s/<domain>/ altında kendi arşivi olur:\n  dosyalar, veritabanı, vhost ve durum. Yeni arşivler geldikçe eskileri silinir.\n'
 MENU_TR['Every day']='Her gün'
 MENU_TR['Once a week']='Haftada bir'
 MENU_TR['Every hour']='Her saat'

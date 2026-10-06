@@ -8241,14 +8241,14 @@ assert_has   "or of this one" "posta kutusu olarak kalıyor: /var/vmail/alpha.ex
 # the usage texts have their Turkish in the functions themselves
 _rn_case _rn_usage_tr
 _o="$(_rn_out)"
-assert_has   "rename --help in Turkish" "Kullanım: setup.sh rename <eski-alan-adı> <yeni-alan-adı> [seçenekler]" "$_o"
+assert_has   "rename --help in Turkish" "Kullanım: setup.sh rename <old-domain> <new-domain> [seçenekler]" "$_o"
 assert_has   "with every option" "--keep-mail          Posta kutuları taşınmaz, eski alan adında bırakılır" "$_o"
 for _rn_opt in --no-redirect --no-ssl --no-search-replace --keep-mail; do
   assert_eq  "the Turkish usage names ${_rn_opt} once, as the English one does" "1 1" \
     "$(grep -c -- "^  ${_rn_opt} " <<<"$_o") $(lib_domain_rename_usage | grep -c -- "^  ${_rn_opt} ")"
 done
-assert_has   "redirect help in Turkish" "Kullanım: setup.sh redirect <komut>" "$_o"
-assert_has   "with its three commands" "del <kimden> [--keep-ssl]" "$_o"
+assert_has   "redirect help in Turkish" "Kullanım: setup.sh redirect <command>" "$_o"
+assert_has   "with its three commands" "del <from> [--keep-ssl]              <from> için yanıt vermeyi bırakır" "$_o"
 assert_lacks "and no English usage beside it" "Usage: setup.sh" "$_o"
 _rn_case _rn_usage_en
 assert_has   "without a language the usage is the English one" "Usage: setup.sh rename <old-domain> <new-domain> [options]" "$(_rn_out)"
@@ -9490,6 +9490,25 @@ for (( _dt_i = 0; _dt_i + 1 < ${#LIB_TR_PAIRS[@]}; _dt_i += 2 )); do
   (( $# >= 2 )) || _dt_gen+="[${_dt_en}] "
 done
 assert_eq   "a line that starts with a value has at least two words of its own" "" "$_dt_gen"
+# an argument in angle brackets is part of the command: <domain> in Turkish too, not here
+# <alan-adı> and there <domain>
+_dt_gen=""; _dt_re='(<[^<> ]+>)(.*)$'
+for (( _dt_i = 0; _dt_i + 1 < ${#LIB_TR_PAIRS[@]}; _dt_i += 2 )); do
+  _dt_w="${LIB_TR_PAIRS[_dt_i + 1]}"
+  while [[ "$_dt_w" =~ $_dt_re ]]; do
+    [[ "${LIB_TR_PAIRS[_dt_i]}" == *"${BASH_REMATCH[1]}"* ]] || _dt_gen+="${BASH_REMATCH[1]} "
+    _dt_w="${BASH_REMATCH[2]}"
+  done
+done
+for _dt_en in "${!MENU_TR[@]}"; do
+  _dt_w="${MENU_TR[$_dt_en]}"
+  while [[ "$_dt_w" =~ $_dt_re ]]; do
+    [[ "$_dt_en" == *"${BASH_REMATCH[1]}"* ]] || _dt_gen+="${BASH_REMATCH[1]} "
+    _dt_w="${BASH_REMATCH[2]}"
+  done
+done
+assert_eq   "the Turkish names an argument as the English does" "" "$_dt_gen"
+assert_lacks "the help texts too" "<kimden>" "$(LIB_LANG=tr; lib_redirect_usage; lib_domain_rename_usage)"
 [[ -z "$_dt_fn" ]] || eval "$_dt_fn"
 unset -f _dt _dt_plain _dt_run _st
 
