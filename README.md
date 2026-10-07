@@ -1052,7 +1052,13 @@ printf '%s' "$PASS" | sudo lomp mail box add sales@example.com
 sudo lomp mail alias add contact@example.com info@example.com
 sudo lomp mail dns example.com            # what to put in DNS
 sudo lomp mail dns example.com --check    # and whether it is there yet
+sudo lomp mail dns example.com --zone > example.com.zone.txt   # the same records as a zone file
 ```
+
+The zone file is for a provider that imports one instead of having each record typed in
+(Cloudflare: DNS > Records > Import and Export, with "Proxy imported DNS records" off). An
+import adds records and replaces none: an MX or SPF record the domain already has stays beside
+the new one until you remove it. The mail menu's DNS item writes the same file.
 
 Enabling mail for a domain creates its DKIM key, asks for a certificate for `mail.example.com`,
 points `postmaster@`, `abuse@` and `dmarc@` at the first mailbox, and prints the records to
