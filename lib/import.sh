@@ -34,6 +34,9 @@ IMP_OPT_NO_CRON=0
 IMP_OPT_CHECK=0 IMP_OPT_FIX=0
 # directories that are served there under no name this server could give a site
 declare -ga IMP_NAMELESS=()
+# ... and what the listing said of each, for the day one is given a name (lib_import_nameless_take)
+declare -ga IMP_NL_KB=() IMP_NL_KIND=() IMP_NL_DB=() IMP_NL_CONF=() IMP_NL_PHP=() IMP_NL_MEM=() IMP_NL_UPL=()
+IMP_TAKEN=0 IMP_ASKED=""
 # one entry per mailbox found: address, its Maildir there, size, password hash ("-": not known)
 declare -ga IMP_BOX=() IMP_BOX_DIR=() IMP_BOX_KB=() IMP_BOX_HASH=()
 # one entry per alias or forwarder found: the address (or @domain), and where it goes
@@ -797,7 +800,14 @@ for base in "$R/home" "$R/var/www" "$R/www/wwwroot" "$R/var/www/vhosts"; do
       if [ -d "$dir/$sub" ]; then root="$dir/$sub"; break; fi
     done
     if [ -z "$root" ]; then
-      [ -f "$dir/index.php" ] || [ -f "$dir/index.html" ] || continue
+      # no index page: under /home that is somebody's home directory and no site. Where a
+      # web server keeps what it serves (/var/www/html, a panel's wwwroot) it is one as soon
+      # as anything is in it - an application whose pages are further down, a download area.
+      if [ ! -f "$dir/index.php" ] && [ ! -f "$dir/index.html" ]; then
+        # (not what a server keeps there for itself: the ACME challenges, CGI programs)
+        case "$name" in acme|cgi-bin|letsencrypt) continue ;; esac
+        case "$base" in */var/www|*/www/wwwroot) [ -n "$(ls -A "$dir" 2>/dev/null | head -n 1)" ] || continue ;; *) continue ;; esac
+      fi
       root="$dir"
     fi
     case "$name" in
@@ -882,6 +892,7 @@ lib_import_disconnect() {
 lib_import_scan_parse() {   # reads the listing from stdin
   local tag="" domain="" root="" kb="" kind="" db="" www="" conf="" php="" mem="" upl="" x="" dup=0 k=0
   IMP_DOMAIN=() IMP_ROOT=() IMP_KB=() IMP_KIND=() IMP_DB=() IMP_WWW=() IMP_CONF=() IMP_PHP=() IMP_NAMELESS=()
+  IMP_NL_KB=() IMP_NL_KIND=() IMP_NL_DB=() IMP_NL_CONF=() IMP_NL_PHP=() IMP_NL_MEM=() IMP_NL_UPL=()
   IMP_MEM=() IMP_UPL=()
   IMP_CRON_ROOT=() IMP_CRON_WHEN=() IMP_CRON_CMD=()
   IMP_BOX=() IMP_BOX_DIR=() IMP_BOX_KB=() IMP_BOX_HASH=() IMP_ALIAS=() IMP_ALIAS_TO=()
@@ -977,7 +988,11 @@ lib_import_scan_parse() {   # reads the listing from stdin
       for x in ${IMP_ROOT[@]+"${IMP_ROOT[@]}"} ${IMP_NAMELESS[@]+"${IMP_NAMELESS[@]}"}; do
         if [[ "$x" == "$root" ]]; then dup=1; break; fi
       done
-      (( dup )) || IMP_NAMELESS+=("$root")
+      if (( ! dup )); then
+        IMP_NAMELESS+=("$root"); IMP_NL_KB+=("$kb"); IMP_NL_KIND+=("$kind"); IMP_NL_DB+=("$db"); IMP_NL_CONF+=("$conf")
+        if lib_php_valid_version "${php:-}"; then IMP_NL_PHP+=("$php"); else IMP_NL_PHP+=("-"); fi
+        IMP_NL_MEM+=("$(_import_size_mb "${mem:-}")"); IMP_NL_UPL+=("$(_import_size_mb "${upl:-}")")
+      fi
       continue
     fi
     for x in ${IMP_DOMAIN[@]+"${IMP_DOMAIN[@]}"}; do
@@ -1068,11 +1083,48 @@ lib_import_list_print() {
     lib_warn "No site with a domain name was found on ${IMP_SSH_TARGET}"
   fi
   if ((${#IMP_NAMELESS[@]} > 0)); then
-    lib_tr "Served there under no domain name (bring one with --path <directory> --as <domain>):"
+    # numbered on from the sites: asked "which ones", the number brings the directory, and the
+    # domain it is to be here is asked then
+    lib_tr "Served there under no domain name (its number brings one, and you are asked for the domain; or --path <directory> --as <domain>):"
     printf '\n%s\n' "$LIB_TR"
-    for x in "${IMP_NAMELESS[@]}"; do printf '       %s\n' "$x"; done
+    for (( i = 0; i < ${#IMP_NAMELESS[@]}; i++ )); do
+      lib_tprintf '  %3d  %-34s %9s  %-9s  %-20s  %s\n' "$(( n + i + 1 ))" "-" "$(_import_mb "${IMP_NL_KB[i]:-0}")" "${IMP_NL_KIND[i]:--}" "${IMP_NL_DB[i]:--}" "${IMP_NAMELESS[i]}"
+    done
   fi
   printf '\n'
+}
+
+# A directory that is served there under no name becomes an entry like any site's, under the
+# domain it is given here. The index of the entry in IMP_TAKEN. Status 1: no such directory,
+# no domain name, or a name the list has already.
+lib_import_nameless_take() {   # index among the nameless (from 0), domain
+  local k="$1" domain="${2,,}" x=""
+  [[ "$k" =~ ^[0-9]+$ ]] && (( k < ${#IMP_NAMELESS[@]} )) || return 1
+  lib_domain_valid "$domain" || return 1
+  for x in ${IMP_DOMAIN[@]+"${IMP_DOMAIN[@]}"}; do
+    [[ "$x" != "$domain" ]] || return 1
+  done
+  IMP_DOMAIN+=("$domain"); IMP_ROOT+=("${IMP_NAMELESS[k]}"); IMP_KB+=("${IMP_NL_KB[k]:-0}"); IMP_KIND+=("${IMP_NL_KIND[k]:-static}")
+  IMP_DB+=("${IMP_NL_DB[k]:--}"); IMP_WWW+=(0); IMP_CONF+=("${IMP_NL_CONF[k]:--}"); IMP_PHP+=("${IMP_NL_PHP[k]:--}")
+  IMP_MEM+=("${IMP_NL_MEM[k]:--}"); IMP_UPL+=("${IMP_NL_UPL[k]:--}")
+  IMP_TAKEN=$(( ${#IMP_DOMAIN[@]} - 1 ))
+}
+
+# The domain a directory without a name is to be here, asked on the terminal: three tries,
+# and nothing leaves the directory where it is. The answer in IMP_ASKED ("": left).
+_import_nameless_ask() {   # directory
+  local ans="" try=0
+  IMP_ASKED=""
+  for (( try = 0; try < 3; try++ )); do
+    lib_tr "${1}: which domain is it to be here? (nothing: leave it there)"
+    printf '%s%s%s: ' "$C_BLD" "$LIB_TR" "$C_RST"
+    read -r ans || ans=""
+    ans="${ans//[[:space:]]/}"; ans="${ans,,}"
+    [[ -n "$ans" ]] || return 0
+    if lib_domain_valid "$ans"; then IMP_ASKED="$ans"; return 0; fi
+    lib_warn "\"${ans}\" is not a domain name (example.com)"
+  done
+  return 0
 }
 
 # "1,3 5-7" or "all" -> the chosen indexes (from 0), one per line. Status 1: not a choice.
@@ -1825,7 +1877,8 @@ lib_import_main() {
   if [[ "${1:-}" == "cron" ]]; then shift; lib_require_tools; lib_require_installed; lib_import_cron_main "$@"; return 0; fi
   local a="" target="" port="22" key="" pwfile="" list=0 all=0 only="" no_create=0 path="" as="" dbname=""
   local i=0 n=0 here="" ans="" x="" total_kb=0 avail_kb=0 found=0 okc=0 what="" mkb=0 mail_kb=0 crons=0 limits="" xdbs="" k=""
-  local -a chosen=() todo=() failed=()
+  local -a chosen=() todo=() failed=() picked=()
+  local nl=0
   IMP_OPT_NO_DB=0; IMP_OPT_NO_FILES=0; IMP_OPT_NO_MAIL=0; IMP_OPT_ONLY_MAIL=0; IMP_OPT_NO_CRON=0; IMP_OPT_FULL=0; IMP_OPT_CHECK=0; IMP_OPT_FIX=0; IMP_OPT_NO_SSL=0
   while (($# > 0)); do
     a="$1"; shift
@@ -1916,7 +1969,9 @@ lib_import_main() {
   n=${#IMP_DOMAIN[@]}
   if [[ -z "$path" ]]; then
     lib_import_list_print
-    if (( n == 0 )); then
+    nl=${#IMP_NAMELESS[@]}
+    # (a directory without a name can be picked where somebody is there to name it)
+    if (( n == 0 )) && ! { (( nl > 0 && ! all )) && [[ -z "$only" ]] && lib_is_interactive; }; then
       lib_import_disconnect
       lib_die "Nothing to import from ${IMP_SSH_TARGET}" "no directory there is served under a domain name" "name one yourself: --path <directory> --as <domain>"
     fi
@@ -1935,8 +1990,19 @@ lib_import_main() {
       printf '%s%s%s: ' "$C_BLD" "$LIB_TR" "$C_RST"
       read -r ans || ans=""
       if [[ -z "${ans// /}" ]]; then lib_import_disconnect; lib_info "Nothing was imported"; return 0; fi
-      mapfile -t chosen < <(lib_import_pick "$ans" "$n" || true)
-      ((${#chosen[@]} > 0)) || { lib_import_disconnect; lib_die "\"${ans}\" is not a choice from the list" "" "numbers such as 1,3 or 2-5, or all"; }
+      # "all" is every site that has a name; a number past them is a directory without one
+      found=$(( n + nl ))
+      if [[ "${ans,,}" =~ ^[[:space:]]*(all|a|\*|hepsi|h)[[:space:]]*$ ]]; then found="$n"; fi
+      mapfile -t picked < <(lib_import_pick "$ans" "$found" || true)
+      ((${#picked[@]} > 0)) || { lib_import_disconnect; lib_die "\"${ans}\" is not a choice from the list" "" "numbers such as 1,3 or 2-5, or all"; }
+      for i in "${picked[@]}"; do
+        if (( i < n )); then chosen+=("$i"); continue; fi
+        _import_nameless_ask "${IMP_NAMELESS[i - n]}"
+        if [[ -z "$IMP_ASKED" ]]; then lib_note "${IMP_NAMELESS[i - n]}: left where it is"; continue; fi
+        if lib_import_nameless_take "$(( i - n ))" "$IMP_ASKED"; then chosen+=("$IMP_TAKEN")
+        else lib_warn "${IMP_NAMELESS[i - n]}: left where it is, ${IMP_ASKED} is in the list already"; fi
+      done
+      if ((${#chosen[@]} == 0)); then lib_import_disconnect; lib_info "Nothing was imported"; return 0; fi
     else
       lib_import_disconnect
       lib_die "Which sites?" "nobody is there to ask" "add --all or --only a.com,b.com   (--list only shows them)"

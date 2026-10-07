@@ -10113,6 +10113,10 @@ printf 'upload\n' >"$_im_shop/wp-content/uploads/a.txt"
 printf 'the blog\n' >"$_im_r/home/blog.example/public_html/index.html"
 printf 'bob\n' >"$_im_r/home/bob/public_html/index.html"
 printf '<?php // default\n' >"$_im_r/var/www/html/index.php"
+# what a web server keeps without an index page: an application further down, and nothing at all
+mkdir -p "$_im_r/var/www/files/app" "$_im_r/var/www/empty" "$_im_r/home/alice" "$_im_r/var/www/acme/.well-known"
+: >"$_im_r/var/www/acme/.well-known/token"
+printf 'a download\n' >"$_im_r/var/www/files/app/setup.zip"; printf 'export A=1\n' >"$_im_r/home/alice/.profile"
 printf '<?php // panel\n' >"$_im_r/www/wwwroot/WWW.Panel.Example/index.php"
 printf 'odd\n' >"$_im_r/home/odd name.example/public_html/index.html"
 printf 'example page\n' >"$_im_l/Example/html/index.html"
@@ -10270,7 +10274,35 @@ assert_eq  "the aliases, each once: the first place that names one counts" "sale
 assert_eq  "with where they go"                                "info@shop.example|a@one.example,b@two.example" "${IMP_ALIAS_TO[0]}|${IMP_ALIAS_TO[4]}"
 assert_eq  "the mailboxes, each with its domain"               "info@shop.example sales@shop.example boss@mailonly.example" "${IMP_BOX[*]}"
 assert_eq  "a hash that is a password in the clear is not one" "$_im_hash - -" "${IMP_BOX_HASH[*]}"
-assert_eq  "the directories without a name are kept apart"     "3" "${#IMP_NAMELESS[@]}"
+assert_eq  "the directories without a name are kept apart"     "4" "${#IMP_NAMELESS[@]}"
+assert_has "one under /var/www counts without an index page, when something is in it" $'S\t-\t'"$_im_r/var/www/files"$'\t' "$_im_scan"
+assert_lacks "what the server keeps there for itself does not" "$_im_r/var/www/acme" "$_im_scan"
+assert_lacks "an empty one does not"                           "$_im_r/var/www/empty" "$_im_scan"
+assert_lacks "nor does a home directory that serves nothing"   "$_im_r/home/alice" "$_im_scan"
+# ... and one of them is given a name: picked by its number where somebody is asked
+_im_nl=0
+for _im_k in "${!IMP_NAMELESS[@]}"; do if [[ "${IMP_NAMELESS[_im_k]}" == "$_im_r/var/www/html" ]]; then _im_nl="$_im_k"; fi; done
+assert_eq  "what the listing said of it is kept"               "$_im_r/var/www/html php" "${IMP_NAMELESS[_im_nl]} ${IMP_NL_KIND[_im_nl]}"
+_im_n=${#IMP_DOMAIN[@]}
+_im_list="$(C_BLD=""; C_RST=""; lib_import_list_print 2>&1)"
+assert_has "the list gives it the number after the sites'"     "$(( _im_n + _im_nl + 1 ))  -" "$(grep -F "$_im_r/var/www/html" <<<"$_im_list")"
+assert_has "and says what the number is for"                   "its number brings one, and you are asked for the domain" "$_im_list"
+assert_false "what is no domain name names none"               lib_import_nameless_take "$_im_nl" "not a name"
+assert_false "nor does a name the list has"                    lib_import_nameless_take "$_im_nl" shop.example
+assert_false "and there is no directory past the last"         lib_import_nameless_take 99 new.example
+assert_eq  "nothing was added by any of that"                  "$_im_n" "${#IMP_DOMAIN[@]}"
+lib_import_nameless_take "$_im_nl" New.Example
+assert_eq  "given a name, it is an entry like a site's"        "new.example|$_im_r/var/www/html|php|0|$_im_n" \
+  "${IMP_DOMAIN[IMP_TAKEN]}|${IMP_ROOT[IMP_TAKEN]}|${IMP_KIND[IMP_TAKEN]}|${IMP_WWW[IMP_TAKEN]}|$IMP_TAKEN"
+assert_eq  "with every field a site has"                       "$(( _im_n + 1 )) $(( _im_n + 1 )) $(( _im_n + 1 )) $(( _im_n + 1 )) $(( _im_n + 1 )) $(( _im_n + 1 )) $(( _im_n + 1 ))" \
+  "${#IMP_KB[@]} ${#IMP_DB[@]} ${#IMP_CONF[@]} ${#IMP_PHP[@]} ${#IMP_MEM[@]} ${#IMP_UPL[@]} ${#IMP_ROOT[@]}"
+assert_false "the same name does not go to a second directory" lib_import_nameless_take "$(( (_im_nl + 1) % 4 ))" new.example
+_import_nameless_ask /var/www/html >/dev/null 2>&1 <<<$'two words\nGood.Example\nlater.example'
+assert_eq  "asked for its domain: what is no domain name is asked again" "good.example" "$IMP_ASKED"
+_import_nameless_ask /var/www/html >/dev/null 2>&1 <<<""
+assert_eq  "nothing leaves the directory there"                "" "$IMP_ASKED"
+_import_nameless_ask /var/www/html >/dev/null 2>&1 <<<$'a b\nc d\ne f\nfourth.example'
+assert_eq  "and so do three answers that are none"             "" "$IMP_ASKED"
 assert_lacks "a path with a blank in it is not taken"          "odd" "${IMP_NAMELESS[*]} ${IMP_ROOT[*]}"
 assert_eq  "the user it ran as"                                "$(id -un)" "$IMP_REMOTE_USER"
 # the listing is another machine's output

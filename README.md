@@ -462,8 +462,13 @@ them, `restore` puts them back, a Node.js application's login over TCP opens the
 `remove` drops them with the site. A database no file under the site names is not found.
 
 A directory that is served under no name - `/usr/local/lsws/Example/html`, `/var/www/html`, a
-user's `public_html` - is listed apart; `--path DIR --as DOMAIN` brings it as that domain, and
-`--db NAME` with it a database the site's own files do not name.
+user's `public_html` - is listed apart, with a number of its own after the sites'. Asked
+"which ones" (the menu's item 29, or the command without `--all`/`--only`), that number
+brings the directory, and the domain it is to be on this server is asked then; its files go
+into that site's `public_html`. Without anybody to ask, `--path DIR --as DOMAIN` brings it as
+that domain, and `--db NAME` with it a database the site's own files do not name. A
+directory under `/var/www` (or a panel's `wwwroot`) is listed as soon as anything is in it,
+an index page or not.
 
 **The mailboxes of a domain come with it** when this server runs mail (`install --with-mail`)
 and you logged in there as root:
