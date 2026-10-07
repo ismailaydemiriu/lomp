@@ -1152,7 +1152,7 @@ lib_update_main() {
   LIB_APT_UPDATED=0
   lib_apt_update
   if (( OPT_DRY_RUN )); then
-    lib_info "[dry-run] upgradable packages:"; apt list --upgradable 2>/dev/null | sed 's/^/        /' | head -n 40 || true
+    lib_info "[dry-run] upgradable packages:"; apt list --upgradable 2>/dev/null | sed 's/^/        /' | sed -n '1,40p' || true
   else
     lib_run apt-get -y -q -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold upgrade || lib_die "apt-get upgrade failed" "see the log" "fix apt problems (apt-get -f install) and re-run"
     lib_run apt-get -y -q autoremove || true
@@ -1213,7 +1213,7 @@ _opt_diff() {   # title file  (new content on stdin) -> prints diff, returns 0 w
   new="$(lib_mktemp)"; cat >"$new"
   if [[ -f "$file" ]] && cmp -s "$new" "$file"; then rm -f "$new"; return 1; fi
   printf '\n%s--- %s (%s)%s\n' "$C_BLD" "$title" "$file" "$C_RST"
-  if [[ -f "$file" ]]; then diff -u "$file" "$new" | tail -n +3 | head -n 80 || true; else printf '(new file, %s lines)\n' "$(wc -l <"$new" | tr -d ' ')"; fi
+  if [[ -f "$file" ]]; then diff -u "$file" "$new" | tail -n +3 | sed -n '1,80p' || true; else printf '(new file, %s lines)\n' "$(wc -l <"$new" | tr -d ' ')"; fi
   rm -f "$new"
   return 0
 }

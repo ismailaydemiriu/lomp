@@ -1494,7 +1494,7 @@ lib_domain_credentials_mail() {   # domain
   printf '%sMail%s\n' "$C_BLD" "$C_RST"
   lib_print_kv "IMAP"     "${mhost}:993, SSL/TLS"
   lib_print_kv "SMTP"     "${mhost}:465 (SSL/TLS) or :587 (STARTTLS)"
-  box="$(lib_mail_boxes "$domain" | head -1)"
+  box="$(lib_mail_boxes "$domain" | sed -n 1p)"
   if [[ -z "$box" && -n "$(lib_mail_aliases "$domain")${all}" ]]; then
     lib_print_kv "User name" "none of its own: the mailbox its addresses are delivered into signs in, with that mailbox's address"
   else

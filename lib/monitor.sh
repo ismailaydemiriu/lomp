@@ -898,7 +898,7 @@ _doc_check_mail() {
   fi
 
   if lib_have postqueue; then
-    q="$(postqueue -p 2>/dev/null | awk '/^-- /{print $5}' | head -n 1 || true)"
+    q="$(postqueue -p 2>/dev/null | awk '/^-- /{print $5}' | sed -n 1p || true)"
     if [[ "$q" =~ ^[0-9]+$ ]] && (( q > 50 )); then
       _doc_add WARN "mail: queue" "${q} message(s) waiting to go out (setup.sh mail queue)"
     fi

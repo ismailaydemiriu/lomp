@@ -867,7 +867,7 @@ _domain_rename_leftovers() {   # what to look for: the old name, or the forms it
   if [[ -d "${D_HOME}/app" ]]; then dirs+=("${D_HOME}/app"); fi
   lib_domain_as_user timeout 30 find "${dirs[@]}" -maxdepth 3 -name node_modules -prune -o -type f -size -1024k \
     \( -name .htaccess -o -name .user.ini -o -name wp-config.php -o -name .env -o -name 'config*.php' -o -name 'settings*.php' \) \
-    -exec grep -lF "${seek[@]}" {} + 2>/dev/null | head -n 20 || true
+    -exec grep -lF "${seek[@]}" {} + 2>/dev/null | sed -n '1,20p' || true
 }
 
 lib_domain_rename_main() {

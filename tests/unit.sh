@@ -917,7 +917,8 @@ assert_eq "a mailbox that is not there does not"          1 "$(run_isolated _sp_
 assert_eq "a port that is not the last one listens"       0 "$(run_isolated _sp_port 587)"
 assert_eq "a port nothing listens on does not"            1 "$(run_isolated _sp_port 465)"
 # grep -q at the end of a pipeline is that bug waiting for a slower machine: lib_grepq reads on
-assert_eq "no pipeline in lomp ends in grep -q"           "" "$(grep -nE '[^|]\| *grep -q' "$ROOT/setup.sh" "$ROOT"/lib/*.sh || true)"
+# (-q among other options, as in "grep -Eq", and grep --quiet are the same thing)
+assert_eq "no pipeline in lomp ends in grep -q"           "" "$(grep -nE '[^|]\| *[ef]?grep +(-[A-Za-z]+ +)*(-[A-Za-z]*q|--quiet|--silent)' "$ROOT/setup.sh" "$ROOT"/lib/*.sh || true)"
 
 # The same with a reader that leaves after so many lines. "optimize" showed what it would change
 # in httpd_config.conf through "head -n 80": with more than that to show, tail was killed
@@ -954,6 +955,10 @@ _sp_out="$(_sp_restore 2>&1 || true)"
 assert_eq    "the menu shows the first twenty of a long list of archives" 20 "$(grep -c 'site.example-2026' <<<"$_sp_out" || true)"
 assert_has   "the oldest first, as before"                 "site.example-20261000.tar.gz" "$_sp_out"
 assert_lacks "and does not say that there are none"        "none found" "$_sp_out"
+# head is that reader wherever it stands, and most of the places it stood in were saved only by
+# an "|| true" or by a command that writes once. sed -n 1p and sed -n '1,Np' show the same
+# lines and read on.
+assert_eq "no pipeline in lomp passes through head"        "" "$(grep -nE '[^|]\| *head([^A-Za-z0-9_-]|$)' "$ROOT/setup.sh" "$ROOT"/lib/*.sh || true)"
 
 # A list read by a loop that returns at its first hit. Every name used to come from a "basename"
 # of its own: the ones still to be written went to nobody, the first of them was killed (SIGPIPE),

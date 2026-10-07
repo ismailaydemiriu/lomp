@@ -58,7 +58,7 @@ app_emit() {   # domain target source [application directory, command line, memo
   akb=0; anode=-
   if [ "$adir2" != - ] && [ -d "$adir2" ]; then
     akb="$(du -sk --exclude=node_modules "$adir2" 2>/dev/null | cut -f1)"
-    anode="$(node -v 2>/dev/null | head -n 1)"
+    anode="$(node -v 2>/dev/null | sed -n 1p)"
   else adir2=-; acw=-; fi
   printf 'P\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t-\t%s\t%s\t%s\n' "$ad" "$at" "$adir2" "$acw" "$3" "${akb:-0}" "${6:--}" "${7:--}" "${anode:--}" "${acmd:--}"
   adb="${8:--}"; aconf=-
@@ -92,7 +92,7 @@ app_ols() {   # its configuration file, the names its listeners map to it
     e && $1 == "address" { a = $2 }
     e && /^[ \t]*\}/ { if (p && a != "") { print a; exit } e = 0 }
   ' "$1" 2>/dev/null)"
-  [ -n "$aot" ] || aot="$(sed -n 's/.*[Rr]ewrite[Rr]ule.*\(https\{0,1\}:\/\/[A-Za-z0-9.-]*:[0-9][0-9]*\).*\[[^]]*P[^]]*\].*/\1/p' "$1" 2>/dev/null | head -n 1)"
+  [ -n "$aot" ] || aot="$(sed -n 's/.*[Rr]ewrite[Rr]ule.*\(https\{0,1\}:\/\/[A-Za-z0-9.-]*:[0-9][0-9]*\).*\[[^]]*P[^]]*\].*/\1/p' "$1" 2>/dev/null | sed -n 1p)"
   aot="${aot#http://}"; aot="${aot#https://}"; aot="${aot%%/*}"
   case "$aot" in *:[0-9]*) ;; *) return 0 ;; esac
   printf '%s\n' "$2" | app_names "$aot" ols

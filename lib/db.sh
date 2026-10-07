@@ -20,8 +20,8 @@ lib_db_admin()   { if lib_have mariadb-admin; then printf 'mariadb-admin'; else 
 lib_db_dumper()  { if lib_have mariadb-dump; then printf 'mariadb-dump'; else printf 'mysqldump'; fi; }
 lib_db_installed() { lib_pkg_installed mariadb-server || lib_have mariadbd; }
 lib_db_version() {
-  lib_have mariadbd && mariadbd --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1 && return 0
-  lib_have mysqld && mysqld --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1 && return 0
+  lib_have mariadbd && mariadbd --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | sed -n 1p && return 0
+  lib_have mysqld && mysqld --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | sed -n 1p && return 0
   printf ''
 }
 lib_db_ping() { "$(lib_db_admin)" --protocol=socket --socket="$DB_SOCKET" ping >/dev/null 2>&1; }
@@ -42,7 +42,7 @@ lib_db_sql_secret() {   # description sql
   lib_log_write CMD "SQL: ${desc}"
   out="$(printf '%s\n' "$sql" | "$(lib_db_client)" --protocol=socket --socket="$DB_SOCKET" -N -B 2>&1)" || rc=$?
   if (( rc != 0 )); then
-    lib_log_write ERROR "SQL failed (${desc}): $(printf '%s' "$out" | lib_mask_secrets | head -n 3)"
+    lib_log_write ERROR "SQL failed (${desc}): $(printf '%s' "$out" | lib_mask_secrets | sed -n '1,3p')"
   fi
   return "$rc"
 }

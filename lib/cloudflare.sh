@@ -209,7 +209,7 @@ lib_cf_origin_lock() {
   left="$(_cf_ufw_web_rule_numbers | wc -l | tr -d ' ')"
   if [[ "$left" =~ ^[0-9]+$ ]] && (( left > 0 )); then
     lib_warn "${left} firewall rule(s) still open port 80 or 443 to somebody other than Cloudflare:"
-    ufw status numbered 2>/dev/null | grep -F "$(_cf_ufw_web_rule_numbers | head -1)" | sed 's/^/        /' || true
+    ufw status numbered 2>/dev/null | grep -F "$(_cf_ufw_web_rule_numbers | sed -n 1p)" | sed 's/^/        /' || true
     lib_warn "The origin is NOT closed. Look at 'ufw status numbered' and remove them by hand."
   fi
   lib_manifest_set '.cloudflare.origin_lock' 'true'

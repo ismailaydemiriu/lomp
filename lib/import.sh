@@ -524,7 +524,7 @@ dbconf_files() {
          -o -iname 'conn*.php' -o -iname 'baglan*.php' -o -iname 'ayar*.php' -o -iname 'vt*.php' -o -iname 'veritabani*.php' \
          -o -iname 'local*.php' -o -iname 'env.php' -o -iname '*.inc.php' -o -iname 'config*.inc' -o -name '.env' -o -name 'wp-config.php' \) -print 2>/dev/null
     [ ! -f "${1%/*}/.env" ] || printf '%s\n' "${1%/*}/.env"
-  } | awk '{ n = gsub(/\//, "/"); print n "\t" $0 }' | sort -n | cut -f2- | head -n 60
+  } | awk '{ n = gsub(/\//, "/"); print n "\t" $0 }' | sort -n | cut -f2- | sed -n '1,60p'
 }
 dbconf_pick() {
   pclient="$(command -v mariadb 2>/dev/null || command -v mysql 2>/dev/null || true)"
@@ -638,9 +638,9 @@ row() {   # domain docroot www source [PHP version, memory_limit, upload_max_fil
   kind=static; conf=-; db=-
   if [ -f "$root/wp-config.php" ]; then kind=wordpress; conf="$root/wp-config.php"
   elif [ -f "$root/wp-settings.php" ] && [ -f "${root%/*}/wp-config.php" ]; then kind=wordpress; conf="${root%/*}/wp-config.php"
-  elif [ -n "$(find "$root" -maxdepth 1 -name '*.php' 2>/dev/null | head -n 1)" ]; then kind=php; fi
+  elif [ -n "$(find "$root" -maxdepth 1 -name '*.php' 2>/dev/null | sed -n 1p)" ]; then kind=php; fi
   if [ "$kind" = wordpress ]; then
-    db="$(sed -n "s/^[[:space:]]*define([[:space:]]*['\"]DB_NAME['\"][[:space:]]*,[[:space:]]*['\"]\([^'\"]*\)['\"].*/\1/p" "$conf" 2>/dev/null | head -n 1)"
+    db="$(sed -n "s/^[[:space:]]*define([[:space:]]*['\"]DB_NAME['\"][[:space:]]*,[[:space:]]*['\"]\([^'\"]*\)['\"].*/\1/p" "$conf" 2>/dev/null | sed -n 1p)"
     [ -n "$db" ] || db=-
   elif [ "$kind" = php ]; then
     # some other application: the file that holds its database login, if one can be told
@@ -659,7 +659,7 @@ row() {   # domain docroot www source [PHP version, memory_limit, upload_max_fil
 # the php.ini of the PHP it runs.
 ini_of() {   # setting, virtual host configuration, document root, PHP version
   iv="$(awk -v k="$1" '($1 == "php_admin_value" || $1 == "php_value") && $2 == k { print $3; exit }' "$2" 2>/dev/null)"
-  for ini in "$3/.user.ini" "$(find "$L/lsphp$(printf '%s' "$4" | tr -d .)/etc" -name php.ini 2>/dev/null | head -n 1)"; do
+  for ini in "$3/.user.ini" "$(find "$L/lsphp$(printf '%s' "$4" | tr -d .)/etc" -name php.ini 2>/dev/null | sed -n 1p)"; do
     [ -z "$iv" ] || break
     [ -r "$ini" ] || continue
     iv="$(awk -F= -v k="$1" '!/^[ \t]*[;#]/ { key = $1; gsub(/[ \t]/, "", key); if (key == k) { v = $2; sub(/;.*/, "", v); gsub(/[ \t"\r]/, "", v); print v; exit } }' "$ini" 2>/dev/null)"
@@ -669,7 +669,7 @@ ini_of() {   # setting, virtual host configuration, document root, PHP version
 # "lsphp74" somewhere in a configuration file -> 7.4
 php_of() {   # file
   [ -r "$1" ] || return 0
-  sed -n 's/.*lsphp\([0-9]\)\([0-9]\).*/\1.\2/p' "$1" 2>/dev/null | head -n 1
+  sed -n 's/.*lsphp\([0-9]\)\([0-9]\).*/\1.\2/p' "$1" 2>/dev/null | sed -n 1p
 }
 # Mailboxes: the addresses Dovecot knows and where the mail of each lies. The password hashes
 # are read where they are kept in a place that is known: lomp's own file, CyberPanel's table.
@@ -690,7 +690,7 @@ mail_rows() {
     case "$u" in *[!A-Za-z0-9@._+-]*) continue ;; esac
     n="${u%@*}"; d="${u#*@}"
     p=""
-    if command -v doveadm >/dev/null 2>&1; then p="$(doveadm mailbox path -u "$u" INBOX 2>/dev/null | head -n 1)"; fi
+    if command -v doveadm >/dev/null 2>&1; then p="$(doveadm mailbox path -u "$u" INBOX 2>/dev/null | sed -n 1p)"; fi
     if [ -z "$p" ] || [ ! -d "$p/cur" ]; then
       p=""
       for c in "$R/home/vmail/$d/$n/Maildir" "$R/var/vmail/$d/$n/Maildir" "$R/var/vmail/vmail1/$d/$n/Maildir" \
@@ -806,7 +806,7 @@ for base in "$R/home" "$R/var/www" "$R/www/wwwroot" "$R/var/www/vhosts"; do
       if [ ! -f "$dir/index.php" ] && [ ! -f "$dir/index.html" ]; then
         # (not what a server keeps there for itself: the ACME challenges, CGI programs)
         case "$name" in acme|cgi-bin|letsencrypt) continue ;; esac
-        case "$base" in */var/www|*/www/wwwroot) [ -n "$(ls -A "$dir" 2>/dev/null | head -n 1)" ] || continue ;; *) continue ;; esac
+        case "$base" in */var/www|*/www/wwwroot) [ -n "$(ls -A "$dir" 2>/dev/null | sed -n 1p)" ] || continue ;; *) continue ;; esac
       fi
       root="$dir"
     fi
@@ -1314,7 +1314,7 @@ _import_compare() {   # what there, directory there, directory here, directory t
   fi
   if (( miss > 0 )); then
     lib_warn "Not here (the topmost ones, up to 40):"
-    sort "${work}/missing" | head -n 40 | awk -F'\t' '{ printf "        %s%s\n", $1, ($2 == "d" ? "/" : "") }'
+    sort "${work}/missing" | sed -n '1,40p' | awk -F'\t' '{ printf "        %s%s\n", $1, ($2 == "d" ? "/" : "") }'
     if (( top > 40 )); then lib_note "... and $(( top - 40 )) more; the whole list is in ${LOG_FILE}"; fi
     cat "${work}/missing" "${work}/missing.all" | cut -f1 | sed "s|^|missing: ${root}/|" >>"$LOG_FILE" 2>/dev/null || true
   fi
@@ -1508,7 +1508,7 @@ _import_add() {   # domain add-options...
 # The address a WordPress gives itself, from the database that was just imported.
 _import_wp_home() {   # wp-config.php (a copy root can read)
   local prefix=""
-  prefix="$(sed -n "s/^[[:space:]]*\$table_prefix[[:space:]]*=[[:space:]]*['\"]\([A-Za-z0-9_]*\)['\"].*/\1/p" "$1" | head -n 1)"
+  prefix="$(sed -n "s/^[[:space:]]*\$table_prefix[[:space:]]*=[[:space:]]*['\"]\([A-Za-z0-9_]*\)['\"].*/\1/p" "$1" | sed -n 1p)"
   [[ -n "$prefix" ]] || prefix="wp_"
   lib_db_sql "SELECT option_value FROM \`${DBI_NAME}\`.\`${prefix}options\` WHERE option_name='home' LIMIT 1" 2>/dev/null || true
 }

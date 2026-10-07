@@ -826,7 +826,7 @@ lib_app_fetch() {   # -> status; APP_BUILD_ERROR says why
       APP_BUILD_ERROR="could not point ${D_HOME}/app at ${APP_GIT_URL} (git config failed)"; return 1
     fi
   else
-    entries="$(_app_as "$D_HOME" sh -c 'ls -A app 2>/dev/null | head -n 1' 2>/dev/null || true)"
+    entries="$(_app_as "$D_HOME" sh -c 'ls -A app 2>/dev/null | sed -n 1p' 2>/dev/null || true)"
     if [[ -n "$entries" ]]; then
       APP_BUILD_ERROR="${D_HOME}/app already holds files but is not a git checkout; move them away before the first deploy from ${APP_GIT_URL}"
       return 1

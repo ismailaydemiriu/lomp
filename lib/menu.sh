@@ -1402,7 +1402,7 @@ _menu_mail_add_domain() {
       _menu_printf '\n  %s is not a site of this server: it is added for its mail alone (no site, no Linux user).\n' "$domain"
     fi
   fi
-  first="$(lib_mail_boxes | head -n 1 || true)"
+  first="$(lib_mail_boxes | sed -n 1p || true)"
   _menu_printf '\n%sWhere does the mail of %s go?%s\n' "$C_BLD" "$domain" "$C_RST"
   _menu_opt 1 "$(_menu_tf 'Into a mailbox of its own (info@%s, with a password of its own)' "$domain")"
   _menu_opt 2 "Into a mailbox that exists already - one inbox for several domains"

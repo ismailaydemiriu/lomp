@@ -46,7 +46,7 @@ lib_ols_is_installed() { [[ -x "$LSWS_BIN" && -f "$LSWS_CONF" ]]; }
 
 lib_ols_version() {
   [[ -x "$LSWS_BIN" ]] || { printf ''; return 0; }
-  "$LSWS_BIN" -v 2>/dev/null | head -n1 | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)*' | head -n1 || true
+  "$LSWS_BIN" -v 2>/dev/null | sed -n 1p | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)*' | sed -n 1p || true
 }
 
 lib_ols_user()  { local u; u="$(lib_ols_conf_top_get user)";  printf '%s' "${u:-nobody}"; }
@@ -698,7 +698,7 @@ lib_ols_htaccess_pending() {
   done < <(lib_ols_htaccess_docroots)
   ((${#roots[@]} > 0)) || return 0
   timeout 30 find "${roots[@]}" -maxdepth 4 -name .htaccess -type f -newerct "@${since}" -print -quit 2>/dev/null \
-    | head -n 1 | tr -c '[:print:]\n' '?' || true
+    | sed -n 1p | tr -c '[:print:]\n' '?' || true
 }
 
 lib_ols_htaccess_reload() {   # reason

@@ -485,7 +485,7 @@ lib_write_file() {
       (( OPT_QUIET )) || { lib_tr "would write ${path} ($(wc -c <"$content" | tr -d ' ') bytes, contents not shown)"; printf '%s[dry ]%s  %s\n' "$C_MAG" "$C_RST" "$LIB_TR"; }
     elif [[ -f "$path" ]]; then
       (( OPT_QUIET )) || { lib_tr "would modify ${path}"; printf '%s[dry ]%s  %s\n' "$C_MAG" "$C_RST" "$LIB_TR"; }
-      (( OPT_QUIET )) || diff -u "$path" "$content" 2>/dev/null | head -n 60 | sed 's/^/        /' || true
+      (( OPT_QUIET )) || diff -u "$path" "$content" 2>/dev/null | sed -n '1,60p' | sed 's/^/        /' || true
     else
       (( OPT_QUIET )) || { lib_tr "would create ${path} ($(wc -l <"$content" | tr -d ' ') lines)"; printf '%s[dry ]%s  %s\n' "$C_MAG" "$C_RST" "$LIB_TR"; }
     fi
@@ -730,7 +730,7 @@ lib_systemd_override() {
 lib_random_password() {   # alphanumeric, default 32 chars
   local len="${1:-32}" out=""
   while ((${#out} < len)); do
-    out+="$(openssl rand -base64 96 | tr -dc 'A-Za-z0-9' | head -c "$len")"
+    out+="$(openssl rand -base64 96 | tr -dc 'A-Za-z0-9')"
   done
   printf '%s' "${out:0:$len}"
 }
@@ -743,7 +743,7 @@ lib_human_mb() {   # MB -> human
 }
 
 lib_version_ge() { # lib_version_ge 10.11.2 10.6  -> 0 if a >= b
-  [[ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -n1)" == "$2" ]]
+  [[ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | sed -n 1p)" == "$2" ]]
 }
 
 # lib_join <separator> <item>...

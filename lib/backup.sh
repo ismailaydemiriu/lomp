@@ -513,7 +513,7 @@ lib_restore_main() {
   fi
   # ---- database --------------------------------------------------------------
   local dump=""
-  dump="$(find "${work}/x" -maxdepth 1 -name 'db-*.sql.gz' | head -n1 || true)"
+  dump="$(find "${work}/x" -maxdepth 1 -name 'db-*.sql.gz' | sed -n 1p || true)"
   if (( ! no_db )) && [[ -n "$dump" ]]; then
     if ! lib_db_info_load "$domain"; then
       if [[ -s "${work}/x/state/db.info" ]]; then

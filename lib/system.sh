@@ -49,7 +49,7 @@ lib_system_analyze() {
   if [[ -n "$src" && "$src" == /dev/* ]]; then
     local parent="$src" next="" i=""
     for (( i = 0; i < 6; i++ )); do
-      next="$(lsblk -no PKNAME "$parent" 2>/dev/null | head -n1 || true)"
+      next="$(lsblk -no PKNAME "$parent" 2>/dev/null | sed -n 1p || true)"
       [[ -n "$next" ]] || break
       parent="/dev/${next}"
     done

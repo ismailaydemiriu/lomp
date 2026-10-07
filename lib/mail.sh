@@ -1200,7 +1200,7 @@ lib_mail_verify_configs() {
       return 1
     fi
     if grep -qiE '(^|: )(fatal|error):' "$t"; then
-      MAIL_LAST_ERROR="postfix check: $(grep -iE '(fatal|error):' "$t" | head -n 2 | tr '\n' ' ')"
+      MAIL_LAST_ERROR="postfix check: $(grep -iE '(fatal|error):' "$t" | sed -n '1,2p' | tr '\n' ' ')"
       rm -f "$t"
       return 1
     fi
@@ -1446,7 +1446,7 @@ lib_mail_ptr_check() {   # host -> 0 ok, 1 mismatch (detail in MAIL_LAST_ERROR)
   lib_system_analyze
   ip="${SYS_PUBLIC_IPV4:-}"
   [[ -n "$ip" ]] || { MAIL_LAST_ERROR="the public IPv4 address of this server is unknown"; return 1; }
-  ptr="$(dig +short -x "$ip" 2>/dev/null | head -n 1 | sed 's/\.$//' || true)"
+  ptr="$(dig +short -x "$ip" 2>/dev/null | sed -n 1p | sed 's/\.$//' || true)"
   [[ -n "$ptr" ]] || { MAIL_LAST_ERROR="${ip} has no PTR record; set it to ${host} in your provider's panel"; return 1; }
   if [[ "${ptr,,}" != "${host,,}" ]]; then
     MAIL_LAST_ERROR="${ip} says it is ${ptr}, not ${host}; set the PTR record to ${host} in your provider's panel"
@@ -1841,7 +1841,7 @@ lib_mail_box_quota() {   # address -> the quota rule's size, or the default
   local a="${1,,}" v=""
   [[ -s "$MAIL_PASSWD_FILE" ]] || { printf '%s' "$MAIL_QUOTA_DEFAULT"; return 0; }
   # not field 8: the rule itself carries a colon (storage=...), so the size sits in field 9
-  v="$(awk -F: -v u="$a" '$1 == u' "$MAIL_PASSWD_FILE" | sed -n 's/.*storage=\([^ :]*\).*/\1/p' | head -1 || true)"
+  v="$(awk -F: -v u="$a" '$1 == u' "$MAIL_PASSWD_FILE" | sed -n 's/.*storage=\([^ :]*\).*/\1/p' | sed -n 1p || true)"
   printf '%s' "${v:-$MAIL_QUOTA_DEFAULT}"
 }
 
@@ -2351,7 +2351,7 @@ lib_mail_enable_main() {   # domain [--mailbox NAME] [--quota Q] | [--to ADDRESS
   else
     # postmaster, abuse and dmarc point at the first mailbox there is; with none, they are
     # left for the first "mail box add" to set, because an alias to nowhere bounces
-    _first_box="$(lib_mail_boxes "$d" | head -1)"
+    _first_box="$(lib_mail_boxes "$d" | sed -n 1p)"
     [[ -n "$_first_box" ]] && lib_mail_domain_aliases_seed "$d" "$_first_box"
     lib_mail_tables_apply || lib_die "The mail tables could not be rebuilt" "${MAIL_LAST_ERROR}" "lomp mail status"
   fi
@@ -2728,7 +2728,7 @@ lib_mail_box_quota_main() {   # address quota
   lib_mail_quota_valid "$q" || lib_die "Invalid quota '${q:-none}'" "a bad value makes every delivery to this mailbox fail" "2G, 500M, or 0 for no limit"
   lib_mail_box_exists "$a" || lib_die "No such mailbox: ${a}" "" "lomp mail box list"
   if (( OPT_DRY_RUN )); then lib_info "[dry-run] would set the quota of ${a} to ${q}"; return 0; fi
-  hash="$(awk -F: -v u="$a" '$1 == u {print $2}' "$MAIL_PASSWD_FILE" | head -1 || true)"
+  hash="$(awk -F: -v u="$a" '$1 == u {print $2}' "$MAIL_PASSWD_FILE" | sed -n 1p || true)"
   [[ -n "$hash" ]] || lib_die "Could not read the stored password of ${a}" "" "lomp mail box passwd ${a}"
   lib_mail_passwd_set "$a" "$hash" "$q"
   lib_ok "Quota of ${a} is now ${q}"
@@ -2891,7 +2891,7 @@ lib_mail_box_list_main() {   # [domain]
     q="$(lib_mail_box_quota "$a")"
     used="-"
     if lib_have doveadm && (( ! OPT_DRY_RUN )); then
-      used="$(doveadm -f tab quota get -u "$a" 2>/dev/null | awk -F'\t' '$2=="STORAGE"{print $3}' | head -1 || true)"
+      used="$(doveadm -f tab quota get -u "$a" 2>/dev/null | awk -F'\t' '$2=="STORAGE"{print $3}' | sed -n 1p || true)"
       [[ -n "$used" ]] && used="$(( used / 1024 )) MB"
     fi
     printf '  %-34s %-10s %s\n' "$a" "$q" "${used:--}"
@@ -3025,7 +3025,7 @@ lib_mail_domain_register() {   # domain
   # month would otherwise get exactly the name resolvers still hold the old key under.
   # "<domain>.<timestamp>": the digit after the dot is what keeps example.com from reading the
   # archive of example.com.tr, whose name starts the same way.
-  old="$(ls -1dt "${MAIL_DOMAINS_GONE_DIR}/${d}."[0-9]* 2>/dev/null | head -n 1 || true)"
+  old="$(ls -1dt "${MAIL_DOMAINS_GONE_DIR}/${d}."[0-9]* 2>/dev/null | sed -n 1p || true)"
   if [[ -n "$old" && -s "${old}/domain.json" ]]; then
     used="$(jq -c '.mail.selectors_used // []' "${old}/domain.json" 2>/dev/null || true)"
     [[ "$used" == \[*\] ]] || used="[]"
@@ -3393,7 +3393,7 @@ lib_mail_dns_check() {   # domain -> 0 when everything is in place
         # number, and the lowest number is where the mail goes: "ours is in the list" is
         # not the question
         want="${v#* }"; want="${want%.}"
-        best="$(sort -n <<<"$got" | head -1 | awk '{print $2}' | sed 's/[.]$//')"
+        best="$(sort -n <<<"$got" | sed -n 1p | awk '{print $2}' | sed 's/[.]$//')"
         count="$(grep -c . <<<"$got" || true)"
         if [[ "$best" == "$want" ]]; then
           _mail_dns_say "$C_GRN" "$t" "$n" "ok"
@@ -4036,7 +4036,7 @@ lib_mail_backup_latest() {   # domain
   local f=""
   # an encrypted one is an archive like any other: left out of this list, a server whose
   # backups are all made with --encrypt had no mail archive a restore would ever find
-  f="$(ls -1t "${BACKUP_ROOT}/${1}/${1}-mail-"[0-9]*.tar.gz "${BACKUP_ROOT}/${1}/${1}-mail-"[0-9]*.tar.gz.enc 2>/dev/null | head -1 || true)"
+  f="$(ls -1t "${BACKUP_ROOT}/${1}/${1}-mail-"[0-9]*.tar.gz "${BACKUP_ROOT}/${1}/${1}-mail-"[0-9]*.tar.gz.enc 2>/dev/null | sed -n 1p || true)"
   [[ -n "$f" ]] || return 1
   printf '%s' "$f"
 }
