@@ -3284,6 +3284,51 @@ lib_mail_dns_json() {   # domain
                    proxied: (.[4] // "" | . == "proxied")} ]}'
 }
 
+# A TXT value the way a zone file holds it: quoted, and in pieces of 255 bytes at most - a DKIM
+# key is longer than one string may be.
+_mail_dns_zone_txt() {   # value
+  local s="$1" piece="" out=""
+  while :; do
+    piece="${s:0:255}"; s="${s:255}"
+    piece="${piece//\\/\\\\}"; piece="${piece//\"/\\\"}"
+    out+="\"${piece}\""
+    [[ -n "$s" ]] || break
+    out+=" "
+  done
+  printf '%s' "$out"
+}
+
+# The same records as a BIND zone file, for a provider that imports one (Cloudflare: DNS >
+# Records > Import and Export) instead of having every record typed in. Nothing but the file
+# goes to standard output, so it can be redirected. A record that has no value yet (no public
+# address, no DKIM key) is left out and said so in a comment: an import must not create it.
+lib_mail_dns_zone() {   # domain
+  local d="$1" t="" n="" v="" note="" px="" ttl="" tag=""
+  printf '; Mail records of %s - lomp mail dns %s --zone\n' "$d" "$d"
+  printf '; Import adds records and replaces none: if the zone already has an MX or an SPF (TXT\n'
+  printf '; "v=spf1 ...") record, remove the old one - two SPF records are the same as none.\n'
+  printf '; At Cloudflare leave "Proxy imported DNS records" off: mail records are DNS only.\n'
+  # shellcheck disable=SC2016
+  printf '$ORIGIN %s.\n' "$d"
+  while IFS=$'\t' read -r t n v note px; do
+    [[ -n "$t" ]] || continue
+    if [[ "$v" == "<"* ]]; then
+      printf '; left out: %s %s - %s\n' "$t" "$n" "$note"
+      continue
+    fi
+    ttl=3600; tag=false
+    if [[ "$px" == "proxied" ]]; then
+      # a proxied record has no TTL of its own (1 is "automatic"); the import brings it in as
+      # DNS only unless the tag is honoured, and then the cloud is switched on by hand
+      ttl=1; tag=true
+      printf '; %s is a web site: it is the one record here that belongs behind the proxy (orange cloud)\n' "$n"
+    fi
+    [[ "$t" == "TXT" ]] && v="$(_mail_dns_zone_txt "$v")"
+    printf '%s.\t%s\tIN\t%s\t%s ; cf_tags=cf-proxied:%s\n' "$n" "$ttl" "$t" "$v" "$tag"
+  done < <(_mail_dns_records "$d")
+  return 0
+}
+
 # What DNS actually says today. Asked of the zone's own name servers, because a record that
 # was added a minute ago is not in a cache yet and "not there" and "wrong" are different
 # answers to an operator.
@@ -3684,6 +3729,7 @@ Kullanım: lomp mail <command>
   alias del <alias@domain> | alias list [domain]
 
   dns <domain> [--json] [--check]       DNS'e ne konacağı ve orada olup olmadığı
+  dns <domain> --zone                   aynı kayıtlar, içe aktarılacak bir BIND zone dosyası olarak
   dns <domain> --apply [--replace-mx]   saklanan token ile Cloudflare'e yazar
   cert [domain]                         gelmemiş bir sertifikayı yeniden ister
 
@@ -3741,6 +3787,7 @@ Usage: lomp mail <command>
   alias del <alias@domain> | alias list [domain]
 
   dns <domain> [--json] [--check]       what to put in DNS, and whether it is there yet
+  dns <domain> --zone                   the same records as a BIND zone file, to import
   dns <domain> --apply [--replace-mx]   write it into Cloudflare with the stored token
   cert [domain]                         ask again for a certificate that did not come
 
@@ -3792,7 +3839,7 @@ _mail_alias_cmd() {
 }
 
 _mail_dns_cmd() {
-  local d="" a="" check=0 apply=0 replace=""
+  local d="" a="" check=0 apply=0 replace="" zone=0
   _mail_domain_arg "${1:-}" "lomp mail dns example.com"
   d="$MAIL_ARG_DOMAIN"; shift || true
   lib_mail_domain_known "$d" || lib_die "${d} is not a domain of this server" "" "lomp mail domain list"
@@ -3803,10 +3850,12 @@ _mail_dns_cmd() {
       --apply) apply=1 ;;
       --replace-mx) replace="--replace-mx"; apply=1 ;;
       --json)  OPT_JSON=1 ;;
+      --zone)  zone=1 ;;
       *) lib_die "Unknown option for 'mail dns': ${a}" "" "lomp mail dns example.com --check" ;;
     esac
   done
   if (( OPT_JSON )); then lib_mail_dns_json "$d"; return 0; fi
+  if (( zone )); then lib_mail_dns_zone "$d"; return 0; fi
   if (( apply )); then
     lib_mail_domain_enabled "$d" || lib_die "Mail is not on for ${d}" "" "lomp mail enable ${d}"
     lib_mail_dns_apply "$d" "$replace" || exit 1

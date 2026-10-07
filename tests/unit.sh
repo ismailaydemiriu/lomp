@@ -3346,6 +3346,37 @@ assert_has "a DMARC record that starts gently" "v=DMARC1; p=none;" "$_dns"
 assert_has "and says what must never be proxied" "DNS only" "$_dns"
 assert_eq  "every row has four fields" 0 "$(awk -F'\t' 'NF != 4' <<<"$_dns" | wc -l | tr -d ' ')"
 assert_true "the JSON says the same" bash -c "jq -e '.records | length >= 5' <<<'$(lib_mail_dns_json alpha.example)' >/dev/null"
+# The same records as a zone file: nine records typed into a provider's form one by one is
+# where a DKIM key gets a character wrong, and Cloudflare imports a BIND file in one upload.
+_zone="$(lib_mail_dns_zone alpha.example)"
+assert_has "the zone file names its origin"      '$ORIGIN alpha.example.' "$_zone"
+assert_has "the MX record, with its dots"        $'alpha.example.\t3600\tIN\tMX\t10 mail.alpha.example.' "$_zone"
+assert_has "a TXT value is quoted"               $'alpha.example.\t3600\tIN\tTXT\t"v=spf1 ip4:' "$_zone"
+assert_has "an SRV record keeps its target"      $'_imaps._tcp.alpha.example.\t3600\tIN\tSRV\t0 1 993 mail.alpha.example.' "$_zone"
+assert_has "and it warns about a second SPF"     "two SPF records are the same as none" "$_zone"
+assert_eq  "every record line has five fields"   0 "$(grep -v '^[;$]' <<<"$_zone" | awk -F'\t' 'NF != 5' | wc -l | tr -d ' ')"
+_zt_long="$(printf 'k%.0s' {1..600})"
+assert_eq  "a long value is cut into strings of 255" "255 255 90" \
+  "$(_mail_dns_zone_txt "$_zt_long" | grep -o '"[^"]*"' | awk '{ printf "%s%d", (NR > 1 ? " " : ""), length($0) - 2 }')"
+assert_eq  "and loses nothing on the way"        "$_zt_long" "$(_mail_dns_zone_txt "$_zt_long" | sed 's/" "//g; s/^"//; s/"$//')"
+assert_eq  "a short one stays one string"        '"v=spf1 ip4:203.0.113.9 ~all"' "$(_mail_dns_zone_txt 'v=spf1 ip4:203.0.113.9 ~all')"
+assert_eq  "a quote inside it is escaped"        '"say \"hi\""' "$(_mail_dns_zone_txt 'say "hi"')"
+_zone="$(
+  _mail_dns_records() {
+    printf 'A\tmail.%s\t<the IPv4 address of this server>\tnote one\n' "$1"
+    printf 'MX\t%s\t10 mail.%s.\tnote two\n' "$1" "$1"
+    printf 'A\twebmail.%s\t203.0.113.9\ta web site\tproxied\n' "$1"
+  }
+  lib_mail_dns_zone alpha.example
+)"
+assert_lacks "a record that has no value yet is not imported" $'IN\tA\t<' "$_zone"
+assert_has   "and the file says it was left out"   "; left out: A mail.alpha.example - note one" "$_zone"
+assert_has   "the webmail is the one proxied record" $'webmail.alpha.example.\t1\tIN\tA\t203.0.113.9 ; cf_tags=cf-proxied:true' "$_zone"
+assert_has   "everything else is DNS only"         $'10 mail.alpha.example. ; cf_tags=cf-proxied:false' "$_zone"
+assert_has   "mail dns takes --zone"               '--zone)' "$(declare -f _mail_dns_cmd)"
+assert_has   "the menu writes the file"            'mail dns "$domain" --zone > "$file"' "$(declare -f _menu_mail_dns)"
+assert_has   "and item 7 of the mail menu leads to it" '_menu_mail_dns' "$(declare -f _menu_mail)"
+unset _zone _zt_long
 # the public half is read from the private key: generating it again would replace a key whose
 # public half is already published, and every signature after that would fail
 assert_has "the DKIM record comes from the key on disk" "openssl rsa" "$(declare -f lib_mail_dkim_public)"

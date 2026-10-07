@@ -117,6 +117,8 @@ KOMUTLAR
                                 o kutu onun adına da gönderebilir. Takma ad olarak "@<domain>" bir
                                 catch-all olur: alan adının kendi satırı olmayan her adresi
   mail dns <domain> [--check] [--json]   DNS'e ne yazılacağı ve orada olup olmadığı
+  mail dns <domain> --zone      Aynı kayıtlar BIND zone dosyası olarak: sağlayıcınız (Cloudflare:
+                                DNS > Records > Import) tek tek yazmak yerine içe aktarır
   mail dns <domain> --apply [--replace-mx]
                                 O kayıtları saklanan token ile Cloudflare'e yazar.
                                 Yabancı bir MX veya ikinci bir SPF kaydı bildirilir, asla üzerine
@@ -381,6 +383,8 @@ COMMANDS
                                 goes to may also send as it. "@<domain>" as the alias is a
                                 catch-all: every address of the domain with no line of its own
   mail dns <domain> [--check] [--json]   What to put in DNS, and whether it is there
+  mail dns <domain> --zone      The same records as a BIND zone file: your provider (Cloudflare:
+                                DNS > Records > Import) takes it in instead of each being typed
   mail dns <domain> --apply [--replace-mx]
                                 Write those records into Cloudflare with the stored token.
                                 A foreign MX or a second SPF record is reported, never
@@ -1422,6 +1426,28 @@ _menu_mail_add_domain() {
   _menu_run "${args[@]}"
 }
 
+# The records of a domain: on the screen with what DNS says today, or in a file for a provider
+# that imports a zone file - at Cloudflare that is one upload instead of nine records typed in.
+_menu_mail_dns() {
+  local domain="" what="" file=""
+  domain="$(_menu_pick_mail_domain)" || { _menu_pause; return 0; }
+  printf '\n'
+  _menu_opt 1 "Show the records, and whether each one is in DNS already"
+  _menu_opt 2 "Write them into a file your DNS provider imports (Cloudflare: DNS > Records > Import)"
+  _menu_ask what "Choice" "1"
+  if [[ "$what" != "2" ]]; then _menu_run mail dns "$domain" --check; return 0; fi
+  file="${HOME:-/root}/${domain}.zone.txt"
+  if "$SCRIPT_PATH" mail dns "$domain" --zone >"$file" 2>/dev/null && [[ -s "$file" ]]; then
+    _menu_printf '\n  The records are in %s\n' "$file"
+    _menu_printf '  Take the file to your computer and give it to your DNS provider (Cloudflare: DNS > Records > Import and Export).\n'
+    _menu_printf '  An MX or SPF record the domain already has stays beside the new one: remove the old one.\n'
+  else
+    rm -f "$file"
+    _menu_printf '%sThe file could not be written; this shows why: %s mail dns %s --zone%s\n' "$C_YEL" "$MENU_CMD" "$domain" "$C_RST"
+  fi
+  _menu_pause
+}
+
 _menu_mail_webmail() {
   local what="" domain=""
   printf '\n'
@@ -1518,8 +1544,7 @@ _menu_mail() {   # [top]
            _menu_ask target "Where should it go? (an address, or several with commas)"
            [[ -n "$target" ]] && _menu_run mail alias add "$alias" "$target"
          fi ;;
-      7) domain="$(_menu_pick_mail_domain)" || { _menu_pause; continue; }
-         _menu_run mail dns "$domain" --check ;;
+      7) _menu_mail_dns ;;
       8) _menu_run mail test ;;
       9) _menu_mail_webmail ;;
       10) _menu_mail_off ;;
@@ -1962,6 +1987,12 @@ MENU_TR['Mailboxes: who has one, its size, how full it is']='Posta kutuları: ki
 MENU_TR['Add a mailbox']='Posta kutusu ekle'
 MENU_TR['Change a mailbox password']='Posta kutusu şifresini değiştir'
 MENU_TR['Aliases: an address that is delivered into another mailbox']='Takma adlar: başka bir posta kutusuna teslim edilen adres'
+MENU_TR['Show the records, and whether each one is in DNS already']='Kayıtları ve her birinin DNS'\''te olup olmadığını göster'
+MENU_TR['Write them into a file your DNS provider imports (Cloudflare: DNS > Records > Import)']='DNS sağlayıcınızın içe aktaracağı bir dosyaya yaz (Cloudflare: DNS > Records > Import)'
+MENU_TR['\n  The records are in %s\n']='\n  Kayıtlar şu dosyada: %s\n'
+MENU_TR['  Take the file to your computer and give it to your DNS provider (Cloudflare: DNS > Records > Import and Export).\n']='  Dosyayı bilgisayarınıza alın ve DNS sağlayıcınıza verin (Cloudflare: DNS > Records > Import and Export).\n'
+MENU_TR['  An MX or SPF record the domain already has stays beside the new one: remove the old one.\n']='  Alan adının zaten var olan MX ya da SPF kaydı yenisinin yanında kalır: eskisini silin.\n'
+MENU_TR['%sThe file could not be written; this shows why: %s mail dns %s --zone%s\n']='%sDosya yazılamadı; nedenini şu gösterir: %s mail dns %s --zone%s\n'
 MENU_TR['What to put in DNS (and whether it is there)']='DNS'\''e ne yazılmalı (ve yazılmış mı)'
 MENU_TR['Can this server send? (reverse DNS, port 25)']='Bu sunucu posta gönderebiliyor mu? (ters DNS, port 25)'
 MENU_TR['Webmail (on or off for a domain, or what runs)']='Webmail (bir alan adı için aç/kapat ya da ne çalışıyor)'
