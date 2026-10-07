@@ -62,7 +62,7 @@ lib_backup_configure_remote() {   # [--type rsync|rclone --target X]
   if [[ "$type" == "rclone" ]]; then
     lib_apt_install rclone || lib_die "rclone installation failed" "" "apt-get install rclone"
     local remote="${target%%:*}"
-    if (( ! OPT_DRY_RUN )) && ! rclone listremotes 2>/dev/null | grep -qx "${remote}:"; then
+    if (( ! OPT_DRY_RUN )) && ! rclone listremotes 2>/dev/null | lib_grepq -x "${remote}:"; then
       lib_warn "rclone remote '${remote}' is not configured yet."
       if lib_is_interactive; then rclone config; else lib_die "rclone remote '${remote}' missing" "run 'rclone config' first" "rclone config"; fi
     fi

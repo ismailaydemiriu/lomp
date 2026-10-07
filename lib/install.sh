@@ -375,8 +375,8 @@ lib_install_ufw() {
       ;;
   esac
   if (( ! OPT_DRY_RUN )); then
-    if ! ufw status 2>/dev/null | head -n1 | grep -q 'Status: active'; then
-      ufw show added 2>/dev/null | grep -qE "allow ${SYS_SSH_PORTS%% *}/tcp" || lib_die "Refusing to enable UFW without an SSH allow rule" "SSH port ${SYS_SSH_PORTS} rule missing" "add it manually: ufw allow ${SYS_SSH_PORTS%% *}/tcp"
+    if ! ufw status 2>/dev/null | sed -n 1p | lib_grepq 'Status: active'; then
+      ufw show added 2>/dev/null | lib_grepq -E "allow ${SYS_SSH_PORTS%% *}/tcp" || lib_die "Refusing to enable UFW without an SSH allow rule" "SSH port ${SYS_SSH_PORTS} rule missing" "add it manually: ufw allow ${SYS_SSH_PORTS%% *}/tcp"
       lib_run ufw --force enable || lib_die "ufw enable failed" "" "check 'ufw status' and the log"
     fi
     lib_systemctl enable ufw >/dev/null 2>&1 || true
@@ -889,7 +889,7 @@ _panel_apply_bind() {   # address
   (( OPT_DRY_RUN )) && return 0
   sleep 1
   if [[ "$addr" == "127.0.0.1" ]]; then
-    if ss -tlnH 2>/dev/null | awk '{print $4}' | grep -qE "^(0\.0\.0\.0|\*|\[::\]):${ADMIN_PORT}\$"; then
+    if ss -tlnH 2>/dev/null | awk '{print $4}' | lib_grepq -E "^(0\.0\.0\.0|\*|\[::\]):${ADMIN_PORT}\$"; then
       lib_ols_restart; lib_ols_wait_ready 40 || lib_warn "OpenLiteSpeed took long to come back; check systemctl status lsws"
     fi
   else

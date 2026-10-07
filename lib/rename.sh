@@ -1127,7 +1127,7 @@ lib_domain_rename_main() {
     oh="$(lib_domain_home "$old")"; seek=("${oh}/" "${oh}'" "${oh}\""); what="the old path ${oh}"
   fi
   for a in "${seek[@]}"; do greps+=(-e "$a"); done
-  if (( app )) && lib_app_env_json "$new" | grep -qF "${greps[@]}"; then
+  if (( app )) && lib_app_env_json "$new" | lib_grepq -F "${greps[@]}"; then
     lib_warn "A variable of the application still names ${what}: setup.sh app env ${new} list"
   fi
   left="$(_domain_rename_leftovers "${seek[@]}")"

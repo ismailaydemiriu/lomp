@@ -829,7 +829,7 @@ lib_mail_users_ensure() {
   if (( ! OPT_DRY_RUN )); then
     for u in _rspamd postfix; do
       id -u "$u" >/dev/null 2>&1 || continue
-      id -nG "$u" 2>/dev/null | tr ' ' '\n' | grep -qx "$MAIL_MILTER_GROUP" && continue
+      id -nG "$u" 2>/dev/null | tr ' ' '\n' | lib_grepq -x "$MAIL_MILTER_GROUP" && continue
       # a process learns its groups when it starts, so this has to reach a restart
       MAIL_CHANGED=1
       lib_run usermod -aG "$MAIL_MILTER_GROUP" "$u" || lib_warn "could not put ${u} in the ${MAIL_MILTER_GROUP} group"
@@ -1825,7 +1825,7 @@ lib_mail_boxes() {   # [domain]
   fi
 }
 
-lib_mail_box_exists() { lib_mail_boxes | grep -qxF "${1,,}"; }
+lib_mail_box_exists() { lib_mail_boxes | lib_grepq -xF "${1,,}"; }
 
 # ...or one that is only put aside: "mail disable" takes a domain's lines out of the live file
 # and keeps them, hashes and all, for "mail enable" to bring back. Such a mailbox is off, not

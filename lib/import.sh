@@ -827,7 +827,7 @@ dumper="$(command -v mariadb-dump 2>/dev/null || command -v mysqldump 2>/dev/nul
 client="$(command -v mariadb 2>/dev/null || command -v mysql 2>/dev/null || true)"
 [ -n "$dumper" ] || { echo "lomp-import: no mysqldump or mariadb-dump on this server" >&2; exit 3; }
 opts="--single-transaction --quick --triggers --default-character-set=utf8mb4"
-if "$dumper" --help 2>/dev/null | grep -q -- '--no-tablespaces'; then opts="$opts --no-tablespaces"; fi
+if "$dumper" --help 2>/dev/null | grep -- '--no-tablespaces' >/dev/null; then opts="$opts --no-tablespaces"; fi
 if [ -n "$client" ] && "$client" -N -B -e 'SELECT 1' "$DB" >/dev/null 2>&1; then
   "$dumper" $opts --routines "$DB" | gzip -c
   exit $?
@@ -1420,7 +1420,7 @@ lib_import_ssl() {   # domain  (the site is here)
     lib_warn "The certificate of ${domain} was not brought: ${why}. The site answers over HTTP until it has one (setup.sh renew-ssl ${domain})"
     rm -rf "$work"; return 0
   fi
-  if (( D_WWW )) && ! openssl x509 -noout -ext subjectAltName -in "${work}/fullchain.pem" 2>/dev/null | grep -qiE "DNS:(www\.${domain//./\\.}|\*\.${domain//./\\.})([, ]|\$)"; then
+  if (( D_WWW )) && ! openssl x509 -noout -ext subjectAltName -in "${work}/fullchain.pem" 2>/dev/null | lib_grepq -iE "DNS:(www\.${domain//./\\.}|\*\.${domain//./\\.})([, ]|\$)"; then
     lib_warn "The certificate of ${domain} does not name www.${domain}: that name will show a certificate warning until the site has one of its own"
   fi
   dst="${SSL_DEPLOY_DIR}/${domain}"

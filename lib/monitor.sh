@@ -370,20 +370,20 @@ _doc_check_services() {
   else _doc_add WARN "redis" "not installed"; fi
   if lib_pkg_installed fail2ban; then
     if lib_service_active fail2ban; then
-      if fail2ban-client status 2>/dev/null | grep -q 'sshd'; then _doc_add OK "fail2ban" "active, sshd jail loaded"; else _doc_add WARN "fail2ban" "active but sshd jail missing"; fi
+      if fail2ban-client status 2>/dev/null | lib_grepq 'sshd'; then _doc_add OK "fail2ban" "active, sshd jail loaded"; else _doc_add WARN "fail2ban" "active but sshd jail missing"; fi
     else _doc_add FAIL "fail2ban" "service inactive"; fi
   else _doc_add WARN "fail2ban" "not installed"; fi
   if lib_have ufw; then
-    if ufw status 2>/dev/null | head -n1 | grep -q 'Status: active'; then
+    if ufw status 2>/dev/null | sed -n 1p | lib_grepq 'Status: active'; then
       local p="" missing=()
-      for p in $SYS_SSH_PORTS; do ufw status 2>/dev/null | grep -qE "^${p}/tcp" || missing+=("$p"); done
+      for p in $SYS_SSH_PORTS; do ufw status 2>/dev/null | lib_grepq -E "^${p}/tcp" || missing+=("$p"); done
       ((${#missing[@]} == 0)) && _doc_add OK "ufw" "active, SSH port(s) ${SYS_SSH_PORTS} allowed" || _doc_add WARN "ufw" "active but SSH port(s) ${missing[*]} not explicitly allowed"
     else _doc_add FAIL "ufw" "firewall inactive"; fi
   else _doc_add WARN "ufw" "not installed"; fi
   local admin_rules=""; admin_rules="$(lib_ufw_port_rule_numbers "$ADMIN_PORT" 2>/dev/null | wc -l | tr -d ' ')"
   if lib_ols_admin_tunnel_only && (( admin_rules == 0 )); then
     _doc_add OK "webadmin exposure" "closed to the internet (SSH tunnel only)"
-  elif ufw status 2>/dev/null | grep -qE "^${ADMIN_PORT}/tcp[[:space:]]+ALLOW IN[[:space:]]+Anywhere"; then
+  elif ufw status 2>/dev/null | lib_grepq -E "^${ADMIN_PORT}/tcp[[:space:]]+ALLOW IN[[:space:]]+Anywhere"; then
     _doc_add WARN "webadmin exposure" "port ${ADMIN_PORT} accepts connections from any address (setup.sh panel close)"
   else
     _doc_add OK "webadmin exposure" "restricted (${admin_rules} firewall rule(s) for port ${ADMIN_PORT})"

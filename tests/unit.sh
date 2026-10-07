@@ -893,6 +893,34 @@ assert_eq "missing CLI exits 0" 0 "$(run_isolated lib_php_ini_paths 8.3)"
 source "$ROOT/lib/php.sh"
 
 # =============================================================================
+section "a command that writes on after the match (regression: SIGPIPE read as no)"
+# What systemctl list-unit-files does: the table, then the legend, in two writes. With grep -q
+# gone after the first, the second one killed it, pipefail made that "no such service", and a
+# first install on a small server never restarted Postfix: "nothing is listening on port 587".
+_sp_exists() {
+  systemctl() { printf 'UNIT FILE       STATE   PRESET\npostfix.service enabled enabled\n'; sleep 0.3; printf '\n1 unit files listed.\n'; }
+  lib_service_exists "$1"
+}
+_sp_box() {
+  lib_mail_boxes() { printf 'info@site.example\n'; sleep 0.3; printf 'sales@site.example\n'; }
+  lib_mail_box_exists "$1"
+}
+_sp_port() {
+  ss() { printf 'LISTEN 0 100 0.0.0.0:587 0.0.0.0:*\n'; sleep 0.3; printf 'LISTEN 0 100 0.0.0.0:993 0.0.0.0:*\n'; }
+  awk() { local l=""; while IFS= read -r l; do set -- $l; printf '%s\n' "$4"; done; }
+  lib_port_listening "$1"
+}
+assert_eq "a service whose legend comes late exists"      0 "$(run_isolated _sp_exists postfix)"
+assert_eq "a service that is not in the table does not"   1 "$(run_isolated _sp_exists dovecot)"
+assert_eq "a mailbox that is not the last one exists"     0 "$(run_isolated _sp_box info@site.example)"
+assert_eq "a mailbox that is not there does not"          1 "$(run_isolated _sp_box nobody@site.example)"
+assert_eq "a port that is not the last one listens"       0 "$(run_isolated _sp_port 587)"
+assert_eq "a port nothing listens on does not"            1 "$(run_isolated _sp_port 465)"
+# grep -q at the end of a pipeline is that bug waiting for a slower machine: lib_grepq reads on
+assert_eq "no pipeline in lomp ends in grep -q"           "" "$(grep -nE '[^|]\| *grep -q' "$ROOT/setup.sh" "$ROOT"/lib/*.sh || true)"
+unset -f _sp_exists _sp_box _sp_port
+
+# =============================================================================
 section "renderers must exit 0 (pipefail safety)"
 # Every renderer is used as "renderer | lib_write_file". If a renderer's last statement is a
 # conditional that turns out false, the renderer exits 1 and pipefail aborts the installer.

@@ -77,7 +77,7 @@ lib_system_analyze() {
   SYS_PRIMARY_IPV4="$(lib_primary_ipv4 || true)"
   SYS_IPV6=0
   if [[ -f /proc/net/if_inet6 ]] && [[ "$(sysctl -n net.ipv6.conf.all.disable_ipv6 2>/dev/null || echo 1)" == "0" ]] \
-     && ip -6 addr show scope global 2>/dev/null | grep -q inet6; then
+     && ip -6 addr show scope global 2>/dev/null | lib_grepq inet6; then
     SYS_IPV6=1
   fi
   if (( ! nonet )); then

@@ -621,7 +621,15 @@ lib_set_kv() {
 # =============================================================================
 export DEBIAN_FRONTEND=noninteractive
 
-lib_pkg_installed() { dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q 'install ok installed'; }
+# "grep -q" for the end of a pipeline: it reads its input to the last line. grep -q leaves at
+# the first match, and a command that has more to write after it is killed by SIGPIPE - which
+# pipefail turns into "no match". systemctl list-unit-files writes its table and then its
+# legend, so on a server with one busy core "is there a postfix.service" came back no, Postfix
+# was never restarted with the configuration lomp had written, and the install stopped at
+# "nothing is listening on port 587".
+lib_grepq() { grep "$@" >/dev/null; }
+
+lib_pkg_installed() { dpkg-query -W -f='${Status}' "$1" 2>/dev/null | lib_grepq 'install ok installed'; }
 lib_pkg_available() { apt-cache show "$1" >/dev/null 2>&1; }
 lib_pkg_version()   { dpkg-query -W -f='${Version}' "$1" 2>/dev/null || true; }
 
@@ -652,7 +660,7 @@ lib_apt_key_install() {
   mkdir -p /etc/apt/keyrings && chmod 0755 /etc/apt/keyrings
   tmp="$(lib_mktemp)"
   curl -fsSL --retry 3 --max-time 60 -o "$tmp" "$url" || lib_die "Could not download signing key ${url}" "network problem" "check connectivity / DNS"
-  if head -c 40 "$tmp" | grep -q 'BEGIN PGP PUBLIC KEY'; then
+  if head -c 40 "$tmp" | lib_grepq 'BEGIN PGP PUBLIC KEY'; then
     gpg --dearmor --yes -o "$dest" "$tmp" >/dev/null 2>&1 || lib_die "gpg --dearmor failed for ${url}" "invalid key data" "retry later"
   else
     cp "$tmp" "$dest"
@@ -668,7 +676,7 @@ lib_systemctl() {   # lib_systemctl action unit [unit...]
 }
 lib_service_active()  { systemctl is-active --quiet "$1" 2>/dev/null; }
 lib_service_enabled() { systemctl is-enabled --quiet "$1" 2>/dev/null; }
-lib_service_exists()  { systemctl list-unit-files "$1.service" 2>/dev/null | grep -q "^$1.service"; }
+lib_service_exists()  { systemctl list-unit-files "$1.service" 2>/dev/null | lib_grepq "^$1.service"; }
 
 lib_ufw_rule() {    # lib_ufw_rule allow 80/tcp comment 'x'   (idempotent by ufw itself)
   if (( OPT_DRY_RUN )); then (( OPT_QUIET )) || { lib_tr "would run: ufw $*"; printf '%s[dry ]%s  %s\n' "$C_MAG" "$C_RST" "$LIB_TR"; }; return 0; fi
@@ -1142,8 +1150,8 @@ lib_ssh_ports() {
 
 lib_port_listening() {   # lib_port_listening 443 [tcp|udp]
   local port="$1" proto="${2:-tcp}"
-  if [[ "$proto" == "udp" ]]; then ss -ulnH 2>/dev/null | awk '{print $5}' | grep -qE "[:.]${port}\$"
-  else ss -tlnH 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${port}\$"; fi
+  if [[ "$proto" == "udp" ]]; then ss -ulnH 2>/dev/null | awk '{print $5}' | lib_grepq -E "[:.]${port}\$"
+  else ss -tlnH 2>/dev/null | awk '{print $4}' | lib_grepq -E "[:.]${port}\$"; fi
 }
 
 # Whether a port answers an address the internet can reach. A loopback listener is not one:
@@ -1153,7 +1161,7 @@ lib_port_listening_public() {   # lib_port_listening_public 10587 [tcp|udp]
   local port="$1" proto="${2:-tcp}" f=""
   if [[ "$proto" == "udp" ]]; then f="$(ss -ulnH 2>/dev/null | awk '{print $5}' || true)"
   else f="$(ss -tlnH 2>/dev/null | awk '{print $4}' || true)"; fi
-  grep -E "[:.]${port}\$" <<<"$f" | grep -qvE '^(127\.|\[?::1\]?)' || return 1
+  grep -E "[:.]${port}\$" <<<"$f" | lib_grepq -vE '^(127\.|\[?::1\]?)' || return 1
   return 0
 }
 
