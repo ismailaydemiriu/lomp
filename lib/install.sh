@@ -1247,7 +1247,10 @@ lib_optimize_main() {
     lib_cf_enabled && lib_cf_tx_apply 1
     if ! cmp -s "$OLS_TX_FILE" "$LSWS_CONF"; then
       printf '\n%s--- OpenLiteSpeed (%s)%s\n' "$C_BLD" "$LSWS_CONF" "$C_RST"
-      lib_ols_tx_diff | tail -n +3 | head -n 80
+      # sed reads to the end. head left after its 80 lines, tail was killed writing the rest
+      # (SIGPIPE), and pipefail made that this command's failure: "optimize" ended here, with
+      # "command exited with status 141", whenever it had more than 80 lines to show.
+      lib_ols_tx_diff | tail -n +3 | sed -n '1,80p'
       changes+=(ols)
     fi
     lib_ols_tx_abort

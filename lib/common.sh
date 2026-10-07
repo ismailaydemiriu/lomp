@@ -931,12 +931,18 @@ lib_domain_arg_ok() { lib_domain_valid "$1" || lib_domain_registered "$1"; }
 lib_domain_home()      { printf '%s/%s' "$SITES_ROOT" "$1"; }
 lib_domain_log_dir()   { printf '%s/%s' "$SITES_LOG_ROOT" "$1"; }
 
+# No command is started per name. The list is read through a process substitution, and a loop
+# that returns at its first hit leaves the rest of it written to nobody: a "basename" killed
+# that way (SIGPIPE) was a failure in a shell of its own, where the ERR trap said "FAILED:
+# command exited with status 141" in the middle of a "remove" or "restore" that was going well,
+# and ran whatever rollback steps were registered.
 lib_domains_list() {   # prints registered domains, one per line
   local d=""
   [[ -d "$STATE_DIR/domains" ]] || return 0
   for d in "$STATE_DIR"/domains/*/domain.json; do
     [[ -s "$d" ]] || continue
-    basename "$(dirname "$d")"
+    d="${d%/domain.json}"
+    printf '%s\n' "${d##*/}"
   done
 }
 

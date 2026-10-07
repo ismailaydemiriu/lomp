@@ -918,7 +918,92 @@ assert_eq "a port that is not the last one listens"       0 "$(run_isolated _sp_
 assert_eq "a port nothing listens on does not"            1 "$(run_isolated _sp_port 465)"
 # grep -q at the end of a pipeline is that bug waiting for a slower machine: lib_grepq reads on
 assert_eq "no pipeline in lomp ends in grep -q"           "" "$(grep -nE '[^|]\| *grep -q' "$ROOT/setup.sh" "$ROOT"/lib/*.sh || true)"
-unset -f _sp_exists _sp_box _sp_port
+
+# The same with a reader that leaves after so many lines. "optimize" showed what it would change
+# in httpd_config.conf through "head -n 80": with more than that to show, tail was killed
+# writing the rest, pipefail made that the command's own failure, and optimize ended there with
+# "command exited with status 141" - 300 runs of 300 on one CPU and 287 on twenty, with the
+# configuration the OpenLiteSpeed package ships (a proposal of 161 lines).
+_sp_optimize() {
+  lib_require_tools() { :; }; lib_require_installed() { :; }; lib_ols_service_repair() { :; }
+  lib_system_analyze() { :; }; lib_system_report() { :; }; lib_system_profile() { :; }; lib_system_profile_report() { :; }
+  _opt_diff() { cat >/dev/null; return 1; }      # nothing else differs
+  lib_php_installed_versions() { :; }; lib_db_installed() { return 1; }; lib_redis_installed() { return 1; }
+  lib_ols_is_installed() { return 0; }; lib_cf_enabled() { return 1; }
+  lib_ols_tx_begin() { OLS_TX_FILE="$TMP/sp-tx"; printf 'proposed\n' >"$OLS_TX_FILE"; }
+  lib_ols_tx_apply_server_settings() { :; }
+  lib_ols_tx_diff() { local i=0; for (( i = 1; i <= 4000; i++ )); do printf '+ line %s\n' "$i"; done; sleep 0.3; printf '+ the last line\n'; }
+  lib_confirm() { return 1; }                    # "Apply these changes?" - no
+  lib_optimize_main
+}
+assert_eq "optimize gets past a proposal of more than 80 lines" 0 "$(run_isolated _sp_optimize)"
+_sp_out="$(_sp_optimize 2>&1 || true)"
+assert_eq    "and shows eighty of them"                    80 "$(grep -c '^+ line ' <<<"$_sp_out" || true)"
+assert_has   "from the third one, as before"               $'\n+ line 3\n' "$_sp_out"
+assert_lacks "to the 82nd"                                 "+ line 83" "$_sp_out"
+# The menu's restore lists a site's archives the same way, twenty of them. Its sort was killed
+# whenever the list was longer than a pipe is deep (64 KB, some 400 archives), and "(none found
+# ...)" stood below the twenty it had just shown: 300 runs of 300 with 450 archives, 1 with 120.
+_sp_restore() {
+  _menu_pick_domain() { printf 'site.example'; }
+  _menu_ask() { :; }                             # no archive named: it ends after the list
+  find() { local i=0; for (( i = 1000; i < 3000; i++ )); do printf '  %s/site.example/site.example-2026%s.tar.gz\n' "$BACKUP_ROOT" "$i"; done; }
+  _menu_restore
+}
+_sp_out="$(_sp_restore 2>&1 || true)"
+assert_eq    "the menu shows the first twenty of a long list of archives" 20 "$(grep -c 'site.example-2026' <<<"$_sp_out" || true)"
+assert_has   "the oldest first, as before"                 "site.example-20261000.tar.gz" "$_sp_out"
+assert_lacks "and does not say that there are none"        "none found" "$_sp_out"
+
+# A list read by a loop that returns at its first hit. Every name used to come from a "basename"
+# of its own: the ones still to be written went to nobody, the first of them was killed (SIGPIPE),
+# and in a process substitution that is the failure of a shell of its own - where the ERR trap
+# said "FAILED: command exited with status 141" in the middle of a "remove" that was going well,
+# and ran the rollback steps: 300 runs of 300 with three sites on record.
+_sp_state="$TMP/sp-state"
+for _i in $(seq -w 0 39); do
+  mkdir -p "$_sp_state/domains/s${_i}.example"
+  if [[ "$_i" == "00" ]]; then printf '{"domain":"s00.example","user":"shared","proxy":{"target":"127.0.0.1:3456"}}\n' >"$_sp_state/domains/s00.example/domain.json"
+  else printf '{"domain":"s%s.example","user":"u%s"}\n' "$_i" "$_i" >"$_sp_state/domains/s${_i}.example/domain.json"; fi
+done
+_sp_asks() {   # the ERR trap as setup.sh sets it, a rollback step on record, then the question
+  trap 'lib_on_error "$?" "$LINENO" "${BASH_SOURCE[0]}" "$BASH_COMMAND"' ERR
+  STATE_DIR="$_sp_state"; LOG_FILE="$TMP/sp-log"
+  lib_rollback_push "touch '$TMP/sp-rolled'"
+  "$@"
+  sleep 0.6      # the list's shell is nobody's child any more: time for it to say what it has to
+}
+_sp_foreign() {   # what "remove" and "rename" ask about a record
+  id() { [[ "${1:-}" == "-u" ]]; }
+  getent() { printf '%s:x:1:1::/srv/elsewhere:/x\n' "${2:-}"; }
+  D_USER="shared"; D_HOME="/srv/elsewhere"
+  if lib_domain_account_foreign zz.example; then return 0; fi
+  return 1
+}
+_sp_claimed() {   # what "remove" asks about the port of the application that goes
+  local other=""
+  other="$(_app_port_claimed_by 3456 zz.example || true)"
+  [[ "$other" == "s00.example" ]]
+}
+# The configuration test is such a loop too: it returns at the first virtual host whose file is
+# missing. Its list comes from one awk, which was killed only with more names to write than a
+# pipe holds - 300 runs of 300 with 3000 virtual hosts, none with 400. It takes the list whole now.
+_sp_vhosts() {
+  LSWS_CONF="$TMP/sp-httpd.conf"; LSWS_ADMIN_CONF="$TMP/sp-none"; LSWS_VHOSTS_DIR="$TMP/sp-none"
+  printf 'virtualhost v%s {\n  configFile              conf/vhosts/v%s/vhconf.conf\n}\n' 1 1 2 2 >"$LSWS_CONF"
+  lib_ols_conf_vhosts() { printf 'v1\n'; sleep 0.3; command awk 'BEGIN { print "v2" }'; }
+  if lib_ols_config_test; then return 1; fi
+  [[ "$OLS_TEST_OUTPUT" == "virtualhost v1: configFile "*" does not exist" ]]
+}
+for _sp_q in _sp_foreign _sp_claimed _sp_vhosts; do
+  : >"$TMP/sp-log"; rm -f "$TMP/sp-rolled"
+  assert_eq    "${_sp_q#_sp_}: the first one on record is the answer"    0 "$(run_isolated _sp_asks "$_sp_q")"
+  assert_eq    "${_sp_q#_sp_}: no failure is reported from the list"     "" "$(grep 'unexpected failure' "$TMP/sp-log" || true)"
+  assert_false "${_sp_q#_sp_}: and no rollback step is run"              test -e "$TMP/sp-rolled"
+done
+assert_eq "the list itself: every site, in order" "s00.example s39.example 40" \
+  "$(STATE_DIR="$_sp_state"; lib_domains_list | sed -n '1p;$p' | tr '\n' ' '; lib_domains_list | wc -l | tr -d ' ')"
+unset -f _sp_exists _sp_box _sp_port _sp_optimize _sp_restore _sp_asks _sp_foreign _sp_claimed _sp_vhosts
 
 # =============================================================================
 section "renderers must exit 0 (pipefail safety)"

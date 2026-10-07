@@ -521,6 +521,9 @@ lib_ols_config_test() {
       lib_log_write ERROR "$OLS_TEST_OUTPUT"; return 1
     fi
   done
+  # The names are taken whole before the loop starts: it returns at the first virtual host
+  # whose file is missing, and a list still being written then - one longer than a pipe holds,
+  # some 1500 sites - was killed in a shell of its own, which reported that as a failure too.
   while read -r name; do
     [[ -n "$name" ]] || continue
     cfg="$(_ols_block_key "$LSWS_CONF" virtualhost "$name" configFile get)"
@@ -531,7 +534,7 @@ lib_ols_config_test() {
     [[ "$cfg" == *'$'* ]] && continue
     [[ "$cfg" == /* ]] || cfg="${LSWS_HOME}/${cfg}"
     if [[ ! -f "$cfg" ]]; then OLS_TEST_OUTPUT="virtualhost ${name}: configFile ${cfg} does not exist"; lib_log_write ERROR "$OLS_TEST_OUTPUT"; return 1; fi
-  done < <(lib_ols_conf_vhosts)
+  done <<<"$(lib_ols_conf_vhosts)"
   if [[ -x "$LSWS_BIN" ]]; then
     out="$(timeout 90 "$LSWS_BIN" -t 2>&1)" || rc=$?
     OLS_TEST_OUTPUT="$out"

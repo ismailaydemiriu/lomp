@@ -1783,7 +1783,9 @@ _menu_restore() {
   local domain="" file=""
   domain="$(_menu_pick_domain)" || { _menu_pause; return 0; }
   _menu_printf '\n%sAvailable archives for %s:%s\n' "$C_BLD" "$domain" "$C_RST"
-  if ! find "${BACKUP_ROOT}/${domain}" -maxdepth 1 -name '*.tar.gz*' -printf '  %p\n' 2>/dev/null | sort | head -20; then
+  # (sed reads the whole list: head left after twenty lines, and a list longer than the pipe
+  # is deep - some 400 archives - had sort killed writing the rest and "none found" said below it)
+  if ! find "${BACKUP_ROOT}/${domain}" -maxdepth 1 -name '*.tar.gz*' -printf '  %p\n' 2>/dev/null | sort | sed -n '1,20p'; then
     _menu_printf '  (none found under %s)\n' "${BACKUP_ROOT}/${domain}"
   fi
   _menu_ask file "Full path of the archive to restore"
