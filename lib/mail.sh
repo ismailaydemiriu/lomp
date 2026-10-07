@@ -3267,7 +3267,8 @@ lib_mail_dns_print() {   # domain
   while IFS=$'\t' read -r t n v note px; do
     [[ -n "$t" ]] || continue
     printf '  %-4s %-38s %s%s\n' "$t" "$n" "$v" "$( [[ "$px" == "proxied" ]] && printf '   [PROXIED]' || true)"
-    [[ -n "$note" ]] && printf '       %s%s%s\n' "$C_DIM" "$note" "$C_RST"
+    # a line of its own under the record, so it is shown in the language of the run
+    if [[ -n "$note" ]]; then lib_tr "$note"; printf '       %s%s%s\n' "$C_DIM" "$LIB_TR" "$C_RST"; fi
   done < <(_mail_dns_records "$d")
   printf '\n'
   lib_note "And one your provider sets, not your DNS: the PTR record of $(lib_mail_host)'s address"
@@ -3302,12 +3303,23 @@ _mail_dns_zone_txt() {   # value
 # Records > Import and Export) instead of having every record typed in. Nothing but the file
 # goes to standard output, so it can be redirected. A record that has no value yet (no public
 # address, no DKIM key) is left out and said so in a comment: an import must not create it.
+#
+# Every record has the same shape, the webmail's too: a TTL of its own and "DNS only". That
+# name belongs behind Cloudflare's proxy, and the file used to say so the way Cloudflare's own
+# export does (TTL 1, cf-proxied:true). After the first real import of such a file the name
+# was in the zone unproxied all the same, so the file promised what the import had not done.
+# Now it says what does happen: the record comes in like the rest, and the proxy is one click
+# afterwards - "mail dns --check" goes on saying so until it is made. Unproxied is a sound
+# way for the name to start, too: its certificate is then fetched from this server directly,
+# whatever SSL mode the zone is in.
+# The comment lines hold no parenthesis and no quote: both mean something in a zone file, and
+# an importer that is careless about them inside a comment should find none.
 lib_mail_dns_zone() {   # domain
-  local d="$1" t="" n="" v="" note="" px="" ttl="" tag=""
+  local d="$1" t="" n="" v="" note="" px="" ip="" web=0
   printf '; Mail records of %s - lomp mail dns %s --zone\n' "$d" "$d"
-  printf '; Import adds records and replaces none: if the zone already has an MX or an SPF (TXT\n'
-  printf '; "v=spf1 ...") record, remove the old one - two SPF records are the same as none.\n'
-  printf '; At Cloudflare leave "Proxy imported DNS records" off: mail records are DNS only.\n'
+  printf '; An import adds records and replaces none. Remove an MX record the zone already has, and\n'
+  printf '; an SPF record - a TXT that begins with v=spf1: two SPF records are the same as none.\n'
+  printf '; At Cloudflare leave Proxy imported DNS records off: every record here comes in DNS only.\n'
   # shellcheck disable=SC2016
   printf '$ORIGIN %s.\n' "$d"
   while IFS=$'\t' read -r t n v note px; do
@@ -3316,16 +3328,24 @@ lib_mail_dns_zone() {   # domain
       printf '; left out: %s %s - %s\n' "$t" "$n" "$note"
       continue
     fi
-    ttl=3600; tag=false
+    [[ "$t" == "A" && "$n" == "mail.${d}" ]] && ip="$v"
     if [[ "$px" == "proxied" ]]; then
-      # a proxied record has no TTL of its own (1 is "automatic"); the import brings it in as
-      # DNS only unless the tag is honoured, and then the cloud is switched on by hand
-      ttl=1; tag=true
-      printf '; %s is a web site: it is the one record here that belongs behind the proxy (orange cloud)\n' "$n"
+      web=1
+      printf '; %s is a web site and belongs behind the proxy. It comes in DNS only like the\n' "$n"
+      printf '; rest, which is how its certificate is fetched: switch its proxy on afterwards, the\n'
+      printf '; orange cloud. lomp mail dns %s --check says so until then.\n' "$d"
     fi
     [[ "$t" == "TXT" ]] && v="$(_mail_dns_zone_txt "$v")"
-    printf '%s.\t%s\tIN\t%s\t%s ; cf_tags=cf-proxied:%s\n' "$n" "$ttl" "$t" "$v" "$tag"
+    printf '%s.\t3600\tIN\t%s\t%s ; cf_tags=cf-proxied:false\n' "$n" "$t" "$v"
   done < <(_mail_dns_records "$d")
+  # A file written before the webmail was switched on has no record for it, and whoever
+  # imports it finds that out when webmail.<domain> does not answer.
+  if (( ! web )); then
+    printf '; No webmail record here: the webmail of %s is not switched on.\n' "$d"
+    printf ';   lomp mail webmail on %s\n' "$d"
+    printf '; switches it on. This file, written again after that, has its record - or type it in:\n'
+    printf ';   A  webmail.%s  %s\n' "$d" "${ip:-the address of this server}"
+  fi
   return 0
 }
 
@@ -3347,7 +3367,10 @@ _mail_dns_query() {   # type name -> the value(s), one per line
 # What DNS says today, judged the way a receiving server judges it: the lowest MX wins, and a
 # second SPF record is the same as none.
 _mail_dns_say() {   # colour type name detail
-  printf '  %s%-4s %-38s %s%s\n' "$1" "$2" "$3" "$4" "$C_RST"
+  # the detail is the last thing on the line, so its Turkish moves no column; it is also the
+  # part that tells the operator what to do ("turn the orange cloud on")
+  lib_tr "$4"
+  printf '  %s%-4s %-38s %s%s\n' "$1" "$2" "$3" "$LIB_TR" "$C_RST"
 }
 
 lib_mail_dns_check() {   # domain -> 0 when everything is in place

@@ -3355,6 +3355,14 @@ assert_has "a TXT value is quoted"               $'alpha.example.\t3600\tIN\tTXT
 assert_has "an SRV record keeps its target"      $'_imaps._tcp.alpha.example.\t3600\tIN\tSRV\t0 1 993 mail.alpha.example.' "$_zone"
 assert_has "and it warns about a second SPF"     "two SPF records are the same as none" "$_zone"
 assert_eq  "every record line has five fields"   0 "$(grep -v '^[;$]' <<<"$_zone" | awk -F'\t' 'NF != 5' | wc -l | tr -d ' ')"
+# a parenthesis and a quote mean something in a zone file; no comment line gives an importer
+# that is careless about them one to trip over
+assert_eq  "no comment line holds a parenthesis or a quote" 0 "$(grep '^;' <<<"$_zone" | grep -c '[()"]' || true)"
+# A file written before the webmail was switched on has no record for it. It used to say
+# nothing about that, and the import looked as if it had lost webmail.<domain>.
+assert_has "a domain whose webmail is off is told so"    "; No webmail record here: the webmail of alpha.example is not switched on." "$_zone"
+assert_has "and how to switch it on"                     ";   lomp mail webmail on alpha.example" "$_zone"
+assert_has "and which record that takes"                 ";   A  webmail.alpha.example  " "$_zone"
 _zt_long="$(printf 'k%.0s' {1..600})"
 assert_eq  "a long value is cut into strings of 255" "255 255 90" \
   "$(_mail_dns_zone_txt "$_zt_long" | grep -o '"[^"]*"' | awk '{ printf "%s%d", (NR > 1 ? " " : ""), length($0) - 2 }')"
@@ -3371,12 +3379,84 @@ _zone="$(
 )"
 assert_lacks "a record that has no value yet is not imported" $'IN\tA\t<' "$_zone"
 assert_has   "and the file says it was left out"   "; left out: A mail.alpha.example - note one" "$_zone"
-assert_has   "the webmail is the one proxied record" $'webmail.alpha.example.\t1\tIN\tA\t203.0.113.9 ; cf_tags=cf-proxied:true' "$_zone"
+# The webmail's record has the shape of the others. Written the way Cloudflare's own export
+# writes a proxied record (TTL 1, cf-proxied:true), it was in the zone unproxied all the same
+# after the first real import: the file says what an import does, and that the proxy is
+# switched on by hand afterwards.
+assert_has   "the webmail's record is a line like the others" $'webmail.alpha.example.\t3600\tIN\tA\t203.0.113.9 ; cf_tags=cf-proxied:false' "$_zone"
+assert_lacks "no record asks the importer to proxy it"   "cf-proxied:true" "$_zone"
+assert_eq    "and none has the TTL that means automatic" 0 "$(grep -v '^[;$]' <<<"$_zone" | awk -F'\t' '$2 != 3600' | wc -l | tr -d ' ')"
+assert_has   "the file says the proxy is switched on afterwards" "; webmail.alpha.example is a web site and belongs behind the proxy." "$_zone"
+assert_has   "and where that is still said later"        "lomp mail dns alpha.example --check says so until then." "$_zone"
+assert_lacks "a file that has the webmail's record does not say it is missing" "No webmail record here" "$_zone"
+assert_eq    "its comments hold no parenthesis or quote either" 0 "$(grep '^;' <<<"$_zone" | grep -c '[()"]' || true)"
 assert_has   "everything else is DNS only"         $'10 mail.alpha.example. ; cf_tags=cf-proxied:false' "$_zone"
+_zone="$(
+  _mail_dns_records() {
+    printf 'A\tmail.%s\t203.0.113.9\tnote one\n' "$1"
+    printf 'MX\t%s\t10 mail.%s.\tnote two\n' "$1" "$1"
+  }
+  lib_mail_dns_zone alpha.example
+)"
+assert_has   "the record to type in names the address the mail name has" ";   A  webmail.alpha.example  203.0.113.9" "$_zone"
+_zone="$(
+  _mail_dns_records() { printf 'A\tmail.%s\t<the IPv4 address of this server>\tnote one\n' "$1"; }
+  lib_mail_dns_zone alpha.example
+)"
+assert_has   "and says so when this server does not know its own" ";   A  webmail.alpha.example  the address of this server" "$_zone"
 assert_has   "mail dns takes --zone"               '--zone)' "$(declare -f _mail_dns_cmd)"
 assert_has   "the menu writes the file"            'mail dns "$domain" --zone > "$file"' "$(declare -f _menu_mail_dns)"
 assert_has   "and item 7 of the mail menu leads to it" '_menu_mail_dns' "$(declare -f _menu_mail)"
-unset _zone _zt_long
+# the file is what gets imported, so the menu asks before it writes one that would lack a record
+assert_has   "the menu asks about a webmail that is off" 'Switch the webmail on first? (y/n)' "$(declare -f _menu_mail_dns)"
+assert_has   "and switches it on before the file is written" 'mail webmail on "$domain"' "$(declare -f _menu_mail_dns)"
+assert_true  "in that order" bash -c '[[ "$1" == *"mail webmail on"*"--zone > "* ]]' _ "$(declare -f _menu_mail_dns)"
+assert_has   "the question does nothing unless it is answered yes" '_menu_ask wm "Switch the webmail on first? (y/n)" "n"' "$(declare -f _menu_mail_dns)"
+# What the check found is the part that tells the operator what to do, and it was the one
+# part of the Turkish output still in English: "turn the orange cloud on" went unread.
+_zs() { ( LIB_LANG="$1"; [[ "$1" != "tr" ]] || lib_lang_build; C_RST=""; shift; "$@" ); }
+assert_has   "the check's finding is in Turkish on a Turkish terminal" "turuncu bulutunu açın" \
+  "$(_zs tr _mail_dns_say "" A webmail.alpha.example "points here but is not proxied; turn the orange cloud on")"
+assert_has   "and in English everywhere else"      "turn the orange cloud on" \
+  "$(_zs en _mail_dns_say "" A webmail.alpha.example "points here but is not proxied; turn the orange cloud on")"
+assert_has   "a finding that carries what DNS said keeps it" "şunu söylüyor: v=spf1 -all" \
+  "$(_zs tr _mail_dns_say "" TXT alpha.example "says: v=spf1 -all")"
+assert_has   "a missing record"                    "eksik" "$(_zs tr _mail_dns_say "" MX alpha.example "missing")"
+assert_has   "two SPF records"                     "2 SPF kaydı var" "$(_zs tr _mail_dns_say "" TXT alpha.example "2 SPF records; a domain may have only one")"
+assert_has   "a mail name behind the proxy"        "proxy'sini kapatın" "$(_zs tr _mail_dns_say "" A mail.alpha.example "resolves to Cloudflare (188.114.96.3): turn the proxy off for it")"
+assert_eq    "the columns before it stay where they were" "$(printf '  %-4s %-38s eksik' A webmail.alpha.example)" \
+  "$(_zs tr _mail_dns_say "" A webmail.alpha.example "missing")"
+_zone="$(_zs tr lib_mail_dns_print alpha.example 2>/dev/null || true)"
+assert_has   "the note under a record is in Turkish too" "sondaki nokta kayda dahildir" "$_zone"
+assert_has   "the record itself is not touched"    "10 mail.alpha.example." "$_zone"
+assert_has   "and the list stays English where nobody chose Turkish" "the dot at the end belongs to the record" "$(_zs en lib_mail_dns_print alpha.example 2>/dev/null || true)"
+# every note the list can print has its Turkish: a new one would come out in English alone.
+# Those of this domain as it stands, and the ones only a relay, a key rotation or a webmail
+# bring into the list.
+_zt_tr() { lib_tr "$1"; printf '%s' "$LIB_TR"; }
+_zone=""
+while IFS= read -r _znote; do
+  [[ -n "$_znote" ]] || continue
+  [[ "$(_zs tr _zt_tr "$_znote")" != "$_znote" ]] || _zone+="[${_znote}] "
+done < <(
+  _mail_dns_records alpha.example | awk -F'\t' '{ print $4 }'
+  printf '%s\n' \
+    'one SPF record per domain, never two; the include covers the relay this server sends through' \
+    'one SPF record per domain, never two - see the note below about the relay' \
+    'the key being rotated in; signing moves to it once this record is visible' \
+    'run: lomp mail enable alpha.example' \
+    'a web site, so this one IS proxied (orange cloud)'
+)
+assert_eq    "no note of the record list is left without its Turkish" "" "$_zone"
+# and the notes the table knows are the ones the code still prints: a reworded note would
+# otherwise go back to English without a test noticing
+for _znote in 'the dot at the end belongs to the record' 'paste it as one line; the provider splits it' \
+              'start at p=none and read the reports before tightening it' 'a web site, so this one IS proxied (orange cloud)' \
+              'DNS only - never proxied: a mail client has to reach this server itself'; do
+  assert_has "the code prints the note the table translates: ${_znote:0:24}" "$_znote" "$(declare -f _mail_dns_records)"
+done
+unset _zone _zt_long _znote
+unset -f _zs _zt_tr
 # the public half is read from the private key: generating it again would replace a key whose
 # public half is already published, and every signature after that would fail
 assert_has "the DKIM record comes from the key on disk" "openssl rsa" "$(declare -f lib_mail_dkim_public)"

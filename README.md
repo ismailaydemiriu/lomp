@@ -1058,7 +1058,11 @@ sudo lomp mail dns example.com --zone > example.com.zone.txt   # the same record
 The zone file is for a provider that imports one instead of having each record typed in
 (Cloudflare: DNS > Records > Import and Export, with "Proxy imported DNS records" off). An
 import adds records and replaces none: an MX or SPF record the domain already has stays beside
-the new one until you remove it. The mail menu's DNS item writes the same file.
+the new one until you remove it. Every record comes in DNS only, the webmail's too - switch the
+orange cloud of `webmail.<domain>` on afterwards; `--check` says so until then. Its record is in
+the file only while the webmail is on: switch it on first (`lomp mail webmail on example.com`),
+or the file says which record to add by hand. The mail menu's DNS item writes the same file and
+asks about the webmail before it does.
 
 Enabling mail for a domain creates its DKIM key, asks for a certificate for `mail.example.com`,
 points `postmaster@`, `abuse@` and `dmarc@` at the first mailbox, and prints the records to

@@ -1429,18 +1429,29 @@ _menu_mail_add_domain() {
 # The records of a domain: on the screen with what DNS says today, or in a file for a provider
 # that imports a zone file - at Cloudflare that is one upload instead of nine records typed in.
 _menu_mail_dns() {
-  local domain="" what="" file=""
+  local domain="" what="" file="" wm=""
   domain="$(_menu_pick_mail_domain)" || { _menu_pause; return 0; }
   printf '\n'
   _menu_opt 1 "Show the records, and whether each one is in DNS already"
   _menu_opt 2 "Write them into a file your DNS provider imports (Cloudflare: DNS > Records > Import)"
   _menu_ask what "Choice" "1"
   if [[ "$what" != "2" ]]; then _menu_run mail dns "$domain" --check; return 0; fi
+  # The webmail's record is in the file only while the webmail is on. Asked here, because the
+  # file is what gets imported: one written before the webmail was switched on left
+  # webmail.<domain> to be typed in afterwards, and looked as if the import had lost it.
+  if lib_mail_domain_enabled "$domain" && [[ "$(lib_json_get "$(lib_mail_json "$domain")" '.mail.webmail')" != "true" ]]; then
+    _menu_printf '\n  The webmail of %s is not switched on, so the file would come without webmail.%s.\n' "$domain" "$domain"
+    _menu_ask wm "Switch the webmail on first? (y/n)" "n"
+    [[ "${wm,,}" == y* ]] && _menu_run mail webmail on "$domain"
+  fi
   file="${HOME:-/root}/${domain}.zone.txt"
   if "$SCRIPT_PATH" mail dns "$domain" --zone >"$file" 2>/dev/null && [[ -s "$file" ]]; then
     _menu_printf '\n  The records are in %s\n' "$file"
     _menu_printf '  Take the file to your computer and give it to your DNS provider (Cloudflare: DNS > Records > Import and Export).\n'
     _menu_printf '  An MX or SPF record the domain already has stays beside the new one: remove the old one.\n'
+    if [[ "$(lib_json_get "$(lib_mail_json "$domain")" '.mail.webmail')" == "true" ]]; then
+      _menu_printf '  webmail.%s comes in with a grey cloud like the rest: switch its orange cloud on afterwards.\n' "$domain"
+    fi
   else
     rm -f "$file"
     _menu_printf '%sThe file could not be written; this shows why: %s mail dns %s --zone%s\n' "$C_YEL" "$MENU_CMD" "$domain" "$C_RST"
@@ -1992,6 +2003,9 @@ MENU_TR['Write them into a file your DNS provider imports (Cloudflare: DNS > Rec
 MENU_TR['\n  The records are in %s\n']='\n  Kayıtlar şu dosyada: %s\n'
 MENU_TR['  Take the file to your computer and give it to your DNS provider (Cloudflare: DNS > Records > Import and Export).\n']='  Dosyayı bilgisayarınıza alın ve DNS sağlayıcınıza verin (Cloudflare: DNS > Records > Import and Export).\n'
 MENU_TR['  An MX or SPF record the domain already has stays beside the new one: remove the old one.\n']='  Alan adının zaten var olan MX ya da SPF kaydı yenisinin yanında kalır: eskisini silin.\n'
+MENU_TR['\n  The webmail of %s is not switched on, so the file would come without webmail.%s.\n']='\n  %s için webmail açık değil; bu yüzden dosyada webmail.%s kaydı olmaz.\n'
+MENU_TR['Switch the webmail on first? (y/n)']='Önce webmail açılsın mı? (y/n)'
+MENU_TR['  webmail.%s comes in with a grey cloud like the rest: switch its orange cloud on afterwards.\n']='  webmail.%s diğerleri gibi gri bulutla gelir: yüklemeden sonra turuncu bulutunu açın.\n'
 MENU_TR['%sThe file could not be written; this shows why: %s mail dns %s --zone%s\n']='%sDosya yazılamadı; nedenini şu gösterir: %s mail dns %s --zone%s\n'
 MENU_TR['What to put in DNS (and whether it is there)']='DNS'\''e ne yazılmalı (ve yazılmış mı)'
 MENU_TR['Can this server send? (reverse DNS, port 25)']='Bu sunucu posta gönderebiliyor mu? (ters DNS, port 25)'
