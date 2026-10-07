@@ -9657,6 +9657,13 @@ assert_eq "a redirect's finding"                  "ziyaretçilerini https://b.ex
 assert_eq "a finding with no Turkish is shown as it is" "something nobody translated" "$(_dt "something nobody translated")"
 assert_eq "and never with the key in front"       "x" "$(_dt "x")"
 assert_eq "an ordinary message that has its Turkish is found from doctor too" "a.example sitesi kayıtlı değil" "$(_dt "Site a.example is not registered")"
+# what "mail test" and doctor say about the PTR record: the detail is a message inside a message
+assert_eq "a wrong PTR record, as mail test says it" "Ters DNS: 192.0.2.7 kendini mail.a.example olarak değil, a.example olarak tanıtıyor; sağlayıcınızın panelinden PTR kaydını mail.a.example yapın" "$(_dt_plain "Reverse DNS: 192.0.2.7 says it is a.example, not mail.a.example; set the PTR record to mail.a.example in your provider's panel")"
+assert_eq "and as doctor says it"                 "192.0.2.7 kendini mail.a.example olarak değil, a.example olarak tanıtıyor; sağlayıcınızın panelinden PTR kaydını mail.a.example yapın" "$(_dt "192.0.2.7 says it is a.example, not mail.a.example; set the PTR record to mail.a.example in your provider's panel")"
+assert_eq "doctor's good PTR line is still its own" "192.0.2.7 kendini mail.a.example olarak tanıtıyor ve o ad geri onu gösteriyor" "$(_dt "192.0.2.7 says it is mail.a.example, and that name points back")"
+assert_eq "no PTR record at all"                  "Ters DNS: 192.0.2.7 adresinin PTR kaydı yok; sağlayıcınızın panelinden mail.a.example olarak ayarlayın" "$(_dt_plain "Reverse DNS: 192.0.2.7 has no PTR record; set it to mail.a.example in your provider's panel")"
+assert_eq "a name that does not point back"       "Ters DNS: mail.a.example adı 192.0.2.7 adresini göstermiyor (bulunan: 192.0.2.9 ); mail.a.example için bir A kaydı ekleyin" "$(_dt_plain "Reverse DNS: mail.a.example does not resolve to 192.0.2.7 (found: 192.0.2.9 ); add an A record for mail.a.example")"
+assert_eq "an address nobody could find"          "Ters DNS: bu sunucunun genel IPv4 adresi bilinmiyor" "$(_dt_plain "Reverse DNS: the public IPv4 address of this server is unknown")"
 # the reason for the key: outside doctor these patterns do not exist
 assert_eq "another command's message that ends like a finding stays whole" "the key file is missing" "$(_dt_plain "the key file is missing")"
 assert_eq "so does one that ends in 'answers'"    "nobody answers" "$(_dt_plain "nobody answers")"
