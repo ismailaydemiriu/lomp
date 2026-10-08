@@ -7458,7 +7458,14 @@ _rn_stubs='
     if [[ -e "$_rn/mail-enable-fails" ]]; then lib_die "The DKIM key could not be created"; fi
     lib_json_set "$(lib_mail_json "$1")" ".mail.enabled = true"
   }
-  lib_mail_tables_apply() { printf "mail-tables %s\n" "$(lib_mail_boxes | tr "\n" " ")" >>"$_rn/calls"; }
+  lib_mail_tables_apply() {
+    printf "mail-tables %s\n" "$(lib_mail_boxes | tr "\n" " ")" >>"$_rn/calls"
+    # Dovecot, standing in: asked about the quota of a mailbox whose mail has just moved away -
+    # Postfix asks at every RCPT TO - it makes the directory again, a Maildir with nothing in it
+    if [[ -e "$_rn/rcpt-during-move" && -d "$_rn/vmail/beta.example/info" ]]; then
+      rm -f "$_rn/rcpt-during-move"; mkdir -p "$_rn/vmail/alpha.example/info/Maildir"
+    fi
+  }
   doveadm() { printf "doveadm %s\n" "$*" >>"$_rn/calls"; }
   lib_webmail_domain_enable() { printf "webmail-enable %s\n" "$1" >>"$_rn/calls"; }
   _wm_info_load() { [[ -e "$_rn/wm-users" ]] && WM_DB_NAME=wm; }
@@ -8338,6 +8345,49 @@ assert_false "and the directory made for it goes" test -e "$_rn/vmail/alpha.exam
 mkdir -p "$_rn/vmail/alpha.example/sales/Maildir/new"; printf 'x\n' >"$_rn/vmail/alpha.example/sales/Maildir/new/keep"
 _rn_case _domain_rename_box_sweep sales@alpha.example beta.example
 assert_true  "with nowhere to put it, a message is left where it is" test -s "$_rn/vmail/alpha.example/sales/Maildir/new/keep"
+# What lies under the old name by then is what Dovecot made of it, and that may well be a
+# Maildir with no new/ and no cur/ in it: Postfix asks whether a mailbox is over quota at every
+# RCPT TO, before any message is delivered, and that alone makes one (so does "mail box
+# list"; looked at with Dovecot 2.3.21 under this configuration). find ended with status 1 on
+# the directories that are not there - in a process substitution, where the ERR trap made the
+# failure of a rename that was going well out of it: "FAILED: command exited with status 1"
+# and the rollback steps on record, 50 runs of 50, each of them with the right answer; and in
+# a real rename on the test server with a sender at RCPT TO, in the middle of its mail step.
+_rn_swept() {   # user@old new-domain: a step on record, the sweep, and time for a shell nobody waits for
+  lib_rollback_push "touch '$_rn/rolled'"
+  _domain_rename_box_sweep "$@"
+  command sleep 0.6
+}
+_rn_mail_boxes
+mkdir -p "$_rn/vmail/beta.example/info/Maildir/new"
+rm -rf "$_rn/vmail/alpha.example/info"; mkdir -p "$_rn/vmail/alpha.example/info/Maildir"
+_rn_case _rn_swept info@alpha.example beta.example
+assert_has   "a mailbox that was only asked about is swept"             "rc=0" "$(_rn_out)"
+assert_lacks "without a failure being shown"                            "FAILED" "$(_rn_out)"
+assert_eq    "or logged"                                                "" "$(grep 'unexpected failure' "$_rn/log" || true)"
+assert_false "no rollback step is run"                                  test -e "$_rn/rolled"
+assert_false "and the directory, with no message in it, goes"           test -e "$_rn/vmail/alpha.example/info"
+# one with new/ and no cur/, which is what this section has had under the old name all along
+_rn_mail_boxes
+mkdir -p "$_rn/vmail/beta.example/info/Maildir/new"
+printf 'late\n' >"$_rn/vmail/alpha.example/info/Maildir/new/late"
+_rn_case _rn_swept info@alpha.example beta.example
+assert_true  "a message beside a directory that is not there still goes on" test -s "$_rn/vmail/beta.example/info/Maildir/new/late"
+assert_lacks "and that is no failure either"                            "FAILED" "$(_rn_out)"
+assert_eq    "in the log as little"                                     "" "$(grep 'unexpected failure' "$_rn/log" || true)"
+# the whole rename, with a sender that gets as far as RCPT TO while the mailboxes move
+_rn_mail_boxes
+: >"$_rn/rcpt-during-move"
+_rn_case _rn_rename alpha.example beta.example
+_o="$(_rn_out)"
+assert_has   "a rename during which mail knocks at the old address ends well" "rc=0" "$_o"
+assert_false "(it did knock: the directory was made again after the move)" test -e "$_rn/rcpt-during-move"
+assert_has   "with the mailboxes moved"                                 "Mail: now at @beta.example - info@beta.example, sales@beta.example" "$_o"
+assert_lacks "and no failure shown in the middle of it"                 "FAILED" "$_o"
+assert_eq    "or logged"                                                "" "$(grep 'unexpected failure' "$_rn/log" || true)"
+assert_false "what was made under the old name in between is gone"      test -e "$_rn/vmail/alpha.example/info"
+assert_true  "and the mail is where it moved to"                        test -s "$_rn/vmail/beta.example/info/Maildir/new/m1"
+unset -f _rn_swept
 _rn_case _domain_rename_mail_targets "a@old.example, b@old.example,c@old.example,x@other.example" old.example new.example "a@old.example
 c@old.example"
 assert_eq    "targets: what moved is named at the new domain, what did not is not" "a@new.example,b@old.example,c@new.example,x@other.examplerc=0" "$(_rn_out)"

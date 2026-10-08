@@ -643,9 +643,16 @@ _domain_rename_box_sweep() {   # user@old new-domain
   src="${MAIL_VMAIL_HOME}/${od}/${loc}"; dst="${MAIL_VMAIL_HOME}/${2}/${loc}/Maildir/new"
   [[ -d "$src" && ! -L "$src" ]] || return 0
   if [[ -d "$dst" ]]; then
+    # "|| true" is load-bearing. What lies under the old name is whatever Dovecot made of it
+    # since the move, and that may well be a Maildir with no new/ and no cur/ in it: Postfix
+    # asking whether the mailbox is over quota makes exactly that, at every RCPT TO and before
+    # any message is delivered, and so does "mail box list". find ends with status 1 on a
+    # directory that is not there, and in a process substitution that is a failure in a shell
+    # of its own, where the ERR trap said "FAILED: command exited with status 1" in the middle
+    # of a rename that was going well. No directory only means that no message came.
     while IFS= read -r -d '' f; do
       mv -n -- "$f" "${dst}/" && n=$((n + 1))
-    done < <(find "${src}/Maildir/new" "${src}/Maildir/cur" -maxdepth 1 -type f -print0 2>/dev/null)
+    done < <(find "${src}/Maildir/new" "${src}/Maildir/cur" -maxdepth 1 -type f -print0 2>/dev/null || true)
   fi
   if (( n > 0 )); then lib_log_write INFO "${n} message(s) that arrived for ${1} during the move went on to ${loc}@${2}"; fi
   if [[ -z "$(find "$src" -type f -path '*/Maildir/*' \( -path '*/new/*' -o -path '*/cur/*' \) -print -quit 2>/dev/null)" ]]; then rm -rf -- "$src"; fi
