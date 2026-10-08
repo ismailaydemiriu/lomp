@@ -1008,7 +1008,37 @@ for _sp_q in _sp_foreign _sp_claimed _sp_vhosts; do
 done
 assert_eq "the list itself: every site, in order" "s00.example s39.example 40" \
   "$(STATE_DIR="$_sp_state"; lib_domains_list | sed -n '1p;$p' | tr '\n' ' '; lib_domains_list | wc -l | tr -d ' ')"
-unset -f _sp_exists _sp_box _sp_port _sp_optimize _sp_restore _sp_asks _sp_foreign _sp_claimed _sp_vhosts
+# The redirects and the mail domains that are no sites are listed the same way, and were written
+# the same way: a "basename" for every name. No loop leaves them at its first hit today; the
+# next one that does finds nothing there to be killed.
+for _i in $(seq -w 0 39); do
+  mkdir -p "$_sp_state/domains/r${_i}.example" "$_sp_state/maildomains/m${_i}.example"
+  printf '{"kind":"redirect","target":"s00.example"}\n' >"$_sp_state/domains/r${_i}.example/redirect.json"
+  printf '{"domain":"m%s.example","kind":"mail"}\n' "$_i" >"$_sp_state/maildomains/m${_i}.example/domain.json"
+done
+_sp_first() {   # list, the name it begins with: read the way a loop that returns at its first hit reads it
+  local n=""
+  MAIL_DOMAINS_DIR="$_sp_state/maildomains"
+  while read -r n; do
+    [[ -n "$n" ]] || continue
+    if [[ "$n" == "$2" ]]; then return 0; fi
+    return 1
+  done < <("$1")
+  return 1
+}
+for _sp_q in "lib_redirects_list r00.example" "lib_mail_standalone_domains m00.example"; do
+  : >"$TMP/sp-log"; rm -f "$TMP/sp-rolled"
+  assert_eq    "${_sp_q%% *}: the first name is the one read"             0 "$(run_isolated _sp_asks _sp_first "${_sp_q%% *}" "${_sp_q##* }")"
+  assert_eq    "${_sp_q%% *}: no failure is reported from the list"       "" "$(grep 'unexpected failure' "$TMP/sp-log" || true)"
+  assert_false "${_sp_q%% *}: and no rollback step is run"                test -e "$TMP/sp-rolled"
+done
+assert_eq "the redirects themselves: every one, in order" "r00.example r39.example 40" \
+  "$(STATE_DIR="$_sp_state"; lib_redirects_list | sed -n '1p;$p' | tr '\n' ' '; lib_redirects_list | wc -l | tr -d ' ')"
+assert_eq "the mail domains themselves: every one, in order" "m00.example m39.example 40" \
+  "$(MAIL_DOMAINS_DIR="$_sp_state/maildomains"; lib_mail_standalone_domains | sed -n '1p;$p' | tr '\n' ' '; lib_mail_standalone_domains | wc -l | tr -d ' ')"
+assert_eq "none of the three lists starts a command for a name" "" \
+  "$(declare -f lib_domains_list lib_redirects_list lib_mail_standalone_domains | grep -E 'basename|dirname|\$\(' || true)"
+unset -f _sp_exists _sp_box _sp_port _sp_optimize _sp_restore _sp_asks _sp_foreign _sp_claimed _sp_vhosts _sp_first
 
 # =============================================================================
 section "renderers must exit 0 (pipefail safety)"

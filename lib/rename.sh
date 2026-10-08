@@ -19,12 +19,15 @@ SSL_OBTAINED=0 SSL_UNRENEWED=0
 lib_redirect_file()   { printf '%s/redirect.json' "$(lib_domain_state_dir "$1")"; }
 lib_redirect_exists() { lib_domain_valid "$1" && [[ -s "$(lib_redirect_file "$1")" ]]; }
 
+# (no command is started per name, for the reason lib_domains_list gives: a list read through
+# a process substitution by a loop that leaves at its first hit)
 lib_redirects_list() {   # one per line
   local f=""
   [[ -d "$STATE_DIR/domains" ]] || return 0
   for f in "$STATE_DIR"/domains/*/redirect.json; do
     [[ -s "$f" ]] || continue
-    basename "$(dirname "$f")"
+    f="${f%/redirect.json}"
+    printf '%s\n' "${f##*/}"
   done
   return 0
 }

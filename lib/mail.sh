@@ -1624,12 +1624,15 @@ lib_mail_domain_file()       { printf '%s/%s/domain.json' "$MAIL_DOMAINS_DIR" "$
 # SITE's - and "mail domain del" then removed that site's state as if it were a record of ours.
 lib_mail_domain_standalone() { lib_domain_valid "$1" && [[ -s "$(lib_mail_domain_file "$1")" ]]; }
 
+# (no command is started per name, for the reason lib_domains_list gives: a list read through
+# a process substitution by a loop that leaves at its first hit)
 lib_mail_standalone_domains() {   # one per line
   local f=""
   [[ -d "$MAIL_DOMAINS_DIR" ]] || return 0
   for f in "$MAIL_DOMAINS_DIR"/*/domain.json; do
     [[ -s "$f" ]] || continue
-    basename "$(dirname "$f")"
+    f="${f%/domain.json}"
+    printf '%s\n' "${f##*/}"
   done
   return 0
 }
