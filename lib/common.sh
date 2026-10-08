@@ -12,6 +12,8 @@ LIB_LOCK_HELD=0
 LIB_ERR_HANDLING=0
 # -g: modules are sourced from inside a function in setup.sh; plain "declare" would be local there
 declare -ga LIB_ROLLBACK_STACK=()
+# the shell (BASHPID) that last put a step on the stack: see lib_on_error
+declare -g LIB_ROLLBACK_SHELL=""
 declare -g LIB_TMP_ROOT=""
 # paths a module wants removed when the command ends, however it ends (see lib/mail.sh:
 # a staging copy of somebody's mailbox is as large as the mailbox)
@@ -155,7 +157,7 @@ lib_log_line_no() {
 #  Errors, traps, rollback
 # =============================================================================
 lib_rollback_clear() { LIB_ROLLBACK_STACK=(); }
-lib_rollback_push()  { LIB_ROLLBACK_STACK+=("$*"); lib_debug "rollback step registered: $*"; }
+lib_rollback_push()  { LIB_ROLLBACK_STACK+=("$*"); LIB_ROLLBACK_SHELL="$BASHPID"; lib_debug "rollback step registered: $*"; }
 # Remove a step by its exact text, for when it has been handled or no longer applies.
 # By value rather than by position: other steps may have been pushed in between.
 lib_rollback_drop() {
@@ -227,6 +229,21 @@ lib_die() {
 }
 
 # ERR trap handler: file/line/command + rollback
+#
+# The rollback is run by the shell the steps belong to, and by no other. A command
+# substitution, a pipeline, a "( ... )" and a process substitution each run in a shell of
+# their own, and that shell starts with a copy of the steps on record while the one that put
+# them there is still running. Where the first shell learns of the failure - x="$(f)", "f | g",
+# a bare "( f )" - it runs the steps itself, and they were run twice. Where it does not - a
+# list read through "< <(f)", local x="$(f)", "cmd <<<$(f)" - it goes on and ends well, and it
+# did so with what it had registered (for a site that is being added: its home, its user, its
+# virtual host) taken away under it by a shell nobody waits for. So a subshell runs the steps
+# only when it has put one on the stack itself. The subshell "import" runs each site in is
+# such a one (a site begins with lib_rollback_clear, and what it registers after that is its
+# own), and a failure there still takes back what that site had got to; a list that fails
+# inside it no longer does.
+# This is about the failures nobody expected. lib_die, which ends a command on purpose, runs
+# the steps on record wherever it is called, as before.
 lib_on_error() {
   local code="$1" line="$2" src="$3" cmd="$4"
   (( LIB_ERR_HANDLING )) && exit "$code"
@@ -247,7 +264,11 @@ lib_on_error() {
     fi
     lib_suggest_doctor
   } >&2
-  lib_rollback_run
+  if [[ "$BASHPID" == "$$" || "$LIB_ROLLBACK_SHELL" == "$BASHPID" ]]; then
+    lib_rollback_run
+  elif ((${#LIB_ROLLBACK_STACK[@]} > 0)); then
+    lib_log_write INFO "the ${#LIB_ROLLBACK_STACK[@]} rollback step(s) on record are left to the shell that registered them (this is a subshell of it)"
+  fi
   exit "$code"
 }
 trap 'lib_on_error "$?" "$LINENO" "${BASH_SOURCE[0]}" "$BASH_COMMAND"' ERR

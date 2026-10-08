@@ -1041,6 +1041,83 @@ assert_eq "none of the three lists starts a command for a name" "" \
 unset -f _sp_exists _sp_box _sp_port _sp_optimize _sp_restore _sp_asks _sp_foreign _sp_claimed _sp_vhosts _sp_first
 
 # =============================================================================
+section "a failure in a subshell leaves the rollback to the shell the steps belong to"
+# A command substitution, a pipeline, a "( ... )" and a process substitution each run in a shell
+# of their own, which holds a copy of the rollback steps on record. A command that failed there
+# unexpectedly had them run by that shell. Measured on the handler as it was, with one step the
+# command itself had registered: a list read through "< <(f)", local x="$(f)", an argument
+# "$(f)" and "<<<$(f)" each ran the step while the command went on and ended with status 0 -
+# for a site that is being added the steps are its home, its user and its virtual host - and
+# x="$(f)", "f | g" and a bare "( f )" ran it twice, once in each shell. The steps are now run
+# by the shell they belong to.
+_sr_list() { false; printf 'line\n'; }      # a list in which a command fails
+_sr_run() {   # how: the ERR trap as setup.sh sets it, one step on record, then the failure
+  trap 'lib_on_error "$?" "$LINENO" "${BASH_SOURCE[0]}" "$BASH_COMMAND"' ERR
+  LOG_FILE="$TMP/sr-log"
+  lib_rollback_clear
+  lib_rollback_push "printf 'mine\n' >>'$TMP/sr-steps'"
+  "$1"
+  printf 'x' >"$TMP/sr-went-on"
+  sleep 0.6      # a shell nobody waits for: time for it to do what it is going to do
+}
+_sr_procsub()    { local x=""; while read -r x; do :; done < <(_sr_list); }
+# shellcheck disable=SC2034,SC2155
+_sr_local()      { local x="$(_sr_list)"; }
+_sr_argument()   { printf '%s' "$(_sr_list)" >/dev/null; }
+_sr_herestring() { local x=""; while read -r x; do :; done <<<"$(_sr_list)"; }
+_sr_comsub()     { local x=""; x="$(_sr_list)"; }
+_sr_pipeline()   { _sr_list | cat >/dev/null; }
+_sr_subshell()   { ( _sr_list >/dev/null ); }
+# where the command does not learn of the failure, it goes on - with what it registered
+for _sr_k in procsub local argument herestring; do
+  : >"$TMP/sr-log"; rm -f "$TMP/sr-steps" "$TMP/sr-went-on"
+  assert_eq    "${_sr_k}: the command goes on to its end"                 0 "$(run_isolated _sr_run "_sr_${_sr_k}")"
+  assert_true  "${_sr_k}: all of it"                                      test -e "$TMP/sr-went-on"
+  assert_has   "${_sr_k}: the failure is still reported"                  "unexpected failure" "$(cat "$TMP/sr-log")"
+  assert_false "${_sr_k}: and its steps are not run under it"             test -e "$TMP/sr-steps"
+done
+# where it does, it ends, and runs them itself: once
+for _sr_k in comsub pipeline subshell; do
+  : >"$TMP/sr-log"; rm -f "$TMP/sr-steps" "$TMP/sr-went-on"
+  assert_eq    "${_sr_k}: the command ends"                               1 "$(run_isolated _sr_run "_sr_${_sr_k}")"
+  assert_false "${_sr_k}: there and then"                                 test -e "$TMP/sr-went-on"
+  assert_eq    "${_sr_k}: and runs its steps once"                        "mine" "$(cat "$TMP/sr-steps" 2>/dev/null || true)"
+done
+# and the shell a command starts in runs what is on record whatever put it there: nothing has
+# changed for that one
+rm -f "$TMP/sr-steps"
+printf '%s\n' 'set -Eeuo pipefail; OPT_DRY_RUN=0; OPT_VERBOSE=0; OPT_QUIET=1; OPT_NO_COLOR=1; LOG_FILE="$2/sr-log"' \
+  'source "$1/lib/common.sh"' 'LIB_ROLLBACK_STACK=("printf mine >>\"$2/sr-steps\"")' 'false' >"$TMP/sr-main.sh"
+bash "$TMP/sr-main.sh" "$ROOT" "$TMP" >/dev/null 2>&1 || true
+assert_eq "the shell a command starts in runs every step on record" "mine" "$(cat "$TMP/sr-steps" 2>/dev/null || true)"
+# The subshell "import" runs a site in is a shell the steps do belong to: a site clears the
+# stack and registers its own. A failure there takes back what the site had got to, as it did -
+_sr_site_fails() {
+  lib_import_site() { lib_rollback_clear; lib_rollback_push "printf 'site\n' >>'$TMP/sr-steps'"; _sr_list >/dev/null; }
+  _import_site_run 0
+  if [[ "$IMP_RC" == 0 ]]; then return 1; fi
+}
+# - and a list that fails inside it leaves the site, which goes on, what it has registered
+_sr_site_list() {
+  lib_import_site() {
+    local x=""
+    lib_rollback_clear; lib_rollback_push "printf 'site\n' >>'$TMP/sr-steps'"
+    while read -r x; do :; done < <(_sr_list)
+    sleep 0.6
+  }
+  _import_site_run 0
+  if [[ "$IMP_RC" != 0 ]]; then return 1; fi
+}
+: >"$TMP/sr-log"; rm -f "$TMP/sr-steps" "$TMP/sr-went-on"
+assert_eq    "import: a site that fails is one failed site, and the import goes on" 0 "$(run_isolated _sr_run _sr_site_fails)"
+assert_eq    "what the site had registered is taken back, what the import had is not" "site" "$(cat "$TMP/sr-steps" 2>/dev/null || true)"
+: >"$TMP/sr-log"; rm -f "$TMP/sr-steps" "$TMP/sr-went-on"
+assert_eq    "import: a list that fails inside a site does not fail the site"       0 "$(run_isolated _sr_run _sr_site_list)"
+assert_has   "it is reported"                                                       "unexpected failure" "$(cat "$TMP/sr-log")"
+assert_false "and the site keeps what it had registered"                            test -e "$TMP/sr-steps"
+unset -f _sr_list _sr_run _sr_procsub _sr_local _sr_argument _sr_herestring _sr_comsub _sr_pipeline _sr_subshell _sr_site_fails _sr_site_list
+
+# =============================================================================
 section "renderers must exit 0 (pipefail safety)"
 # Every renderer is used as "renderer | lib_write_file". If a renderer's last statement is a
 # conditional that turns out false, the renderer exits 1 and pipefail aborts the installer.
