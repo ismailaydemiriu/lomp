@@ -1216,10 +1216,15 @@ lib_mail_verify_configs() {
   return 0
 }
 
+# One write, after the question that takes a moment (which resolver) and not around it. Three
+# loops read this list through a process substitution and leave at the first service that is
+# down; a name written after that goes to nobody, and where SIGPIPE is ignored that is not the
+# end of the list's shell but a printf that fails in it (see lib_domains_list): "FAILED: command
+# exited with status 1" from a check of the services that had its answer.
 lib_mail_services() {
-  printf '%s\n' lomp-redis-rspamd
-  [[ "$(lib_mail_resolver)" == "lomp" ]] && printf 'unbound\n'
-  printf '%s\n' rspamd dovecot postfix
+  local unbound=""
+  [[ "$(lib_mail_resolver)" == "lomp" ]] && unbound="unbound"
+  printf '%s\n' lomp-redis-rspamd ${unbound:+"$unbound"} rspamd dovecot postfix
 }
 
 # Are they all up? This is what decides, together with MAIL_CHANGED, whether a run that
@@ -1624,16 +1629,18 @@ lib_mail_domain_file()       { printf '%s/%s/domain.json' "$MAIL_DOMAINS_DIR" "$
 # SITE's - and "mail domain del" then removed that site's state as if it were a record of ours.
 lib_mail_domain_standalone() { lib_domain_valid "$1" && [[ -s "$(lib_mail_domain_file "$1")" ]]; }
 
-# (no command is started per name, for the reason lib_domains_list gives: a list read through
-# a process substitution by a loop that leaves at its first hit)
+# (no command is started per name and the names leave in one piece, for the reasons
+# lib_domains_list gives: a list read through a process substitution by a loop that leaves at
+# its first hit)
 lib_mail_standalone_domains() {   # one per line
-  local f=""
+  local f="" all=""
   [[ -d "$MAIL_DOMAINS_DIR" ]] || return 0
   for f in "$MAIL_DOMAINS_DIR"/*/domain.json; do
     [[ -s "$f" ]] || continue
     f="${f%/domain.json}"
-    printf '%s\n' "${f##*/}"
+    all+="${f##*/}"$'\n'
   done
+  printf '%s' "$all" 2>/dev/null || true
   return 0
 }
 

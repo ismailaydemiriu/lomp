@@ -973,9 +973,9 @@ for _i in $(seq -w 0 39); do
 done
 _sp_asks() {   # the ERR trap as setup.sh sets it, a rollback step on record, then the question
   trap 'lib_on_error "$?" "$LINENO" "${BASH_SOURCE[0]}" "$BASH_COMMAND"' ERR
-  STATE_DIR="$_sp_state"; LOG_FILE="$TMP/sp-log"
+  STATE_DIR="${_sp_dir:-$_sp_state}"; LOG_FILE="$TMP/sp-log"
   lib_rollback_push "touch '$TMP/sp-rolled'"
-  "$@"
+  "$@" 2>"$TMP/sp-err"
   sleep 0.6      # the list's shell is nobody's child any more: time for it to say what it has to
 }
 _sp_foreign() {   # what "remove" and "rename" ask about a record
@@ -988,7 +988,7 @@ _sp_foreign() {   # what "remove" and "rename" ask about a record
 _sp_claimed() {   # what "remove" asks about the port of the application that goes
   local other=""
   other="$(_app_port_claimed_by 3456 zz.example || true)"
-  [[ "$other" == "s00.example" ]]
+  [[ "$other" == "${_sp_hit:-s00.example}" ]]
 }
 # The configuration test is such a loop too: it returns at the first virtual host whose file is
 # missing. Its list comes from one awk, which was killed only with more names to write than a
@@ -1018,7 +1018,7 @@ for _i in $(seq -w 0 39); do
 done
 _sp_first() {   # list, the name it begins with: read the way a loop that returns at its first hit reads it
   local n=""
-  MAIL_DOMAINS_DIR="$_sp_state/maildomains"
+  MAIL_DOMAINS_DIR="${_sp_dir:-$_sp_state}/maildomains"
   while read -r n; do
     [[ -n "$n" ]] || continue
     if [[ "$n" == "$2" ]]; then return 0; fi
@@ -1038,7 +1038,52 @@ assert_eq "the mail domains themselves: every one, in order" "m00.example m39.ex
   "$(MAIL_DOMAINS_DIR="$_sp_state/maildomains"; lib_mail_standalone_domains | sed -n '1p;$p' | tr '\n' ' '; lib_mail_standalone_domains | wc -l | tr -d ' ')"
 assert_eq "none of the three lists starts a command for a name" "" \
   "$(declare -f lib_domains_list lib_redirects_list lib_mail_standalone_domains | grep -E 'basename|dirname|\$\(' || true)"
-unset -f _sp_exists _sp_box _sp_port _sp_optimize _sp_restore _sp_asks _sp_foreign _sp_claimed _sp_vhosts _sp_first
+# All of the above holds with SIGPIPE at its default: the writer of a list that is left early
+# dies of it, and only a command started for a name could make a failure of that. Where SIGPIPE
+# is ignored - in whatever a systemd unit starts, on a CI runner, and a shell that inherits it
+# cannot take it back - a write to nobody is a printf that FAILS in the list's own shell:
+# "printf: write error: Broken pipe", status 1, and from there "FAILED: command exited with
+# status 1". (It was the CI runner that showed it: the two lists above, read by a loop that
+# leaves at once.) Measured with the two loops further up over a list longer than a pipe
+# holds: 60 runs of 60, and none with SIGPIPE at its default. The mail services are such a
+# list too, with a question of its own (which resolver) between two writes: 59 of 60 when the
+# reader had its answer at once. Each list is one write now - over before a reader can have
+# left - and where a list is too long for that, the write that fails is nobody's failure.
+_sp_deaf() { trap '' PIPE; "$@"; }
+_sp_services() {   # are the mail services up? The first one is not, and the list takes its time
+  lib_mail_resolver() { sleep 0.3; printf 'lomp'; }
+  lib_service_exists() { return 0; }; lib_service_active() { return 1; }
+  if lib_mail_services_active; then return 1; fi
+}
+assert_eq "the mail services, in the order they are started" "lomp-redis-rspamd unbound rspamd dovecot postfix" \
+  "$(lib_mail_resolver() { printf 'lomp'; }; lib_mail_services | tr '\n' ' ' | sed 's/ $//')"
+assert_eq "without unbound where the resolver is not lomp's own" "lomp-redis-rspamd rspamd dovecot postfix" \
+  "$(lib_mail_resolver() { printf 'system'; }; lib_mail_services | tr '\n' ' ' | sed 's/ $//')"
+# (names of 240 characters make a list of 72 KB out of 300 of them, as 4000 ordinary sites
+# would; a path that long is Linux's to make)
+if [[ "${OSTYPE:-}" == linux* ]]; then
+  _sp_big="$TMP/sp-big"; _sp_long="$(printf 'x%.0s' $(seq 1 228))"
+  for _i in $(seq -w 0 299); do
+    mkdir -p "$_sp_big/domains/s${_i}-${_sp_long}.example" "$_sp_big/domains/r${_i}-${_sp_long}.example" "$_sp_big/maildomains/m${_i}-${_sp_long}.example"
+    if [[ "$_i" == "000" ]]; then printf '{"domain":"s","user":"shared","proxy":{"target":"127.0.0.1:3456"}}\n' >"$_sp_big/domains/s${_i}-${_sp_long}.example/domain.json"
+    else printf '{"domain":"s","user":"u%s"}\n' "$_i" >"$_sp_big/domains/s${_i}-${_sp_long}.example/domain.json"; fi
+    printf '{"kind":"redirect","target":"s00.example"}\n' >"$_sp_big/domains/r${_i}-${_sp_long}.example/redirect.json"
+    printf '{"kind":"mail"}\n' >"$_sp_big/maildomains/m${_i}-${_sp_long}.example/domain.json"
+  done
+  assert_true "(the long list is longer than a pipe holds)" test "$(STATE_DIR="$_sp_big"; lib_domains_list | wc -c)" -gt 65536
+  for _sp_how in "" _sp_deaf; do
+    for _sp_q in _sp_foreign _sp_claimed "_sp_first lib_redirects_list r000-${_sp_long}.example" "_sp_first lib_mail_standalone_domains m000-${_sp_long}.example" _sp_services; do
+      : >"$TMP/sp-log"; : >"$TMP/sp-err"
+      # shellcheck disable=SC2086
+      _sp_rc="$(_sp_dir="$_sp_big" _sp_hit="s000-${_sp_long}.example" run_isolated $_sp_how _sp_asks $_sp_q)"
+      _sp_n="${_sp_q#_sp_first }"; _sp_n="${_sp_n%% *}"; _sp_n="${_sp_n#_sp_}${_sp_how:+, SIGPIPE ignored}"
+      assert_eq "${_sp_n}: the list is left at its first name"      0 "$_sp_rc"
+      assert_eq "${_sp_n}: no failure is reported from the list"    "" "$(grep 'unexpected failure' "$TMP/sp-log" || true)"
+      assert_eq "${_sp_n}: and nothing is said of a broken pipe"    "" "$(grep 'Broken pipe' "$TMP/sp-err" || true)"
+    done
+  done
+fi
+unset -f _sp_exists _sp_box _sp_port _sp_optimize _sp_restore _sp_asks _sp_foreign _sp_claimed _sp_vhosts _sp_first _sp_deaf _sp_services
 
 # =============================================================================
 section "a failure in a subshell leaves the rollback to the shell the steps belong to"

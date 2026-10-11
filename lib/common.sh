@@ -957,14 +957,21 @@ lib_domain_log_dir()   { printf '%s/%s' "$SITES_LOG_ROOT" "$1"; }
 # that way (SIGPIPE) was a failure in a shell of its own, where the ERR trap said "FAILED:
 # command exited with status 141" in the middle of a "remove" or "restore" that was going well,
 # and ran whatever rollback steps were registered.
+# And the names leave in one piece, with nothing asked of the write. Where SIGPIPE is ignored -
+# in whatever a systemd unit starts (IgnoreSIGPIPE=yes is the default there), on a CI runner -
+# a shell cannot take that back, and a write to nobody does not end the writer: printf fails,
+# with "write error: Broken pipe" and status 1, and that was the same FAILED from the same
+# shell. One write is over before any reader can have left. Only a list longer than a pipe
+# holds (64 KB) is still being written when its reader goes, and that write may fail.
 lib_domains_list() {   # prints registered domains, one per line
-  local d=""
+  local d="" all=""
   [[ -d "$STATE_DIR/domains" ]] || return 0
   for d in "$STATE_DIR"/domains/*/domain.json; do
     [[ -s "$d" ]] || continue
     d="${d%/domain.json}"
-    printf '%s\n' "${d##*/}"
+    all+="${d##*/}"$'\n'
   done
+  printf '%s' "$all" 2>/dev/null || true
 }
 
 # =============================================================================
