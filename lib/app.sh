@@ -1510,16 +1510,19 @@ lib_app_env() {   # domain list [--show] | set NAME | unset NAME... | import-db
 # =============================================================================
 #  Workers and scheduled jobs
 # =============================================================================
-# The workers with what PM2 says about them - never their environment: the process list,
-# which carries it, reaches jq through jq's own environment.
+# The workers with what PM2 says about them - never their environment. The process list, which
+# carries every process's variables twice, is what jq reads: it stands on no command line, and
+# not in jq's environment either, where one string ends at 128 KiB - six processes of an
+# application with 12 KB of variables have a longer list than that. The workers are an
+# argument: start commands are no secret.
 _app_workers_status() {   # workers JSON, PM2 process list ("" when PM2 does not run)
-  LOMP_APP_JLIST="${2:-}" jq -c '(($ENV.LOMP_APP_JLIST // "") | try fromjson catch []) as $pl
-    | map(. as $w | [$pl[]? | select(type == "object") | select(.name? == $w.name)][0] as $p
+  jq -cn --argjson workers "${1:-[]}" '(try input catch []) as $pl
+    | $workers | map(. as $w | [$pl[]? | select(type == "object") | select(.name? == $w.name)][0] as $p
       | {name, start, cwd: (.cwd // "app"), port, schedule: .cron, timeout, memory, enabled: (.enabled != false),
          kind: (if (.cron // "") == "" then "process" else "job" end),
          status: (if .enabled == false then "stopped" elif (.cron // "") != "" then "scheduled"
                   elif $p == null then "not running" else $p.pm2_env.status end),
-         restarts: ($p.pm2_env.restart_time // 0), cpu: ($p.monit.cpu // 0), memory_bytes: ($p.monit.memory // 0)})' <<<"$1"
+         restarts: ($p.pm2_env.restart_time // 0), cpu: ($p.monit.cpu // 0), memory_bytes: ($p.monit.memory // 0)})' <<<"${2:-}"
 }
 
 _app_worker_rows() {   # workers status JSON

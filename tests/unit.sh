@@ -2348,6 +2348,63 @@ assert_eq "changes: an ecosystem larger than an environment variable still recon
   "$(_app_process_changes "$_bigeco" "$_bigeco" "" "" "$_bignames")"
 assert_eq "a process list of the wrong shape leaves the workers alone" "not running" \
   "$(_app_workers_status '[{"name":"queue","cron":null,"enabled":true}]' '["a","b"]' | jq -r '.[0].status')"
+# PM2's list carries every process's variables, and carries them twice. It used to reach jq as
+# one string of jq's environment, and such a string ends at 128 KiB: with six processes and
+# 12 KB of variables (156 548 bytes from PM2 7) jq could not even be started ("Argument list
+# too long", status 126). "app status" and "app worker list" then showed no worker, "app list"
+# an empty list of them, and doctor said nothing about a worker that had crashed.
+_ws_list() {   # variables per process, bytes per variable -> what "pm2 jlist" prints for this site
+  jq -cn --argjson v "$1" --argjson b "$2" '
+    def variables: ([range(0; $v) | {key: ("VAR_" + tostring), value: ("x" * $b)}] | from_entries) + {API_KEY: "w0rker-list-s3cr3t"};
+    def proc($n; $st; $rs; $cpu; $mem):
+      variables as $env
+      | {pid: 4242, name: $n, pm2_env: ($env + {status: $st, restart_time: $rs, pm_uptime: 1700000000000, env: $env}),
+         pm_id: 0, monit: {memory: $mem, cpu: $cpu}};
+    [proc("web"; "online"; 0; 0.5; 73400320), proc("api"; "online"; 3; 1.5; 52428800),
+     proc("queue"; "errored"; 12; 0; 0), proc("not-of-this-site"; "online"; 1; 2; 1048576)]'
+}
+_ws_want='[{"name":"api","start":"node api.js","cwd":"app/api","port":3401,"schedule":null,"timeout":null,"memory":null,"enabled":true,"kind":"process","status":"online","restarts":3,"cpu":1.5,"memory_bytes":52428800},'
+_ws_want+='{"name":"cleanup","start":"npm run cleanup","cwd":"app","port":null,"schedule":"*/5 * * * *","timeout":"30m","memory":null,"enabled":true,"kind":"job","status":"scheduled","restarts":0,"cpu":0,"memory_bytes":0},'
+_ws_want+='{"name":"paused","start":"node p.js","cwd":"app","port":null,"schedule":null,"timeout":null,"memory":null,"enabled":false,"kind":"process","status":"stopped","restarts":0,"cpu":0,"memory_bytes":0},'
+_ws_want+='{"name":"queue","start":"node worker.js --queue=mail","cwd":"app","port":null,"schedule":null,"timeout":null,"memory":"256M","enabled":true,"kind":"process","status":"errored","restarts":12,"cpu":0,"memory_bytes":0}]'
+_ws_short="$(_ws_list 2 8)"; _ws_long="$(_ws_list 10 2500)"
+_ws_out="$TMP/ws.out"; _ws_seen="$TMP/ws.seen"
+_ws_run()    { _app_workers_status "$@" >"$_ws_out" 2>/dev/null; }
+_ws_states() { _app_workers_status "$(_wj)" "$1" 2>/dev/null | jq -r 'map(.name + "=" + .status) | join(" ")' || true; }
+# what jq is started with: its arguments, and its environment
+_ws_watch()  { jq() { printf '%s\n' "$@" >>"$_ws_seen"; env >>"$_ws_seen"; command jq "$@"; }; _app_workers_status "$@" >/dev/null; }
+assert_eq    "a short process list: the workers with what PM2 says about them" 0 "$(run_isolated _ws_run "$(_wj)" "$_ws_short")"
+assert_eq    "byte for byte what it always was"                                "$_ws_want" "$(cat "$_ws_out")"
+assert_true  "a list of 200 KB is longer than a string of the environment may be" test "${#_ws_long}" -gt 131072
+assert_eq    "it is read all the same"                                         0 "$(run_isolated _ws_run "$(_wj)" "$_ws_long")"
+assert_eq    "and the answer is the same"                                      "$_ws_want" "$(cat "$_ws_out")"
+: >"$_ws_seen"
+assert_eq    "jq, watched as it is started"                                    0 "$(run_isolated _ws_watch "$(_wj)" "$_ws_short")"
+assert_has   "is given its program"                                            'pm2_env.status' "$(cat "$_ws_seen")"
+assert_lacks "and nothing of the list: no command line and no environment holds a variable of the application" "w0rker-list-s3cr3t" "$(cat "$_ws_seen")"
+assert_eq    "no list, PM2 is not running: nothing runs, a job stays scheduled" "api=not running cleanup=scheduled paused=stopped queue=not running" "$(_ws_states "")"
+assert_eq    "a last line of PM2 that is no list: the same"                    "api=not running cleanup=scheduled paused=stopped queue=not running" "$(_ws_states "In-memory PM2 is out-of-date, do:")"
+assert_eq    "a site without workers: an empty list, whatever PM2 runs"        "[]" "$(_app_workers_status "" "$_ws_short")"
+# the commands that ask, with PM2 stood in for by the long list
+_ws_cmd() {
+  lib_require_tools() { return 0; }; lib_service_active() { return 0; }; lib_service_enabled() { return 0; }; lib_service_exists() { return 0; }
+  _app_as() { local dir="$1"; shift; ( cd "$dir" && "$@" ); }
+  _app_jlist() { printf '%s' "$_ws_long"; }
+  _doc_add() { printf '%s|%s|%s\n' "$1" "$2" "$3"; }
+  "$@"
+}
+_ws_said="$(_ws_cmd _doc_check_apps 2>&1 || true)"
+assert_has   "doctor names a worker that runs"          "OK|app work.example.com: worker api|online, 3 restart(s)" "$_ws_said"
+assert_has   "one that has crashed"                     "FAIL|app work.example.com: worker queue|errored (setup.sh app logs work.example.com --process queue)" "$_ws_said"
+assert_has   "and that it keeps crashing"               "WARN|app work.example.com: worker queue restarts|12 restarts, it keeps crashing" "$_ws_said"
+assert_lacks "with no failure of its own in between"    "FAILED" "$_ws_said"
+assert_has   "app worker list has the rows"             "queue process - errored 12 node worker.js --queue=mail" "$(_ws_cmd lib_app_worker_list 2>&1 | tr -s ' ' || true)"
+assert_eq    "and ends well as JSON"                    0 "$(run_isolated _ws_cmd lib_app_worker_list --json)"
+assert_has   "app status has them"                      "queue process - errored 12 node worker.js --queue=mail" "$(_ws_cmd lib_app_status work.example.com 2>&1 | tr -s ' ' || true)"
+assert_eq    "app list --json too, not an empty list"   "api=online cleanup=scheduled paused=stopped queue=errored" \
+  "$(_ws_cmd lib_app_list --json 2>/dev/null | jq -r '.[] | select(.domain == "work.example.com") | .workers | map(.name + "=" + .status) | join(" ")' || true)"
+unset -f _ws_list _ws_run _ws_states _ws_watch _ws_cmd
+unset _ws_short _ws_long _ws_want _ws_said
 
 _job='{"name":"cleanup","start":"npm run cleanup","cwd":"app","cron":"*/5 * * * *","timeout":"30m","enabled":true}'
 _js="$(lib_app_render_job "$_job")"
