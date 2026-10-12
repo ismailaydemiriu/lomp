@@ -1147,6 +1147,70 @@ printf '%s\n' 'set -Eeuo pipefail; OPT_DRY_RUN=0; OPT_VERBOSE=0; OPT_QUIET=1; OP
   'source "$1/lib/common.sh"' 'LIB_ROLLBACK_STACK=("printf mine >>\"$2/sr-steps\"")' 'false' >"$TMP/sr-main.sh"
 bash "$TMP/sr-main.sh" "$ROOT" "$TMP" >/dev/null 2>&1 || true
 assert_eq "the shell a command starts in runs every step on record" "mine" "$(cat "$TMP/sr-steps" 2>/dev/null || true)"
+# (and a step a subshell registers after a stack that was assigned as a whole is the subshell's)
+rm -f "$TMP/sr-steps"
+printf '%s\n' 'set -Eeuo pipefail; OPT_DRY_RUN=0; OPT_VERBOSE=0; OPT_QUIET=1; OPT_NO_COLOR=1; LOG_FILE="$2/sr-log"' \
+  'source "$1/lib/common.sh"' 'LIB_ROLLBACK_STACK=("printf \"mine\n\" >>\"$2/sr-steps\"")' \
+  '( lib_rollback_push "printf \"own\n\" >>\"$2/sr-steps\""; false )' >"$TMP/sr-main2.sh"
+bash "$TMP/sr-main2.sh" "$ROOT" "$TMP" >/dev/null 2>&1 || true
+assert_eq "a subshell under it takes back the step it registered, and it the rest" "own mine" "$(tr '\n' ' ' <"$TMP/sr-steps" 2>/dev/null | sed 's/ $//' || true)"
+# lib_die is no different: called on purpose, it still ends the shell it is called in and no
+# other, and ran the steps of whoever had registered them. "( f ) || lib_warn" says that f
+# may fail and the command goes on - which it did, without what it had made.
+_sr_die()        { ( lib_die "on purpose" ) || true; }
+_sr_die_comsub() { local x=""; x="$(lib_die "on purpose")"; }
+_sr_die_test()   { local x=""; x="$(lib_die "on purpose")" || true; }
+_sr_die_pipe()   { lib_die "on purpose" | cat >/dev/null; }
+: >"$TMP/sr-log"; rm -f "$TMP/sr-steps" "$TMP/sr-went-on"
+assert_eq    "lib_die in a subshell whose failure is allowed for: the command goes on" 0 "$(run_isolated _sr_run _sr_die)"
+assert_true  "to its end"                                                 test -e "$TMP/sr-went-on"
+assert_false "and its steps are not run under it"                         test -e "$TMP/sr-steps"
+: >"$TMP/sr-log"; rm -f "$TMP/sr-steps" "$TMP/sr-went-on"
+assert_eq    "lib_die in a command substitution whose failure is allowed for: the same" 0 "$(run_isolated _sr_run _sr_die_test)"
+assert_false "its steps are not run under it either"                      test -e "$TMP/sr-steps"
+for _sr_k in comsub pipe; do
+  : >"$TMP/sr-log"; rm -f "$TMP/sr-steps" "$TMP/sr-went-on"
+  assert_eq    "lib_die, ${_sr_k}, nobody allowed for it: the command ends" 1 "$(run_isolated _sr_run "_sr_die_${_sr_k}")"
+  assert_false "${_sr_k}: there and then"                                 test -e "$TMP/sr-went-on"
+  assert_eq    "${_sr_k}: and runs its steps once"                        "mine" "$(cat "$TMP/sr-steps" 2>/dev/null || true)"
+done
+# a subshell that registers a step of its own takes that one back, and leaves the others
+_sr_own()     { ( lib_rollback_push "printf 'own\n' >>'$TMP/sr-steps'"; _sr_list >/dev/null ); }
+_sr_own_die() { ( lib_rollback_push "printf 'own\n' >>'$TMP/sr-steps'"; lib_die "on purpose" ) || true; }
+: >"$TMP/sr-log"; rm -f "$TMP/sr-steps" "$TMP/sr-went-on"
+assert_eq    "a subshell with a step of its own fails: the command ends"  1 "$(run_isolated _sr_run _sr_own)"
+assert_eq    "each shell having run its own, once"                        "own mine" "$(cat "$TMP/sr-steps" 2>/dev/null | tr '\n' ' ' | sed 's/ $//' || true)"
+: >"$TMP/sr-log"; rm -f "$TMP/sr-steps" "$TMP/sr-went-on"
+assert_eq    "it ends itself with lib_die, allowed for: the command goes on" 0 "$(run_isolated _sr_run _sr_own_die)"
+assert_eq    "and only the subshell's own step is taken back"             "own" "$(cat "$TMP/sr-steps" 2>/dev/null || true)"
+# (a step that is dropped takes its place in the record with it: the others stay whose they were)
+_sr_drop() {
+  lib_rollback_push "printf 'gone\n' >>'$TMP/sr-steps'"; lib_rollback_push "printf 'kept\n' >>'$TMP/sr-steps'"
+  lib_rollback_drop "printf 'gone\n' >>'$TMP/sr-steps'"
+  _sr_list >/dev/null
+}
+: >"$TMP/sr-log"; rm -f "$TMP/sr-steps" "$TMP/sr-went-on"
+assert_eq    "a step is dropped and the command fails afterwards"         1 "$(run_isolated _sr_run _sr_drop)"
+assert_eq    "the steps that are left are run, the last one first"        "kept mine" "$(cat "$TMP/sr-steps" 2>/dev/null | tr '\n' ' ' | sed 's/ $//' || true)"
+# What that was in "add": its WordPress step, "( lib_domain_wp_https ) || true" - in a subshell
+# so that nothing in it can end the add. A WordPress is in the document root already, wp-cli is
+# not on this server yet and cannot be downloaded: lib_die, two subshells down, ran every step
+# the add had on record, and the add said "wp-cli could not be installed" and went on to its
+# end. (The real functions; what add has on record by then stands in as lines in a file.)
+_sr_add() {
+  D_DOMAIN="wp.example"; D_USER="wp_example"; D_HOME="$TMP/sr-home/wp.example"; D_SSL=1; D_WWW=0
+  STATE_DIR="$TMP/sr-state"; WPCLI_PHAR="$TMP/sr-nowhere/wp-cli.phar"; WPCLI_BIN="$TMP/sr-nowhere/wp"; INSTALL_DIR="$TMP/sr-install"
+  mkdir -p "$D_HOME/public_html" "$STATE_DIR/domains/wp.example"
+  printf '<?php // a WordPress that was here before the site was added\n' >"$D_HOME/public_html/wp-config.php"
+  curl() { return 6; }
+  lib_rollback_push "printf 'certificate\n' >>'$TMP/sr-steps'"
+  if (( D_SSL )); then ( lib_domain_wp_https ) >"$TMP/sr-out" 2>&1 || true; fi
+}
+: >"$TMP/sr-log"; rm -f "$TMP/sr-steps" "$TMP/sr-went-on" "$TMP/sr-out"
+assert_eq    "add: a wp-cli that cannot be downloaded does not end the add" 0 "$(run_isolated _sr_run _sr_add)"
+assert_has   "it is said"                                                 "wp-cli could not be installed" "$(cat "$TMP/sr-out" 2>/dev/null || true)"
+assert_true  "the add goes on"                                            test -e "$TMP/sr-went-on"
+assert_false "with everything it has made still there"                    test -e "$TMP/sr-steps"
 # The subshell "import" runs a site in is a shell the steps do belong to: a site clears the
 # stack and registers its own. A failure there takes back what the site had got to, as it did -
 _sr_site_fails() {
@@ -1172,7 +1236,17 @@ assert_eq    "what the site had registered is taken back, what the import had is
 assert_eq    "import: a list that fails inside a site does not fail the site"       0 "$(run_isolated _sr_run _sr_site_list)"
 assert_has   "it is reported"                                                       "unexpected failure" "$(cat "$TMP/sr-log")"
 assert_false "and the site keeps what it had registered"                            test -e "$TMP/sr-steps"
-unset -f _sr_list _sr_run _sr_procsub _sr_local _sr_argument _sr_herestring _sr_comsub _sr_pipeline _sr_subshell _sr_site_fails _sr_site_list
+# - nor does a step of the site that is allowed to fail, and ends with lib_die
+_sr_site_die() {
+  lib_import_site() { lib_rollback_clear; lib_rollback_push "printf 'site\n' >>'$TMP/sr-steps'"; ( lib_die "on purpose" ) || true; }
+  _import_site_run 0
+  if [[ "$IMP_RC" != 0 ]]; then return 1; fi
+}
+: >"$TMP/sr-log"; rm -f "$TMP/sr-steps" "$TMP/sr-went-on"
+assert_eq    "import: a step of a site that may fail, and does with lib_die, does not fail the site" 0 "$(run_isolated _sr_run _sr_site_die)"
+assert_false "and takes nothing of the site back"                                   test -e "$TMP/sr-steps"
+unset -f _sr_list _sr_run _sr_procsub _sr_local _sr_argument _sr_herestring _sr_comsub _sr_pipeline _sr_subshell _sr_site_fails _sr_site_list \
+  _sr_die _sr_die_comsub _sr_die_test _sr_die_pipe _sr_own _sr_own_die _sr_drop _sr_add _sr_site_die
 
 # =============================================================================
 section "renderers must exit 0 (pipefail safety)"

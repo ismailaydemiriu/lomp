@@ -12,8 +12,8 @@ LIB_LOCK_HELD=0
 LIB_ERR_HANDLING=0
 # -g: modules are sourced from inside a function in setup.sh; plain "declare" would be local there
 declare -ga LIB_ROLLBACK_STACK=()
-# the shell (BASHPID) that last put a step on the stack: see lib_on_error
-declare -g LIB_ROLLBACK_SHELL=""
+# the shell (BASHPID) each step was registered in, index for index: see lib_rollback_run
+declare -ga LIB_ROLLBACK_PIDS=()
 declare -g LIB_TMP_ROOT=""
 # paths a module wants removed when the command ends, however it ends (see lib/mail.sh:
 # a staging copy of somebody's mailbox is as large as the mailbox)
@@ -156,24 +156,46 @@ lib_log_line_no() {
 # =============================================================================
 #  Errors, traps, rollback
 # =============================================================================
-lib_rollback_clear() { LIB_ROLLBACK_STACK=(); }
-lib_rollback_push()  { LIB_ROLLBACK_STACK+=("$*"); LIB_ROLLBACK_SHELL="$BASHPID"; lib_debug "rollback step registered: $*"; }
+lib_rollback_clear() { LIB_ROLLBACK_STACK=(); LIB_ROLLBACK_PIDS=(); }
+lib_rollback_push()  { LIB_ROLLBACK_PIDS[${#LIB_ROLLBACK_STACK[@]}]="$BASHPID"; LIB_ROLLBACK_STACK+=("$*"); lib_debug "rollback step registered: $*"; }
 # Remove a step by its exact text, for when it has been handled or no longer applies.
 # By value rather than by position: other steps may have been pushed in between.
 lib_rollback_drop() {
-  local want="$*" s=""
-  local -a keep=()
-  for s in ${LIB_ROLLBACK_STACK[@]+"${LIB_ROLLBACK_STACK[@]}"}; do
-    if [[ "$s" != "$want" ]]; then keep+=("$s"); fi
+  local want="$*" i=0
+  local -a keep=() pids=()
+  for (( i = 0; i < ${#LIB_ROLLBACK_STACK[@]}; i++ )); do
+    if [[ "${LIB_ROLLBACK_STACK[i]}" != "$want" ]]; then keep+=("${LIB_ROLLBACK_STACK[i]}"); pids+=("${LIB_ROLLBACK_PIDS[i]:-$$}"); fi
   done
-  LIB_ROLLBACK_STACK=(${keep[@]+"${keep[@]}"})
+  LIB_ROLLBACK_STACK=(${keep[@]+"${keep[@]}"}); LIB_ROLLBACK_PIDS=(${pids[@]+"${pids[@]}"})
   return 0
 }
+# A shell rolls back what it registered itself, and nothing else. A command substitution, a
+# pipeline, a "( ... )" and a process substitution each run in a shell of their own, which
+# starts with a COPY of the steps on record while the shell that put them there is still
+# running - and lib_die and the ERR trap alike ran that copy from wherever they found
+# themselves. Where the first shell learns of the failure - x="$(f)", "f | g", a bare "( f )" -
+# it runs the steps itself, and they were run twice. Where it does not (a list read from a
+# process substitution, local x="$(f)") or has said that it goes on ("( f ) || lib_warn"), it
+# went on and ended well with what it had registered taken away under it: "add" runs its
+# WordPress step as "( lib_domain_wp_https ) || true" so that nothing in it can end the add,
+# and a wp-cli that could not be downloaded there (lib_die, two subshells down) ran every step
+# the add had on record - certificate, virtual host, Linux user, state directory - while the
+# add went on to its end.
+# So each step remembers the shell it was registered in. In the shell the command started in
+# every step is its own; the subshell "import" runs each site in registers that site's steps
+# itself, and a failure there still takes them back.
 lib_rollback_run() {
-  local n=${#LIB_ROLLBACK_STACK[@]} i="" cmd=""
+  local n=${#LIB_ROLLBACK_STACK[@]} i="" cmd="" left=0
+  local -a steps=()
+  for (( i = 0; i < n; i++ )); do
+    # a step whose shell is not on record (the stack was assigned as a whole) is the first shell's
+    if [[ "${LIB_ROLLBACK_PIDS[i]:-$$}" == "$BASHPID" ]]; then steps+=("${LIB_ROLLBACK_STACK[i]}")
+    else left=$((left + 1)); fi
+  done
+  LIB_ROLLBACK_STACK=(); LIB_ROLLBACK_PIDS=()      # cleared first: a failing step must not re-enter this loop
+  if (( left > 0 )); then lib_log_write INFO "${left} rollback step(s) on record are left to the shell that registered them (this is a subshell of it)"; fi
+  n=${#steps[@]}
   (( n > 0 )) || return 0
-  local -a steps=("${LIB_ROLLBACK_STACK[@]}")
-  LIB_ROLLBACK_STACK=()            # cleared first: a failing step must not re-enter this loop
   lib_warn "Rolling back ${n} step(s)..."
   for (( i = n - 1; i >= 0; i-- )); do
     cmd="${steps[$i]}"
@@ -228,22 +250,10 @@ lib_die() {
   exit 1
 }
 
-# ERR trap handler: file/line/command + rollback
-#
-# The rollback is run by the shell the steps belong to, and by no other. A command
-# substitution, a pipeline, a "( ... )" and a process substitution each run in a shell of
-# their own, and that shell starts with a copy of the steps on record while the one that put
-# them there is still running. Where the first shell learns of the failure - x="$(f)", "f | g",
-# a bare "( f )" - it runs the steps itself, and they were run twice. Where it does not - a
-# list read through "< <(f)", local x="$(f)", "cmd <<<$(f)" - it goes on and ends well, and it
-# did so with what it had registered (for a site that is being added: its home, its user, its
-# virtual host) taken away under it by a shell nobody waits for. So a subshell runs the steps
-# only when it has put one on the stack itself. The subshell "import" runs each site in is
-# such a one (a site begins with lib_rollback_clear, and what it registers after that is its
-# own), and a failure there still takes back what that site had got to; a list that fails
-# inside it no longer does.
-# This is about the failures nobody expected. lib_die, which ends a command on purpose, runs
-# the steps on record wherever it is called, as before.
+# ERR trap handler: file/line/command + rollback - of the steps this shell registered itself,
+# which in a subshell is seldom any (lib_rollback_run): the trap is inherited by every command
+# substitution, pipeline and process substitution, and what fails there fails in a shell
+# nobody may be waiting for.
 lib_on_error() {
   local code="$1" line="$2" src="$3" cmd="$4"
   (( LIB_ERR_HANDLING )) && exit "$code"
@@ -264,11 +274,7 @@ lib_on_error() {
     fi
     lib_suggest_doctor
   } >&2
-  if [[ "$BASHPID" == "$$" || "$LIB_ROLLBACK_SHELL" == "$BASHPID" ]]; then
-    lib_rollback_run
-  elif ((${#LIB_ROLLBACK_STACK[@]} > 0)); then
-    lib_log_write INFO "the ${#LIB_ROLLBACK_STACK[@]} rollback step(s) on record are left to the shell that registered them (this is a subshell of it)"
-  fi
+  lib_rollback_run
   exit "$code"
 }
 trap 'lib_on_error "$?" "$LINENO" "${BASH_SOURCE[0]}" "$BASH_COMMAND"' ERR
