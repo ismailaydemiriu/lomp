@@ -2666,6 +2666,33 @@ assert_false "a start of only spaces gets no script"      lib_app_render_job '{"
 assert_has   "files in the site's home are read with a bound" "timeout 5 head -c" "$(declare -f _app_read_as_user)"
 assert_has   "and written with noclobber, so a planted pipe fails instead of blocking" "set -C" "$(declare -f _app_write_as_user)"
 assert_eq    "root never reads a file of theirs unbounded" "" "$(grep -nE '_app_as "\$D_HOME" cat ' "$ROOT/lib/app.sh" || true)"
+# PM2's list is bounded in time the same way, and for a sharper reason: the site owns its PM2
+# daemon and can SIGSTOP it, after which "pm2 jlist" never answers. Unbounded, that hangs app
+# list/status/worker and doctor, and the healthcheck cron then holds the global lock for the
+# whole wait - so a site's own user could stall all server management (a lock DoS). The bound is
+# generous (30 s, overridable with APP_JLIST_TIMEOUT) so only a true hang trips it, never a
+# slow-but-alive daemon, and there is no size cap: truncating a valid list would drop a real
+# app's processes and bring back the 128 KiB-class breakage.
+assert_has   "PM2's list is read as the site user"                              '_app_as "$D_HOME"' "$(declare -f _app_jlist)"
+assert_has   "and bounded in time, generous and overridable (default 30 s)"     'timeout "${APP_JLIST_TIMEOUT:-30}"' "$(declare -f _app_jlist)"
+assert_lacks "with no size cap that could truncate a valid list into invalid JSON" "head -c" "$(declare -f _app_jlist)"
+if command -v timeout >/dev/null 2>&1; then
+  # behaviour: a daemon that never answers (here a pm2 that just sleeps) is given up on at the
+  # bound, not waited out; on the unbounded version the call waits the full sleep and fails -lt 10
+  mkdir -p "$TMP/jlbin"
+  printf '#!/bin/sh\nexec sleep 20\n' >"$TMP/jlbin/pm2"; chmod +x "$TMP/jlbin/pm2"
+  _jl_t0=$(date +%s)
+  _jl_out="$(
+    PATH="$TMP/jlbin:$PATH"; D_HOME="$TMP"; APP_JLIST_TIMEOUT=2
+    _app_as() { shift; ( "$@" ); }
+    _app_jlist
+  )"
+  _jl_el=$(( $(date +%s) - _jl_t0 ))
+  assert_true  "a wedged pm2 jlist is given up on within the bound, not left to hang" test "$_jl_el" -lt 10
+  assert_eq    "and its output is empty, which every caller reads as PM2 not running" "" "$_jl_out"
+  rm -rf "$TMP/jlbin"
+  unset _jl_t0 _jl_out _jl_el
+fi
 assert_eq    "the cron line runs the script as the site user" "*/5 * * * * work_example_com /bin/bash $D_HOME/.pm2/jobs/cleanup.sh" "$(lib_app_job_line "$_job")"
 assert_has   "a % in the cron line is escaped"          'a\%b' "$(D_HOME="/home/a%b" lib_app_job_line "$_job")"
 

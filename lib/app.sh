@@ -609,7 +609,24 @@ _app_pm2() {
 
 # PM2's process list as JSON. PM2 can print a version warning before it, so only the last
 # line counts. It carries every process's environment: kept in memory, never logged.
-_app_jlist() { _app_pm2 jlist 2>/dev/null | tail -n 1 || true; }
+#
+# Bounded in time, like _app_read_as_user: the site owns its PM2 daemon and can wedge it (a
+# plain SIGSTOP of its own process), and then `pm2 jlist` never answers. Without a bound that
+# hangs every reader of the list - app list/status/worker and doctor - and the healthcheck
+# cron then holds lompstack's global lock for the whole wait, so a site's own user could stall
+# all server management (a denial of service on the lock). timeout runs as the site user,
+# wrapping pm2 directly the way head does in _app_read_as_user, so it reaps the stuck client;
+# on expiry the output is empty, which every caller already treats as "PM2 not running".
+#
+# The bound is generous (30 s by default, well over the few seconds even a tens-of-MB valid
+# list takes to read): only a true hang should trip it, never a slow-but-alive daemon. No size
+# cap - truncating a valid list would make a real app's processes vanish and bring back the
+# 128 KiB-class breakage removed earlier, so a legitimate large list must pass through whole.
+_app_jlist() {
+  local pm2=""
+  pm2="$(command -v pm2 || printf '/usr/bin/pm2')"
+  _app_as "$D_HOME" timeout "${APP_JLIST_TIMEOUT:-30}" "$pm2" jlist 2>/dev/null | tail -n 1 || true
+}
 
 # "status cpu memory_bytes started_ms restarts" of one process in such a list
 _app_info_from() {   # jlist name
