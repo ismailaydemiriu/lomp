@@ -1395,7 +1395,8 @@ says what it needs (mail, swaks, the webmail) and stops when that is missing:
 
 ```bash
 LOMPSTACK_INTEGRATION=yes bash tests/e2e-rename.sh            # a WordPress site, the redirect, rollback, the menu
-LOMPSTACK_INTEGRATION=yes bash tests/e2e-rename-app-mail.sh   # a Node.js application; mailboxes that follow the site
+LOMPSTACK_INTEGRATION=yes bash tests/e2e-rename-app-mail.sh   # a Node.js application; mailboxes that follow the site,
+                                                              # also while mail keeps arriving, and back again
 LOMPSTACK_INTEGRATION=yes bash tests/e2e-rename-webmail.sh    # what Roundcube keeps for a mailbox
 ```
 

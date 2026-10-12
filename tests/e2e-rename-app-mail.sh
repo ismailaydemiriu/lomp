@@ -6,7 +6,8 @@
 #  A PM2 application with a build step, a scheduled job and a variable is renamed and,
 #  after an injected failure, put back. A site with two mailboxes and an alias is renamed:
 #  same passwords under the new addresses, mail to the old ones delivered into the new
-#  mailboxes; and once more with --keep-mail.
+#  mailboxes; once more while mail keeps arriving, and back to the name it had; and once
+#  more with --keep-mail.
 #
 #  RUN ONLY ON A THROWAWAY SERVER, AS ROOT. It adds, renames and removes real sites
 #  (names under .invalid, which no DNS answers for), reloads OpenLiteSpeed many times
@@ -53,6 +54,7 @@ cp -r "$SRC/setup.sh" "$SRC/lib" "$SRC/tests" "$T/src/"
 L="bash $T/src/setup.sh"
 APP=rnapp.lomp-e2e.invalid; APPN=rnappnew.lomp-e2e.invalid; AI=rnapp_lomp_e2e_invalid; ANI=rnappnew_lomp_e2e_invalid
 ML=rnmail.lomp-e2e.invalid; MLN=rnmailnew.lomp-e2e.invalid; MK=rnkeep.lomp-e2e.invalid; MKN=rnkeepnew.lomp-e2e.invalid
+MB=rnbusy.lomp-e2e.invalid; MBN=rnbusynew.lomp-e2e.invalid
 ST=/root/.server-setup/domains
 MD=/root/.server-setup/mail/domains
 T0=$(date +%s)
@@ -70,7 +72,12 @@ wait_body() {   # host needle seconds
 }
 cleanup() {
   local d="" u=""
-  for d in "$APP" "$APPN" "$ML" "$MLN" "$MK" "$MKN"; do
+  # what Postfix still holds for an address of the test (a delivery the move of a mailbox
+  # interrupted waits there for its next attempt)
+  for d in $(postqueue -j 2>/dev/null | jq -r 'select((.recipients | length) > 0 and all(.recipients[]; .address | test("@rn[a-z]*\\.lomp-e2e\\.invalid$"))) | .queue_id' 2>/dev/null); do
+    postsuper -d "$d" >/dev/null 2>&1
+  done
+  for d in "$APP" "$APPN" "$ML" "$MLN" "$MK" "$MKN" "$MB" "$MBN"; do
     [ -s "$ST/$d/redirect.json" ] && $L redirect del "$d" --yes >/dev/null 2>&1
     [ -s "$MD/$d/domain.json" ] && $L mail domain del "$d" --yes --no-backup >/dev/null 2>&1
     [ -s "$ST/$d/domain.json" ] && $L remove "$d" --yes >/dev/null 2>&1
@@ -199,6 +206,52 @@ else bad "the mailbox may still send as its old address" "swaks refused"; fi
 # (a test domain has no DNS: that finding is there before the rename as well)
 doc="$($L doctor --no-color 2>&1 | grep -E "$ML|$MLN" | grep -v 'mail: DNS')"
 lacks "doctor has no failure for either name" "FAIL" "$doc"
+
+sec "a site with mail, renamed while mail keeps arriving"
+# Dovecot looks at its user file at most once a second, and Postfix asks it about the mailbox
+# at every RCPT TO. A rename that did not wait for that second, with senders at work all
+# through it, left a directory under the old name in six runs of seven and had "550 User
+# doesn't exist" for the new address, a message bounced each time, in one of two.
+out="$($L add "$MB" --static --no-ssl --mail --email e2e@example.org --yes --no-color 2>&1)"
+check "the site is added" test -s "$ST/$MB/domain.json"
+printf '%s' "$PW1" | $L mail box add "info@$MB" --yes --no-color >/dev/null 2>&1
+tb="$(date +%s)"
+: >"$T/busy"
+for i in 1 2 3 4; do
+  ( while [ -e "$T/busy" ]; do
+      swaks --server 127.0.0.1 --port 25 --helo client.example.org --from '<>' --to "info@$MB" --header "Subject: e2e-busy" --body hello >/dev/null 2>&1
+    done ) &
+done
+sleep 2
+out="$($L rename "$MB" "$MBN" --yes --no-color 2>&1)"; rc=$?
+rm -f "$T/busy"; wait
+eq "the rename succeeds" "0" "$rc"
+[ "$rc" = 0 ] || printf '%s\n' "$out" | tail -n 50
+lacks "with no failure shown on the way" "FAILED" "$out"
+for i in $(seq 1 20); do postqueue -p 2>/dev/null | grep -q 'Mail queue is empty' && break; sleep 1; done
+has "the mailbox is one of the new domain" "info@$MBN" "$($L mail box list --no-color 2>&1)"
+n="$(grep -rl '^Subject: e2e-busy' "/var/vmail/$MBN/info/Maildir" 2>/dev/null | grep -cE '/(new|cur)/')"
+if [ "${n:-0}" -ge 20 ]; then ok "the mail that kept arriving is in it ($n messages)"; else bad "the mail that kept arriving is in it" "${n:-0} messages"; fi
+nope "nothing is left under the old name, not a directory either" bash -c "ls -d /var/vmail/$MB/*"
+eq "no message was refused at the new address" "0" "$(journalctl -t postfix/lmtp --since "@$tb" --no-pager -o cat 2>/dev/null | grep -c "to=<info@$MBN>.*status=bounced")"
+
+sec "... and renamed back to the name it had"
+# Every address of the first name became an alias of the same address at the second. A mailbox
+# that comes back takes its address over from that alias: left in place, the two aliases sent
+# each other its mail, and Postfix answered "451 4.6.0 Alias expansion error".
+$L redirect del "$MB" --yes --no-color >/dev/null 2>&1
+out="$($L rename "$MBN" "$MB" --yes --no-color 2>&1)"; rc=$?
+eq "the rename back succeeds" "0" "$rc"
+[ "$rc" = 0 ] || printf '%s\n' "$out" | tail -n 50
+boxes="$($L mail box list --no-color 2>&1)"
+has "the mailbox has its first address again" "info@$MB" "$boxes"
+lacks "and is none of the other domain" "@$MBN " "$boxes"
+check "the same password signs in under it" doveadm auth test "info@$MB" "$PW1"
+check "its mail came back with it" bash -c "grep -rlq '^Subject: e2e-busy' /var/vmail/$MB/info/Maildir"
+lacks "its address is no alias of the other one any more" "info@$MBN" "$($L mail alias list --no-color 2>&1 | grep "^ *info@$MB ")"
+if deliver "info@$MB" e2e-back "/var/vmail/$MB/info/Maildir"; then ok "mail to it arrives"; else bad "mail to it arrives" "$(postqueue -p 2>&1 | tail -n 4)"; fi
+if deliver "info@$MBN" e2e-back-other "/var/vmail/$MB/info/Maildir"; then ok "and so does mail to the address of the meantime"; else bad "and so does mail to the address of the meantime" "$(postqueue -p 2>&1 | tail -n 4)"; fi
+nope "nothing is left under the name of the meantime" bash -c "ls -d /var/vmail/$MBN/*"
 
 sec "a site with mail, renamed with --keep-mail"
 out="$($L add "$MK" --static --no-ssl --mail --email e2e@example.org --yes --no-color 2>&1)"
