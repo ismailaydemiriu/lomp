@@ -26,7 +26,7 @@ INSTALL_DIR="$TMP/install"; BIN_LINK="$TMP/lompstack"; BIN_SHORT="$TMP/lomp"; LO
 OPT_YES=1 OPT_DRY_RUN=0 OPT_QUIET=1 OPT_VERBOSE=0 OPT_NO_COLOR=1 OPT_JSON=0 OPT_NON_INTERACTIVE=1
 SCRIPT_PATH="$ROOT/setup.sh"; SCRIPT_DIR="$ROOT"
 export TMPDIR="$TMP"
-for m in common lang system ols php db ssl domain harden scan proxy app mail webmail cloudflare backup monitor install importapp import rename menu; do
+for m in common lang system ols php db ssl domain harden scan speed proxy app mail webmail cloudflare backup monitor install importapp import rename menu; do
   # shellcheck source=/dev/null
   source "$ROOT/lib/$m.sh"
 done
@@ -6079,7 +6079,7 @@ assert_lacks "a clean run has no advice to give" "A match is a reason" "$_out"
 assert_false "a site that is not registered is refused" bash -c "$(declare -f lib_scan_main lib_scan_usage lib_domain_valid lib_domain_registered lib_domain_json lib_die 2>/dev/null); STATE_DIR='$STATE_DIR'; lib_scan_main nosuch.example.com >/dev/null 2>&1"
 assert_false "--all and a domain together are refused" bash -c "$(declare -f lib_scan_main lib_scan_usage lib_die 2>/dev/null); lib_scan_main --all sc1.example.com >/dev/null 2>&1"
 assert_has "setup.sh has the command" 'scan)           lib_scan_main' "$(cat "$ROOT/setup.sh")"
-assert_has "it takes no lock: it only reads" 'list|status|doctor|credentials|logs|menu|scan) ;;' "$(cat "$ROOT/setup.sh")"
+assert_has "it takes no lock: it only reads" 'list|status|doctor|credentials|logs|menu|scan|speed) ;;' "$(cat "$ROOT/setup.sh")"
 assert_has "the menu offers it"       '24) _menu_scan' "$(cat "$ROOT/lib/menu.sh")"
 assert_has "and the command reference" 'scan <domain>|--all [--wide]' "$(lib_usage)"
 STATE_DIR="$_sc_state"; unset -f _sc_file _sc_sum; eval "$_sc_saved"
@@ -7922,7 +7922,7 @@ section "rename: a site under another name, and the old name as a redirect"
 # stood in for is still standing in here; what reaches outside the process is stood in for
 # below, and what decides, moves and writes is real.
 _rn="$TMP/rename"
-_rn_mods="common system ols php db ssl domain harden scan proxy app mail webmail cloudflare backup monitor install rename menu"
+_rn_mods="common system ols php db ssl domain harden scan speed proxy app mail webmail cloudflare backup monitor install rename menu"
 _rn_stubs='
   HARDEN_PHP_INI_ROOT="$_rn/phpini"; LE_LIVE="$_rn/le"; WPCLI_BIN="$_rn/wp"; MAIL_DOMAINS_DIR="$_rn/maildomains"
   MAIL_PASSWD_FILE="$_rn/mail/passwd"; MAIL_ALIAS_DIR="$_rn/mail/aliases"; MAIL_VMAIL_HOME="$_rn/vmail"; MAIL_DISABLED_DIR="$_rn/mail/disabled"
@@ -9770,7 +9770,7 @@ assert_has  "setup.sh loads the module" " rename menu; do" "$_rn_setup"
 assert_has  "and knows the command" 'rename)         lib_domain_rename_main "${rest[@]}" ;;' "$_rn_setup"
 assert_has  "and redirect" 'redirect)       lib_redirect_main "${rest[@]}" ;;' "$_rn_setup"
 assert_has  "listing the redirects takes no lock; changing them does" 'redirect) case "${rest[0]:-list}" in list|--list|help|-h|--help) ;; *) lib_lock ;; esac ;;' "$_rn_setup"
-assert_lacks "rename is not among the commands that run without the lock" "rename" "$(grep -n 'list|status|doctor|credentials|logs|menu|scan) ;;' "$ROOT/setup.sh")"
+assert_lacks "rename is not among the commands that run without the lock" "rename" "$(grep -n 'list|status|doctor|credentials|logs|menu|scan|speed) ;;' "$ROOT/setup.sh")"
 _rn_usage="$(lib_usage)"
 assert_has  "help has rename" "rename <old> <new>" "$_rn_usage"
 assert_has  "and redirect" "redirect add <from> <to>" "$_rn_usage"
@@ -10829,7 +10829,7 @@ assert_eq   "each of them has its Turkish"        "SERTİFİKALAR Siteler Yönle
 # that names an option the command does not take, or leaves one out, sends somebody the wrong way
 _uo() { grep -o -- '--[a-z][a-z0-9-]*' | sort | uniq -c | tr -s ' \n' ' '; }
 for _u in lib_usage lib_domain_add_usage lib_domain_wordpress_usage lib_domain_fix_owner_usage lib_app_usage lib_mail_usage \
-          lib_harden_usage lib_scan_usage lib_proxy_usage lib_import_usage lib_domain_rename_usage lib_redirect_usage lib_ssl_usage; do
+          lib_harden_usage lib_scan_usage lib_speed_usage lib_proxy_usage lib_import_usage lib_domain_rename_usage lib_redirect_usage lib_ssl_usage; do
   if ! declare -F "$_u" >/dev/null; then fail "${_u} is not there"; continue; fi
   _u_en="$("$_u")"; _u_tr="$( LIB_LANG="tr"; "$_u" )"
   assert_true  "${_u}: there is a Turkish text"            test -n "$_u_tr" -a "$_u_tr" != "$_u_en"
@@ -12590,6 +12590,88 @@ assert_true  "the warning too"                                       grep -qF "'
 WPCLI_BIN="$_rt_bin"; eval "$_rt_fn"
 unset -f _rt_wp _rt_set _rt_title _rt_calls _rt_said
 lib_domain_state_reset
+
+section "speed: where a slow site loses its time"
+# A curl that answers from a script: SP_LOCAL and SP_PUBLIC are the first-byte times it reports
+# for the first request and the next ones ("first next"; 0 = no answer), whichever path asks.
+_sp_bin="$TMP/sp-bin"; mkdir -p "$_sp_bin"
+cat >"$_sp_bin/curl" <<'SPEOF'
+#!/usr/bin/env bash
+hdr=""; kind="public"; prev=""
+for a in "$@"; do
+  [[ "$prev" == "-D" ]] && hdr="$a"
+  [[ "$a" == "--resolve" ]] && kind="local"
+  prev="$a"
+done
+spec="$SP_PUBLIC"; [[ "$kind" == "local" ]] && spec="$SP_LOCAL"
+n=0; [[ -f "$SP_DIR/n-$kind" ]] && n="$(cat "$SP_DIR/n-$kind")"
+printf '%s' $((n + 1)) >"$SP_DIR/n-$kind"
+read -r first next <<<"$spec"
+t="$next"; ((n == 0)) && t="$first"
+if [[ "$t" == "0" ]]; then printf '0 0 0 0 0 000 0'; exit 7; fi
+[[ -n "$hdr" ]] && printf 'HTTP/2 200\r\nx-litespeed-cache: hit\r\n\r\n' >"$hdr"
+printf '%s 0.010 0.030 %s %s 200 5120' "${SP_DNS:-0.002}" "$t" "$t"
+SPEOF
+chmod +x "$_sp_bin/curl"
+_sp_state="$STATE_DIR"; _sp_list="$(declare -f lib_domains_list)"; _sp_srv="$(declare -f _speed_server)"
+STATE_DIR="$TMP/sp-state"
+eval "$(sed -n '/^lib_domains_list() {/,/^}/p' "$ROOT/lib/common.sh")"
+mkdir -p "$STATE_DIR/domains/sp1.example.com"; printf '{}\n' >"$STATE_DIR/domains/sp1.example.com/domain.json"
+export SP_DIR="$TMP/sp-run"; mkdir -p "$SP_DIR"
+_sp_run() {   # local public [args...]  -> output + rc
+  local rc=0; export SP_LOCAL="$1" SP_PUBLIC="$2"; shift 2
+  rm -f "$SP_DIR"/n-*
+  ( OPT_QUIET=0; _speed_server() { :; }; PATH="$_sp_bin:$PATH"; lib_speed_main sp1.example.com --runs 3 "$@" ) >"$TMP/sp-out" 2>&1 || rc=$?
+  cat "$TMP/sp-out"; printf 'rc=%s' "$rc"
+}
+assert_eq "the middle of an odd list"  2   "$(_speed_median 3 1 2)"
+assert_eq "the middle of an even list" 2.5 "$(_speed_median 1 2 3 4)"
+assert_eq "milliseconds"               "1500 ms" "$(_speed_ms 1.5)"
+assert_true  "1.5 is more than 1.0"    _speed_gt 1.5 1.0
+assert_false "1.0 is not more than 1.0" _speed_gt 1.0 1.0
+_out="$(PATH="$_sp_bin:$PATH" SP_LOCAL="0.1 0.1" SP_PUBLIC="0.1 0.1" _speed_probe https://x.example/ -k)"
+assert_has "a probe reads curl's times and the code" "0.100 0.100 200 5120" "$(awk '{ printf "%.3f %.3f %s %s", $4, $5, $6, $7 }' <<<"$_out")"
+assert_has "and the cache header the answer carried"  "x-litespeed-cache=hit" "$_out"
+assert_has "a path that does not answer is all zeros" "0 0 0 0 0 000 0" "$(PATH="$_sp_bin:$PATH" SP_PUBLIC="0" _speed_probe https://x.example/)"
+
+_out="$(_sp_run "0.12 0.1" "0.2 0.18")"
+assert_has   "a fast site is said to be fast"             "no slow part found from here" "$_out"
+assert_has   "each request is shown, local and visitor's" "visitor  #3" "$_out"
+assert_lacks "and nothing is named"                       "[warn]" "$_out"
+assert_has   "it succeeds"                                "rc=0" "$_out"
+_out="$(_sp_run "1.6 1.5" "1.7 1.6")"
+assert_has   "a web server that is slow itself is named"  "the web server itself needs 1500 ms" "$_out"
+assert_lacks "and the way to the visitor is not blamed"   "DNS, Cloudflare or the network between" "$_out"
+_out="$(_sp_run "3.0 0.1" "3.1 0.2")"
+assert_has   "a slow first request against fast later ones" "the first request took 3000 ms, the later ones 100 ms" "$_out"
+_out="$(_sp_run "0.1 0.1" "2.0 1.9")"
+assert_has   "a visitor who waits longer than the server needs" "DNS, Cloudflare or the network between" "$_out"
+_out="$(_sp_run "0.1 0.1" "2.0 1.9" --local)"
+assert_lacks "--local does not test the visitor's path"   "visitor  #" "$_out"
+_out="$(SP_DNS=0.9 _sp_run "0.1 0.1" "0.2 0.2")"
+assert_has   "a slow DNS answer is named"                 "the DNS answer took 900 ms" "$_out"
+_out="$(_sp_run "0 0" "0 0")"
+assert_has   "no answer from the web server is said so"   "the web server on this machine did not answer" "$_out"
+assert_has   "and fails"                                  "rc=1" "$_out"
+_out="$(_sp_run "0.1 0.1" "0 0")"
+assert_has   "no answer for a visitor is not called slow" "the visitor's path gave no answer" "$_out"
+
+for _a in "--runs 0" "--runs 21" "--runs x" "--nosuch" "" "--all sp1.example.com" "nosuch.example.com"; do
+  assert_false "refused: ${_a:-no domain}" bash -c "$(declare -f lib_speed_main lib_speed_usage lib_die lib_domain_valid lib_domain_registered lib_domain_json lib_domain_name_safe 2>/dev/null); STATE_DIR='$STATE_DIR'; lib_speed_main ${_a} >/dev/null 2>&1"
+done
+_out="$(PATH="$_sp_bin:$PATH" OPT_QUIET=0 _speed_server 2>&1)"
+assert_has   "the server section shows load and memory"   "load " "$_out"
+assert_has   "and the busiest processes"                  "busiest processes" "$_out"
+assert_has   "setup.sh has the command"        'speed)          lib_speed_main' "$(cat "$ROOT/setup.sh")"
+assert_has   "it takes no lock: it only reads" 'menu|scan|speed) ;;' "$(cat "$ROOT/setup.sh")"
+assert_has   "the menu offers it as 30"        '30) _menu_speed' "$(cat "$ROOT/lib/menu.sh")"
+assert_has   "and the command reference"       'speed <domain>|--all [--runs N] [--local]' "$(lib_usage)"
+assert_has   "in Turkish too"                  'speed <domain>|--all [--runs N] [--local]' "$( LIB_LANG="tr"; lib_usage )"
+assert_lacks "it pipes nothing into head or grep -q (SIGPIPE)" "| head" "$(cat "$ROOT/lib/speed.sh")"
+assert_lacks "it changes nothing: no write outside its own temp file" "systemctl" "$(cat "$ROOT/lib/speed.sh")"
+
+STATE_DIR="$_sp_state"; eval "$_sp_list"; eval "$_sp_srv"
+unset -f _sp_run; unset SP_DIR SP_LOCAL SP_PUBLIC
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 if (( FAIL > 0 )); then exit 1; fi

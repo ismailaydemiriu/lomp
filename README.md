@@ -270,6 +270,7 @@ sudo lomp self-update                               # pull the latest code and a
 sudo lomp optimize                                  # re-measure hardware, show a diff, re-tune
 sudo lomp harden --all                              # limit what a PHP shell in a site can do
 sudo lomp scan --all                                # look through every site's PHP for a shell
+sudo lomp speed example.com                         # a site opens slowly: where does the time go?
 sudo lomp php-cleanup                               # undo an "apt-get install lsphp83*": purge the
                                                     # compiler, debug symbols and the rest it added
                                                     # beyond lomp's own PHP packages (asks first)
@@ -888,6 +889,27 @@ into a site can do from there. New sites start with it; for the sites an older r
 `harden` checks each site before and after, and names one that answered before and no longer
 does. `sudo lomp harden status` shows what is set. It narrows what a shell can do; it does not
 find or remove one.
+
+### A site that opens slowly
+
+`sudo lomp speed example.com` (or `--all`; item 30 in the menu) finds where the time goes. It
+asks for the site's page a few times (`--runs N`, default 4) twice over: straight to the web
+server on this machine, with no DNS and no Cloudflare in between, and the way a visitor goes
+(`--local` skips that one). Each answer is split into DNS, connect, TLS, first byte and total,
+with the cache headers it carried. The first request counts as cold and the others as warm; the
+difference between them shows whether a cache is working.
+
+It names what it finds:
+
+- the web server itself is slow: the time goes into PHP or the database (a heavy plugin, a slow
+  query, no page cache);
+- the first request is much slower than the rest: the cache expires or PHP starts cold;
+- the web server is fast but a visitor waits longer: DNS, Cloudflare or the network between;
+- the machine is short of something: load above what its CPUs can run, less than 10% of the
+  memory free, swap in use, the CPUs waiting for the disk (with the busiest processes).
+
+It measures from the server, so a visitor far away or on a slow phone adds time it cannot see.
+It changes nothing.
 
 ### Looking for a shell
 

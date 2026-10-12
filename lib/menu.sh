@@ -202,6 +202,11 @@ KOMUTLAR
                                 kurulan komutlar, paketlenmiş kod) ve bakılacak dosyaları
                                 listeler. Hiçbir şeyi değiştirmez; --wide ayrıca her eval,
                                 base64_decode ve exec kullanımını listeler
+  speed <domain>|--all [--runs N] [--local]
+                                Yavaş açılan sitenin zamanı nerede kaybettiğini bulur: sayfayı
+                                doğrudan web sunucusundan ve ziyaretçinin yolundan ister, DNS /
+                                bağlantı / TLS / ilk bayt süresini ayırır, önbelleğe ve makinenin
+                                yüküne, belleğine, swap'ına bakar. Hiçbir şeyi değiştirmez
   php-cleanup [--php 8.3]       Bir "apt-get install lsphp83*" işlemini geri alır: onun, lomp'un kendi
                                 PHP paketleri dışında eklediklerini siler (derleyici, hata
                                 ayıklama sembolleri, kaynaklar, dağıtımın PHP'si). Listeyi
@@ -465,6 +470,11 @@ COMMANDS
                                 (eval of decoded or request data, commands made of the request,
                                 packed code) and list the files to open. Changes nothing;
                                 --wide also lists every use of eval, base64_decode and exec
+  speed <domain>|--all [--runs N] [--local]
+                                Find where a slow site loses its time: ask for the page straight
+                                from the web server and the way a visitor goes, split DNS /
+                                connect / TLS / first byte, and look at the cache and at the
+                                machine's load, memory and swap. Changes nothing
   php-cleanup [--php 8.3]       Undo an "apt-get install lsphp83*": purge what it added beyond
                                 lomp's own PHP packages (compiler, debug symbols, sources,
                                 the distribution's PHP). Shows the list and asks first
@@ -813,6 +823,7 @@ lib_menu_main() {
     _menu_item 23 "Harden sites against PHP shells"
     _menu_item 24 "Scan sites for PHP shells (eval, base64, exec)"
     _menu_item 25 "Download WordPress into a site (you finish the setup in the browser)"
+    _menu_item 30 "Test why a site is slow (where the time goes: server, cache, DNS, Cloudflare)"
     _menu_group "SERVER"
     _menu_item  8 "Status"
     _menu_item  9 "Health check"
@@ -849,6 +860,7 @@ lib_menu_main() {
       23) _menu_harden ;;
       24) _menu_scan ;;
       25) _menu_wordpress ;;
+      30) _menu_speed ;;
       8) _menu_run status ;;
       9) _menu_run doctor ;;
       10) _menu_run panel ;;
@@ -1338,6 +1350,26 @@ _menu_scan() {
   _menu_ask wide "Also list every use of eval, base64_decode and exec? Plugins use them too (y/N)" "n"
   if [[ "${wide,,}" == y* ]]; then args+=(--wide); fi
   _menu_run scan "${args[@]}"
+}
+
+# Where a slow site loses its time. The command asks the page for itself, a few times, twice
+# over; it changes nothing.
+_menu_speed() {
+  local what="" domain="" only_local=""
+  local -a args=()
+  printf '\n'; _menu_note "Asks the site for its page a few times, straight from the web server and the way a visitor goes, and shows where the time is spent. It changes nothing."
+  _menu_opt 1 "One site"
+  _menu_opt 2 "Every site"
+  _menu_ask what "Choice" "1"
+  if [[ "$what" == "2" ]]; then
+    args=(--all)
+  else
+    domain="$(_menu_pick_domain)" || { _menu_pause; return 0; }
+    args=("$domain")
+  fi
+  _menu_ask only_local "Only the web server on this machine, not the visitor's path (y/N)" "n"
+  if [[ "${only_local,,}" == y* ]]; then args+=(--local); fi
+  _menu_run speed "${args[@]}"
 }
 
 # WordPress's files into a site that is already there; "Add a site" with kind 2 installs it
@@ -2066,4 +2098,7 @@ MENU_TR['database of a WordPress. A site that is not here yet is added first. Th
 MENU_TR['Its mailboxes come along when this server runs mail. You are asked for the SSH password once.']='Bu sunucuda posta kuruluysa posta kutuları da gelir. SSH şifresi bir kez sorulur.'
 MENU_TR['The other server (user@address, e.g. root@203.0.113.10)']='Diğer sunucu (kullanıcı@adres, örn. root@203.0.113.10)'
 MENU_TR['Its SSH port']='SSH portu'
+MENU_TR['Test why a site is slow (where the time goes: server, cache, DNS, Cloudflare)']='Bir site neden yavaş test et (zaman nerede gidiyor: sunucu, önbellek, DNS, Cloudflare)'
+MENU_TR['Asks the site for its page a few times, straight from the web server and the way a visitor goes, and shows where the time is spent. It changes nothing.']='Sitenin sayfasını birkaç kez ister: doğrudan web sunucusundan ve ziyaretçinin yolundan; zamanın nerede harcandığını gösterir. Hiçbir şeyi değiştirmez.'
+MENU_TR['Only the web server on this machine, not the visitor'\''s path (y/N)']='Yalnızca bu makinedeki web sunucusu, ziyaretçinin yolu değil (y/N)'
 # MENU_TR-END
