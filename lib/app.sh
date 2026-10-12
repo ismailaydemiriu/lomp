@@ -1526,9 +1526,22 @@ lib_app_env() {   # domain list [--show] | set NAME | unset NAME... | import-db
 # not in jq's environment either, where one string ends at 128 KiB - six processes of an
 # application with 12 KB of variables have a longer list than that. The workers are an
 # argument: start commands are no secret.
+# An entry of the list counts when it is what PM2 writes about a process: an object with the
+# worker's name whose pm2_env is an object with a status in words, and numbers where numbers
+# belong (restart_time, monit.cpu, monit.memory - each may be missing, and so may monit).
+# Anything else there - the list is the site user's to write - says nothing about the process,
+# as if PM2 did not have it. A pm2_env that was a string, or a monit that was a number, ended
+# jq instead (status 5): in doctor a FAILED block and no word about any worker of the site.
+# A status that was no string, or a memory that was no number, cut the rows short after it
+# without even that.
 _app_workers_status() {   # workers JSON, PM2 process list ("" when PM2 does not run)
-  jq -cn --argjson workers "${1:-[]}" '(try input catch []) as $pl
-    | $workers | map(. as $w | [$pl[]? | select(type == "object") | select(.name? == $w.name)][0] as $p
+  jq -cn --argjson workers "${1:-[]}" '
+    def num: . == null or type == "number";
+    def told: (.pm2_env | type) == "object" and (.pm2_env.status | type == "string" and . != "")
+              and (.pm2_env.restart_time | num)
+              and (.monit == null or ((.monit | type) == "object" and (.monit.cpu | num) and (.monit.memory | num)));
+    (try input catch []) as $pl
+    | $workers | map(. as $w | [$pl[]? | select(type == "object") | select(.name? == $w.name) | select(told)][0] as $p
       | {name, start, cwd: (.cwd // "app"), port, schedule: .cron, timeout, memory, enabled: (.enabled != false),
          kind: (if (.cron // "") == "" then "process" else "job" end),
          status: (if .enabled == false then "stopped" elif (.cron // "") != "" then "scheduled"

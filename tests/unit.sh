@@ -2578,8 +2578,70 @@ assert_eq    "and ends well as JSON"                    0 "$(run_isolated _ws_cm
 assert_has   "app status has them"                      "queue process - errored 12 node worker.js --queue=mail" "$(_ws_cmd lib_app_status work.example.com 2>&1 | tr -s ' ' || true)"
 assert_eq    "app list --json too, not an empty list"   "api=online cleanup=scheduled paused=stopped queue=errored" \
   "$(_ws_cmd lib_app_list --json 2>/dev/null | jq -r '.[] | select(.domain == "work.example.com") | .workers | map(.name + "=" + .status) | join(" ")' || true)"
-unset -f _ws_list _ws_run _ws_states _ws_watch _ws_cmd
-unset _ws_short _ws_long _ws_want _ws_said
+# An entry of the list that is not what PM2 writes about a process - the list is the site
+# user's to write. A pm2_env that was a string, or a monit that was a number, ended jq (status
+# 5): "app worker list --json" failed, and doctor printed a failure of its own and not a word
+# about the site's workers. A status that was no string, or a memory that was no number, cut
+# the rows short after it without even that. Such an entry says nothing about the process, as
+# if PM2 did not have it.
+_ws_api='{"name":"api","pm2_env":{"status":"online","restart_time":3},"monit":{"cpu":1.5,"memory":52428800}}'
+_ws_web='{"name":"web","pm2_env":{"status":"online","restart_time":0,"pm_uptime":1700000000000},"monit":{"cpu":0.5,"memory":73400320}}'
+_ws_entry() {   # entries for queue -> the function's status, then api and queue as it answers
+  local rc=0 out=""
+  out="$(_app_workers_status "$(_wj)" "[${_ws_api},${1}]" 2>/dev/null)" || rc=$?
+  printf '%s: %s' "$rc" "$(jq -r 'map(select(.name == "api" or .name == "queue") | [.name, .status, .restarts, .cpu, .memory_bytes] | map(tojson) | join(" ")) | join(", ")' <<<"$out" 2>/dev/null || true)"
+}
+_ws_none='0: "api" "online" 3 1.5 52428800, "queue" "not running" 0 0 0'
+assert_eq "pm2_env a string: the worker is not running, the one beside it is as PM2 says" "$_ws_none" "$(_ws_entry '{"name":"queue","pm2_env":"x"}')"
+assert_eq "pm2_env a list"                    "$_ws_none" "$(_ws_entry '{"name":"queue","pm2_env":[1]}')"
+assert_eq "pm2_env a number"                  "$_ws_none" "$(_ws_entry '{"name":"queue","pm2_env":7}')"
+assert_eq "pm2_env true"                      "$_ws_none" "$(_ws_entry '{"name":"queue","pm2_env":true}')"
+assert_eq "monit a number"                    "$_ws_none" "$(_ws_entry '{"name":"queue","pm2_env":{"status":"online"},"monit":5}')"
+assert_eq "monit a string"                    "$_ws_none" "$(_ws_entry '{"name":"queue","pm2_env":{"status":"online"},"monit":"x"}')"
+assert_eq "monit a list"                      "$_ws_none" "$(_ws_entry '{"name":"queue","pm2_env":{"status":"online"},"monit":[1]}')"
+assert_eq "no pm2_env at all"                 "$_ws_none" "$(_ws_entry '{"name":"queue","monit":{"cpu":1,"memory":2}}')"
+assert_eq "a pm2_env without a status"        "$_ws_none" "$(_ws_entry '{"name":"queue","pm2_env":{"restart_time":4}}')"
+assert_eq "a status that is a number"         "$_ws_none" "$(_ws_entry '{"name":"queue","pm2_env":{"status":7}}')"
+assert_eq "a status that is an object"        "$_ws_none" "$(_ws_entry '{"name":"queue","pm2_env":{"status":{"a":1}}}')"
+assert_eq "a status of no letters"            "$_ws_none" "$(_ws_entry '{"name":"queue","pm2_env":{"status":""}}')"
+assert_eq "restarts that are no number"       "$_ws_none" "$(_ws_entry '{"name":"queue","pm2_env":{"status":"online","restart_time":"many"}}')"
+assert_eq "a cpu that is no number"           "$_ws_none" "$(_ws_entry '{"name":"queue","pm2_env":{"status":"online"},"monit":{"cpu":"hot","memory":1}}')"
+assert_eq "a memory that is no number"        "$_ws_none" "$(_ws_entry '{"name":"queue","pm2_env":{"status":"online"},"monit":{"cpu":1,"memory":[1]}}')"
+assert_eq "after an entry that is none, the one PM2 does write counts" '0: "api" "online" 3 1.5 52428800, "queue" "errored" 12 0 0' \
+  "$(_ws_entry '{"name":"queue","pm2_env":"x"},{"name":"queue","pm2_env":{"status":"errored","restart_time":12},"monit":{"cpu":0,"memory":0}}')"
+# and what PM2 may leave out stays what it was: 0
+assert_eq "an entry without monit is an entry"            '0: "api" "online" 3 1.5 52428800, "queue" "online" 2 0 0' \
+  "$(_ws_entry '{"name":"queue","pm2_env":{"status":"online","restart_time":2}}')"
+assert_eq "one without a count of restarts too"           '0: "api" "online" 3 1.5 52428800, "queue" "launching" 0 0.5 1048576' \
+  "$(_ws_entry '{"name":"queue","pm2_env":{"status":"launching"},"monit":{"cpu":0.5,"memory":1048576}}')"
+assert_eq "a status of two words is one of PM2's"         '0: "api" "online" 3 1.5 52428800, "queue" "waiting restart" 4 0 0' \
+  "$(_ws_entry '{"name":"queue","pm2_env":{"status":"waiting restart","restart_time":4},"monit":{}}')"
+# the commands that ask: first with no entry for the worker that comes first, then with none
+# for the one that comes last
+_ws_with() {   # PM2's list, command...
+  local _ws_long="$1"; shift
+  _ws_cmd "$@"
+}
+_ws_odd="[${_ws_web},{\"name\":\"api\",\"pm2_env\":{\"status\":{\"a\":1}}},{\"name\":\"queue\",\"pm2_env\":{\"status\":\"errored\",\"restart_time\":12},\"monit\":{\"cpu\":0,\"memory\":0}}]"
+_ws_said="$(_ws_with "$_ws_odd" _doc_check_apps 2>&1 || true)"
+assert_has   "doctor: a worker whose status is no word is not running" "FAIL|app work.example.com: worker api|not running (setup.sh app logs work.example.com --process api)" "$_ws_said"
+assert_has   "and the workers after it are still looked at"          "FAIL|app work.example.com: worker queue|errored (setup.sh app logs work.example.com --process queue)" "$_ws_said"
+assert_has   "restarts and all"                                      "WARN|app work.example.com: worker queue restarts|12 restarts, it keeps crashing" "$_ws_said"
+assert_has   "app list keeps the rows after it too"                  " - queue - errored 0% 0 MB - 12" "$(_ws_with "$_ws_odd" lib_app_list 2>&1 | tr -s ' ' || true)"
+_ws_odd="[${_ws_web},${_ws_api},{\"name\":\"queue\",\"pm2_env\":\"x\"}]"
+_ws_said="$(_ws_with "$_ws_odd" _doc_check_apps 2>&1 || true)"
+assert_has   "doctor: pm2_env a string - that worker is not running" "FAIL|app work.example.com: worker queue|not running (setup.sh app logs work.example.com --process queue)" "$_ws_said"
+assert_has   "the one beside it is named as PM2 has it"              "OK|app work.example.com: worker api|online, 3 restart(s)" "$_ws_said"
+assert_lacks "and doctor has no failure of its own"                  "FAILED" "$_ws_said"
+assert_eq    "app worker list --json ends well"                      0 "$(run_isolated _ws_with "$_ws_odd" lib_app_worker_list --json)"
+_ws_said="$(_ws_with "$_ws_odd" lib_app_worker_list 2>&1 | tr -s ' ' || true)"
+assert_has   "app worker list has the worker that runs"              "api process 3401 online 3 node api.js" "$_ws_said"
+assert_has   "and the one PM2 says nothing about"                    "queue process - not running 0 node worker.js --queue=mail" "$_ws_said"
+assert_has   "app status has them"                                  "queue process - not running 0 node worker.js --queue=mail" "$(_ws_with "$_ws_odd" lib_app_status work.example.com 2>&1 | tr -s ' ' || true)"
+assert_eq    "app list --json too"                                   "api=online cleanup=scheduled paused=stopped queue=not running" \
+  "$(_ws_with "$_ws_odd" lib_app_list --json 2>/dev/null | jq -r '.[] | select(.domain == "work.example.com") | .workers | map(.name + "=" + .status) | join(" ")' || true)"
+unset -f _ws_list _ws_run _ws_states _ws_watch _ws_cmd _ws_entry _ws_with
+unset _ws_short _ws_long _ws_want _ws_said _ws_api _ws_web _ws_none _ws_odd
 
 _job='{"name":"cleanup","start":"npm run cleanup","cwd":"app","cron":"*/5 * * * *","timeout":"30m","enabled":true}'
 _js="$(lib_app_render_job "$_job")"
