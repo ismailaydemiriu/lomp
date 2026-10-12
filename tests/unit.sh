@@ -2477,6 +2477,50 @@ _bigeco="$(jq -cn '{apps: [range(0;60) | {name: ("w" + tostring), script: "s", e
 _bignames="$(jq -rn '[range(0;60) | "w" + tostring] | join(" ")')"
 assert_eq "changes: an ecosystem larger than an environment variable still reconciles" "" \
   "$(_app_process_changes "$_bigeco" "$_bigeco" "" "" "$_bignames")"
+# So do the names PM2 has. They were an argument of jq, and an argument ends at 128 KiB as a
+# string of the environment does: with 4000 processes in PM2's list - it is the site user's to
+# write - or with one whose name was that long, jq could not be started (status 126), and
+# "app start", "stop", "restart" and "deploy" could not work out which processes to restart.
+_pc_many="$(jq -rn '[range(0; 4000) | "a-process-of-the-site-users-own-" + tostring] | join(" ")')"
+_pc_one="$(jq -rn '"n" * 131100')"
+_pc_out="$TMP/pc.out"; _pc_calls="$TMP/pc.calls"
+_pc_run() { _app_process_changes "$@" >"$_pc_out" 2>/dev/null; }
+_pc_tmp="$(find "$TMP" -name 'ss.*' 2>/dev/null | sort)"
+assert_true  "4000 names are longer than one argument may be"       test "${#_pc_many}" -gt 131072
+assert_eq    "changes: they are compared all the same"              0 "$(run_isolated _pc_run "$_new" "$_new" "" "" "web queue api $_pc_many")"
+assert_eq    "changes: each of them goes, and nothing else happens" "4000 4000" \
+  "$(grep -c '^delete a-process-of-the-site-users-own-[0-9]*$' "$_pc_out" || true) $(grep -c . "$_pc_out" || true)"
+assert_eq    "changes: one name of 128 KiB is compared too"         0 "$(run_isolated _pc_run "$_new" "$_new" "" "" "web queue api $_pc_one")"
+assert_eq    "changes: and comes back whole"                        "delete $_pc_one" "$(cat "$_pc_out")"
+assert_eq    "changes: none of the files it goes through is left"   "$_pc_tmp" "$(find "$TMP" -name 'ss.*' 2>/dev/null | sort)"
+# through the command, PM2 stood in for by its list: the site's two workers, three processes
+# the site user started under names of its own, and more of them
+_pc_list() {   # how many more, the length of their names -> what "pm2 jlist" prints
+  jq -cn --argjson n "$1" --argjson len "$2" '
+    def proc: {name: ., pm2_env: {status: "online", restart_time: 0}, monit: {cpu: 0, memory: 1048576}};
+    [("api", "queue", "mybot", "Queue", "all" | proc), (range(0; $n) | ("p" + tostring) | . + ("x" * ($len - length)) | proc)]'
+}
+_pc_apply() {   # PM2's list -> how the command ends, and what it asked PM2 to do
+  local _pc_pl="$1"
+  lib_require_tools() { return 0; }; lib_service_active() { return 0; }; lib_service_enabled() { return 0; }
+  lib_systemctl() { return 0; }; lib_app_wait_port() { return 0; }; _app_site_lock() { return 0; }
+  _app_as() { local dir="$1"; shift; ( cd "$dir" && "$@" ); }
+  _app_jlist() { printf '%s' "$_pc_pl"; }
+  pm2() { printf '%s %s\n' "$1" "${@: -1}" >>"$_pc_calls"; }
+  APP_UNIT_DIR="$TMP/pc-systemd"; mkdir -p "$APP_UNIT_DIR"
+  lib_app_apply >/dev/null 2>&1   # the unit file is new: the service is restarted, nothing compared
+  : >"$_pc_calls"
+  lib_app_apply >/dev/null 2>&1
+  printf '%s: ' "$APP_RESULT"; sort "$_pc_calls" | tr '\n' ';'
+}
+assert_eq    "apply: a process the site user started under a name lompstack could have given goes, the others are not touched" \
+  "running: delete mybot;" "$(_pc_apply "$(_pc_list 0 0)")"
+assert_eq    "apply: with 4000 more of them the processes are compared, and the same happens" \
+  "running: delete mybot;" "$(_pc_apply "$(_pc_list 4000 40)")"
+assert_eq    "apply: with one whose name has 128 KiB as well" \
+  "running: delete mybot;" "$(_pc_apply "$(_pc_list 1 131100)")"
+unset -f _pc_run _pc_list _pc_apply
+unset _pc_many _pc_one _pc_tmp
 assert_eq "a process list of the wrong shape leaves the workers alone" "not running" \
   "$(_app_workers_status '[{"name":"queue","cron":null,"enabled":true}]' '["a","b"]' | jq -r '.[0].status')"
 # PM2's list carries every process's variables, and carries them twice. It used to reach jq as

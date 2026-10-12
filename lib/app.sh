@@ -646,12 +646,15 @@ _app_running_names() {   # jlist
 # What runs comes from PM2 itself, not only from the ecosystem file: that file lives in the
 # site's home, and its user could otherwise hide a process from "stop" by rewriting it. The
 # ecosystems go through files rather than jq's environment or arguments - they carry the
-# application's variables, and an environment string is capped at 128 KiB.
+# application's variables, and an environment string is capped at 128 KiB. So is an argument,
+# and the names PM2 has are that list's, which is the site user's to write: as an argument,
+# 4000 processes there, or one whose name was that long, and no command could start, stop or
+# deploy the site any more. They go through a file as well.
 _app_process_changes() {   # old ecosystem, new ecosystem, restart ("" | restart), only ("" | name), running names
-  local of="" nf="" rc=0
-  of="$(lib_mktemp)"; nf="$(lib_mktemp)"
-  printf '%s' "$1" >"$of"; printf '%s' "$2" >"$nf"
-  jq -rn --rawfile o "$of" --rawfile n "$nf" --arg restart "$3" --arg only "$4" --arg running "${5:-}" '
+  local of="" nf="" rf="" rc=0
+  of="$(lib_mktemp)"; nf="$(lib_mktemp)"; rf="$(lib_mktemp)"
+  printf '%s' "$1" >"$of"; printf '%s' "$2" >"$nf"; printf '%s' "${5:-}" >"$rf"
+  jq -rn --rawfile o "$of" --rawfile n "$nf" --rawfile running "$rf" --arg restart "$3" --arg only "$4" '
     def apps: if type == "object" then (.apps? // []) else [] end
               | if type == "array" then map(select(type == "object" and (.name? | type) == "string")) else [] end;
     (($o | try fromjson catch {}) | apps) as $old
@@ -663,7 +666,7 @@ _app_process_changes() {   # old ecosystem, new ecosystem, restart ("" | restart
     | ((($up + ($old | map(.name))) | unique | map(select(. as $x | $names | index($x) | not)) | .[] | "delete " + .),
        ($new[] | select(($restart == "restart" and ($only == "" or $only == .name))
                         or $oldmap[.name] != . or ($upmap[.name] | not)) | "start " + .name))' || rc=$?
-  rm -f "$of" "$nf"
+  rm -f "$of" "$nf" "$rf"
   return "$rc"
 }
 
