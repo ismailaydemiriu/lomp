@@ -6,8 +6,9 @@
 #  A PM2 application with a build step, a scheduled job and a variable is renamed and,
 #  after an injected failure, put back. A site with two mailboxes and an alias is renamed:
 #  same passwords under the new addresses, mail to the old ones delivered into the new
-#  mailboxes; once more while mail keeps arriving, and back to the name it had; and once
-#  more with --keep-mail.
+#  mailboxes; once more while mail keeps arriving - marked spam among it, and a message
+#  Postfix was holding from before - and back to the name it had, past an empty directory
+#  left under it; and once more with --keep-mail.
 #
 #  RUN ONLY ON A THROWAWAY SERVER, AS ROOT. It adds, renames and removes real sites
 #  (names under .invalid, which no DNS answers for), reloads OpenLiteSpeed many times
@@ -215,13 +216,32 @@ sec "a site with mail, renamed while mail keeps arriving"
 out="$($L add "$MB" --static --no-ssl --mail --email e2e@example.org --yes --no-color 2>&1)"
 check "the site is added" test -s "$ST/$MB/domain.json"
 printf '%s' "$PW1" | $L mail box add "info@$MB" --yes --no-color >/dev/null 2>&1
+if deliver "info@$MB" e2e-first "/var/vmail/$MB/info/Maildir"; then ok "a message is in the mailbox before the rename"; else bad "a message is in the mailbox before the rename" "$(postqueue -p 2>&1 | tail -n 4)"; fi
 tb="$(date +%s)"
+# A message Postfix holds for the mailbox when the rename begins: Dovecot is refused the
+# mailbox's tmp/ for a moment and answers 451, and Postfix puts the message off - under the
+# address it came for, which it keeps: an alias is applied when a message comes in, not when
+# it is handed over. Its next attempt after a rename was answered "550 User doesn't exist".
+held_for() {   # address -> the ids of the messages the deferred queue holds for it
+  postqueue -j 2>/dev/null | jq -r --arg a "$1" 'select(.queue_name == "deferred" and any(.recipients[]; .address == $a)) | .queue_id' 2>/dev/null
+}
+chmod 000 "/var/vmail/$MB/info/Maildir/tmp"
+swaks --server 127.0.0.1 --port 25 --helo client.example.org --from '<>' --to "info@$MB" --header "Subject: e2e-held" --body hello >/dev/null 2>&1
+for i in $(seq 1 15); do [ -n "$(held_for "info@$MB")" ] && break; sleep 1; done
+chmod 700 "/var/vmail/$MB/info/Maildir/tmp"
+h="$(held_for "info@$MB")"
+if [ -n "$h" ]; then ok "Postfix holds a message for the mailbox when the rename begins"; else bad "Postfix holds a message for the mailbox when the rename begins" "$(postqueue -p 2>&1 | tail -n 6)"; fi
 : >"$T/busy"
 for i in 1 2 3 4; do
   ( while [ -e "$T/busy" ]; do
       swaks --server 127.0.0.1 --port 25 --helo client.example.org --from '<>' --to "info@$MB" --header "Subject: e2e-busy" --body hello >/dev/null 2>&1
     done ) &
 done
+# ... and mail that Rspamd marked, which the spam rule files into the folder Junk - handed to
+# Dovecot under the old address, as Postfix does with what it took in before it had the alias
+( while [ -e "$T/busy" ]; do
+    swaks --protocol LMTP --socket /var/spool/postfix/private/dovecot-lmtp --from '<>' --to "info@$MB" --header "Subject: e2e-junk" --header "X-Spam: Yes" --body hello >/dev/null 2>&1
+  done ) &
 sleep 2
 out="$($L rename "$MB" "$MBN" --yes --no-color 2>&1)"; rc=$?
 rm -f "$T/busy"; wait
@@ -232,17 +252,30 @@ for i in $(seq 1 20); do postqueue -p 2>/dev/null | grep -q 'Mail queue is empty
 has "the mailbox is one of the new domain" "info@$MBN" "$($L mail box list --no-color 2>&1)"
 n="$(grep -rl '^Subject: e2e-busy' "/var/vmail/$MBN/info/Maildir" 2>/dev/null | grep -cE '/(new|cur)/')"
 if [ "${n:-0}" -ge 20 ]; then ok "the mail that kept arriving is in it ($n messages)"; else bad "the mail that kept arriving is in it" "${n:-0} messages"; fi
+nj="$(grep -rl '^Subject: e2e-junk' "/var/vmail/$MBN/info/Maildir" 2>/dev/null | grep -cE '/\.Junk/(new|cur)/')"
+if [ "${nj:-0}" -ge 2 ]; then ok "and what the spam rule filed is in Junk there ($nj messages)"; else bad "and what the spam rule filed is in Junk there" "${nj:-0} messages"; fi
+nope "none of it is left in a Junk under the old name" bash -c "grep -rlq '^Subject: e2e-junk' /var/vmail/$MB"
 nope "nothing is left under the old name, not a directory either" bash -c "ls -d /var/vmail/$MB/*"
 eq "no message was refused at the new address" "0" "$(journalctl -t postfix/lmtp --since "@$tb" --no-pager -o cat 2>/dev/null | grep -c "to=<info@$MBN>.*status=bounced")"
+for i in $(seq 1 30); do grep -rlq '^Subject: e2e-held' "/var/vmail/$MBN/info/Maildir" 2>/dev/null && break; sleep 1; done
+check "the message Postfix was holding went on to the mailbox, under its new address" bash -c "grep -rl '^Subject: e2e-held' /var/vmail/$MBN/info/Maildir | grep -E '/(new|cur)/'"
+eq "Postfix holds nothing for the old address any more" "" "$(held_for "info@$MB")"
+eq "and nothing was bounced there" "0" "$(journalctl -t postfix/lmtp --since "@$tb" --no-pager -o cat 2>/dev/null | grep -c "to=<info@$MB>.*status=bounced")"
 
 sec "... and renamed back to the name it had"
 # Every address of the first name became an alias of the same address at the second. A mailbox
 # that comes back takes its address over from that alias: left in place, the two aliases sent
 # each other its mail, and Postfix answered "451 4.6.0 Alias expansion error".
 $L redirect del "$MB" --yes --no-color >/dev/null 2>&1
+# What a rename that did not wait for Dovecot left under the first name, put there by hand: the
+# Maildir Dovecot makes of an address it is asked about, with no message in it. It was "in the
+# way", and the mailbox stayed at the address of the meantime.
+install -d -o vmail -g vmail -m 0700 "/var/vmail/$MB" "/var/vmail/$MB/info" "/var/vmail/$MB/info/Maildir"
+install -o vmail -g vmail -m 0600 /dev/null "/var/vmail/$MB/info/Maildir/dovecot.list.index.log"
 out="$($L rename "$MBN" "$MB" --yes --no-color 2>&1)"; rc=$?
 eq "the rename back succeeds" "0" "$rc"
 [ "$rc" = 0 ] || printf '%s\n' "$out" | tail -n 50
+has "an empty directory under that name is taken out of the mailbox's way, and said" "/var/vmail/$MB/info held no message and was in the way of info@$MB: removed" "$out"
 boxes="$($L mail box list --no-color 2>&1)"
 has "the mailbox has its first address again" "info@$MB" "$boxes"
 lacks "and is none of the other domain" "@$MBN " "$boxes"
