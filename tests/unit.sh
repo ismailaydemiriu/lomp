@@ -12673,6 +12673,356 @@ assert_lacks "it changes nothing: no write outside its own temp file" "systemctl
 STATE_DIR="$_sp_state"; eval "$_sp_list"; eval "$_sp_srv"
 unset -f _sp_run; unset SP_DIR SP_LOCAL SP_PUBLIC
 
+# =============================================================================
+section "apcu: a site's in-memory cache, switched on or off"
+# APCu is on for every site unless the site's record says off. Off is one line in the site's own
+# ini directory - the one hardening uses - which the vhost points the site's PHP at. Nothing
+# changes for a site nobody switched: its ini, where it has one, stays what it was to the byte.
+_ap_fns="lib_domains_list lib_ols_is_installed lib_ols_change_begin lib_ols_change_commit lib_harden_php_restart _harden_code lib_require_tools lib_require_installed lib_system_profile lib_domain_registered _php_apcu_loaded"
+_ap_saved="$(for _f in $_ap_fns; do declare -f "$_f" || true; done)"
+_ap_state="$STATE_DIR"; STATE_DIR="$TMP/ap-state"; mkdir -p "$STATE_DIR"; printf '{"params":{"site_firewall":true}}\n' >"$STATE_DIR/manifest.json"
+_ap_ini="$HARDEN_PHP_INI_ROOT"; HARDEN_PHP_INI_ROOT="$TMP/ap-ini"
+eval "$(sed -n '/^lib_domains_list() {/,/^}/p' "$ROOT/lib/common.sh")"
+_ap_site() {   # domain mode [process execution]
+  local d="$1" i="${1//./_}"
+  mkdir -p "$STATE_DIR/domains/$d"
+  jq -n --arg d "$d" --arg i "$i" --arg h "$SITES_ROOT/$d" --arg m "$2" --arg x "${3:-}" \
+    '{domain:$d, ident:$i, user:$i, group:$i, home:$h, mode:$m,
+      php:{version:"8.3", children:4, memory_limit:"256M", upload_max:"64M"}}
+     | if $x != "" then .security.php_exec = $x else . end' >"$STATE_DIR/domains/$d/domain.json"
+}
+_ap_site ap1.example.com php blocked; _ap_site ap2.example.com wordpress; _ap_site ap3.example.com proxy; _ap_site ap4.example.com php allowed
+_ap_rec()  { jq -r '.php.apcu // "-"' "$STATE_DIR/domains/$1/domain.json"; }
+_ap_file() { printf '%s/%s/%s' "$HARDEN_PHP_INI_ROOT" "$1" "$HARDEN_PHP_INI_NAME"; }
+_ap_vh()   { cat "$LSWS_VHOSTS_DIR/$1/vhconf.conf" 2>/dev/null || true; }
+
+# ---- the ini and the vhost, from the site's state
+lib_domain_state_load ap1.example.com
+assert_eq "a site nobody switched has nothing recorded" "" "$D_APCU"
+_ap_old="; Managed by lompstack for ap1.example.com - regenerated on every change; do not edit by hand.
+; \"lomp harden ap1.example.com --allow-exec\" removes it.
+disable_functions = ${HARDEN_DISABLE_FUNCTIONS}
+open_basedir = ${D_HOME}/:${SITES_LOG_ROOT}/ap1.example.com/:${LSWS_HOME}/lsphp83/share/:/tmp/"
+assert_eq "and the ini of a hardened one is what it was, to the byte" "$_ap_old" "$(lib_harden_render_php_ini)"
+D_APCU="on"
+assert_eq "switched on by name, it is the same file" "$_ap_old" "$(lib_harden_render_php_ini)"
+D_APCU="off"; _ini="$(lib_harden_render_php_ini)"
+assert_eq  "switched off, its last line says so" "apc.enabled = 0" "$(tail -n 1 <<<"$_ini")"
+assert_has "what hardening put there stays" "disable_functions = ${HARDEN_DISABLE_FUNCTIONS}" "$_ini"
+assert_has "and so does open_basedir" "open_basedir = ${D_HOME}/:" "$_ini"
+assert_has "each part names the command that takes it out: APCu" '; "lomp apcu on ap1.example.com" takes the next line out.' "$_ini"
+assert_has "and hardening, which no longer removes the whole file" '; "lomp harden ap1.example.com --allow-exec" takes the next two lines out.' "$_ini"
+assert_eq  "six lines, nothing else" 6 "$(wc -l <<<"$_ini" | tr -d ' ')"
+assert_has "its PHP is pointed at the directory, as before" "PHP_INI_SCAN_DIR=:${HARDEN_PHP_INI_ROOT}/ap1.example.com" "$(lib_ols_render_vhconf)"
+lib_domain_state_load ap4.example.com
+assert_false "a site that keeps process execution has nothing for an ini" lib_harden_php_ini_wanted
+assert_lacks "and its PHP is pointed at none" "PHP_INI_SCAN_DIR" "$(lib_ols_render_vhconf)"
+D_APCU="off"
+assert_true "with APCu off it has" lib_harden_php_ini_wanted
+assert_eq "the APCu line and nothing of hardening" \
+  "; Managed by lompstack for ap4.example.com - regenerated on every change; do not edit by hand.|; \"lomp apcu on ap4.example.com\" takes the next line out.|apc.enabled = 0" \
+  "$(lib_harden_render_php_ini | paste -sd'|' -)"
+_vh="$(lib_ols_render_vhconf)"; printf '%s\n' "$_vh" >"$TMP/ap.vhconf"
+assert_has  "and its PHP reads it: the site's ini directory, after the version's own" \
+  "  env                     PHP_INI_SCAN_DIR=:${HARDEN_PHP_INI_ROOT}/ap4.example.com" "$_vh"
+assert_has  "inside the site's own processor" "PHP_INI_SCAN_DIR" "$(awk '/^extprocessor ap4_example_com \{/,/^\}/' "$TMP/ap.vhconf")"
+assert_true "the vhost is balanced" _ols_braces_balanced "$TMP/ap.vhconf"
+assert_lacks "apc.enabled is not left to phpIniOverride" "apc.enabled" "$_vh"
+HARDEN_PHP_CHANGED=""; lib_harden_php_ini_write
+assert_eq   "the ini is written" "apc.enabled = 0" "$(tail -n 1 "$(_ap_file ap4.example.com)")"
+assert_eq   "and the site named as changed" "ap4.example.com" "$HARDEN_PHP_CHANGED"
+if (( CAN_CHMOD )); then
+  assert_eq "the site's group may read it, nobody may change it" "640 750" "$(stat -c %a "$(_ap_file ap4.example.com)") $(stat -c %a "$(dirname "$(_ap_file ap4.example.com)")")"
+fi
+assert_false "the record says off and the ini too: nothing is lost" lib_php_apcu_off_lost ap4.example.com
+HARDEN_PHP_CHANGED=""; lib_harden_php_ini_write
+assert_eq   "a second write changes nothing" "" "$HARDEN_PHP_CHANGED"
+D_APCU="on"; HARDEN_PHP_CHANGED=""; lib_harden_php_ini_write
+assert_false "on again: the directory goes" test -e "$(dirname "$(_ap_file ap4.example.com)")"
+assert_eq    "which is a change too" "ap4.example.com" "$HARDEN_PHP_CHANGED"
+assert_false "a record that says on has lost nothing" lib_php_apcu_off_lost ap4.example.com
+D_APCU="off"
+assert_true  "a record that says off beside no ini has" lib_php_apcu_off_lost ap4.example.com
+mkdir -p "$(dirname "$(_ap_file ap4.example.com)")"; printf '; apc.enabled = 0\napc.enabled = 1\n' >"$(_ap_file ap4.example.com)"
+assert_true  "and so has one beside an ini that does not say it" lib_php_apcu_off_lost ap4.example.com
+rm -rf "$(dirname "$(_ap_file ap4.example.com)")"
+D_MODE="proxy"; lib_harden_php_ini_write
+assert_false "a site with no PHP gets no ini" test -e "$(dirname "$(_ap_file ap4.example.com)")"
+OPT_DRY_RUN=1; D_MODE="php"; lib_harden_php_ini_write >/dev/null 2>&1; OPT_DRY_RUN=0
+assert_false "a dry run writes none" test -e "$(_ap_file ap4.example.com)"
+
+# ---- the record: kept through a save, a load and an archive's copy; none made for nothing
+lib_domain_state_load ap2.example.com; D_APCU="off"; lib_domain_state_save; lib_domain_state_load ap2.example.com
+assert_eq "off is kept in the site's record" "off|off" "${D_APCU}|$(_ap_rec ap2.example.com)"
+assert_eq "beside its other PHP settings" "8.3 256M" "$(jq -r '"\(.php.version) \(.php.memory_limit)"' "$STATE_DIR/domains/ap2.example.com/domain.json")"
+lib_domain_state_save; lib_domain_state_load ap2.example.com
+assert_eq "and through a save by any other command" "off" "$D_APCU"
+cp "$STATE_DIR/domains/ap2.example.com/domain.json" "$TMP/ap-archive.json"
+D_APCU="on"; lib_domain_state_save; lib_domain_state_load ap2.example.com
+assert_eq "on replaces it" "on|on" "${D_APCU}|$(_ap_rec ap2.example.com)"
+lib_domain_state_load_file "$TMP/ap-archive.json" ap2.example.com
+assert_eq "the copy in a backup says what the site had" "off" "$D_APCU"
+lib_domain_state_load ap3.example.com; lib_domain_state_save; lib_domain_state_load ap3.example.com
+assert_eq "saving a site nobody switched records nothing" "|-" "${D_APCU}|$(_ap_rec ap3.example.com)"
+D_APCU="off"; lib_domain_state_reset
+assert_eq "a reset leaves none behind for the next site" "" "$D_APCU"
+_ap_site ap2.example.com wordpress
+
+# ---- what a site added later starts with
+assert_eq "a new site starts with APCu on while nobody said otherwise" "" "$(lib_php_apcu_new_sites)"
+lib_manifest_set '.params.apcu' off
+assert_eq "off for every site is off for the next one" "off" "$(lib_php_apcu_new_sites)"
+lib_manifest_set '.params.apcu' on
+assert_eq "and on again is on" "" "$(lib_php_apcu_new_sites)"
+lib_json_set "$STATE_DIR/manifest.json" 'del(.params.apcu)'
+assert_has "add asks for it, for a site PHP runs in" \
+  'if [[ "$D_MODE" == "php" || "$D_MODE" == "wordpress" ]]; then D_APCU="$(lib_php_apcu_new_sites)"; fi' "$(sed -n '/^lib_domain_add_main() {/,/^}/p' "$ROOT/lib/domain.sh")"
+
+# ---- does a PHP version load it at all
+_ap_cli="$TMP/ap-cli"; mkdir -p "$_ap_cli"
+printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\n" Core apcu "Zend OPcache"' >"$_ap_cli/php83"
+printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\n" Core apcupdate "Zend OPcache"' >"$_ap_cli/php74"
+chmod +x "$_ap_cli/php83" "$_ap_cli/php74"
+_ap_loaded() { ( eval 'lib_php_cli() { printf "%s/php%s" "$_ap_cli" "${1//./}"; }'; _php_apcu_loaded "$1" ); }
+assert_true  "a version whose modules list apcu loads it"  _ap_loaded 8.3
+assert_false "one that lists something like it does not"   _ap_loaded 7.4
+assert_false "nor does a version that is not installed"    _ap_loaded 8.9
+
+# ---- the command
+: >"$TMP/ap-calls"
+_ap_stubs='lib_require_tools() { :; }; lib_require_installed() { :; }; lib_system_profile() { :; }
+      lib_ols_is_installed() { return 0; }
+      lib_ols_change_begin() { OLS_PENDING_RELOAD=0; }
+      lib_ols_change_commit() { printf "commit %s\n" "$*" >>"$TMP/ap-calls"; }
+      lib_harden_php_restart() { printf "restart %s\n" "$1" >>"$TMP/ap-calls"; }
+      lib_domain_registered() { [[ -s "$STATE_DIR/domains/$1/domain.json" ]]; }
+      _harden_code() { cat "$TMP/ap-code" 2>/dev/null || printf 200; }
+      _php_apcu_loaded() { [[ "$1" == "8.3" ]]; }'
+eval "$_ap_stubs"
+_ap_run() {   # arguments of "lomp apcu" -> what it says, then rc=<status>
+  local rc=0
+  ( OPT_QUIET=0; lib_php_apcu_main "$@" ) >"$TMP/ap-out" 2>&1 || rc=$?
+  cat "$TMP/ap-out"; printf 'rc=%s' "$rc"
+}
+_ap_calls() { cat "$TMP/ap-calls"; }
+
+_out="$(_ap_run off ap4.example.com)"
+assert_has   "apcu off <site> exits 0" "rc=0" "$_out"
+assert_eq    "off is in the site's record" "off" "$(_ap_rec ap4.example.com)"
+assert_eq    "and in its ini" "apc.enabled = 0" "$(tail -n 1 "$(_ap_file ap4.example.com)")"
+assert_has   "which its vhost points PHP at" "PHP_INI_SCAN_DIR=:${HARDEN_PHP_INI_ROOT}/ap4.example.com" "$(_ap_vh ap4.example.com)"
+assert_eq    "its PHP is started again to read it, and no other site's" "restart ap4_example_com" "$(grep '^restart' "$TMP/ap-calls" | paste -sd'|' -)"
+assert_eq    "in one change set" "commit APCu off" "$(grep '^commit' "$TMP/ap-calls" | paste -sd'|' -)"
+assert_has   "it says so, with what the site answers" "ap4.example.com: APCu switched off (HTTP 200)" "$_out"
+assert_eq    "no other site's record is touched" "-|-|-" "$(_ap_rec ap1.example.com)|$(_ap_rec ap2.example.com)|$(_ap_rec ap3.example.com)"
+assert_false "nor any other ini made" test -e "$(dirname "$(_ap_file ap1.example.com)")"
+assert_eq    "one site alone decides nothing for the sites added later" "" "$(lib_php_apcu_new_sites)"
+: >"$TMP/ap-calls"; _out="$(_ap_run off ap4.example.com)"
+assert_has   "off twice: it is said to be off already" "ap4.example.com: APCu is off already" "$_out"
+assert_lacks "and its PHP is left running" "restart" "$(_ap_calls)"
+rm -rf "$(dirname "$(_ap_file ap4.example.com)")"; : >"$TMP/ap-calls"; _out="$(_ap_run off ap4.example.com)"
+assert_eq    "an ini that went missing is written again" "apc.enabled = 0" "$(tail -n 1 "$(_ap_file ap4.example.com)")"
+assert_has   "and its PHP started again to read it" "restart ap4_example_com" "$(_ap_calls)"
+assert_lacks "that is not called off already" "already" "$_out"
+: >"$TMP/ap-calls"; _out="$(_ap_run on ap4.example.com)"
+assert_eq    "on is recorded" "on" "$(_ap_rec ap4.example.com)"
+assert_false "the ini directory of a site with nothing else in it goes" test -e "$(dirname "$(_ap_file ap4.example.com)")"
+assert_lacks "its vhost points PHP at none" "PHP_INI_SCAN_DIR" "$(_ap_vh ap4.example.com)"
+assert_has   "its PHP is started again" "restart ap4_example_com" "$(_ap_calls)"
+assert_has   "and it says so" "ap4.example.com: APCu switched on (HTTP 200)" "$_out"
+: >"$TMP/ap-calls"; _out="$(_ap_run on ap4.example.com)"
+assert_has   "on twice: on already, nothing restarted" "ap4.example.com: APCu is on already|" "${_out%%$'\n'*}|$(_ap_calls)"
+# a hardened site keeps its limits through both
+_out="$(_ap_run off ap1.example.com)"
+assert_eq    "a hardened site: its limits and the APCu line" "disable_functions|open_basedir|apc.enabled" \
+  "$(grep -v '^;' "$(_ap_file ap1.example.com)" | sed 's/ = .*//' | paste -sd'|' -)"
+assert_eq    "process execution stays blocked in its record" "blocked" "$(jq -r '.security.php_exec' "$STATE_DIR/domains/ap1.example.com/domain.json")"
+_out="$(_ap_run on ap1.example.com)"
+assert_eq    "and on again leaves the ini hardening wrote" "$_ap_old" "$(cat "$(_ap_file ap1.example.com)")"
+assert_has   "its PHP still reads it" "PHP_INI_SCAN_DIR=:${HARDEN_PHP_INI_ROOT}/ap1.example.com" "$(_ap_vh ap1.example.com)"
+# several names
+: >"$TMP/ap-calls"; _out="$(_ap_run off ap1.example.com AP2.example.com)"
+assert_eq    "several sites in one command, whatever the case" "off off" "$(_ap_rec ap1.example.com) $(_ap_rec ap2.example.com)"
+assert_eq    "and still one change set" 1 "$(grep -c '^commit' "$TMP/ap-calls")"
+_out="$(_ap_run on ap1.example.com ap2.example.com)"
+
+# every site, and the ones added later
+: >"$TMP/ap-calls"; _out="$(_ap_run off --all)"
+assert_has   "apcu off --all exits 0" "rc=0" "$_out"
+assert_eq    "every site PHP runs in is off" "off off off" "$(_ap_rec ap1.example.com) $(_ap_rec ap2.example.com) $(_ap_rec ap4.example.com)"
+assert_has   "the proxy site is told it has none" "ap3.example.com: no PHP runs here (proxy); it has no APCu to switch" "$_out"
+assert_eq    "and gets no record of one, no ini" "-|no" "$(_ap_rec ap3.example.com)|$(test -e "$(dirname "$(_ap_file ap3.example.com)")" && printf yes || printf no)"
+assert_eq    "one change set for all of them" 1 "$(grep -c '^commit APCu off' "$TMP/ap-calls")"
+assert_eq    "each one's PHP started again" 3 "$(grep -c '^restart' "$TMP/ap-calls")"
+assert_eq    "the sites added from now on start without it" "off" "$(lib_php_apcu_new_sites)"
+assert_has   "which is said" "Sites added from now on start with APCu off" "$_out"
+assert_eq    "what else is kept in the server's settings stays" "true" "$(jq -r '.params.site_firewall' "$STATE_DIR/manifest.json")"
+_out="$(_ap_run on --all)"
+assert_eq    "on --all takes all of it back" "on on on|" "$(_ap_rec ap1.example.com) $(_ap_rec ap2.example.com) $(_ap_rec ap4.example.com)|$(lib_php_apcu_new_sites)"
+assert_has   "and says what the next site starts with" "Sites added from now on start with APCu on" "$_out"
+
+# a site that answered before and not after is named, and the command fails
+printf '200' >"$TMP/ap-code"
+eval 'lib_harden_php_restart() { printf 500 >"$TMP/ap-code"; }'
+_out="$(_ap_run off ap2.example.com)"
+assert_has "a site that stops answering is named" "ap2.example.com (HTTP 200 -> 500)" "$_out"
+assert_has "with the way back" "To switch APCu on again for one site: lomp apcu on <domain>" "$_out"
+assert_has "and a failing status" "rc=1" "$_out"
+assert_lacks "it is not reported as switched" "APCu switched off" "$_out"
+printf '200' >"$TMP/ap-code"
+_out="$(_ap_run on ap2.example.com)"
+assert_has "the way back of on is off" "To switch APCu off again for one site: lomp apcu off <domain>" "$_out"
+printf '500' >"$TMP/ap-code"; eval 'lib_harden_php_restart() { :; }'
+_out="$(_ap_run off ap2.example.com)"
+assert_has "a site that did not answer before is not blamed on the switch" "ap2.example.com: APCu switched off (HTTP 500)|rc=0" "$(grep -F 'ap2.example.com' <<<"$_out" | paste -sd'|' -)|${_out##*$'\n'}"
+rm -f "$TMP/ap-code"; eval "$_ap_stubs"
+_out="$(_ap_run on ap2.example.com)"
+
+# a dry run
+: >"$TMP/ap-calls"
+_out="$(OPT_DRY_RUN=1; _ap_run off ap2.example.com)"
+assert_eq    "a dry run changes no record" "on" "$(_ap_rec ap2.example.com)"
+assert_false "writes no ini" test -e "$(_ap_file ap2.example.com)"
+assert_lacks "restarts nothing" "restart" "$(_ap_calls)"
+assert_has   "and says what it would do" "[dry-run] ap2.example.com: APCu would be switched off" "$_out"
+_out="$(OPT_DRY_RUN=1; _ap_run on ap2.example.com)"
+assert_has   "what is so already is said to be so, in a dry run too" "ap2.example.com: APCu is on already" "$_out"
+_out="$(OPT_DRY_RUN=1; _ap_run off --all)"
+assert_eq    "a dry run of --all decides nothing for later sites" "" "$(lib_php_apcu_new_sites)"
+assert_has   "it says what it would" "[dry-run] sites added from now on would start with APCu off" "$_out"
+
+# under errexit, as setup.sh runs it
+assert_eq "off for one site exits 0 with errexit armed" 0 "$(run_isolated lib_php_apcu_main off ap4.example.com)"
+assert_eq "on too"                                      0 "$(run_isolated lib_php_apcu_main on ap4.example.com)"
+assert_eq "and --all"                                   0 "$(run_isolated lib_php_apcu_main off --all)"
+assert_eq "and a dry run"                               0 "$(OPT_DRY_RUN=1; run_isolated lib_php_apcu_main on --all)"
+assert_eq "and status"                                  0 "$(run_isolated lib_php_apcu_main status)"
+assert_eq "a site that stops answering is status 1"     1 "$(printf '200' >"$TMP/ap-code"; eval 'lib_harden_php_restart() { printf 500 >"$TMP/ap-code"; }'; run_isolated lib_php_apcu_main on ap4.example.com)"
+rm -f "$TMP/ap-code"
+_out="$(_ap_run on --all)"
+
+# what is refused (each in a shell of its own: a refusal ends the shell it happens in)
+_out="$(_ap_run ap1.example.com)"
+assert_has "a site without on or off is asked which" "Say whether APCu goes on or off" "$_out"
+assert_has "with a failing status" "rc=1" "$_out"
+_out="$(_ap_run off)"
+assert_has "on or off without a site is asked for one" "Which site? Give a domain, or --all|rc=1" "$(grep -oF 'Which site? Give a domain, or --all' <<<"$_out" | sort -u)|${_out##*$'\n'}"
+_out="$(_ap_run off --all ap1.example.com)"
+assert_has "a site beside --all is refused" "Give a domain or --all, not both" "$_out"
+assert_eq  "and nothing was switched" "on" "$(_ap_rec ap1.example.com)"
+_out="$(_ap_run off nosuch.example.com)"
+assert_has "a site that is not registered is refused" "Site nosuch.example.com is not registered" "$_out"
+_out="$(_ap_run off ap1.example.com nosuch.example.com)"
+assert_eq  "one bad name among good ones: nothing is switched" "on|rc=1" "$(_ap_rec ap1.example.com)|${_out##*$'\n'}"
+_out="$(_ap_run off --everything)"
+assert_has "an option it does not know is refused" "Unknown option for apcu: --everything" "$_out"
+assert_has "with the help that is about this command" "lomp apcu help" "$_out"
+assert_has "which 'lomp apcu help' shows" "Usage: lomp apcu status" "$(lib_php_apcu_main help)"
+_ap_real="$(grep -E '^lib_domain_registered\(\) ' "$ROOT/lib/common.sh")"
+_ap_site old_name php allowed; _ap_site old_name_ php allowed
+_out="$(eval "$_ap_real"; OPT_DRY_RUN=1; _ap_run off old_name)"
+assert_has "a site under a name that is no domain name is switched by that name" "old_name: APCu would be switched off" "$_out"
+_out="$(eval "$_ap_real"; _ap_run off old_name_)"
+assert_has "a name no site can have is refused when it is typed" "Invalid domain name 'old_name_'" "$_out"
+_out="$(eval "$_ap_real"; OPT_DRY_RUN=1; _ap_run off --all)"
+assert_has   "--all is not stopped by a state directory under such a name" "ap1.example.com: APCu would be switched off" "$_out"
+assert_lacks "and refuses no name of the registry's own" "Invalid domain name" "$_out"
+rm -rf "$STATE_DIR/domains/old_name" "$STATE_DIR/domains/old_name_"
+
+# ---- status
+_ap_site ap5.example.com php allowed
+jq '.php.version = "7.4"' "$STATE_DIR/domains/ap5.example.com/domain.json" >"$TMP/ap.json" && cat "$TMP/ap.json" >"$STATE_DIR/domains/ap5.example.com/domain.json"
+_out="$(_ap_run off ap2.example.com)"
+_st="$(lib_php_apcu_status)"
+_ap_row() { awk -v d="$1" '$1 == d { $1 = ""; sub(/^ /, ""); print }' <<<"$_st"; }
+assert_eq  "status begins with what a new site gets" "Sites added from now on start with APCu on" "$(sed -n 1p <<<"$_st")"
+assert_eq  "a site that has it"            "php 8.3 on"        "$(_ap_row ap1.example.com)"
+assert_eq  "one that has it switched off"  "wordpress 8.3 off" "$(_ap_row ap2.example.com)"
+assert_eq  "one with no PHP"               "proxy - -"         "$(_ap_row ap3.example.com)"
+assert_eq  "one whose PHP version has none" "php 7.4 not installed for this PHP version" "$(_ap_row ap5.example.com)"
+assert_eq  "'lomp apcu' alone shows the same"  "$_st" "$(lib_php_apcu_main)"
+assert_eq  "and so does 'lomp apcu status'"    "$_st" "$(lib_php_apcu_main status)"
+assert_eq  "status changes nothing" "" "$(: >"$TMP/ap-calls"; lib_php_apcu_main status >/dev/null; cat "$TMP/ap-calls")"
+lib_manifest_set '.params.apcu' off
+assert_eq  "after off --all it says so" "Sites added from now on start with APCu off" "$(lib_php_apcu_status | sed -n 1p)"
+lib_json_set "$STATE_DIR/manifest.json" 'del(.params.apcu)'
+_out="$(_ap_run on ap2.example.com)"
+
+# ---- help, in both languages
+assert_has "apcu --help shows how it is called" "Usage: lomp apcu status" "$(lib_php_apcu_main --help)"
+assert_has "in Turkish too"                     "Kullanım: lomp apcu status" "$(LIB_LANG=tr; lib_php_apcu_main --help)"
+assert_eq  "the two texts have the same lines"  "$(lib_php_apcu_usage | wc -l | tr -d ' ')" "$(LIB_LANG=tr; lib_php_apcu_usage | wc -l | tr -d ' ')"
+assert_has "the command reference has it"       "apcu on|off <domain>|--all" "$(lib_usage)"
+assert_has "and its Turkish one"                "apcu on|off <domain>|--all    APCu'yu" "$(LIB_LANG=tr; lib_usage)"
+
+# ---- Turkish for what a person reads: the command run with the language loaded
+_ap_tr() { ( LIB_LANG="tr"; lib_lang_build; _ap_run "$@" ); }
+_out="$(_ap_tr off ap4.example.com)"
+assert_has "switched off, in Turkish"      "ap4.example.com: APCu kapatıldı (HTTP 200)" "$_out"
+assert_has "off already"                   "ap4.example.com: APCu zaten kapalı" "$(_ap_tr off ap4.example.com)"
+assert_has "switched on"                   "ap4.example.com: APCu açıldı (HTTP 200)" "$(_ap_tr on ap4.example.com)"
+assert_has "on already"                    "ap4.example.com: APCu zaten açık" "$(_ap_tr on ap4.example.com)"
+assert_has "what a dry run would do"       "[dry-run] ap4.example.com: APCu kapatılacaktı" "$(OPT_DRY_RUN=1; _ap_tr off ap4.example.com)"
+assert_has "and the other way"             "[dry-run] ap4.example.com: APCu açılacaktı" "$(_ap_run off ap4.example.com >/dev/null; OPT_DRY_RUN=1; _ap_tr on ap4.example.com)"
+_out="$(OPT_DRY_RUN=1; _ap_tr on --all)"
+assert_has "a site with no PHP"            "ap3.example.com: burada PHP çalışmıyor (proxy); açılıp kapatılacak bir APCu yok" "$_out"
+assert_has "what later sites would get"    "[dry-run] bundan sonra eklenen siteler APCu açık olarak başlayacaktı" "$_out"
+assert_has "and off"                       "[dry-run] bundan sonra eklenen siteler APCu kapalı olarak başlayacaktı" "$(OPT_DRY_RUN=1; _ap_tr off --all)"
+assert_has "what later sites get"          "Bundan sonra eklenen siteler APCu kapalı olarak başlar" "$(_ap_tr off --all)"
+_out="$(_ap_tr on --all)"
+assert_has "and on"                        "Bundan sonra eklenen siteler APCu açık olarak başlar" "$_out"
+assert_has "the refusals: no on or off"    "APCu açılsın mı kapansın mı, onu belirtin" "$(_ap_tr ap1.example.com)"
+assert_has "no site"                       "Hangi site? Bir alan adı ya da --all verin" "$(_ap_tr off)"
+assert_has "an unknown option"             "apcu için bilinmeyen seçenek: --everything" "$(_ap_tr off --everything)"
+printf '200' >"$TMP/ap-code"
+_out="$(eval 'lib_harden_php_restart() { printf 500 >"$TMP/ap-code"; }'; _ap_tr off ap2.example.com)"
+assert_has "the way back of off"           "Tek bir sitede APCu'yu yeniden açmak için: lomp apcu on <domain>" "$_out"
+printf '200' >"$TMP/ap-code"
+_out="$(eval 'lib_harden_php_restart() { printf 500 >"$TMP/ap-code"; }'; _ap_tr on ap2.example.com)"
+assert_has "and of on"                     "Tek bir sitede APCu'yu yeniden kapatmak için: lomp apcu off <domain>" "$_out"
+rm -f "$TMP/ap-code"
+_out="$(_ap_run off ap2.example.com)"
+_st="$(LIB_LANG="tr"; lib_lang_build; lib_php_apcu_status)"
+assert_eq  "the table: what a new site gets"  "Bundan sonra eklenen siteler APCu açık olarak başlar" "$(sed -n 1p <<<"$_st")"
+assert_has "its headings"                     "SİTE" "$(sed -n 3p <<<"$_st")"
+assert_eq  "on"                               "php 8.3 açık" "$(_ap_row ap1.example.com)"
+assert_eq  "off"                              "wordpress 8.3 kapalı" "$(_ap_row ap2.example.com)"
+assert_eq  "none for this version"            "php 7.4 bu PHP sürümü için kurulu değil" "$(_ap_row ap5.example.com)"
+assert_eq  "doctor's two lines" "site a.example: APCu önbelleği|kapalı olmalıydı ama /etc/x/y.ini bunu söylemiyor (lomp apcu off a.example)" \
+  "$(LIB_LANG="tr"; lib_lang_build; _doc_tr "site a.example: APCu"; printf '%s|' "$LIB_TR"; _doc_tr "it is meant to be off, but /etc/x/y.ini does not say so (lomp apcu off a.example)"; printf '%s' "$LIB_TR")"
+
+# ---- where it is wired in
+assert_has "doctor names a site whose ini does not say off" 'if lib_php_apcu_off_lost "$d"; then' "$(declare -f _doc_check_domains)"
+assert_has "with the command that writes it again"          '(lomp apcu off ${d})' "$(declare -f _doc_check_domains)"
+assert_has "setup.sh has the command"  'apcu)           lib_php_apcu_main "${rest[@]}" || exit 1 ;;' "$(cat "$ROOT/setup.sh")"
+assert_has "status and help take no lock" 'apcu)   case "${rest[0]:-status}" in status|help|-h|--help) ;; *) lib_lock ;; esac ;;' "$(cat "$ROOT/setup.sh")"
+_menu_block="$(awk '/_menu_group "SITES"/{f=1} f{print} f && /^[[:space:]]*esac/{exit}' "$ROOT/lib/menu.sh")"
+assert_has "it is item 31 of the main menu" "_menu_item 31 \"APCu, PHP's in-memory cache: on or off (one site, or every site)\"" "$_menu_block"
+assert_has "which opens it"                 '31) _menu_apcu ;;' "$_menu_block"
+_map() {   # [answer] -> the command the menu runs
+  (
+    eval '_menu_ask() { local -n _o="$1"; _o="${_maa:-${3:-}}"; }
+          _menu_run() { printf "%s\n" "$*"; }
+          _menu_pick_domain() { printf "%s" "${1:-all}" >"$TMP/ap-pick"; printf "picked.example.com"; }
+          _menu_pause() { :; }'
+    _maa="${1:-}"
+    _menu_apcu 2>/dev/null | tail -n 1
+  )
+}
+assert_eq "the menu shows what is set unless told otherwise" "apcu status" "$(_map)"
+assert_eq "off for the site picked"   "apcu off picked.example.com" "$(_map 2)"
+assert_eq "among the sites PHP runs in" "php" "$(cat "$TMP/ap-pick")"
+assert_eq "on for the site picked"    "apcu on picked.example.com" "$(_map 3)"
+assert_eq "off for every site"        "apcu off --all" "$(_map 4)"
+assert_eq "on for every site"         "apcu on --all" "$(_map 5)"
+assert_eq "anything else shows what is set" "apcu status" "$(_map 9)"
+assert_eq "no site to pick: nothing is run" "" "$( eval '_menu_ask() { local -n _o="$1"; _o=2; }; _menu_run() { printf "%s\n" "$*"; }; _menu_pick_domain() { return 1; }; _menu_pause() { :; }'; _menu_apcu 2>/dev/null | grep '^apcu' || true)"
+
+STATE_DIR="$_ap_state"; HARDEN_PHP_INI_ROOT="$_ap_ini"
+# shellcheck disable=SC2086
+unset -f $_ap_fns _ap_site _ap_rec _ap_file _ap_vh _ap_loaded _ap_run _ap_calls _ap_row _ap_tr _map; eval "$_ap_saved"
+lib_domain_state_reset
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 if (( FAIL > 0 )); then exit 1; fi
 exit 0

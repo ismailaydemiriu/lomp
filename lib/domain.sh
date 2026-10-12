@@ -11,6 +11,8 @@ D_WWW=0 D_WWW_PRIMARY=0 D_SSL=0 D_SSL_WANTED=1 D_SSL_WILDCARD=0 D_HSTS_PRELOAD=0
 D_EMAIL="" D_CREATED="" D_STATUS="" D_DB_NAME="" D_DB_USER="" D_WP=0 D_BACKUP_LAST="" D_STAGING=0
 # hardening (lib/harden.sh): "blocked", "allowed", or empty for a site nobody decided about yet
 D_SEC_EXEC="" D_SEC_UPLOAD=""
+# APCu (lib/php.sh, "lomp apcu"): "off", "on", or empty for a site nobody switched - which is on
+D_APCU=""
 # ---- add-only options ---------------------------------------------------------
 # Every new site gets a database and its own MariaDB user by default; --no-db opts out.
 DOM_OPT_WP_TITLE="" DOM_OPT_WP_ADMIN="admin" DOM_OPT_WP_EMAIL="" DOM_OPT_WP_LOCALE="en_US" DOM_OPT_WITH_DB=1
@@ -38,6 +40,7 @@ lib_domain_state_reset() {
   D_WWW=0 D_WWW_PRIMARY=0 D_SSL=0 D_SSL_WANTED=1 D_SSL_WILDCARD=0 D_HSTS_PRELOAD=0 D_CLOUDFLARE=0
   D_EMAIL="" D_CREATED="" D_STATUS="" D_DB_NAME="" D_DB_USER="" D_WP=0 D_BACKUP_LAST="" D_STAGING=0
   D_SEC_EXEC="" D_SEC_UPLOAD=""
+  D_APCU=""
 }
 
 _d_bool() { [[ "$1" == "true" ]] && printf '1' || printf '0'; }
@@ -63,6 +66,7 @@ lib_domain_state_load_file() {   # file domain  (returns 1 when the file is not 
   D_PHP_CHILDREN="$(lib_json_get "$f" '.php.children')"
   D_MEMORY="$(lib_json_get "$f" '.php.memory_limit')"
   D_UPLOAD="$(lib_json_get "$f" '.php.upload_max')"
+  D_APCU="$(lib_json_get "$f" '.php.apcu')"
   D_PROXY="$(lib_json_get "$f" '.proxy.target')"
   D_STATIC_PATHS="$(lib_json_get "$f" '.proxy.static_paths')"
   D_WS_PATH="$(lib_json_get "$f" '.proxy.websocket_path')"
@@ -105,7 +109,7 @@ lib_domain_state_json() {
     --argjson cf "$(_d_json_bool "$D_CLOUDFLARE")" --arg email "$D_EMAIL" --arg created "$D_CREATED" \
     --arg status "$D_STATUS" --arg dbn "$D_DB_NAME" --arg dbu "$D_DB_USER" --argjson wp "$(_d_json_bool "$D_WP")" \
     --arg blast "$D_BACKUP_LAST" --arg ts "$(lib_iso_now)" --arg ver "$SCRIPT_VERSION" \
-    --arg sexec "$D_SEC_EXEC" --arg supl "$D_SEC_UPLOAD" \
+    --arg sexec "$D_SEC_EXEC" --arg supl "$D_SEC_UPLOAD" --arg apcu "$D_APCU" \
     '{domain:$domain, ident:$ident, user:$user, group:$group, home:$home, mode:$mode,
       php:{version:$php, children:$children, memory_limit:$mem, upload_max:$up},
       proxy:{target:$proxy, static_paths:$spaths, websocket_path:$ws},
@@ -116,6 +120,7 @@ lib_domain_state_json() {
       wordpress:$wp, backup:{last:$blast}, updated_at:$ts, script_version:$ver}
      | if $sexec != "" then .security.php_exec = $sexec else . end
      | if $supl != "" then .security.upload_php = $supl else . end
+     | if $apcu != "" then .php.apcu = $apcu else . end
      | del(.. | nulls)'
 }
 
@@ -308,6 +313,8 @@ lib_domain_add_main() {
   lib_require_tools
   lib_require_installed
   lib_domain_parse_add_args "$@"
+  # where APCu was switched off for every site, one added later starts without it too
+  if [[ "$D_MODE" == "php" || "$D_MODE" == "wordpress" ]]; then D_APCU="$(lib_php_apcu_new_sites)"; fi
   # A server installed for mail alone carries OpenLiteSpeed and PHP for the webmail, tuned for
   # that and nothing more. A site here would be one nobody planned for; a domain gets mail.
   if lib_server_mail_only; then

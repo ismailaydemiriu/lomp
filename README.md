@@ -271,6 +271,8 @@ sudo lomp optimize                                  # re-measure hardware, show 
 sudo lomp harden --all                              # limit what a PHP shell in a site can do
 sudo lomp scan --all                                # look through every site's PHP for a shell
 sudo lomp speed example.com                         # a site opens slowly: where does the time go?
+sudo lomp apcu off example.com                      # APCu (PHP's in-memory cache) off for a site;
+                                                    # "on" takes it back, --all is every site
 sudo lomp php-cleanup                               # undo an "apt-get install lsphp83*": purge the
                                                     # compiler, debug symbols and the rest it added
                                                     # beyond lomp's own PHP packages (asks first)
@@ -319,6 +321,26 @@ not a git checkout) shows `1.0.x`.
 | `--no-db` | Skip the database. Every site otherwise gets its own MariaDB database and user — `example.com` becomes `example_db` / `example_user` with a 32-character random password, printed once when the site is created and available afterwards from `credentials` |
 | `--wildcard` | Also request `*.<domain>` over DNS-01 (needs a stored Cloudflare API token) |
 | `--staging` | Use the Let's Encrypt staging CA while you are testing |
+
+### APCu, on or off for a site
+
+APCu - the in-memory cache a PHP application keeps values in between requests (`apcu_store`,
+`apcu_fetch`) - is installed with every LSPHP version and on for every site. Each site has a
+cache of its own, in the memory of its own PHP processes.
+
+```bash
+sudo lomp apcu status               # where it is on and where off; item 31 in the menu does the same
+sudo lomp apcu off example.com      # off for one site (several names may be given)
+sudo lomp apcu on example.com       # and on again
+sudo lomp apcu off --all            # every site, and the sites added from now on
+```
+
+Switched off, the site's `lsphp` starts with `apc.enabled = 0` from its own ini directory
+(`/etc/lompstack/php/<domain>/`, the one `harden` uses): the `apcu_*` functions stay defined,
+`apcu_enabled()` returns false and nothing is stored. Only that site's PHP is started again.
+The site is asked for its page before and after, and one that answered before and no longer
+does is named. The setting is part of the site's record: it follows a rename, and a site that
+is recreated from its backup comes back with it.
 
 ### Moving a site to another domain name
 
@@ -1459,11 +1481,11 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
 | `lib/system.sh` | Hardware analysis, resource profile, sysctl and limits, swap, timezone |
 | `lib/install.sh` | `install`, `update`, `optimize`, UFW, SSH hardening, Fail2ban, cron, optional runtimes |
 | `lib/ols.sh` | OpenLiteSpeed: transactional config editing, snapshots, config test, templates, WebAdmin |
-| `lib/php.sh` | LSPHP versions, extensions, php.ini tuning |
+| `lib/php.sh` | LSPHP versions, extensions, php.ini tuning, `php-cleanup`, `apcu` |
 | `lib/db.sh` | MariaDB install, hardening, tuning, per-site databases, Redis |
 | `lib/ssl.sh` | certbot, DNS checks, certificate deployment, renewal hook |
 | `lib/domain.sh` | Site lifecycle, users and directories, WordPress, logrotate and jail regeneration |
-| `lib/harden.sh` | `harden`: per-site PHP limits, the site firewall |
+| `lib/harden.sh` | `harden`: per-site PHP limits and the site's own ini file, the site firewall |
 | `lib/scan.sh` | `scan`: looks through a site's PHP files for what web shells are made of |
 | `lib/proxy.sh` | Path proxies: an application under a path of any site |
 | `lib/app.sh` | Node.js applications: one PM2 daemon per site as the site user, systemd units, deploy, environment, workers and scheduled jobs |

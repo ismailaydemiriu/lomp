@@ -557,6 +557,10 @@ _doc_check_domains() {
       elif [[ "$D_SEC_EXEC" == "blocked" && ! -s "$(lib_harden_php_ini_dir "$d")/${HARDEN_PHP_INI_NAME}" ]]; then _doc_add FAIL "site ${d}: hardening" "process execution is meant to be blocked, but $(lib_harden_php_ini_dir "$d")/${HARDEN_PHP_INI_NAME} is missing (lomp harden ${d})"
       elif [[ "$D_SEC_EXEC" == "blocked" ]]; then _doc_add OK "site ${d}: hardening" "PHP starts no process and reads only the site's own files"
       else _doc_add OK "site ${d}: hardening" "process execution left on for this site (--allow-exec)"; fi
+      # APCu switched off is a line of the same file: without it the site's PHP starts with APCu on
+      if lib_php_apcu_off_lost "$d"; then
+        _doc_add FAIL "site ${d}: APCu" "it is meant to be off, but $(lib_harden_php_ini_dir "$d")/${HARDEN_PHP_INI_NAME} does not say so (lomp apcu off ${d})"
+      fi
     fi
     _doc_site_wp_config "$d"
     _doc_site_fix_owner "$d"

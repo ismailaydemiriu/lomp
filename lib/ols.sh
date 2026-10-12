@@ -1065,7 +1065,8 @@ extprocessor ${D_IDENT} {
 EOF
     # A site's own ini directory, read after the version's: disable_functions is only ever read
     # when PHP starts, so phpIniOverride cannot set it - the value shows, the functions stay.
-    if [[ "$D_SEC_EXEC" == "blocked" ]]; then
+    # APCu's apc.enabled is read then too (lomp apcu off).
+    if [[ "$D_SEC_EXEC" == "blocked" || "${D_APCU:-}" == "off" ]]; then
       printf '  env                     PHP_INI_SCAN_DIR=:%s\n' "$(lib_harden_php_ini_dir "$D_DOMAIN")"
     fi
     cat <<EOF

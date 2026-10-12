@@ -197,6 +197,9 @@ KOMUTLAR
                                 yok, bu makinede yalnızca DNS, web, MariaDB, Redis ve kendi
                                 uygulaması erişilebilir (site başına --allow-exec,
                                 --allow-upload-php; "harden status"; --firewall on|off)
+  apcu on|off <domain>|--all    APCu'yu (PHP'nin bellek içi önbelleği) bir site için açar ya da
+                                kapatır (varsayılan: açık); --all tüm siteler ve sonradan
+                                eklenenler içindir. "apcu status" geçerli durumu gösterir
   scan <domain>|--all [--wide]  Sitenin PHP dosyalarında web shell'lerin yapı taşlarını arar
                                 (çözülmüş veya istekten gelen verinin eval edilmesi, istekten
                                 kurulan komutlar, paketlenmiş kod) ve bakılacak dosyaları
@@ -466,6 +469,9 @@ COMMANDS
                                 only DNS, web, MariaDB, Redis and its own application reachable
                                 on this machine (--allow-exec, --allow-upload-php per site;
                                 "harden status"; --firewall on|off)
+  apcu on|off <domain>|--all    Switch APCu, PHP's in-memory cache, on or off for a site (it is
+                                on by default); --all is every site and those added later.
+                                "apcu status" shows what is set
   scan <domain>|--all [--wide]  Look through a site's PHP files for what web shells are made of
                                 (eval of decoded or request data, commands made of the request,
                                 packed code) and list the files to open. Changes nothing;
@@ -824,6 +830,7 @@ lib_menu_main() {
     _menu_item 24 "Scan sites for PHP shells (eval, base64, exec)"
     _menu_item 25 "Download WordPress into a site (you finish the setup in the browser)"
     _menu_item 30 "Test why a site is slow (where the time goes: server, cache, DNS, Cloudflare)"
+    _menu_item 31 "APCu, PHP's in-memory cache: on or off (one site, or every site)"
     _menu_group "SERVER"
     _menu_item  8 "Status"
     _menu_item  9 "Health check"
@@ -861,6 +868,7 @@ lib_menu_main() {
       24) _menu_scan ;;
       25) _menu_wordpress ;;
       30) _menu_speed ;;
+      31) _menu_apcu ;;
       8) _menu_run status ;;
       9) _menu_run doctor ;;
       10) _menu_run panel ;;
@@ -1329,6 +1337,29 @@ _menu_harden() {
        _menu_ask keep "Does this site need exec/proc_open (y/N)" "n"
        if [[ "${keep,,}" == y* ]]; then _menu_run harden "$domain" --allow-exec; else _menu_run harden "$domain"; fi ;;
     *) _menu_run harden --all ;;
+  esac
+}
+
+# What is set, then one site or all of them. "Every site" also decides what a site added later
+# starts with, and says so.
+_menu_apcu() {
+  local what="" domain=""
+  printf '\n'; _menu_note "APCu is the memory a PHP application caches values in between requests. Each site has its own." \
+    "It is on unless switched off here. Switching it restarts the PHP of that site only."
+  _menu_opt 1 "Show where it is on and where off"
+  _menu_opt 2 "Switch it off for one site"
+  _menu_opt 3 "Switch it on for one site"
+  _menu_opt 4 "Switch it off for every site (and for the sites added later)"
+  _menu_opt 5 "Switch it on for every site (and for the sites added later)"
+  _menu_ask what "Choice" "1"
+  case "$what" in
+    2) domain="$(_menu_pick_domain php)" || { _menu_pause; return 0; }
+       _menu_run apcu off "$domain" ;;
+    3) domain="$(_menu_pick_domain php)" || { _menu_pause; return 0; }
+       _menu_run apcu on "$domain" ;;
+    4) _menu_run apcu off --all ;;
+    5) _menu_run apcu on --all ;;
+    *) _menu_run apcu status ;;
   esac
 }
 
@@ -2101,4 +2132,12 @@ MENU_TR['Its SSH port']='SSH portu'
 MENU_TR['Test why a site is slow (where the time goes: server, cache, DNS, Cloudflare)']='Bir site neden yavaş test et (zaman nerede gidiyor: sunucu, önbellek, DNS, Cloudflare)'
 MENU_TR['Asks the site for its page a few times, straight from the web server and the way a visitor goes, and shows where the time is spent. It changes nothing.']='Sitenin sayfasını birkaç kez ister: doğrudan web sunucusundan ve ziyaretçinin yolundan; zamanın nerede harcandığını gösterir. Hiçbir şeyi değiştirmez.'
 MENU_TR['Only the web server on this machine, not the visitor'\''s path (y/N)']='Yalnızca bu makinedeki web sunucusu, ziyaretçinin yolu değil (y/N)'
+MENU_TR['APCu, PHP'\''s in-memory cache: on or off (one site, or every site)']='APCu, PHP'\''nin bellek içi önbelleği: aç ya da kapat (tek site ya da tüm siteler)'
+MENU_TR['APCu is the memory a PHP application caches values in between requests. Each site has its own.']='APCu, bir PHP uygulamasının istekler arasında değer sakladığı bellektir. Her sitenin kendi önbelleği vardır.'
+MENU_TR['It is on unless switched off here. Switching it restarts the PHP of that site only.']='Buradan kapatılmadıkça açıktır. Açıp kapatmak yalnızca o sitenin PHP'\''sini yeniden başlatır.'
+MENU_TR['Show where it is on and where off']='Nerede açık, nerede kapalı olduğunu göster'
+MENU_TR['Switch it off for one site']='Tek bir site için kapat'
+MENU_TR['Switch it on for one site']='Tek bir site için aç'
+MENU_TR['Switch it off for every site (and for the sites added later)']='Tüm siteler için kapat (sonradan eklenen siteler için de)'
+MENU_TR['Switch it on for every site (and for the sites added later)']='Tüm siteler için aç (sonradan eklenen siteler için de)'
 # MENU_TR-END

@@ -5,6 +5,8 @@
 
 # ---- per-site PHP ini ---------------------------------------------------------------
 # Root's, readable by the site's group: PHP reads it as the site user, who must not change it.
+# It holds what PHP reads only when it starts: the limits below and, for a site whose APCu was
+# switched off, apc.enabled.
 HARDEN_PHP_INI_ROOT="/etc/lompstack/php"
 HARDEN_PHP_INI_NAME="99-lompstack-site.ini"
 # Process execution, and the two ways around its absence: putenv (LD_PRELOAD for the sendmail
@@ -26,22 +28,38 @@ SITEFW_MAIL_PORTS="25,465,587"
 
 lib_harden_php_ini_dir() { printf '%s/%s' "$HARDEN_PHP_INI_ROOT" "$1"; }
 
+# Has the site in D_* anything for an ini of its own? Process execution blocked, or APCu
+# switched off ("lomp apcu", lib/php.sh): apc.enabled is read when PHP starts, like
+# disable_functions, so it stands in the same file, which the site's PHP reads then.
+lib_harden_php_ini_wanted() {
+  [[ "$D_MODE" == "php" || "$D_MODE" == "wordpress" ]] || return 1
+  [[ "$D_SEC_EXEC" == "blocked" || "${D_APCU:-}" == "off" ]]
+}
+
 lib_harden_render_php_ini() {
-  local share=""; share="$(lib_php_home "$D_PHP")/share/"
-  cat <<EOF
-; Managed by lompstack for ${D_DOMAIN} - regenerated on every change; do not edit by hand.
-; "lomp harden ${D_DOMAIN} --allow-exec" removes it.
-disable_functions = ${HARDEN_DISABLE_FUNCTIONS}
-open_basedir = ${D_HOME}/:$(lib_domain_log_dir "$D_DOMAIN")/:${share}:/tmp/
-EOF
+  local share="" apcu_off=0
+  share="$(lib_php_home "$D_PHP")/share/"
+  if [[ "${D_APCU:-}" == "off" ]]; then apcu_off=1; fi
+  printf '; Managed by lompstack for %s - regenerated on every change; do not edit by hand.\n' "$D_DOMAIN"
+  if [[ "$D_SEC_EXEC" == "blocked" ]]; then
+    if (( apcu_off )); then printf '; "lomp harden %s --allow-exec" takes the next two lines out.\n' "$D_DOMAIN"
+    else printf '; "lomp harden %s --allow-exec" removes it.\n' "$D_DOMAIN"; fi
+    printf 'disable_functions = %s\n' "$HARDEN_DISABLE_FUNCTIONS"
+    printf 'open_basedir = %s/:%s/:%s:/tmp/\n' "$D_HOME" "$(lib_domain_log_dir "$D_DOMAIN")" "$share"
+  fi
+  if (( apcu_off )); then
+    printf '; "lomp apcu on %s" takes the next line out.\n' "$D_DOMAIN"
+    printf 'apc.enabled = 0\n'
+  fi
+  return 0
 }
 
 # The ini directory of the site in D_*, as its state says: written when process execution is
-# blocked, removed when it is not. lib_ols_vhconf_write calls it, so whatever renders a vhost
-# that points PHP at the directory has the directory in place.
+# blocked or APCu is off, removed when neither is. lib_ols_vhconf_write calls it, so whatever
+# renders a vhost that points PHP at the directory has the directory in place.
 lib_harden_php_ini_write() {
   local dir=""; dir="$(lib_harden_php_ini_dir "$D_DOMAIN")"
-  if [[ "$D_SEC_EXEC" == "blocked" && ( "$D_MODE" == "php" || "$D_MODE" == "wordpress" ) ]]; then
+  if lib_harden_php_ini_wanted; then
     lib_mkdir "$HARDEN_PHP_INI_ROOT" 0755 root:root
     lib_mkdir "$dir" 0750 "root:${D_GROUP}"
     lib_harden_render_php_ini | lib_write_file "${dir}/${HARDEN_PHP_INI_NAME}" 0640 "root:${D_GROUP}"

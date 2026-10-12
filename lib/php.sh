@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# lib/php.sh - LSPHP installation, required extensions, php.ini tuning, CLI links.
+# lib/php.sh - LSPHP installation, required extensions, php.ini tuning, CLI links, and the
+#              per-site APCu switch ("lomp apcu").
 
 # Every LSPHP version must load these. Most are compiled into lsphpXX itself; the framework basics
 # on the second line are checked too, so a build without one is reported by install and update
@@ -430,4 +431,184 @@ lib_php_cleanup_main() {
     if [[ -e /usr/bin/php ]]; then lib_note "/usr/bin/php still exists: it was there before the wildcard install, or something that stays needs it."; fi
   fi
   return "$rc"
+}
+
+# =============================================================================
+#  apcu - PHP's in-memory cache, on or off for a site
+# =============================================================================
+# APCu comes with every LSPHP version (_php_packages) and is on. A site has PHP processes of its
+# own and so a cache of its own: switching it off for one site touches no other. What says so
+# is "apc.enabled = 0" in the site's own ini directory (lib/harden.sh keeps that file): it is a
+# setting PHP takes from its ini files when it starts, which is when APCu sets its memory up.
+# The functions stay defined; apcu_enabled() says false and nothing is stored.
+
+# What a site added from now on starts with: "off" once "apcu off --all" was run, else nothing.
+lib_php_apcu_new_sites() {
+  if [[ "$(lib_manifest_get '.params.apcu')" == "off" ]]; then printf 'off'; fi
+  return 0
+}
+
+# Is the site in D_* meant to run without APCu while its ini does not say so? (the file was
+# removed by hand, or never written: its PHP then starts with APCu on)
+lib_php_apcu_off_lost() {   # domain
+  [[ "$D_APCU" == "off" ]] || return 1
+  ! grep -qx 'apc.enabled = 0' "$(lib_harden_php_ini_dir "$1")/${HARDEN_PHP_INI_NAME}" 2>/dev/null
+}
+
+# Does this LSPHP version load APCu at all? (its repository may have no package for it)
+_php_apcu_loaded() {   # version
+  local cli=""; cli="$(lib_php_cli "$1")"
+  [[ -x "$cli" ]] || return 1
+  _php_has_ext "$("$cli" -m 2>/dev/null | tr '[:upper:]' '[:lower:]')" apcu
+}
+
+lib_php_apcu_usage() {
+  # a usage text is no single message lib/lang.sh could look up: its Turkish is here
+  if [[ "${LIB_LANG:-en}" == "tr" ]]; then
+    cat <<'EOF'
+Kullanım: lomp apcu status
+          lomp apcu on|off <domain>... | --all
+
+  APCu, bir PHP uygulamasının istekler arasında değer sakladığı bellek içi önbellektir
+  (apcu_store, apcu_fetch; WordPress önbellek eklentileri ve framework'ler onu kullanacak
+  şekilde ayarlanabilir). Her PHP sürümüyle birlikte kurulur ve her sitede açıktır. Her sitenin
+  önbelleği kendisine aittir: kendi PHP süreçlerinin belleğinde durur.
+
+  off      Sitenin PHP'si apc.enabled = 0 ile başlar: işlevler yerinde kalır, apcu_enabled()
+           false döner ve hiçbir şey saklanmaz. Yalnızca o sitenin PHP'si yeniden başlatılır.
+  on       Bunu geri alır.
+  --all    Bütün siteler; bundan sonra eklenen siteler de aynı ayarla başlar.
+  status   Hangi sitede açık, hangisinde kapalı ("lomp apcu" tek başına da bunu gösterir).
+
+  Siteye önce ve sonra sayfası sorulur; önceden yanıt verip sonra vermeyen site adıyla
+  bildirilir.
+EOF
+    return 0
+  fi
+  cat <<'EOF'
+Usage: lomp apcu status
+       lomp apcu on|off <domain>... | --all
+
+  APCu is the in-memory cache a PHP application keeps values in between requests (apcu_store,
+  apcu_fetch; WordPress cache plugins and frameworks can be told to use it). It is installed
+  with every PHP version and on for every site. Each site has a cache of its own, in the
+  memory of its own PHP processes.
+
+  off      The site's PHP starts with apc.enabled = 0: the functions stay, apcu_enabled() says
+           false and nothing is stored. Only that site's PHP is started again.
+  on       Takes that back.
+  --all    Every site; the sites added from now on start the same way.
+  status   Which sites have it on and which off ("lomp apcu" alone shows this too).
+
+  A site is asked for its page before and after; one that answered before and does not after
+  is named.
+EOF
+}
+
+lib_php_apcu_status() {
+  local d="" ver="" state="" new=""
+  local -A loaded=()
+  new="$(lib_php_apcu_new_sites)"
+  lib_tr "Sites added from now on start with APCu ${new:-on}"; printf '%s\n\n' "$LIB_TR"
+  lib_tprintf '%-34s %-10s %-5s %s\n' "SITE" "MODE" "PHP" "APCU"
+  while read -r d; do
+    [[ -n "$d" ]] || continue
+    lib_domain_state_load "$d" || continue
+    if [[ "$D_MODE" != "php" && "$D_MODE" != "wordpress" ]]; then
+      lib_tprintf '%-34s %-10s %-5s %s\n' "$d" "$D_MODE" "-" "-"
+      continue
+    fi
+    ver="${D_PHP:-?}"
+    if [[ -z "${loaded[$ver]:-}" ]]; then
+      if _php_apcu_loaded "$ver"; then loaded["$ver"]="yes"; else loaded["$ver"]="no"; fi
+    fi
+    if [[ "${loaded[$ver]}" == "no" ]]; then state="not installed for this PHP version"
+    elif [[ "$D_APCU" == "off" ]]; then state="off"
+    else state="on"; fi
+    lib_tprintf '%-34s %-10s %-5s %s\n' "$d" "$D_MODE" "$ver" "$state"
+  done < <(lib_domains_list)
+  return 0
+}
+
+lib_php_apcu_main() {
+  local a="" want="" all=0 d="" before="" after="" other="on"
+  local -a targets=() sites=() broke=()
+  local -A code_before=() was=()
+  while (($# > 0)); do
+    a="$1"; shift
+    case "$a" in
+      on|off|status) want="$a" ;;
+      --all) all=1 ;;
+      -h|--help|help) lib_php_apcu_usage; return 0 ;;
+      # "--help" is the whole command reference, whatever the command (setup.sh takes it first)
+      -*) lib_die "Unknown option for apcu: ${a}" "" "lomp apcu help" ;;
+      *) targets+=("${a,,}") ;;
+    esac
+  done
+  lib_require_tools
+  lib_require_installed
+  if [[ "$want" == "status" ]] || [[ -z "$want" && $all -eq 0 && ${#targets[@]} -eq 0 ]]; then
+    lib_php_apcu_status
+    return 0
+  fi
+  [[ -n "$want" ]] || lib_die "Say whether APCu goes on or off" "" "lomp apcu off ${targets[0]:---all}"
+  if (( all )); then
+    ((${#targets[@]} == 0)) || lib_die "Give a domain or --all, not both" "" "lomp apcu ${want} --all"
+    while read -r d; do [[ -n "$d" ]] && targets+=("$d"); done < <(lib_domains_list)
+  else
+    ((${#targets[@]})) || lib_die "Which site? Give a domain, or --all" "" "lomp apcu ${want} example.com"
+    # what was typed is checked; with --all the names are the registry's own (see lib_harden_main)
+    for d in "${targets[@]}"; do
+      lib_domain_arg_ok "$d" || lib_die "Invalid domain name '${d}'" "" "lomp list"
+      lib_domain_registered "$d" || lib_die "Site ${d} is not registered" "" "lomp list"
+    done
+  fi
+  if [[ "$want" == "on" ]]; then other="off"; fi
+
+  lib_ols_is_installed || lib_die "OpenLiteSpeed is not installed on this server" "" "run 'lompstack install' first"
+  lib_system_profile
+  HARDEN_PHP_CHANGED=""
+  lib_ols_change_begin
+  for d in "${targets[@]}"; do
+    lib_domain_state_load "$d" || continue
+    if [[ "$D_MODE" != "php" && "$D_MODE" != "wordpress" ]]; then
+      lib_info "${d}: no PHP runs here (${D_MODE}); it has no APCu to switch"
+      continue
+    fi
+    sites+=("$d")
+    if [[ "$D_APCU" == "off" ]]; then was["$d"]="off"; else was["$d"]="on"; fi
+    (( OPT_DRY_RUN )) || code_before["$d"]="$(_harden_code "$d")"
+    D_APCU="$want"
+    lib_domain_state_save
+    lib_ols_vhconf_write "$d"
+  done
+  if (( OLS_PENDING_RELOAD || ! OPT_DRY_RUN )); then lib_ols_change_commit "APCu ${want}"; fi
+  for d in "${sites[@]}"; do
+    lib_domain_state_load "$d" || continue
+    if [[ "${was[$d]}" == "$want" && " ${HARDEN_PHP_CHANGED} " != *" ${d} "* ]]; then
+      lib_ok "${d}: APCu is ${want} already"
+      continue
+    fi
+    if (( OPT_DRY_RUN )); then
+      lib_info "[dry-run] ${d}: APCu would be switched ${want}"
+      continue
+    fi
+    # apc.enabled is read when PHP starts: the site's own PHP is started again, no other
+    lib_harden_php_restart "$D_USER"
+    before="${code_before[$d]}"; after="$(_harden_code "$d")"
+    if [[ "$before" =~ ^[23] && ! "$after" =~ ^[23] ]]; then broke+=("${d} (HTTP ${before} -> ${after})")
+    else lib_ok "${d}: APCu switched ${want} (HTTP ${after})"; fi
+  done
+  if ((${#broke[@]})); then
+    lib_warn "These sites answered before and do not now: ${broke[*]}"
+    lib_note "Their error log says what they miss (lomp logs <domain>). To switch APCu ${other} again for one site: lomp apcu ${other} <domain>"
+  fi
+  if (( all )); then
+    if (( OPT_DRY_RUN )); then lib_info "[dry-run] sites added from now on would start with APCu ${want}"
+    else
+      lib_manifest_set '.params.apcu' "$want"
+      lib_ok "Sites added from now on start with APCu ${want}"
+    fi
+  fi
+  ((${#broke[@]} == 0))
 }

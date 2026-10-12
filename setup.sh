@@ -183,6 +183,7 @@ main() {
     htaccess-check) ;;
     panel) if [[ "${rest[0]:-open}" != "status" ]]; then lib_lock; fi ;;
     harden) case "${rest[0]:-help}" in status|help|-h|--help) ;; *) lib_lock ;; esac ;;
+    apcu)   case "${rest[0]:-status}" in status|help|-h|--help) ;; *) lib_lock ;; esac ;;
     notify) [[ " ${rest[*]:-} " == *" --send "* ]] || lib_lock ;;
     proxy)  if [[ "${rest[0]:-list}" != "list" && "${rest[0]:-list}" != "help" ]]; then lib_lock; fi ;;
     redirect) case "${rest[0]:-list}" in list|--list|help|-h|--help) ;; *) lib_lock ;; esac ;;
@@ -242,6 +243,7 @@ main() {
     optimize)       lib_optimize_main "${rest[@]}" ;;
     php-cleanup)    lib_php_cleanup_main "${rest[@]}" || exit 1 ;;
     harden)         lib_harden_main "${rest[@]}" || exit 1 ;;
+    apcu)           lib_php_apcu_main "${rest[@]}" || exit 1 ;;
     scan)           lib_scan_main "${rest[@]}" || exit 1 ;;
     speed)          lib_speed_main "${rest[@]}" || exit 1 ;;
     backup)         lib_backup_main "${rest[@]}" ;;
