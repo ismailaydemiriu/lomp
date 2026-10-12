@@ -642,7 +642,9 @@ _domain_rename_box_move() {   # user@old new-domain
 
 # A message that reached the old address in the moment between the move of its mail and the
 # alias taking effect was put into a mailbox made afresh under the old name. It goes on to
-# the new one, and the leftover directory goes.
+# the new one, and the leftover directory goes. Called once Dovecot has stopped answering for
+# the old address (_domain_rename_mail_move): swept sooner, the directory was made again
+# behind it.
 _domain_rename_box_sweep() {   # user@old new-domain
   local loc="${1%%@*}" od="${1#*@}" src="" dst="" f="" n=0
   src="${MAIL_VMAIL_HOME}/${od}/${loc}"; dst="${MAIL_VMAIL_HOME}/${2}/${loc}/Maildir/new"
@@ -686,6 +688,19 @@ UPDATE \`${WM_DB_NAME}\`.identities i JOIN \`${WM_DB_NAME}\`.users u ON u.user_i
 # being a mailbox, and the old one is an alias by the time it stops. RENAME_MAIL_MOVED lists
 # the new addresses. Status 1 with MAIL_LAST_ERROR when the new domain could not get mail at
 # all: then nothing has moved.
+#
+# "Exists" and "stops" have to be true for Dovecot, and Dovecot looks at its user file at most
+# once a second: asked about an address earlier in the same second, it answers from the file
+# as it was then until that second is over (2.3.21. On the test server the old answer came to
+# the last millisecond of the second after ten changes of the file out of ten, and not once
+# when nobody had asked in that second; lib_mail_box_remove waits the same second out). Hence
+# the two waits below, which a rename under mail did not have. Without the first, Postfix sent
+# mail for an old address on to a new one that Dovecot still refused: "550 User doesn't exist"
+# for three of 861 messages, each of them bounced. Without the second, the mailbox under the
+# old name was swept while Dovecot still took mail and questions for it: 35 messages a sender
+# handed over in that moment stayed under the old name, where nobody reads, and Postfix's
+# quota question at RCPT TO alone made the directory again - which a rename back to the old
+# name then found "in the way", so that the mailbox did not come back with its site.
 _domain_rename_mail_move() {   # old new
   local old="$1" new="$2" boxes="" aliases="" catchall="" moved="" a="" t="" webmail=""
   RENAME_MAIL_MOVED=""
@@ -712,12 +727,23 @@ _domain_rename_mail_move() {   # old new
     lib_mail_alias_set "$new" "@${new}" "$t"
     lib_mail_alias_set "$old" "@${old}" "$t"
   fi
+  # Dovecot has to know the new addresses before Postfix sends anything on to them
+  if [[ -n "$RENAME_MAIL_MOVED" ]]; then sleep 1; fi
   lib_mail_tables_apply || lib_warn "The mail tables could not be rebuilt (${MAIL_LAST_ERROR}): setup.sh mail status"
-  # the old addresses are aliases now, for Postfix too: their mailbox lines go, and whatever
-  # arrived for them in between goes on
+  # the old addresses are aliases now, for Postfix too: their mailbox lines go
   for a in $RENAME_MAIL_MOVED; do
     a="${a%%@*}@${old}"
     awk -F: -v u="$a" '$1 != u' "$MAIL_PASSWD_FILE" | lib_write_file "$MAIL_PASSWD_FILE" 0640 root:dovecot secret
+  done
+  # ... and Dovecot has to have seen that - one second - and to have put down what it had
+  # taken in until then - another: the longest of 1078 deliveries took 85 ms. Only then is
+  # nothing made under an old name any more. A session that signed in there since the move is
+  # closed (the order lib_mail_box_remove has, for the reason it gives), and whatever arrived
+  # for the address in between goes on.
+  if [[ -n "$RENAME_MAIL_MOVED" ]]; then sleep 2; fi
+  for a in $RENAME_MAIL_MOVED; do
+    a="${a%%@*}@${old}"
+    if lib_have doveadm; then doveadm kick "$a" >/dev/null 2>&1 || true; fi
     _domain_rename_box_sweep "$a" "$new"
     ( _domain_rename_webmail_user "$a" "${a%%@*}@${new}" ) || true
   done

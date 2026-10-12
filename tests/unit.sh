@@ -8834,6 +8834,78 @@ assert_eq    "or logged"                                                "" "$(gr
 assert_false "what was made under the old name in between is gone"      test -e "$_rn/vmail/alpha.example/info"
 assert_true  "and the mail is where it moved to"                        test -s "$_rn/vmail/beta.example/info/Maildir/new/m1"
 unset -f _rn_swept
+# Dovecot looks at its user file at most once a second, and the rename did not wait for it
+# (2.3.21 on the test server: asked about an address earlier in the same second, it answered
+# from the file as it had been until that second was over - ten changes of the file, ten times
+# to the last millisecond - and from the new file at once when nobody had asked). Twice that
+# cost something in a real rename with mail arriving all the time. Postfix sent mail for the
+# old address on to the new one from the moment its tables were rebuilt, and Dovecot answered
+# "550 User doesn't exist" for the new address for the rest of that second: 3 of 861 messages
+# bounced. And the mailbox under the old name was swept the moment its line had gone, while
+# Dovecot went on taking mail and questions for the old address: 35 messages handed over in
+# that moment stayed under the old name, where nobody reads, and Postfix's quota question
+# alone made the directory again - "in the way" when the site was renamed back, so that the
+# mailbox did not come back with it.
+# Dovecot, standing in: it knows the addresses of the user file as it last saw it, and sees
+# the file again only where the rename lets a second pass. A sender, standing in, at every
+# moment the rename calls out to something (doveadm, the tables, the webmail's database): a
+# message for info@, sent on to the new address once Postfix has its tables and refused there
+# when Dovecot does not know it; one more that Postfix had already taken in under the old
+# address; and for sales@ only the question whether its mailbox is over quota.
+_rn_rename_dovecot() {
+  cp "$MAIL_PASSWD_FILE" "$_rn/dovecot-saw"
+  _rn_knows() { grep -q "^${1}:" "$_rn/dovecot-saw"; }
+  _rn_mail_comes() {
+    local n=0
+    n="$(cat "$_rn/sent" 2>/dev/null || printf 0)"; n=$((n + 1)); printf '%s' "$n" >"$_rn/sent"
+    if [[ -e "$_rn/postfix-sends-on" ]]; then
+      if _rn_knows info@beta.example; then printf 'm\n' >"$_rn/vmail/beta.example/info/Maildir/new/on$n"
+      else printf 'message %s: 550 User does not exist: info@beta.example\n' "$n" >>"$_rn/bounced"; fi
+    fi
+    if _rn_knows info@alpha.example; then
+      mkdir -p "$_rn/vmail/alpha.example/info/Maildir/new" "$_rn/vmail/alpha.example/info/Maildir/cur"
+      printf 'm\n' >"$_rn/vmail/alpha.example/info/Maildir/new/old$n"; printf 'old%s\n' "$n" >>"$_rn/taken"
+    fi
+    if _rn_knows sales@alpha.example; then mkdir -p "$_rn/vmail/alpha.example/sales/Maildir"; fi
+    return 0
+  }
+  sleep() {
+    printf 'sleep %s\n' "$*" >>"$_rn/calls"; _rn_mail_comes
+    if [[ "${1:-}" =~ ^[1-9] ]]; then cp "$MAIL_PASSWD_FILE" "$_rn/dovecot-saw"; fi
+  }
+  doveadm() { printf 'doveadm %s\n' "$*" >>"$_rn/calls"; _rn_mail_comes; }
+  _wm_info_load() { _rn_mail_comes; return 1; }
+  lib_mail_tables_apply() {
+    printf 'mail-tables %s\n' "$(lib_mail_boxes | tr '\n' ' ')" >>"$_rn/calls"; : >"$_rn/postfix-sends-on"; _rn_mail_comes
+  }
+  _rn_flow; lib_domain_rename_main "$@"
+}
+_rn_mail_boxes
+_rn_case _rn_rename_dovecot alpha.example beta.example
+_o="$(_rn_out)"
+assert_has   "a rename with mail arriving all the time ends well"       "rc=0" "$_o"
+assert_has   "with the mailboxes moved"                                 "Mail: now at @beta.example - info@beta.example, sales@beta.example" "$_o"
+assert_eq    "no message Postfix sent on was refused at the new address" "" "$(cat "$_rn/bounced" 2>/dev/null || true)"
+assert_true  "(messages were sent on: the sender got that far)"         bash -c 'ls "$1" | grep -q "^on"' _ "$_rn/vmail/beta.example/info/Maildir/new"
+assert_eq    "every message Dovecot took in under the old address is in the new mailbox" "$(sort "$_rn/taken" 2>/dev/null || true)" \
+  "$(ls "$_rn/vmail/beta.example/info/Maildir/new" 2>/dev/null | grep '^old' | sort || true)"
+assert_true  "(before the move, after it, and after the old line had gone)" test "$(grep -c . "$_rn/taken" 2>/dev/null || true)" -ge 4
+assert_false "nothing is left under the old name of a mailbox that got mail in that moment" test -e "$_rn/vmail/alpha.example/info"
+assert_false "or of one that was only asked about"                      test -e "$_rn/vmail/alpha.example/sales"
+# the order that does it: the new lines, a second, the tables; the old lines out, a second for
+# Dovecot and one for what it had taken in, the sessions that began in between closed, the sweep
+assert_eq    "the new addresses are a second old when the tables are rebuilt, and the old ones two seconds gone when they are swept" \
+  "doveadm kick info@alpha.example|doveadm kick sales@alpha.example|sleep 1|mail-tables|sleep 2|doveadm kick info@alpha.example|doveadm kick sales@alpha.example|mail-tables|" \
+  "$(grep -E '^(sleep|doveadm|mail-tables)' "$_rn/calls" | sed 's/^mail-tables.*/mail-tables/' | tr '\n' '|')"
+# a site whose mail has aliases only moves without either wait
+_rn_mail_site
+mkdir -p "$_rn/mail/aliases"; printf 'other@gamma.example:{H}otherhash::::::userdb_quota_rule=*:storage=1G\n' >"$_rn/mail/passwd"
+printf 'team@alpha.example\tboss@elsewhere.example\n' >"$_rn/mail/aliases/alpha.example"
+_rn_case _rn_rename_dovecot alpha.example beta.example
+assert_has   "a site that has aliases and no mailbox is renamed"        "rc=0" "$(_rn_out)"
+assert_eq    "its alias is one of the new domain"                       "boss@elsewhere.example team@beta.example" "$(_rn_alias beta.example team@beta.example) $(_rn_alias alpha.example team@alpha.example)"
+assert_lacks "and nothing waits for Dovecot where no mailbox moved"     "sleep" "$(_rn_calls)"
+unset -f _rn_rename_dovecot
 _rn_case _domain_rename_mail_targets "a@old.example, b@old.example,c@old.example,x@other.example" old.example new.example "a@old.example
 c@old.example"
 assert_eq    "targets: what moved is named at the new domain, what did not is not" "a@new.example,b@old.example,c@new.example,x@other.examplerc=0" "$(_rn_out)"
