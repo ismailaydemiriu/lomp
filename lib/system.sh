@@ -65,10 +65,14 @@ lib_system_analyze() {
       case "$base" in /dev/vd*|/dev/xvd*|/dev/sd*) SYS_DISK_TYPE="virtual" ;; *) SYS_DISK_TYPE="hdd" ;; esac
     fi
   fi
-  # "|| true": df's --output is a GNU coreutils extension, and a process substitution
-  # inherits the ERR trap, so on a host without it the trap would report a fatal error for
-  # a probe whose result is optional (the defaults below cover it).
-  read -r SYS_DISK_TOTAL_GB SYS_DISK_FREE_GB SYS_DISK_USED_PCT < <(df -BG --output=size,avail,pcent / 2>/dev/null | awk 'NR==2{gsub(/[G%]/,""); print $1, $2, $3}' || true)
+  # "|| true": df's --output is a GNU coreutils extension, and the result of this probe is
+  # optional (the defaults below cover it). Through a variable and a here-string, which always
+  # holds a line: read straight from "< <(df ...)" was left at the end of its input by a df
+  # that had nothing to say, and that is status 1 in THIS shell - "FAILED: command exited with
+  # status 1 ... read -r SYS_DISK_TOTAL_GB" - before the defaults were reached.
+  local disk=""
+  disk="$(df -BG --output=size,avail,pcent / 2>/dev/null | awk 'NR==2{gsub(/[G%]/,""); print $1, $2, $3}' || true)"
+  read -r SYS_DISK_TOTAL_GB SYS_DISK_FREE_GB SYS_DISK_USED_PCT <<<"$disk"
   SYS_DISK_TOTAL_GB="${SYS_DISK_TOTAL_GB:-0}"; SYS_DISK_FREE_GB="${SYS_DISK_FREE_GB:-0}"; SYS_DISK_USED_PCT="${SYS_DISK_USED_PCT:-0}"
 
   # ---- virtualisation / network --------------------------------------------

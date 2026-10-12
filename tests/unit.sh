@@ -571,6 +571,18 @@ out="$(lib_redis_render_conf secretpass 1)"
 assert_has "redis persistence" "appendonly yes" "$out"
 out="$(lib_system_render_sysctl)"; assert_has "sysctl header" "Managed by lompstack" "$out"
 out="$(lib_system_render_limits)"; assert_has "limits nofile" "nofile  1048576" "$out"
+# The disk probe has nothing to say where df cannot answer (--output is GNU's; a root that is
+# no mount point). The probe's own shell was quiet about that, and read was not: left at the
+# end of its input it ends with status 1 in the shell the command runs in, which was "FAILED:
+# command exited with status 1 ... read -r SYS_DISK_TOTAL_GB" before the defaults were reached.
+# (The analysis itself asks this machine: Linux only.)
+if [[ "${OSTYPE:-}" == linux* ]]; then
+  _sy_nodf() { df() { return 1; }; SYS_ANALYZED=0; lib_system_analyze --no-net; [[ "$SYS_DISK_TOTAL_GB $SYS_DISK_FREE_GB $SYS_DISK_USED_PCT" == "0 0 0" ]]; }
+  _sy_df()   { SYS_ANALYZED=0; lib_system_analyze --no-net; (( SYS_DISK_TOTAL_GB > 0 )); }
+  assert_eq "a df with nothing to say does not end the analysis: the disk is unknown" 0 "$(run_isolated _sy_nodf)"
+  assert_eq "a df that answers is read as before"                                     0 "$(run_isolated _sy_df)"
+  unset -f _sy_nodf _sy_df
+fi
 
 # =============================================================================
 section "vhost templates"
