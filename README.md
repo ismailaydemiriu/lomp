@@ -378,6 +378,14 @@ mailbox whose new address is already taken - by a mailbox, or by an alias somebo
 stays where it is and is named. The alias a rename leaves behind is no such alias: a site that
 is renamed back to the name it had gets its mailboxes back under their first addresses.
 
+Mail that arrives while the mailboxes move is not lost over it. What still reaches an old
+address in that moment is carried into the mailbox under its new one, into the folder it was
+filed in (the spam rule puts what Rspamd marked into Junk). A message Postfix was holding for
+an old address - put off before the rename, or by the move of the mailbox under a delivery -
+is sent through the alias instead of being offered, minutes later, to an address that is no
+mailbox any more. And a directory that lies where a mailbox goes keeps that mailbox where it is
+only when there is mail in it: an empty one is removed, and that is said.
+
 `--keep-mail` leaves the mail at the old domain instead: `example.com` becomes a mail domain of
 its own with everything as it was, and the site starts without mail under its new name. That is
 also what happens to mail that is switched off, and to a domain whose mail was added on its own

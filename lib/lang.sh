@@ -683,6 +683,7 @@ LIB_TR_PAIRS=(
   'Mailboxes to @{1}' 'Posta kutuları @{1} alanına'
   '{1} stays a mailbox at {2}: {3}' '{1}, {2} alanında posta kutusu olarak kalıyor: {3}'
   '{1} exists already' '{1} zaten var'
+  '{1} held no message and was in the way of {2}: removed' '{1} dizininde ileti yoktu ve {2} posta kutusuna engel oluyordu: kaldırıldı'
   '{1} is in the way' '{1} engel oluyor'
   'mail could not be switched on for {1}' '{1} için posta açılamadı'
   'The mail tables could not be rebuilt ({1}): setup.sh mail status' 'Posta tabloları yeniden oluşturulamadı ({1}): setup.sh mail status'

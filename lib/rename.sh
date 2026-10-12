@@ -623,18 +623,31 @@ _domain_rename_mail_targets() {   # targets old new moved
 # Then the mailbox takes its old address back. (Left in place, that alias and the one made
 # below sent each other the mail of a site that was renamed back: Postfix answered every
 # message for it with "451 4.6.0 Alias expansion error".)
+# Where the mail would go there may be a directory already, and one that is nobody's mailbox
+# is taken away, and said: the release that did not wait for Dovecot (see
+# _domain_rename_mail_move) left one under the old name in six renames of seven that had mail
+# arriving, and a site renamed back then kept its mailbox at the address of the meantime
+# because of an empty directory. Anything else in the way stays there, and the mailbox stays
+# where it is.
 _domain_rename_box_move() {   # user@old new-domain
-  local a="$1" nd="$2" loc="${1%%@*}" od="${1#*@}" na="" hash="" quota="" src="" dst="" to=""
+  local a="$1" nd="$2" loc="${1%%@*}" od="${1#*@}" na="" hash="" quota="" src="" dst="" to="" vacant=0
   na="${loc}@${nd}"
   src="${MAIL_VMAIL_HOME}/${od}/${loc}"; dst="${MAIL_VMAIL_HOME}/${nd}/${loc}"
   if lib_mail_box_exists "$na"; then MAIL_LAST_ERROR="${na} exists already"; return 1; fi
   to="$(lib_mail_aliases "$nd" | awk -F'\t' -v k="$na" '$1 == k { t = $2 } END { print t }' || true)"
   if [[ -n "$to" && "${to// /}" != "$a" ]]; then MAIL_LAST_ERROR="${na} is already an alias"; return 1; fi
-  if [[ -e "$dst" || -L "$dst" ]]; then MAIL_LAST_ERROR="${dst} is in the way"; return 1; fi
+  if [[ -e "$dst" || -L "$dst" ]]; then
+    if lib_mail_box_parked "$na" || ! _domain_rename_box_vacant "$dst"; then MAIL_LAST_ERROR="${dst} is in the way"; return 1; fi
+    vacant=1
+  fi
   hash="$(awk -F: -v u="$a" '$1 == u { print $2; exit }' "$MAIL_PASSWD_FILE")"
   [[ -n "$hash" ]] || { MAIL_LAST_ERROR="no password line for ${a}"; return 1; }
   quota="$(lib_mail_box_quota "$a")"
   if lib_have doveadm; then doveadm kick "$a" >/dev/null 2>&1 || true; fi
+  if (( vacant )); then
+    rm -rf -- "$dst" || { MAIL_LAST_ERROR="${dst} is in the way"; return 1; }
+    lib_info "${dst} held no message and was in the way of ${na}: removed"
+  fi
   if [[ -d "$src" && ! -L "$src" ]]; then
     if [[ ! -d "${MAIL_VMAIL_HOME}/${nd}" ]]; then
       mkdir -- "${MAIL_VMAIL_HOME}/${nd}" \
@@ -649,29 +662,57 @@ _domain_rename_box_move() {   # user@old new-domain
   lib_mail_alias_set "$od" "$a" "$na"
 }
 
+# The messages a mailbox directory holds: the files in a new/ or a cur/ of its Maildir,
+# whichever folder that is. Told by the directory a file lies in and never by its whole path:
+# a mailbox may itself be called "new", and every index file of it then has ".../new/..." in
+# its path.
+_domain_rename_box_messages() {   # the mailbox directory [what find does with each, e.g. -print0]
+  find "${1}/Maildir" -type f -regextype posix-extended -regex '.*/(new|cur)/[^/]*' "${@:2}" 2>/dev/null || true
+}
+
+# Is a directory that lies where a mailbox would go nobody's? It is when it is what Dovecot
+# makes by itself of an address it is asked about and nothing more: a Maildir - empty, with
+# its index files, with folders - that no message was ever put into, and nothing beside it.
+# One message in it, or anything else in that home (a filter somebody wrote, a file), and it
+# is somebody's.
+_domain_rename_box_vacant() {   # directory
+  [[ -d "$1" && ! -L "$1" && ! -L "${1}/Maildir" ]] || return 1
+  [[ -z "$(find "$1" -mindepth 1 -maxdepth 1 ! -name Maildir -print -quit 2>/dev/null)" ]] || return 1
+  [[ -z "$(_domain_rename_box_messages "$1" -print -quit)" ]]
+}
+
 # A message that reached the old address in the moment between the move of its mail and the
 # alias taking effect was put into a mailbox made afresh under the old name. It goes on to
 # the new one, and the leftover directory goes. Called once Dovecot has stopped answering for
 # the old address (_domain_rename_mail_move): swept sooner, the directory was made again
 # behind it.
+# Every message of it, whichever folder it lies in: the spam rule files what Rspamd marked
+# into "Junk" under the old name as it does anywhere, and a mail client that signed in again
+# in those seconds may have saved a draft there. Carried over from the inbox alone, such a
+# message stayed behind, and with it the whole directory - which is what a rename back to
+# the old name finds in its way. It goes into the folder of that name where the mailbox has
+# one, and into its inbox where it has not.
 _domain_rename_box_sweep() {   # user@old new-domain
-  local loc="${1%%@*}" od="${1#*@}" src="" dst="" f="" n=0
-  src="${MAIL_VMAIL_HOME}/${od}/${loc}"; dst="${MAIL_VMAIL_HOME}/${2}/${loc}/Maildir/new"
+  local loc="${1%%@*}" od="${1#*@}" src="" dst="" f="" to="" n=0
+  src="${MAIL_VMAIL_HOME}/${od}/${loc}"; dst="${MAIL_VMAIL_HOME}/${2}/${loc}/Maildir"
   [[ -d "$src" && ! -L "$src" ]] || return 0
-  if [[ -d "$dst" ]]; then
-    # "|| true" is load-bearing. What lies under the old name is whatever Dovecot made of it
-    # since the move, and that may well be a Maildir with no new/ and no cur/ in it: Postfix
-    # asking whether the mailbox is over quota makes exactly that, at every RCPT TO and before
-    # any message is delivered, and so does "mail box list". find ends with status 1 on a
-    # directory that is not there, and in a process substitution that is a failure in a shell
-    # of its own, where the ERR trap said "FAILED: command exited with status 1" in the middle
-    # of a rename that was going well. No directory only means that no message came.
+  if [[ -d "${dst}/new" ]]; then
+    # What lies under the old name is whatever Dovecot made of it since the move, and that may
+    # well be a Maildir with no new/ and no cur/ in it: Postfix asking whether the mailbox is
+    # over quota makes exactly that, at every RCPT TO and before any message is delivered, and
+    # so does "mail box list". No directory only means that no message came - and the list
+    # below never fails over it: a find that ends with status 1 in a process substitution is
+    # a failure in a shell of its own, where the ERR trap said "FAILED: command exited with
+    # status 1" in the middle of a rename that was going well.
     while IFS= read -r -d '' f; do
-      mv -n -- "$f" "${dst}/" && n=$((n + 1))
-    done < <(find "${src}/Maildir/new" "${src}/Maildir/cur" -maxdepth 1 -type f -print0 2>/dev/null || true)
+      # .../Maildir/new/<file> is the inbox, .../Maildir/.Junk/new/<file> the folder Junk
+      to="${f%/*/*}"; to="${dst}${to#"${src}/Maildir"}/new"
+      [[ -d "$to" && ! -L "$to" ]] || to="${dst}/new"
+      mv -n -- "$f" "${to}/" && n=$((n + 1))
+    done < <(_domain_rename_box_messages "$src" -print0)
   fi
   if (( n > 0 )); then lib_log_write INFO "${n} message(s) that arrived for ${1} during the move went on to ${loc}@${2}"; fi
-  if [[ -z "$(find "$src" -type f -path '*/Maildir/*' \( -path '*/new/*' -o -path '*/cur/*' \) -print -quit 2>/dev/null)" ]]; then rm -rf -- "$src"; fi
+  if [[ -z "$(_domain_rename_box_messages "$src" -print -quit)" ]]; then rm -rf -- "$src"; fi
   return 0
 }
 
@@ -686,6 +727,50 @@ _domain_rename_webmail_user() {   # user@old user@new
   [[ -n "$(_wm_users "$o" || true)" ]] || return 0
   lib_db_sql "UPDATE \`${WM_DB_NAME}\`.users SET username = '${n}' WHERE LOWER(username) = '${o}';
 UPDATE \`${WM_DB_NAME}\`.identities i JOIN \`${WM_DB_NAME}\`.users u ON u.user_id = i.user_id SET i.email = '${n}' WHERE u.username = '${n}' AND LOWER(i.email) = '${o}';" >/dev/null 2>&1
+}
+
+# A message Postfix took in for an address keeps that address: an alias is applied when a
+# message comes in, not when it is handed over. So what Postfix could not hand over at the
+# time waits in its deferred queue under the old address, and its next attempt, minutes after
+# the rename, was answered "550 User doesn't exist" and bounced. That is mail from before the
+# rename began (Dovecot had been busy), and mail the move itself put off: a delivery under way
+# when the mailbox is moved ends with "451 Mailbox was deleted under us", and those that reach
+# the mailbox made afresh under the old name at the same moment trip over each other's index
+# files ("451 Internal error"). With mail arriving on three connections at once on the test
+# server, 26 and 31 messages of some 2500 were bounced that way in the two renames tried, and
+# none of them was in the mailbox. Such a message is put back where mail comes in ("postsuper
+# -r") and goes through the aliases to the new address: in seven such renames none was bounced
+# and 58 went on - three of them arrived twice, Dovecot having written the message before it
+# answered 451.
+#
+# From the deferred queue only. A message in the active queue is being handed over at this
+# very moment, and what Dovecot answers is what becomes of it whatever is done to its file:
+# requeued under a delivery on the test server, one was bounced all the same and one
+# delivered, and the copy that had been put back was thrown away both times ("no recipients
+# specified"). And one on hold was put there by somebody. An address is compared, in lower
+# case and without the "+extension" Postfix delivers it with, and never matched as a pattern:
+# info@a-b.example is not info@a.b.example.
+_domain_rename_mail_requeue() {   # old new   (for the mailboxes RENAME_MAIL_MOVED names)
+  local old="$1" new="$2" held="" id="" a="" loc="" ids="" n=0
+  [[ -n "${RENAME_MAIL_MOVED:-}" ]] || return 0
+  lib_have postqueue && lib_have postsuper || return 0
+  held="$(postqueue -j 2>/dev/null | jq -r --arg d "@${old}" '
+            select(.queue_name == "deferred") | .queue_id as $id | .recipients[]?
+            | (.address // "" | ascii_downcase) | select(endswith($d)) | "\($id)\t\(.)"' 2>/dev/null || true)"
+  while IFS=$'\t' read -r id a; do
+    [[ "$id" =~ ^[0-9A-Za-z]+$ && "$id" != ALL ]] || continue
+    loc="${a%@*}"; loc="${loc%%+*}"
+    [[ "$loc" =~ ^[a-z0-9._-]+$ ]] || continue
+    if [[ " ${RENAME_MAIL_MOVED} " == *" ${loc}@${new} "* && $'\n'"${ids}"$'\n' != *$'\n'"${id}"$'\n'* ]]; then ids+="${ids:+$'\n'}${id}"; fi
+  done <<<"$held"
+  [[ -n "$ids" ]] || return 0
+  n="$(postsuper -r - deferred <<<"$ids" 2>&1 | sed -n 's/^postsuper: Requeued: \([0-9][0-9]*\) message.*/\1/p' | sed -n 1p || true)"
+  [[ "$n" =~ ^[0-9]+$ ]] || n=0
+  (( n > 0 )) || return 0
+  # pickup looks into its directory once a minute; told, it takes them up at once
+  if lib_have postkick; then postkick public pickup W >/dev/null 2>&1 || true; fi
+  lib_log_write INFO "${n} message(s) Postfix was holding for the addresses of ${old} that moved go through their aliases now, to @${new}"
+  return 0
 }
 
 # The mail of the old domain moves to the new one: every mailbox with its mail, its password
@@ -739,6 +824,10 @@ _domain_rename_mail_move() {   # old new
   # Dovecot has to know the new addresses before Postfix sends anything on to them
   if [[ -n "$RENAME_MAIL_MOVED" ]]; then sleep 1; fi
   lib_mail_tables_apply || lib_warn "The mail tables could not be rebuilt (${MAIL_LAST_ERROR}): setup.sh mail status"
+  # ... and what Postfix took in before it had these aliases, and still holds, goes through
+  # them now: while Dovecot still answers for the old addresses, so that an attempt Postfix
+  # makes by itself in this very moment is no bounce either
+  _domain_rename_mail_requeue "$old" "$new"
   # the old addresses are aliases now, for Postfix too: their mailbox lines go
   for a in $RENAME_MAIL_MOVED; do
     a="${a%%@*}@${old}"
@@ -757,6 +846,8 @@ _domain_rename_mail_move() {   # old new
     ( _domain_rename_webmail_user "$a" "${a%%@*}@${new}" ) || true
   done
   lib_mail_tables_apply || lib_warn "The mail tables could not be rebuilt (${MAIL_LAST_ERROR}): setup.sh mail status"
+  # once more, for a message that was put off under an old address since
+  _domain_rename_mail_requeue "$old" "$new"
   if [[ "$webmail" == "true" ]]; then
     ( lib_webmail_domain_enable "$new" ) >/dev/null 2>&1 \
       || lib_warn "The webmail of ${new} could not be set up; later: setup.sh mail webmail on ${new}"

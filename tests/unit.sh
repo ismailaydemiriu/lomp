@@ -7940,6 +7940,33 @@ _rn_stubs='
     fi
   }
   doveadm() { printf "doveadm %s\n" "$*" >>"$_rn/calls"; }
+  # Postfix, standing in: what it holds is $_rn/queue, one message a line as "postqueue -j"
+  # prints it. "postsuper -r - deferred" takes the ids it is handed out of the deferred ones
+  # and says how many, in the words Postfix has for it; any other use of it is refused. What
+  # becomes of a message that was put back is _rn_requeued, which a test may replace.
+  postqueue() {
+    printf "postqueue %s\n" "$*" >>"$_rn/calls"
+    if [[ "${1:-}" != "-j" || -e "$_rn/postqueue-down" ]]; then printf "postqueue: fatal: Queue report unavailable - mail system is down\n" >&2; return 69; fi
+    cat "$_rn/queue" 2>/dev/null || true
+  }
+  postsuper() {
+    local id="" line="" n=0
+    printf "postsuper %s\n" "$*" >>"$_rn/calls"
+    [[ "$*" == "-r - deferred" ]] || return 1
+    # (Postfix went through its queue between the look and the request: nothing is left to take)
+    if [[ -e "$_rn/queue-moves-on" ]]; then : >"$_rn/queue"; fi
+    while read -r id; do
+      printf "asked-for %s\n" "$id" >>"$_rn/calls"
+      line="$(jq -c --arg id "$id" "select(.queue_id == \$id and .queue_name == \"deferred\")" "$_rn/queue" 2>/dev/null | sed -n 1p || true)"
+      [[ -n "$line" ]] || continue
+      jq -c --arg id "$id" "select(.queue_id != \$id)" "$_rn/queue" >"$_rn/queue.new"; mv "$_rn/queue.new" "$_rn/queue"
+      printf "postsuper: %s: requeued\n" "$id" >&2; n=$((n + 1))
+      _rn_requeued "$id" "$line"
+    done
+    if (( n == 1 )); then printf "postsuper: Requeued: 1 message\n" >&2; else printf "postsuper: Requeued: %s messages\n" "$n" >&2; fi
+  }
+  postkick() { printf "postkick %s\n" "$*" >>"$_rn/calls"; }
+  _rn_requeued() { printf "%s\n" "$1" >>"$_rn/requeued"; }
   lib_webmail_domain_enable() { printf "webmail-enable %s\n" "$1" >>"$_rn/calls"; }
   _wm_info_load() { [[ -e "$_rn/wm-users" ]] && WM_DB_NAME=wm; }
   _wm_users() { grep -xF -- "${1,,}" "$_rn/wm-users" 2>/dev/null || true; }
@@ -8775,11 +8802,77 @@ assert_has   "the others move" 'sales@beta.example:{H}saleshash' "$_p"
 assert_eq    "an alias names each target where it is now" "info@alpha.example,sales@beta.example,boss@elsewhere.example" "$(_rn_alias beta.example team@beta.example)"
 # mail of somebody else's lies where a mailbox would go: that mailbox stays too
 _rn_mail_boxes
-mkdir -p "$_rn/vmail/beta.example/sales/Maildir"
+mkdir -p "$_rn/vmail/beta.example/sales/Maildir/cur"; printf 'theirs\n' >"$_rn/vmail/beta.example/sales/Maildir/cur/m9:2,S"
 _rn_case _rn_rename alpha.example beta.example
 assert_has   "a directory in the way at the new domain is said" "sales@alpha.example stays a mailbox at alpha.example: $_rn/vmail/beta.example/sales is in the way" "$(_rn_out)"
 assert_has   "and that mailbox keeps its line" 'sales@alpha.example:{H}saleshash' "$(cat "$_rn/mail/passwd")"
 assert_true  "and its mail directory" test -d "$_rn/vmail/alpha.example/sales/Maildir/cur"
+assert_true  "the mail in the way is where it was" test -s "$_rn/vmail/beta.example/sales/Maildir/cur/m9:2,S"
+assert_lacks "and nothing is said to have been removed" "held no message" "$(_rn_out)"
+# A directory with no message in it is nobody's mailbox, and no reason for one to stay behind.
+# It is what Dovecot makes by itself of an address it is asked about - and what a rename under
+# mail left under the old name before it waited for Dovecot (six renames of seven on the test
+# server): an empty Maildir, or one with dovecot.list.index.log in it. Renamed back, the site
+# got its name again and its mailbox stayed at the address of the meantime: "in the way".
+_rn_mail_boxes
+mkdir -p "$_rn/vmail/beta.example/sales/Maildir" "$_rn/vmail/beta.example/info/Maildir/cur" "$_rn/vmail/beta.example/info/Maildir/new" \
+  "$_rn/vmail/beta.example/info/Maildir/tmp" "$_rn/vmail/beta.example/info/Maildir/.Junk/new"
+printf 'x' >"$_rn/vmail/beta.example/sales/Maildir/dovecot.list.index.log"
+printf 'x' >"$_rn/vmail/beta.example/info/Maildir/dovecot-uidlist"; printf 'x' >"$_rn/vmail/beta.example/info/Maildir/.Junk/maildirfolder"
+_rn_case _rn_rename alpha.example beta.example
+_o="$(_rn_out)"; _p="$(cat "$_rn/mail/passwd")"
+assert_has   "a mailbox moves although an empty directory lay where it goes" 'sales@beta.example:{H}saleshash' "$_p"
+assert_true  "with its mail"                                            test -d "$_rn/vmail/beta.example/sales/Maildir/cur"
+assert_false "what lay there is gone, not moved into"                   test -e "$_rn/vmail/beta.example/sales/Maildir/dovecot.list.index.log"
+assert_has   "one that Dovecot had opened and nobody had written to as well" 'info@beta.example:{H}infohash' "$_p"
+assert_true  "with its mail too"                                        test -s "$_rn/vmail/beta.example/info/Maildir/new/m1"
+assert_false "and nothing of the directory that was there"              test -e "$_rn/vmail/beta.example/info/Maildir/dovecot-uidlist"
+assert_has   "it is said, for the one"                                  "$_rn/vmail/beta.example/sales held no message and was in the way of sales@beta.example: removed" "$_o"
+assert_has   "and for the other"                                        "$_rn/vmail/beta.example/info held no message and was in the way of info@beta.example: removed" "$_o"
+assert_has   "and written down"                                         "$_rn/vmail/beta.example/sales held no message and was in the way" "$(cat "$_rn/log")"
+assert_lacks "no mailbox is said to stay behind"                        "stays a mailbox" "$_o"
+assert_has   "the rename says where the mail is"                        "Mail: now at @beta.example - info@beta.example, sales@beta.example" "$_o"
+# ... which is the site that is renamed back after such a rename: the alias its first address
+# became leads to the mailbox, and the directory left under that name is in nobody's way
+_rn_mail_boxes
+printf 'info@beta.example\tinfo@alpha.example\n' >"$_rn/mail/aliases/beta.example"
+mkdir -p "$_rn/vmail/beta.example/info/Maildir"; printf 'x' >"$_rn/vmail/beta.example/info/Maildir/dovecot.list.index.log"
+_rn_case _rn_rename alpha.example beta.example
+assert_has   "a mailbox comes back to its first address past what an older rename left there" 'info@beta.example:{H}infohash' "$(cat "$_rn/mail/passwd")"
+assert_true  "with its mail"                                            test -s "$_rn/vmail/beta.example/info/Maildir/new/m1"
+assert_eq    "and is no alias of itself"                                "" "$(_rn_alias beta.example info@beta.example)"
+# anything but that stays in the way: a message in any folder, something beside the Maildir, a
+# link, or the directory of a mailbox that is only put aside ("mail disable" keeps its mail)
+for _rn_way in junk beside link link-to-nothing linked-maildir parked file; do
+  _rn_mail_boxes
+  mkdir -p "$_rn/elsewhere/Maildir/cur" "$_rn/nothing/Maildir" "$_rn/mail/disabled"; printf 'kept\n' >"$_rn/elsewhere/Maildir/cur/k1"
+  case "$_rn_way" in
+    junk)   mkdir -p "$_rn/vmail/beta.example/sales/Maildir/.Junk/new"; printf 'spam\n' >"$_rn/vmail/beta.example/sales/Maildir/.Junk/new/s1" ;;
+    beside) mkdir -p "$_rn/vmail/beta.example/sales/Maildir" "$_rn/vmail/beta.example/sales/sieve"; printf 'keep;\n' >"$_rn/vmail/beta.example/sales/sieve/mine.sieve" ;;
+    link)   mkdir -p "$_rn/vmail/beta.example"; ln -s "$_rn/elsewhere" "$_rn/vmail/beta.example/sales" ;;
+    link-to-nothing) mkdir -p "$_rn/vmail/beta.example"; ln -s "$_rn/nothing" "$_rn/vmail/beta.example/sales" ;;
+    linked-maildir) mkdir -p "$_rn/vmail/beta.example/sales"; ln -s "$_rn/elsewhere/Maildir" "$_rn/vmail/beta.example/sales/Maildir" ;;
+    parked) mkdir -p "$_rn/vmail/beta.example/sales/Maildir"; printf 'sales@beta.example:{H}parked::::::userdb_quota_rule=*:storage=1G\n' >"$_rn/mail/disabled/beta.example.passwd" ;;
+    file)   mkdir -p "$_rn/vmail/beta.example"; printf 'not a directory\n' >"$_rn/vmail/beta.example/sales" ;;
+  esac
+  _rn_case _rn_rename alpha.example beta.example
+  assert_has   "in the way (${_rn_way}): it is said"                    "sales@alpha.example stays a mailbox at alpha.example: $_rn/vmail/beta.example/sales is in the way" "$(_rn_out)"
+  assert_has   "in the way (${_rn_way}): the mailbox keeps its line"    'sales@alpha.example:{H}saleshash' "$(cat "$_rn/mail/passwd")"
+  assert_true  "in the way (${_rn_way}): and its mail"                  test -d "$_rn/vmail/alpha.example/sales/Maildir/cur"
+  assert_true  "in the way (${_rn_way}): what lay there is still there" test -e "$_rn/vmail/beta.example/sales"
+  assert_lacks "in the way (${_rn_way}): nothing is said to be removed" "held no message" "$(_rn_out)"
+  assert_true  "in the way (${_rn_way}): and nothing a link led to is touched" test -s "$_rn/elsewhere/Maildir/cur/k1"
+done
+unset _rn_way
+# a mailbox that is itself called "new" or "cur": its index files have ".../new/..." in their
+# path and are no messages for that
+_rn_mail_boxes
+mkdir -p "$_rn/vmail/alpha.example/new/Maildir/cur" "$_rn/vmail/beta.example/new/Maildir"
+printf 'mine\n' >"$_rn/vmail/alpha.example/new/Maildir/cur/n1:2,S"; printf 'x' >"$_rn/vmail/beta.example/new/Maildir/dovecot.list.index.log"
+printf 'new@alpha.example:{H}newhash::::::userdb_quota_rule=*:storage=1G\n' >>"$_rn/mail/passwd"
+_rn_case _rn_rename alpha.example beta.example
+assert_has   "a mailbox called new moves past an empty directory as any other" 'new@beta.example:{H}newhash' "$(cat "$_rn/mail/passwd")"
+assert_true  "with its mail"                                            test -s "$_rn/vmail/beta.example/new/Maildir/cur/n1:2,S"
 # The new address is an alias at the new domain already. One that leads to this very mailbox
 # is what a rename the other way left behind - the site was called beta.example before, and
 # every address there became an alias of the same address here: the mailbox takes its old
@@ -8842,6 +8935,54 @@ assert_false "and the directory made for it goes" test -e "$_rn/vmail/alpha.exam
 mkdir -p "$_rn/vmail/alpha.example/sales/Maildir/new"; printf 'x\n' >"$_rn/vmail/alpha.example/sales/Maildir/new/keep"
 _rn_case _domain_rename_box_sweep sales@alpha.example beta.example
 assert_true  "with nowhere to put it, a message is left where it is" test -s "$_rn/vmail/alpha.example/sales/Maildir/new/keep"
+# Not every message that arrives lies in the inbox. What Rspamd marked is filed into Junk by
+# the spam rule, under the old name as anywhere ("fileinto :create"), and a mail client that
+# signed in again in those seconds may have saved a draft or a sent message. Only the inbox
+# was carried over: such a message stayed under the old name, where nobody reads, and so did
+# the directory around it - 57 of the 793 marked messages a sender handed over during one
+# rename on the test server - "in the way" when that site was renamed back.
+_rn_mail_boxes
+mkdir -p "$_rn/vmail/beta.example/info/Maildir/new" "$_rn/vmail/beta.example/info/Maildir/.Junk/new" "$_rn/vmail/beta.example/info/Maildir/.Junk/cur"
+mkdir -p "$_rn/vmail/alpha.example/info/Maildir/.Junk/new" "$_rn/vmail/alpha.example/info/Maildir/.Junk/cur" "$_rn/vmail/alpha.example/info/Maildir/.Sent/cur" \
+  "$_rn/vmail/alpha.example/info/Maildir/.Drafts/new" "$_rn/vmail/alpha.example/info/Maildir/cur" "$_rn/vmail/alpha.example/info/Maildir/tmp"
+printf 'late\n'  >"$_rn/vmail/alpha.example/info/Maildir/new/late"
+printf 'read\n'  >"$_rn/vmail/alpha.example/info/Maildir/cur/read:2,S"
+printf 'spam\n'  >"$_rn/vmail/alpha.example/info/Maildir/.Junk/new/spam1"
+printf 'spam\n'  >"$_rn/vmail/alpha.example/info/Maildir/.Junk/cur/spam2:2,S"
+printf 'sent\n'  >"$_rn/vmail/alpha.example/info/Maildir/.Sent/cur/sent1:2,S"
+printf 'draft\n' >"$_rn/vmail/alpha.example/info/Maildir/.Drafts/new/draft1"
+printf 'half\n'  >"$_rn/vmail/alpha.example/info/Maildir/tmp/half"
+printf 'x' >"$_rn/vmail/alpha.example/info/Maildir/dovecot-uidlist"; printf 'x' >"$_rn/vmail/alpha.example/info/Maildir/.Junk/maildirfolder"
+: >"$_rn/log"
+_rn_case _domain_rename_box_sweep info@alpha.example beta.example
+assert_true  "a message the spam rule filed under the old name goes into that folder of the mailbox" test -s "$_rn/vmail/beta.example/info/Maildir/.Junk/new/spam1"
+assert_true  "one that had been looked at there as well"                test -s "$_rn/vmail/beta.example/info/Maildir/.Junk/new/spam2:2,S"
+assert_true  "one in a folder the mailbox does not have goes into its inbox" test -s "$_rn/vmail/beta.example/info/Maildir/new/sent1:2,S"
+assert_true  "from any such folder"                                     test -s "$_rn/vmail/beta.example/info/Maildir/new/draft1"
+assert_true  "and what lay in the inbox goes into the inbox, as before" test -s "$_rn/vmail/beta.example/info/Maildir/new/late"
+assert_true  "from cur/ too"                                            test -s "$_rn/vmail/beta.example/info/Maildir/new/read:2,S"
+assert_false "no index file is taken for a message"                     test -e "$_rn/vmail/beta.example/info/Maildir/new/dovecot-uidlist"
+assert_false "nor the mark of a folder"                                 test -e "$_rn/vmail/beta.example/info/Maildir/.Junk/new/maildirfolder"
+assert_false "nor a delivery that never ended"                          test -e "$_rn/vmail/beta.example/info/Maildir/new/half"
+assert_false "nothing is left under the old name then"                  test -e "$_rn/vmail/alpha.example/info"
+assert_has   "the log says how many went on"                            "7 message(s) that arrived for info@alpha.example during the move went on to info@beta.example" "$(cat "$_rn/log")"
+# a folder of that name which is a link is not gone into
+_rn_mail_boxes
+mkdir -p "$_rn/vmail/beta.example/info/Maildir/new" "$_rn/elsewhere/new" "$_rn/vmail/alpha.example/info/Maildir/.Junk/new"
+mkdir -p "$_rn/vmail/beta.example/info/Maildir/.Junk"
+ln -s "$_rn/elsewhere/new" "$_rn/vmail/beta.example/info/Maildir/.Junk/new"
+printf 'spam\n' >"$_rn/vmail/alpha.example/info/Maildir/.Junk/new/spam1"
+_rn_case _domain_rename_box_sweep info@alpha.example beta.example
+assert_true  "a message whose folder is a link at the new name goes into the inbox" test -s "$_rn/vmail/beta.example/info/Maildir/new/spam1"
+assert_false "and not where the link leads"                             test -e "$_rn/elsewhere/new/spam1"
+# a mailbox that is itself called "cur": nothing but messages is carried over
+_rn_mail_boxes
+mkdir -p "$_rn/vmail/beta.example/cur/Maildir/new" "$_rn/vmail/alpha.example/cur/Maildir/new"
+printf 'late\n' >"$_rn/vmail/alpha.example/cur/Maildir/new/late"; printf 'x' >"$_rn/vmail/alpha.example/cur/Maildir/dovecot.list.index.log"
+_rn_case _domain_rename_box_sweep cur@alpha.example beta.example
+assert_true  "a mailbox called cur: its message goes on"                test -s "$_rn/vmail/beta.example/cur/Maildir/new/late"
+assert_false "its index file does not, as a message"                    test -e "$_rn/vmail/beta.example/cur/Maildir/new/dovecot.list.index.log"
+assert_false "and the directory under the old name goes"                test -e "$_rn/vmail/alpha.example/cur"
 # What lies under the old name by then is what Dovecot made of it, and that may well be a
 # Maildir with no new/ and no cur/ in it: Postfix asks whether a mailbox is over quota at every
 # RCPT TO, before any message is delivered, and that alone makes one (so does "mail box
@@ -8902,10 +9043,47 @@ unset -f _rn_swept
 # moment the rename calls out to something (doveadm, the tables, the webmail's database): a
 # message for info@, sent on to the new address once Postfix has its tables and refused there
 # when Dovecot does not know it; one more that Postfix had already taken in under the old
-# address; and for sales@ only the question whether its mailbox is over quota.
+# address, and a third that Rspamd had marked, which the spam rule files into Junk; and for
+# sales@ only the question whether its mailbox is over quota.
+# Postfix's queue, standing in too ($_rn/queue, with the stand-ins at the top of the section).
+# A message it holds that is named in $_rn/due-when-forgotten is offered to Dovecot at the
+# first of those moments at which Dovecot no longer knows its address, the end of a wait among
+# them - the worst one for it, and one a queue run of the real Postfix may fall on - and is
+# bounced there. A message that
+# was put back comes in again: through the aliases, into the mailbox at the new address, when
+# Postfix has them by then, and into the queue as it was when it has not. And where
+# $_rn/defers-in-between is there, a delivery under the old address is put off in the two
+# seconds the rename waits for Dovecot.
+_rn_held() {   # id address... -> one line of the queue, as "postqueue -j" prints a deferred message
+  local id="$1" a="" r=""
+  shift
+  for a in "$@"; do
+    r+="${r:+,}{\"address\":\"${a}\",\"delay_reason\":\"host mail.example[private/dovecot-lmtp] said: 451 4.2.0 <${a}> Mailbox was deleted under us (in reply to end of DATA command)\"}"
+  done
+  printf '{"queue_name":"deferred","queue_id":"%s","arrival_time":1791819809,"message_size":353,"forced_expire":false,"sender":"someone@elsewhere.example","recipients":[%s]}\n' "$id" "$r"
+}
 _rn_rename_dovecot() {
   cp "$MAIL_PASSWD_FILE" "$_rn/dovecot-saw"
   _rn_knows() { grep -q "^${1}:" "$_rn/dovecot-saw"; }
+  _rn_requeued() {   # id, its line
+    local loc=""
+    printf '%s\n' "$1" >>"$_rn/requeued"
+    if [[ ! -e "$_rn/postfix-sends-on" ]]; then printf '%s\n' "$2" >>"$_rn/queue"; printf '%s\n' "$1" >>"$_rn/due-when-forgotten"; return 0; fi
+    loc="$(jq -r '[.recipients[].address | ascii_downcase | select(endswith("@alpha.example"))][0] | split("@")[0] | split("+")[0]' <<<"$2" || true)"
+    if _rn_knows "${loc}@beta.example"; then
+      mkdir -p "$_rn/vmail/beta.example/${loc}/Maildir/new"; printf 'm\n' >"$_rn/vmail/beta.example/${loc}/Maildir/new/requeued-$1"
+    else printf 'requeued %s: 550 User does not exist: %s@beta.example\n' "$1" "$loc" >>"$_rn/bounced"; fi
+  }
+  _rn_queue_run() {
+    local id="" a=""
+    [[ -s "$_rn/queue" && -s "$_rn/due-when-forgotten" ]] || return 0
+    while IFS=$'\t' read -r id a; do
+      if [[ -z "$id" ]] || ! grep -qxF -- "$id" "$_rn/due-when-forgotten" || _rn_knows "$a"; then continue; fi
+      printf 'held %s: 550 User does not exist: %s\n' "$id" "$a" >>"$_rn/bounced"
+      jq -c --arg id "$id" 'select(.queue_id != $id)' "$_rn/queue" >"$_rn/queue.new"; mv "$_rn/queue.new" "$_rn/queue"
+    done < <(jq -r 'select(.queue_name == "deferred") | "\(.queue_id)\t\(.recipients[0].address)"' "$_rn/queue" 2>/dev/null || true)
+    return 0
+  }
   _rn_mail_comes() {
     local n=0
     n="$(cat "$_rn/sent" 2>/dev/null || printf 0)"; n=$((n + 1)); printf '%s' "$n" >"$_rn/sent"
@@ -8914,15 +9092,19 @@ _rn_rename_dovecot() {
       else printf 'message %s: 550 User does not exist: info@beta.example\n' "$n" >>"$_rn/bounced"; fi
     fi
     if _rn_knows info@alpha.example; then
-      mkdir -p "$_rn/vmail/alpha.example/info/Maildir/new" "$_rn/vmail/alpha.example/info/Maildir/cur"
+      mkdir -p "$_rn/vmail/alpha.example/info/Maildir/new" "$_rn/vmail/alpha.example/info/Maildir/cur" "$_rn/vmail/alpha.example/info/Maildir/.Junk/new"
       printf 'm\n' >"$_rn/vmail/alpha.example/info/Maildir/new/old$n"; printf 'old%s\n' "$n" >>"$_rn/taken"
+      printf 's\n' >"$_rn/vmail/alpha.example/info/Maildir/.Junk/new/junk$n"; printf 'junk%s\n' "$n" >>"$_rn/taken"
     fi
     if _rn_knows sales@alpha.example; then mkdir -p "$_rn/vmail/alpha.example/sales/Maildir"; fi
+    _rn_queue_run
     return 0
   }
   sleep() {
     printf 'sleep %s\n' "$*" >>"$_rn/calls"; _rn_mail_comes
-    if [[ "${1:-}" =~ ^[1-9] ]]; then cp "$MAIL_PASSWD_FILE" "$_rn/dovecot-saw"; fi
+    if [[ "${1:-}" == 2 && -e "$_rn/defers-in-between" ]]; then _rn_held LATE1 info@alpha.example >>"$_rn/queue"; fi
+    # the second is over: Dovecot has looked again - and Postfix may try what it holds right then
+    if [[ "${1:-}" =~ ^[1-9] ]]; then cp "$MAIL_PASSWD_FILE" "$_rn/dovecot-saw"; _rn_queue_run; fi
   }
   doveadm() { printf 'doveadm %s\n' "$*" >>"$_rn/calls"; _rn_mail_comes; }
   _wm_info_load() { _rn_mail_comes; return 1; }
@@ -8938,25 +9120,113 @@ assert_has   "a rename with mail arriving all the time ends well"       "rc=0" "
 assert_has   "with the mailboxes moved"                                 "Mail: now at @beta.example - info@beta.example, sales@beta.example" "$_o"
 assert_eq    "no message Postfix sent on was refused at the new address" "" "$(cat "$_rn/bounced" 2>/dev/null || true)"
 assert_true  "(messages were sent on: the sender got that far)"         bash -c 'ls "$1" | grep -q "^on"' _ "$_rn/vmail/beta.example/info/Maildir/new"
-assert_eq    "every message Dovecot took in under the old address is in the new mailbox" "$(sort "$_rn/taken" 2>/dev/null || true)" \
-  "$(ls "$_rn/vmail/beta.example/info/Maildir/new" 2>/dev/null | grep '^old' | sort || true)"
-assert_true  "(before the move, after it, and after the old line had gone)" test "$(grep -c . "$_rn/taken" 2>/dev/null || true)" -ge 4
+assert_eq    "every message Dovecot took in under the old address is in the new mailbox, the spam among them" "$(sort "$_rn/taken" 2>/dev/null || true)" \
+  "$(find "$_rn/vmail/beta.example/info/Maildir" -type f \( -name 'old*' -o -name 'junk*' \) -printf '%f\n' 2>/dev/null | sort || true)"
+assert_true  "(before the move, after it, and after the old line had gone)" test "$(grep -c '^old' "$_rn/taken" 2>/dev/null || true)" -ge 4
+assert_eq    "what the spam rule filed under the old name is in Junk under the new one" "$(grep '^junk' "$_rn/taken" 2>/dev/null | sort || true)" \
+  "$(ls "$_rn/vmail/beta.example/info/Maildir/.Junk/new" 2>/dev/null | sort || true)"
 assert_false "nothing is left under the old name of a mailbox that got mail in that moment" test -e "$_rn/vmail/alpha.example/info"
 assert_false "or of one that was only asked about"                      test -e "$_rn/vmail/alpha.example/sales"
-# the order that does it: the new lines, a second, the tables; the old lines out, a second for
-# Dovecot and one for what it had taken in, the sessions that began in between closed, the sweep
+# the order that does it: the new lines, a second, the tables, a look at what Postfix holds;
+# the old lines out, a second for Dovecot and one for what it had taken in, the sessions that
+# began in between closed, the sweep, the tables, and one more look
 assert_eq    "the new addresses are a second old when the tables are rebuilt, and the old ones two seconds gone when they are swept" \
-  "doveadm kick info@alpha.example|doveadm kick sales@alpha.example|sleep 1|mail-tables|sleep 2|doveadm kick info@alpha.example|doveadm kick sales@alpha.example|mail-tables|" \
-  "$(grep -E '^(sleep|doveadm|mail-tables)' "$_rn/calls" | sed 's/^mail-tables.*/mail-tables/' | tr '\n' '|')"
+  "doveadm kick info@alpha.example|doveadm kick sales@alpha.example|sleep 1|mail-tables|postqueue -j|sleep 2|doveadm kick info@alpha.example|doveadm kick sales@alpha.example|mail-tables|postqueue -j|" \
+  "$(grep -E '^(sleep|doveadm|mail-tables|postqueue|postsuper|postkick)' "$_rn/calls" | sed 's/^mail-tables.*/mail-tables/' | tr '\n' '|')"
 # a site whose mail has aliases only moves without either wait
 _rn_mail_site
 mkdir -p "$_rn/mail/aliases"; printf 'other@gamma.example:{H}otherhash::::::userdb_quota_rule=*:storage=1G\n' >"$_rn/mail/passwd"
 printf 'team@alpha.example\tboss@elsewhere.example\n' >"$_rn/mail/aliases/alpha.example"
+_rn_held HELD1 info@alpha.example >"$_rn/queue"
 _rn_case _rn_rename_dovecot alpha.example beta.example
 assert_has   "a site that has aliases and no mailbox is renamed"        "rc=0" "$(_rn_out)"
 assert_eq    "its alias is one of the new domain"                       "boss@elsewhere.example team@beta.example" "$(_rn_alias beta.example team@beta.example) $(_rn_alias alpha.example team@alpha.example)"
 assert_lacks "and nothing waits for Dovecot where no mailbox moved"     "sleep" "$(_rn_calls)"
-unset -f _rn_rename_dovecot
+assert_lacks "nor is Postfix asked what it holds"                       "postqueue" "$(_rn_calls)"
+
+# Postfix applies an alias when a message comes in, not when it hands it over: what it holds
+# keeps the address it came for. A message it could not hand over at the time - the mailbox
+# was moved from under the delivery ("451 4.2.0 Mailbox was deleted under us"), deliveries
+# into the mailbox made afresh under the old name tripped over each other ("451 Internal
+# error"), or Dovecot had been busy before the rename began - waited in the deferred queue
+# under the old address, and Postfix's next attempt, minutes after the rename, was answered
+# "550 5.1.1 User doesn't exist": bounced. With the real rename on the test server and mail
+# arriving on three connections at once, 26 and 31 messages of some 2500 in the two renames
+# tried, none of them in the mailbox. Such a message is put back where mail comes in
+# ("postsuper -r") once Postfix has the aliases, and once more at the end for one that was
+# put off in between: none bounced in seven such renames, 58 went on.
+_rn_held_mail() {
+  {
+    _rn_held HELD1 info@alpha.example
+    _rn_held HELD2 boss@elsewhere.example Sales+News@Alpha.Example
+    _rn_held HELD3 info@alpha.example
+    _rn_held HELD4 info@alpha.example sales@alpha.example
+    _rn_held KEEP1 info@alphaxexample
+    _rn_held KEEP2 info@notalpha.example
+    _rn_held KEEP3 info@alpha.example.org
+    _rn_held KEEP4 other@gamma.example
+    _rn_held KEEP5 info@alpha.example | sed 's/"queue_name":"deferred"/"queue_name":"active"/'
+    _rn_held KEEP6 info@alpha.example | sed 's/"queue_name":"deferred"/"queue_name":"hold"/'
+    _rn_held KEEP7 ghost@alpha.example
+    _rn_held KEEP8 info@beta.example
+    _rn_held ALL info@alpha.example
+  } >"$_rn/queue"
+}
+_rn_holds() { jq -r '.queue_id' "$_rn/queue" 2>/dev/null | sort | tr '\n' ' ' | sed 's/ $//' || true; }
+_rn_mail_boxes
+_rn_held_mail
+printf 'HELD3\n' >"$_rn/due-when-forgotten"; : >"$_rn/defers-in-between"
+_rn_case _rn_rename_dovecot alpha.example beta.example
+_o="$(_rn_out)"; _c="$(_rn_calls)"
+assert_has   "a rename of a site Postfix holds mail for ends well"      "rc=0" "$_o"
+assert_has   "with the mailboxes moved"                                 "Mail: now at @beta.example - info@beta.example, sales@beta.example" "$_o"
+assert_eq    "what Postfix held for a mailbox that moved is put back where mail comes in, and so is what was put off since" \
+  "HELD1 HELD2 HELD3 HELD4 LATE1" "$(tr '\n' ' ' <"$_rn/requeued" 2>/dev/null | sed 's/ $//' || true)"
+assert_eq    "and nothing else: not what another domain's name only looks like, another queue, another mailbox, or an id that is none" \
+  "ALL KEEP1 KEEP2 KEEP3 KEEP4 KEEP5 KEEP6 KEEP7 KEEP8" "$(_rn_holds)"
+assert_eq    "none of it was offered to a Dovecot that had forgotten the address, or sent on before Postfix had the alias" "" "$(cat "$_rn/bounced" 2>/dev/null || true)"
+assert_true  "it is in the mailbox at the new address"                  test -s "$_rn/vmail/beta.example/info/Maildir/new/requeued-HELD1"
+assert_true  "one for an address in capitals, with an extension, beside a recipient elsewhere" test -s "$_rn/vmail/beta.example/sales/Maildir/new/requeued-HELD2"
+assert_true  "the one Postfix was about to try again"                   test -s "$_rn/vmail/beta.example/info/Maildir/new/requeued-HELD3"
+assert_true  "and the one that was put off while the rename waited for Dovecot" test -s "$_rn/vmail/beta.example/info/Maildir/new/requeued-LATE1"
+assert_eq    "each message is asked for once, whoever of its recipients moved" \
+  "asked-for HELD1|asked-for HELD2|asked-for HELD3|asked-for HELD4|asked-for LATE1|" "$(grep '^asked-for' "$_rn/calls" | tr '\n' '|' || true)"
+assert_eq    "from the deferred queue and no other, once Postfix has the aliases and once at the end, and pickup is told each time" \
+  "sleep 1|mail-tables|postqueue -j|postsuper -r - deferred|postkick public pickup W|sleep 2|mail-tables|postqueue -j|postsuper -r - deferred|postkick public pickup W|" \
+  "$(grep -E '^(sleep|mail-tables|postqueue|postsuper|postkick)' "$_rn/calls" | sed 's/^mail-tables.*/mail-tables/' | tr '\n' '|')"
+assert_has   "the log says how many"                                    "4 message(s) Postfix was holding for the addresses of alpha.example that moved go through their aliases now, to @beta.example" "$(cat "$_rn/log")"
+assert_has   "both times"                                               "1 message(s) Postfix was holding for the addresses of alpha.example that moved" "$(cat "$_rn/log")"
+assert_lacks "and nothing of it is a failure"                           "FAILED" "$_o"
+# a mailbox that stays at the old domain keeps the mail Postfix holds for it
+_rn_mail_boxes
+printf '%s\n' 'info@beta.example:{H}taken::::::userdb_quota_rule=*:storage=1G' >>"$_rn/mail/passwd"; mkdir -p "$_rn/vmail/beta.example/info/Maildir/new"
+{ _rn_held STAYS1 info@alpha.example; _rn_held MOVES1 sales@alpha.example; } >"$_rn/queue"
+_rn_case _rn_rename_dovecot alpha.example beta.example
+assert_eq    "only what is held for a mailbox that moved is put back"   "MOVES1" "$(tr '\n' ' ' <"$_rn/requeued" 2>/dev/null | sed 's/ $//' || true)"
+assert_eq    "what is held for one that stayed is left to Postfix"      "STAYS1" "$(_rn_holds)"
+# nothing is held: nothing is asked of postsuper
+_rn_mail_boxes
+_rn_held KEEP4 other@gamma.example >"$_rn/queue"
+_rn_case _rn_rename_dovecot alpha.example beta.example
+assert_lacks "with nothing held for the site, postsuper is not called"  "postsuper" "$(_rn_calls)"
+assert_lacks "and pickup is not told"                                   "postkick" "$(_rn_calls)"
+assert_lacks "and the log has nothing about it"                         "Postfix was holding" "$(cat "$_rn/log")"
+# Postfix cannot say what it holds: the rename goes on
+_rn_mail_boxes
+_rn_held HELD1 info@alpha.example >"$_rn/queue"; : >"$_rn/postqueue-down"
+_rn_case _rn_rename_dovecot alpha.example beta.example
+assert_has   "a Postfix that cannot say what it holds does not stop the rename" "Mail: now at @beta.example - info@beta.example, sales@beta.example" "$(_rn_out)"
+assert_lacks "and nothing is put back blindly"                          "postsuper" "$(_rn_calls)"
+assert_lacks "nor is a failure shown"                                   "FAILED" "$(_rn_out)"
+# Postfix went through its queue in between: what was held is no longer there to take
+_rn_mail_boxes
+_rn_held HELD1 info@alpha.example >"$_rn/queue"; : >"$_rn/queue-moves-on"
+_rn_case _rn_rename_dovecot alpha.example beta.example
+assert_has   "a message that left the queue in that moment is asked for" "asked-for HELD1" "$(_rn_calls)"
+assert_lacks "and with none put back, pickup is not told"               "postkick" "$(_rn_calls)"
+assert_lacks "nor is one said to have been"                             "Postfix was holding" "$(cat "$_rn/log")"
+assert_has   "the rename ends well all the same"                        "rc=0" "$(_rn_out)"
+unset -f _rn_rename_dovecot _rn_held _rn_held_mail _rn_holds
 _rn_case _domain_rename_mail_targets "a@old.example, b@old.example,c@old.example,x@other.example" old.example new.example "a@old.example
 c@old.example"
 assert_eq    "targets: what moved is named at the new domain, what did not is not" "a@new.example,b@old.example,c@new.example,x@other.examplerc=0" "$(_rn_out)"
@@ -9418,6 +9688,10 @@ _rn_case _rn_say_tr "sales@alpha.example stays a mailbox at alpha.example: could
 assert_has   "or of this one" "posta kutusu olarak kalıyor: /var/vmail/alpha.example/sales taşınamadı" "$(_rn_out)"
 _rn_case _rn_say_tr "sales@alpha.example stays a mailbox at alpha.example: sales@beta.example is already an alias"
 assert_has   "or with an alias in its place" "posta kutusu olarak kalıyor: sales@beta.example zaten bir takma ad" "$(_rn_out)"
+_rn_case _rn_say_tr "sales@alpha.example stays a mailbox at alpha.example: /var/vmail/beta.example/sales is in the way"
+assert_has   "or with something in its way" "posta kutusu olarak kalıyor: /var/vmail/beta.example/sales engel oluyor" "$(_rn_out)"
+_rn_case _rn_say_tr "/var/vmail/beta.example/sales held no message and was in the way of sales@beta.example: removed"
+assert_eq    "and the empty directory that was taken out of its way" "/var/vmail/beta.example/sales dizininde ileti yoktu ve sales@beta.example posta kutusuna engel oluyordu: kaldırıldırc=0" "$(_rn_out)"
 # the usage texts have their Turkish in the functions themselves
 _rn_case _rn_usage_tr
 _o="$(_rn_out)"
