@@ -1468,6 +1468,14 @@ half way leaves behind (nothing, the Linux user included):
 LOMPSTACK_INTEGRATION=yes bash tests/e2e-www-primary.sh
 ```
 
+And `apcu` has one that asks the PHP of real sites whether APCu is on: one site switched while
+its neighbour keeps its cache, `--all` and the site added afterwards, a rename, a restore, the
+menu. `--all` reaches every site of the server; what each had recorded is put back at the end:
+
+```bash
+LOMPSTACK_INTEGRATION=yes bash tests/e2e-apcu.sh
+```
+
 See [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
 
 ---
