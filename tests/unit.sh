@@ -2129,6 +2129,42 @@ assert_eq "the env file survives the shell" "it's \$HOME|x y" "$( ( eval "$envf"
 assert_eq "unit renderer exits 0"      0 "$(run_isolated lib_app_render_unit /usr/bin/pm2)"
 assert_eq "ecosystem renderer exits 0" 0 "$(run_isolated lib_app_render_ecosystem '{"script":"npm","args":[]}' '{}')"
 assert_eq "env file renderer exits 0"  0 "$(run_isolated lib_app_render_envfile '{}')"
+# The variables used to reach jq as ONE string of its environment, and one string ends at
+# 128 KiB: with 33 variables of 4000 bytes - each of them one the application may have - jq
+# could not even be started ("Argument list too long", status 126), and "app start", "restart",
+# "deploy" and "env set" said the ecosystem file could not be written. Now jq reads them.
+_ev_vars() {   # variables, bytes each -> what "app env" keeps for a site
+  jq -cn --argjson n "$1" --argjson b "$2" \
+    '([range(0; $n) | {key: ("VAR_" + tostring), value: ("x" * $b)}] | from_entries) + {API_KEY: "ec0-s3cr3t-value", LETTERS: (([351] | implode) * 5000)}'
+}
+_ev_cmd='{"script":"npm","args":["start"]}'
+_ev_long="$(_ev_vars 33 4000)"
+_ev_out="$TMP/ev.out"; _ev_seen="$TMP/ev.seen"
+_ev_run()   { MSYS_NO_PATHCONV=1 lib_app_render_ecosystem "$_ev_cmd" "$1" '[]' 1 >"$_ev_out" 2>/dev/null; }
+_ev()       { jq -r "$1" "$_ev_out"; }
+# what jq is started with: its arguments, and its environment
+_ev_watch() { jq() { printf '%s\n' "$@" >>"$_ev_seen"; env >>"$_ev_seen"; command jq "$@"; }; lib_app_render_ecosystem "$@" >/dev/null; }
+_ev_want='{"apps":[{"name":"web","cwd":"'"$D_HOME"'/app","script":"npm","args":["start"],"exec_mode":"fork","filter_env":true,"vizion":false,"autorestart":true,"merge_logs":true,"time":true,'
+_ev_want+='"out_file":"'"$D_HOME"'/.pm2/logs/web-out.log","error_file":"'"$D_HOME"'/.pm2/logs/web-error.log",'
+_ev_want+='"env":{"API_KEY":"s3cr3t","NODE_ENV":"staging","PORT":"3000","HOME":"'"$D_HOME"'","PATH":"/usr/local/bin:/usr/bin:/bin","LANG":"C.UTF-8"}}]}'
+assert_eq    "a few variables: the ecosystem, key for key what it always was" "$_ev_want" \
+  "$(MSYS_NO_PATHCONV=1 lib_app_render_ecosystem "$_ev_cmd" '{"API_KEY":"s3cr3t","NODE_ENV":"staging","PORT":"9999"}' '[]' 1 | jq -c .)"
+assert_true  "33 variables of 4000 bytes are longer than one string of the environment may be" test "${#_ev_long}" -gt 131072
+assert_eq    "the ecosystem is rendered all the same"            0 "$(run_isolated _ev_run "$_ev_long")"
+assert_eq    "with every one of them"                            "33" "$(_ev '[.apps[0].env | keys[] | select(startswith("VAR_"))] | length')"
+assert_eq    "each one whole"                                    "4000 4000 ec0-s3cr3t-value" "$(_ev '.apps[0].env | "\(.VAR_0 | length) \(.VAR_32 | length) \(.API_KEY)"')"
+assert_eq    "no letter of two bytes broken where jq reads on"   "true" "$(_ev '.apps[0].env.LETTERS == (([351] | implode) * 5000)')"
+assert_eq    "and what lompstack sets itself beside them"        "3000 production" "$(_ev '.apps[0].env | "\(.PORT) \(.NODE_ENV)"')"
+: >"$_ev_seen"
+assert_eq    "jq, watched as it is started"                      0 "$(run_isolated _ev_watch "$_ev_cmd" '{"API_KEY":"ec0-s3cr3t-value"}' '[]' 1)"
+assert_has   "is given its program"                              'filter_env' "$(cat "$_ev_seen")"
+assert_lacks "and no variable of the application: not as an argument, not in its environment" "ec0-s3cr3t-value" "$(cat "$_ev_seen")"
+assert_eq    "no variables at all: what lompstack sets, and nothing else" "HOME LANG NODE_ENV PATH PORT" \
+  "$(MSYS_NO_PATHCONV=1 lib_app_render_ecosystem "$_ev_cmd" '' '[]' 1 | jq -r '.apps[0].env | keys | join(" ")')"
+assert_true  "variables that are no JSON: a failure"             test "$(run_isolated _ev_run 'API_KEY=oops')" != 0
+assert_eq    "and no ecosystem"                                  "" "$(cat "$_ev_out")"
+assert_true  "two objects where one belongs: a failure as well"  test "$(run_isolated _ev_run '{"A":"1"} {"B":"2"}')" != 0
+assert_eq    "not an ecosystem with the first of them"           "" "$(cat "$_ev_out")"
 
 # ports: another site's application port and loopback proxy targets are taken
 _orig_holder="$(declare -f lib_port_holder)"
@@ -2168,6 +2204,14 @@ _sc_calls=""; lib_app_apply
 assert_eq    "code present: running"                 "running" "$APP_RESULT"
 assert_has   "the unit is enabled"                   "enable pm2-app_example_com" "$_sc_calls"
 assert_has   "and started"                           "start pm2-app_example_com" "$_sc_calls"
+# the same through the command: with that many variables it said the ecosystem file could not
+# be written, and left the old one in place
+printf '%s\n' "$_ev_long" >"$(lib_app_env_file app.example.com)"
+lib_app_apply
+assert_eq    "more than 128 KiB of variables: the application starts" "running" "$APP_RESULT"
+assert_eq    "with all of them in its ecosystem file"                "33" "$(jq '[.apps[0].env | keys[] | select(startswith("VAR_"))] | length' "$D_HOME/.pm2/lomp.ecosystem.json")"
+assert_eq    "and in the file builds and jobs read"                  "33" "$(grep -c '^export VAR_' "$D_HOME/.pm2/lomp.env" || true)"
+printf '{"API_KEY":"top-s3cr3t-value"}' >"$(lib_app_env_file app.example.com)"
 lib_service_active() { return 0; }; lib_service_enabled() { return 0; }
 APP_ENABLED=0; _sc_calls=""; lib_app_apply
 assert_eq    "stopped on purpose"                    "stopped" "$APP_RESULT"
@@ -2214,7 +2258,8 @@ assert_eq "a home the app files cannot be written to is reported, not fatal" "fa
 assert_eq "and apply exits 0 with errexit armed" 0 "$(run_isolated lib_app_apply)"
 eval "$_orig_write"
 eval "$_orig_as"; eval "$_orig_sc"; eval "$_orig_act"; eval "$_orig_en"; eval "$_orig_wait"; eval "$_orig_lock"; eval "$_orig_tools"
-unset -f pm2
+unset -f pm2 _ev_vars _ev_run _ev _ev_watch
+unset _ev_long _ev_want
 lib_json_set "$(lib_domain_json app.example.com)" 'del(.app)'
 rm -f "$(lib_app_env_file app.example.com)"
 lib_domain_state_reset

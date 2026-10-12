@@ -494,14 +494,22 @@ EOF
 }
 
 # filter_env: a process gets exactly this environment and nothing inherited from whoever ran
-# pm2. exec_mode fork without "instances" (instances silently means cluster mode). The
-# variables reach jq through its environment, not its argument list. The web process is in
-# only when it should run (enabled, with code to run); a worker when it is enabled and has no
-# schedule (a scheduled job belongs to cron). A worker gets PORT only when it has a port.
+# pm2. exec_mode fork without "instances" (instances silently means cluster mode). The web
+# process is in only when it should run (enabled, with code to run); a worker when it is
+# enabled and has no schedule (a scheduled job belongs to cron). A worker gets PORT only when
+# it has a port.
+# The variables are what jq reads, as PM2's list is in _app_workers_status: they stand on no
+# command line, and not in jq's environment either. There all of them together were one
+# string, and one string ends at 128 KiB: 33 variables of 4000 bytes - each of them one the
+# application may have - and jq could not be started ("Argument list too long"), which every
+# command that starts, stops or deploys the site reported as an ecosystem file it could not
+# write. No variables at all is {}; a text that is not one JSON value fails, as it always did.
 lib_app_render_ecosystem() {   # command JSON, environment JSON [, workers JSON [, web 0|1]]
-  LOMP_APP_ECO_ENV="${2:-}" jq -n --argjson cmd "$1" --argjson workers "${3:-[]}" --arg web "${4:-$APP_ENABLED}" \
+  local vars="${2:-}"
+  [[ -n "$vars" ]] || vars='{}'
+  jq -n --argjson cmd "$1" --argjson workers "${3:-[]}" --arg web "${4:-$APP_ENABLED}" \
     --arg home "$D_HOME" --arg port "$APP_PORT" --arg mem "$APP_MEMORY" --arg path "$APP_PATH_ENV" \
-    '(($ENV.LOMP_APP_ECO_ENV // "") | if . == "" then {} else fromjson end) as $env
+    '([inputs] | if length == 1 then .[0] else error("the variables are not one JSON value") end) as $env
      | def proc($n; $dir; $script; $argv; $p; $m):
          {name: $n, cwd: ($home + "/" + $dir), script: $script, args: $argv,
           exec_mode: "fork", filter_env: true, vizion: false, autorestart: true, merge_logs: true, time: true,
@@ -512,7 +520,7 @@ lib_app_render_ecosystem() {   # command JSON, environment JSON [, workers JSON 
      {apps: ((if $web == "1" then [proc("web"; "app"; $cmd.script; $cmd.args; $port; $mem)] else [] end)
        + [$workers[] | select((.cron // "") == "" and .enabled != false)
           | ([.start | splits("\\s+") | select(length > 0)]) as $w
-          | proc(.name; (.cwd // "app"); $w[0]; $w[1:]; (.port // "" | tostring); (.memory // ""))])}'
+          | proc(.name; (.cwd // "app"); $w[0]; $w[1:]; (.port // "" | tostring); (.memory // ""))])}' <<<"$vars"
 }
 
 lib_app_render_envfile() {   # environment JSON -> sourceable lines
