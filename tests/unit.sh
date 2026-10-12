@@ -8753,6 +8753,30 @@ _rn_case _rn_rename alpha.example beta.example
 assert_has   "a directory in the way at the new domain is said" "sales@alpha.example stays a mailbox at alpha.example: $_rn/vmail/beta.example/sales is in the way" "$(_rn_out)"
 assert_has   "and that mailbox keeps its line" 'sales@alpha.example:{H}saleshash' "$(cat "$_rn/mail/passwd")"
 assert_true  "and its mail directory" test -d "$_rn/vmail/alpha.example/sales/Maildir/cur"
+# The new address is an alias at the new domain already. One that leads to this very mailbox
+# is what a rename the other way left behind - the site was called beta.example before, and
+# every address there became an alias of the same address here: the mailbox takes its old
+# address back and that alias goes. (It stayed. With the alias the move makes from the address
+# of the meantime, the two sent each other every message for the mailbox, and Postfix answered
+# "451 4.6.0 Alias expansion error" - seen with a real rename there and back on the test
+# server.) An alias that leads anywhere else is somebody's forwarding: it stays, and so does
+# the mailbox, as for an address that is taken.
+_rn_mail_boxes
+printf 'info@beta.example\tinfo@alpha.example\nsales@beta.example\tboss@elsewhere.example\n' >"$_rn/mail/aliases/beta.example"
+_rn_case _rn_rename alpha.example beta.example
+_p="$(cat "$_rn/mail/passwd")"
+assert_has   "a mailbox goes back to the address it had before an earlier rename" 'info@beta.example:{H}infohash' "$_p"
+assert_eq    "and is no alias of itself there any more" "" "$(_rn_alias beta.example info@beta.example)"
+assert_eq    "its address of the meantime leads to it" "info@beta.example" "$(_rn_alias alpha.example info@alpha.example)"
+assert_true  "with its mail" test -s "$_rn/vmail/beta.example/info/Maildir/new/m1"
+assert_has   "an address that is an alias at the new domain is said" "sales@alpha.example stays a mailbox at alpha.example: sales@beta.example is already an alias" "$(_rn_out)"
+assert_has   "that mailbox keeps its line" 'sales@alpha.example:{H}saleshash' "$_p"
+assert_lacks "and gets none at the new domain" 'sales@beta.example:' "$_p"
+assert_eq    "the alias is as it was" "boss@elsewhere.example" "$(_rn_alias beta.example sales@beta.example)"
+assert_eq    "the old address is not made an alias of it" "" "$(_rn_alias alpha.example sales@alpha.example)"
+assert_true  "and its mail stays where it is" test -d "$_rn/vmail/alpha.example/sales/Maildir/cur"
+assert_eq    "no address is a mailbox and an alias at once afterwards" "" \
+  "$( { cut -d: -f1 "$_rn/mail/passwd"; awk -F'\t' '!/^#/ && NF >= 2 { print $1 }' "$_rn/mail/aliases/alpha.example" "$_rn/mail/aliases/beta.example"; } | sort | uniq -d)"
 # somebody already signed in to the webmail under the new address: that user is not written over
 _rn_mail_boxes
 printf 'info@alpha.example\ninfo@beta.example\n' >"$_rn/wm-users"
@@ -9365,6 +9389,8 @@ _rn_case _rn_say_tr "info@alpha.example stays a mailbox at alpha.example: no pas
 assert_eq    "a mailbox that stays, with a reason of the rarer kind" "info@alpha.example, alpha.example alanında posta kutusu olarak kalıyor: info@alpha.example için şifre satırı yokrc=0" "$(_rn_out)"
 _rn_case _rn_say_tr "sales@alpha.example stays a mailbox at alpha.example: could not move /var/vmail/alpha.example/sales"
 assert_has   "or of this one" "posta kutusu olarak kalıyor: /var/vmail/alpha.example/sales taşınamadı" "$(_rn_out)"
+_rn_case _rn_say_tr "sales@alpha.example stays a mailbox at alpha.example: sales@beta.example is already an alias"
+assert_has   "or with an alias in its place" "posta kutusu olarak kalıyor: sales@beta.example zaten bir takma ad" "$(_rn_out)"
 # the usage texts have their Turkish in the functions themselves
 _rn_case _rn_usage_tr
 _o="$(_rn_out)"

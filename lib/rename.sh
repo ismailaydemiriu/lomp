@@ -617,11 +617,19 @@ _domain_rename_mail_targets() {   # targets old new moved
 
 # One mailbox to the new domain: its mail, and a line for the new address with the password
 # hash and the quota it had. The line of the old address stays for now - see below.
+# An address is a mailbox or an alias, never both: Postfix asks the aliases first. Where the
+# new address is an alias already, it stays one and the mailbox stays where it is - unless
+# that alias leads to this very mailbox, which is what a rename the other way left there.
+# Then the mailbox takes its old address back. (Left in place, that alias and the one made
+# below sent each other the mail of a site that was renamed back: Postfix answered every
+# message for it with "451 4.6.0 Alias expansion error".)
 _domain_rename_box_move() {   # user@old new-domain
-  local a="$1" nd="$2" loc="${1%%@*}" od="${1#*@}" na="" hash="" quota="" src="" dst=""
+  local a="$1" nd="$2" loc="${1%%@*}" od="${1#*@}" na="" hash="" quota="" src="" dst="" to=""
   na="${loc}@${nd}"
   src="${MAIL_VMAIL_HOME}/${od}/${loc}"; dst="${MAIL_VMAIL_HOME}/${nd}/${loc}"
   if lib_mail_box_exists "$na"; then MAIL_LAST_ERROR="${na} exists already"; return 1; fi
+  to="$(lib_mail_aliases "$nd" | awk -F'\t' -v k="$na" '$1 == k { t = $2 } END { print t }' || true)"
+  if [[ -n "$to" && "${to// /}" != "$a" ]]; then MAIL_LAST_ERROR="${na} is already an alias"; return 1; fi
   if [[ -e "$dst" || -L "$dst" ]]; then MAIL_LAST_ERROR="${dst} is in the way"; return 1; fi
   hash="$(awk -F: -v u="$a" '$1 == u { print $2; exit }' "$MAIL_PASSWD_FILE")"
   [[ -n "$hash" ]] || { MAIL_LAST_ERROR="no password line for ${a}"; return 1; }
@@ -637,6 +645,7 @@ _domain_rename_box_move() {   # user@old new-domain
     mv -T -- "$src" "$dst" || { MAIL_LAST_ERROR="could not move ${src}"; return 1; }
   fi
   lib_mail_passwd_set "$na" "$hash" "$quota"
+  if [[ -n "$to" ]]; then lib_mail_alias_set "$nd" "$na" ""; fi
   lib_mail_alias_set "$od" "$a" "$na"
 }
 

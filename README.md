@@ -374,7 +374,9 @@ mail was signed with (keep its MX pointing here). People sign in with their new 
 then on, in their mail program and in the webmail, whose address book and settings follow.
 For mail from outside to reach `@example.net` directly, its DNS needs the usual records:
 `lomp mail dns example.net` (written into Cloudflare by itself when a token is stored). A
-mailbox whose new address is already taken stays where it is and is named.
+mailbox whose new address is already taken - by a mailbox, or by an alias somebody made there -
+stays where it is and is named. The alias a rename leaves behind is no such alias: a site that
+is renamed back to the name it had gets its mailboxes back under their first addresses.
 
 `--keep-mail` leaves the mail at the old domain instead: `example.com` becomes a mail domain of
 its own with everything as it was, and the site starts without mail under its new name. That is
