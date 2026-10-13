@@ -9436,6 +9436,254 @@ assert_eq    "or logged"                                                "" "$(gr
 assert_false "what was made under the old name in between is gone"      test -e "$_rn/vmail/alpha.example/info"
 assert_true  "and the mail is where it moved to"                        test -s "$_rn/vmail/beta.example/info/Maildir/new/m1"
 unset -f _rn_swept
+# ---- rename: what is done in the mail store, the mail user does ------------------------
+# The store is the mail user's, down to the last directory: a process of that user - Dovecot
+# delivers and serves as it - can take any name there away and put a link in its place between
+# root's look at the name and root's use of it. The mail steps of a rename were root's own: an
+# "rm -rf" and an "mv" two names deep in the store (the directory of a domain is the mail
+# user's to swap), a mkdir with a "chown --reference" behind it (a chown follows a link: a
+# file of root's, handed to the mail user), an "mv" of every message into a new/ (a link by
+# then, and a file whose content its sender chose lies wherever it leads). Each of them is the
+# mail user's step now: led elsewhere, it does there what that user could have done without
+# lomp.
+# Root, standing in: what it does itself to a name in the store, with a command that makes,
+# moves, removes or hands over, is written down ($_rn/root-wrote). What the mail user is asked
+# to do is run as before - and refused where a test says so ($_rn/mail-user-cannot, a pattern:
+# the right that user turns out not to have).
+_rn_watched() {   # command...
+  runuser() {
+    local _rn_as_mail="" _rn_no=""
+    printf '%s\n' "$*" >>"$_rn/runuser.log"
+    [[ "${1:-}" == "-u" && -n "${2:-}" && "${3:-}" == "--" ]] || return 1
+    if [[ "$2" == "$MAIL_VMAIL_USER" ]]; then _rn_as_mail=1; fi
+    shift 3
+    _rn_no="$(cat "$_rn/mail-user-cannot" 2>/dev/null || true)"
+    # shellcheck disable=SC2053
+    if [[ -n "$_rn_as_mail" && -n "$_rn_no" && "$*" == $_rn_no ]]; then printf '%s: Permission denied\n' "$1" >&2; return 1; fi
+    "$@"
+  }
+  _rn_root() {   # a command and its arguments, as root itself runs them
+    if [[ -z "${_rn_as_mail:-}" && "${*:2}" == *"$_rn/vmail/"* ]]; then printf '%s\n' "$*" >>"$_rn/root-wrote"; fi
+    if [[ "$1" == chown ]]; then return 0; fi
+    command "$@"
+  }
+  eval 'mv() { _rn_root mv "$@"; }; rm() { _rn_root rm "$@"; }; mkdir() { _rn_root mkdir "$@"; }; rmdir() { _rn_root rmdir "$@"; }
+        cp() { _rn_root cp "$@"; }; ln() { _rn_root ln "$@"; }; touch() { _rn_root touch "$@"; }; chmod() { _rn_root chmod "$@"; }
+        chown() { _rn_root chown "$@"; }; xargs() { _rn_root xargs "$@"; }'
+  "$@"
+}
+_rn_ran()   { sed -E 's/~[0-9]{8}-[0-9]{6}/~T/g' "$_rn/runuser.log" 2>/dev/null || true; }   # who was asked for what, a time of day made "T"
+_rn_wrote() { cat "$_rn/root-wrote" 2>/dev/null || true; }
+_rn_st="$_rn/vmail"; _rn_mu="-u ${MAIL_VMAIL_USER} --"
+# a mailbox to a domain that has no directory yet: the directory is made, then each mailbox moved
+_rn_mail_boxes
+if (( CAN_CHMOD )); then chmod 0750 "$_rn/vmail/alpha.example"; fi
+_rn_mode="$(stat -c %a "$_rn/vmail/alpha.example")"
+: >"$_rn/runuser.log"
+_rn_case _rn_watched _rn_rename alpha.example beta.example
+assert_has   "(a site with two mailboxes is renamed)"                   "Mail: now at @beta.example - info@beta.example, sales@beta.example" "$(_rn_out)"
+assert_true  "(and its mail moved)"                                     test -s "$_rn/vmail/beta.example/info/Maildir/new/m1"
+assert_eq    "root itself makes and moves nothing in the mail store"    "" "$(_rn_wrote)"
+assert_eq    "the directory of the new domain is made by the mail user, once, closed as the old domain's is" \
+  "${_rn_mu} mkdir -m ${_rn_mode} -- ${_rn_st}/beta.example" "$(_rn_ran | grep -F -- '-- mkdir ' || true)"
+if (( CAN_CHMOD )); then
+  assert_eq  "and is closed so"                                         "750" "$(stat -c %a "$_rn/vmail/beta.example" 2>/dev/null || true)"
+fi
+assert_eq    "each mailbox is moved by the mail user, as the one directory it is" \
+  "${_rn_mu} mv -T -- ${_rn_st}/alpha.example/info ${_rn_st}/beta.example/info|${_rn_mu} mv -T -- ${_rn_st}/alpha.example/sales ${_rn_st}/beta.example/sales|" \
+  "$(_rn_ran | grep -F -- '-- mv ' | tr '\n' '|' || true)"
+# (a chown follows a link, and so does a chmod: neither comes after a directory is made)
+assert_lacks "no owner and no mode is copied onto a name afterwards"    "--reference" "$(declare -f _domain_rename_box_move)"
+assert_lacks "and nothing is handed over there"                         "chown" "$(declare -f _domain_rename_box_move _domain_rename_box_carry _domain_rename_box_sweep)"
+# the old domain's directory does not say how it is closed: the new one is the mail user's alone
+_rn_mail_boxes
+_rn_unread() { eval 'stat() { if [[ "${*: -1}" == "$_rn/vmail/alpha.example" ]]; then return 1; fi; command stat "$@"; }'; "$@"; }
+: >"$_rn/runuser.log"
+_rn_case _rn_watched _rn_unread _rn_rename alpha.example beta.example
+assert_eq    "where the old domain's directory cannot be read for how it is closed, the new one is closed to all but the mail user" \
+  "${_rn_mu} mkdir -m 700 -- ${_rn_st}/beta.example" "$(_rn_ran | grep -F -- '-- mkdir ' || true)"
+assert_true  "and the mailboxes move into it"                           test -s "$_rn/vmail/beta.example/info/Maildir/new/m1"
+unset -f _rn_unread
+# the mail user cannot make it: nothing moves, each mailbox is said to stay, and root does not
+# make it in that user's place
+_rn_mail_boxes
+printf '%s' "mkdir -m * -- ${_rn_st}/beta.example" >"$_rn/mail-user-cannot"
+_rn_case _rn_watched _rn_rename alpha.example beta.example
+_o="$(_rn_out)"; _p="$(cat "$_rn/mail/passwd")"
+assert_has   "a directory the mail user cannot make is said, for the one mailbox" "info@alpha.example stays a mailbox at alpha.example: could not make $_rn/vmail/beta.example" "$_o"
+assert_has   "and for the other"                                        "sales@alpha.example stays a mailbox at alpha.example: could not make $_rn/vmail/beta.example" "$_o"
+assert_false "root does not make it either"                             test -e "$_rn/vmail/beta.example"
+assert_eq    "or anything else there"                                   "" "$(_rn_wrote)"
+assert_has   "the mailboxes keep their lines"                           'info@alpha.example:{H}infohash' "$_p"
+assert_lacks "and get none at the new domain"                           '@beta.example:' "$_p"
+assert_true  "and their mail"                                           test -s "$_rn/vmail/alpha.example/info/Maildir/new/m1"
+assert_has   "the rename itself is no failure for it"                   "rc=0" "$_o"
+# an empty directory lies where a mailbox goes: the mail user removes it
+_rn_mail_boxes
+mkdir -p "$_rn/vmail/beta.example/sales/Maildir" "$_rn/vmail/beta.example/info/Maildir/cur" "$_rn/vmail/beta.example/info/Maildir/new" "$_rn/vmail/beta.example/info/Maildir/tmp"
+printf 'x' >"$_rn/vmail/beta.example/sales/Maildir/dovecot.list.index.log"
+: >"$_rn/runuser.log"
+_rn_case _rn_watched _rn_rename alpha.example beta.example
+assert_has   "(an empty directory in the way is said to be removed)"    "$_rn/vmail/beta.example/sales held no message and was in the way of sales@beta.example: removed" "$(_rn_out)"
+assert_eq    "it is the mail user that removes it, for the one mailbox and the other" \
+  "${_rn_mu} rm -rf -- ${_rn_st}/beta.example/info|${_rn_mu} rm -rf -- ${_rn_st}/beta.example/sales|" "$(_rn_ran | grep -F -- '-- rm ' | tr '\n' '|' || true)"
+assert_eq    "root itself removes and moves nothing"                    "" "$(_rn_wrote)"
+assert_false "(what lay there is gone)"                                 test -e "$_rn/vmail/beta.example/sales/Maildir/dovecot.list.index.log"
+assert_true  "(and the mailbox is in its place)"                        test -d "$_rn/vmail/beta.example/sales/Maildir/cur"
+# ... and cannot: it is still in the way, and root does not remove it in that user's place
+_rn_mail_boxes
+mkdir -p "$_rn/vmail/beta.example/sales/Maildir"; printf 'x' >"$_rn/vmail/beta.example/sales/Maildir/dovecot.list.index.log"
+printf '%s' "rm -rf -- ${_rn_st}/beta.example/sales" >"$_rn/mail-user-cannot"
+_rn_case _rn_watched _rn_rename alpha.example beta.example
+_o="$(_rn_out)"
+assert_has   "an empty directory the mail user cannot remove is in the way, and said" "sales@alpha.example stays a mailbox at alpha.example: $_rn/vmail/beta.example/sales is in the way" "$_o"
+assert_lacks "it is not said to be removed"                             "held no message" "$_o"
+assert_true  "and is not: root does not remove it either"               test -s "$_rn/vmail/beta.example/sales/Maildir/dovecot.list.index.log"
+assert_has   "the mailbox keeps its line"                               'sales@alpha.example:{H}saleshash' "$(cat "$_rn/mail/passwd")"
+assert_true  "and its mail"                                             test -d "$_rn/vmail/alpha.example/sales/Maildir/cur"
+assert_has   "the other mailbox moves"                                  'info@beta.example:{H}infohash' "$(cat "$_rn/mail/passwd")"
+assert_eq    "root itself touches nothing there"                        "" "$(_rn_wrote)"
+# a directory with mail in it lies where a mailbox goes: the mail user puts it aside
+_rn_aside() {
+  _rn_mail_boxes
+  mkdir -p "$_rn/vmail/beta.example/sales/Maildir/cur" "$_rn/vmail/beta.example/sales/Maildir/new" "$_rn/vmail/beta.example/sales/Maildir/tmp"
+  printf 'theirs\n' >"$_rn/vmail/beta.example/sales/Maildir/cur/m9:2,S"
+  : >"$_rn/runuser.log"
+}
+_rn_aside
+_rn_case _rn_watched _rn_rename alpha.example beta.example
+_rn_side="$(ls -d "$_rn/vmail/beta.example/sales~"* 2>/dev/null | tr '\n' ' ' | sed 's/ $//' || true)"
+assert_has   "(a directory with mail in it is put aside, and said)"     "$_rn/vmail/beta.example/sales was in the way of sales@beta.example: it is ${_rn_side} now" "$(_rn_out)"
+assert_eq    "it is the mail user that puts it aside, and then moves the mailbox to where it lay" \
+  "${_rn_mu} mv -T -- ${_rn_st}/beta.example/sales ${_rn_st}/beta.example/sales~T|${_rn_mu} mv -T -- ${_rn_st}/alpha.example/sales ${_rn_st}/beta.example/sales|" \
+  "$(_rn_ran | grep -F -- '-- mv ' | grep -F -- '/sales' | tr '\n' '|' || true)"
+assert_true  "(what lay there is beside the mailbox, with its mail)"    test -s "${_rn_side}/Maildir/cur/m9:2,S"
+assert_eq    "root itself moves nothing"                                "" "$(_rn_wrote)"
+# ... and cannot: it stays in the way
+_rn_aside
+printf '%s' "mv -T -- ${_rn_st}/beta.example/sales ${_rn_st}/beta.example/sales~*" >"$_rn/mail-user-cannot"
+_rn_case _rn_watched _rn_rename alpha.example beta.example
+assert_has   "a directory the mail user cannot put aside is in the way, and said" "sales@alpha.example stays a mailbox at alpha.example: $_rn/vmail/beta.example/sales is in the way" "$(_rn_out)"
+assert_true  "it lies where it lay"                                     test -s "$_rn/vmail/beta.example/sales/Maildir/cur/m9:2,S"
+assert_eq    "and nothing beside it"                                    "" "$(ls -d "$_rn/vmail/beta.example/sales~"* 2>/dev/null || true)"
+assert_true  "the mailbox keeps its mail"                               test -d "$_rn/vmail/alpha.example/sales/Maildir/cur"
+assert_eq    "root itself moves nothing there"                          "" "$(_rn_wrote)"
+# ... or can, and then cannot move the mailbox: what was put aside for it goes back where it
+# lay, by the mail user again, and nothing has changed
+_rn_aside
+printf '%s' "mv -T -- ${_rn_st}/alpha.example/sales *" >"$_rn/mail-user-cannot"
+_rn_case _rn_watched _rn_rename alpha.example beta.example
+_o="$(_rn_out)"
+assert_has   "a mailbox the mail user cannot move stays, and it is said" "sales@alpha.example stays a mailbox at alpha.example: could not move $_rn/vmail/alpha.example/sales" "$_o"
+assert_eq    "what had been put aside for it is put back by the mail user" \
+  "${_rn_mu} mv -T -- ${_rn_st}/beta.example/sales~T ${_rn_st}/beta.example/sales" "$(_rn_ran | grep -F -- "-- mv -T -- ${_rn_st}/beta.example/sales~T " || true)"
+assert_true  "it lies where it lay, with what was in it"                test -s "$_rn/vmail/beta.example/sales/Maildir/cur/m9:2,S"
+assert_eq    "and nothing is left beside it"                            "" "$(ls -d "$_rn/vmail/beta.example/sales~"* 2>/dev/null || true)"
+assert_lacks "nothing is said to have been in the way"                  "was in the way" "$_o"
+assert_has   "the mailbox keeps its line"                               'sales@alpha.example:{H}saleshash' "$(cat "$_rn/mail/passwd")"
+assert_true  "and its mail"                                             test -d "$_rn/vmail/alpha.example/sales/Maildir/cur"
+assert_has   "the other mailbox moves"                                  'info@beta.example:{H}infohash' "$(cat "$_rn/mail/passwd")"
+assert_eq    "root itself moves nothing, there or back"                 "" "$(_rn_wrote)"
+unset -f _rn_aside
+# mail of the mailbox's own lies where it comes back to: the mail user puts the directory
+# aside, moves the mailbox, carries the messages in and removes what is left of the directory
+_rn_mail_boxes
+printf 'info@beta.example\tinfo@alpha.example\n' >"$_rn/mail/aliases/beta.example"
+mkdir -p "$_rn/maildomains/beta.example" "$_rn/vmail/beta.example/info/Maildir/new" "$_rn/vmail/beta.example/info/Maildir/.Junk/new"
+printf '{"domain":"beta.example","kind":"mail","created_at":"2026-10-01T10:00:00Z","mail":{"enabled":true}}\n' >"$_rn/maildomains/beta.example/domain.json"
+printf 'left\n' >"$_rn/vmail/beta.example/info/Maildir/new/left1"; printf 'spam\n' >"$_rn/vmail/beta.example/info/Maildir/.Junk/new/left2"
+touch -d "2026-10-01T10:00:20Z" "$_rn/vmail/beta.example/info/Maildir/new/left1"; touch -d "2026-10-01T10:31:00Z" "$_rn/vmail/beta.example/info/Maildir/.Junk/new/left2"
+: >"$_rn/runuser.log"
+_rn_case _rn_watched _rn_rename alpha.example beta.example
+assert_has   "(mail that had been left under the name is carried in, and said)" "2 message(s) that had been left under info@beta.example when the site was renamed are in the mailbox now" "$(_rn_out)"
+assert_eq    "every step of it is the mail user's: aside, the mailbox, the list, the messages, what is left" \
+  "${_rn_mu} mv -T -- ${_rn_st}/beta.example/info ${_rn_st}/beta.example/info~T|${_rn_mu} mv -T -- ${_rn_st}/alpha.example/info ${_rn_st}/beta.example/info|${_rn_mu} env -C / find ${_rn_st}/beta.example/info~T/Maildir -type f -regextype posix-extended -regex .*/(new|cur)/[^/]* -print0|${_rn_mu} xargs -0 -r mv -n -t ${_rn_st}/beta.example/info/Maildir/new --|${_rn_mu} rm -rf -- ${_rn_st}/beta.example/info~T|" \
+  "$(_rn_ran | grep -F -- "${_rn_st}/beta.example/info" | tr '\n' '|' || true)"
+assert_true  "(the messages are in the mailbox)"                        test -s "$_rn/vmail/beta.example/info/Maildir/new/left2"
+assert_eq    "(and nothing is left beside it)"                          "" "$(ls -d "$_rn/vmail/beta.example/info~"* 2>/dev/null || true)"
+assert_eq    "root itself moves and removes nothing"                    "" "$(_rn_wrote)"
+# What arrived under the old name while the mailbox moved: the mail user lists it, carries it
+# and removes the directory. One hand-over a folder, not one a message: a rename under mail
+# carries hundreds, and each hand-over is a process started for it (3.5 ms on the test server;
+# 2000 messages in one go took 39 ms).
+_rn_mail_boxes
+mkdir -p "$_rn/vmail/beta.example/info/Maildir/new" "$_rn/vmail/beta.example/info/Maildir/.Junk/new" "$_rn/vmail/beta.example/info/Maildir/.Junk/cur"
+mkdir -p "$_rn/vmail/alpha.example/info/Maildir/.Junk/new" "$_rn/vmail/alpha.example/info/Maildir/.Junk/cur" "$_rn/vmail/alpha.example/info/Maildir/.Sent/cur" \
+  "$_rn/vmail/alpha.example/info/Maildir/.Drafts/new" "$_rn/vmail/alpha.example/info/Maildir/cur" "$_rn/vmail/alpha.example/info/Maildir/tmp"
+printf 'read\n'  >"$_rn/vmail/alpha.example/info/Maildir/cur/read:2,S"
+printf 'spam\n'  >"$_rn/vmail/alpha.example/info/Maildir/.Junk/new/spam1"
+printf 'spam\n'  >"$_rn/vmail/alpha.example/info/Maildir/.Junk/cur/spam2:2,S"
+printf 'sent\n'  >"$_rn/vmail/alpha.example/info/Maildir/.Sent/cur/sent1:2,S"
+printf 'draft\n' >"$_rn/vmail/alpha.example/info/Maildir/.Drafts/new/draft1"
+printf 'half\n'  >"$_rn/vmail/alpha.example/info/Maildir/tmp/half"
+: >"$_rn/log"; : >"$_rn/runuser.log"
+_rn_case _rn_watched _domain_rename_box_sweep info@alpha.example beta.example
+assert_has   "(what arrived under the old name is swept)"               "rc=0" "$(_rn_out)"
+# (started in "/": find wants to come back to the directory it was started in, and from one
+# the mail user may not enter - root's own - it ended with status 1 and "Failed to restore
+# initial working directory", on the test server)
+assert_eq    "the list of what is carried is the mail user's own, made from a directory that user may enter" \
+  "${_rn_mu} env -C / find ${_rn_st}/alpha.example/info/Maildir -type f -regextype posix-extended -regex .*/(new|cur)/[^/]* -print0" "$(_rn_ran | grep -F -- '-- env -C / find ' || true)"
+assert_eq    "the mail user moves the messages, all that go into one folder at once: two hand-overs for six messages out of six directories, and none is written over" \
+  "${_rn_mu} xargs -0 -r mv -n -t ${_rn_st}/beta.example/info/Maildir/.Junk/new --|${_rn_mu} xargs -0 -r mv -n -t ${_rn_st}/beta.example/info/Maildir/new --|" \
+  "$(_rn_ran | grep -F -- '-- xargs ' | LC_ALL=C sort | tr '\n' '|' || true)"
+assert_eq    "each into the folder it lay in, and into the inbox where the mailbox has no such folder" \
+  ".Junk/new/spam1 .Junk/new/spam2:2,S new/draft1 new/m1 new/read:2,S new/sent1:2,S" \
+  "$( ( cd "$_rn/vmail/beta.example/info/Maildir" && find . -type f | sed 's|^\./||' | LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//' ) 2>/dev/null || true)"
+assert_has   "the log says how many went"                               "6 message(s) that arrived for info@alpha.example during the move went on to info@beta.example" "$(cat "$_rn/log")"
+assert_eq    "the directory under the old name is removed by the mail user" "${_rn_mu} rm -rf -- ${_rn_st}/alpha.example/info" "$(_rn_ran | grep -F -- '-- rm ' || true)"
+assert_false "(and is gone)"                                            test -e "$_rn/vmail/alpha.example/info"
+assert_eq    "root itself lists for nobody, moves and removes nothing"  "" "$(_rn_wrote)"
+# A name that is taken in the mailbox: the message that has it there is not written over, the
+# one that could not go stays where it is, and the log says what went - not what was listed.
+# (mv has one status for all of them, and "mv -n" of one release says of a name that is taken
+# "not replacing" with status 1: no failure of the rename either.)
+_rn_mail_boxes
+mkdir -p "$_rn/vmail/beta.example/info/Maildir/new"
+printf 'late\n' >"$_rn/vmail/alpha.example/info/Maildir/new/late"; printf 'theirs\n' >"$_rn/vmail/beta.example/info/Maildir/new/late"
+: >"$_rn/log"; : >"$_rn/runuser.log"
+_rn_case _rn_watched _domain_rename_box_sweep info@alpha.example beta.example
+assert_has   "a name that is taken in the mailbox is no failure"        "rc=0" "$(_rn_out)"
+assert_lacks "and none is shown"                                        "FAILED" "$(_rn_out)"
+assert_eq    "the message that has the name there is not written over"  "theirs" "$(cat "$_rn/vmail/beta.example/info/Maildir/new/late" 2>/dev/null || true)"
+assert_eq    "the one that could not go stays where it is"              "late" "$(cat "$_rn/vmail/alpha.example/info/Maildir/new/late" 2>/dev/null || true)"
+assert_true  "the other one went"                                       test -s "$_rn/vmail/beta.example/info/Maildir/new/m1"
+assert_has   "the log counts what went, not what was listed"            "1 message(s) that arrived for info@alpha.example during the move went on to info@beta.example" "$(cat "$_rn/log")"
+assert_eq    "with a message left in it, the directory under the old name is not removed" "" "$(_rn_ran | grep -F -- '-- rm ' || true)"
+assert_true  "(it is there)"                                            test -d "$_rn/vmail/alpha.example/info/Maildir/new"
+# a name is whatever the mail user's programs made it: a blank, a line break, a leading dash
+if [[ "${OSTYPE:-}" == linux* ]]; then
+  _rn_mail_boxes
+  mkdir -p "$_rn/vmail/beta.example/info/Maildir/new"; rm -f "$_rn/vmail/alpha.example/info/Maildir/new/m1"
+  printf 'a\n' >"$_rn/vmail/alpha.example/info/Maildir/new/two words"; printf 'b\n' >"$_rn/vmail/alpha.example/info/Maildir/new/"$'two\nlines'
+  printf 'c\n' >"$_rn/vmail/alpha.example/info/Maildir/new/-n"
+  : >"$_rn/log"
+  _rn_case _rn_watched _domain_rename_box_sweep info@alpha.example beta.example
+  assert_true  "a message whose name has a blank in it is carried"      test -s "$_rn/vmail/beta.example/info/Maildir/new/two words"
+  assert_true  "one whose name has a line break in it"                  test -s "$_rn/vmail/beta.example/info/Maildir/new/"$'two\nlines'
+  assert_true  "one whose name begins like an option"                   test -s "$_rn/vmail/beta.example/info/Maildir/new/-n"
+  assert_has   "each is counted once"                                   "3 message(s) that arrived for info@alpha.example" "$(cat "$_rn/log")"
+  assert_false "and nothing is left under the old name"                 test -e "$_rn/vmail/alpha.example/info"
+fi
+# a directory under the old name with no Maildir in it: the mail user's find ends with status
+# 1 there - in a process substitution, where that is a failure in a shell of its own
+_rn_swept() {   # user@old new-domain: a step on record, the sweep, and time for a shell nobody waits for
+  lib_rollback_push "touch '$_rn/rolled'"
+  _domain_rename_box_sweep "$@"
+  command sleep 0.6
+}
+_rn_mail_boxes
+mkdir -p "$_rn/vmail/beta.example/info/Maildir/new"
+rm -rf "$_rn/vmail/alpha.example/info"; mkdir -p "$_rn/vmail/alpha.example/info"
+_rn_case _rn_watched _rn_swept info@alpha.example beta.example
+assert_has   "a directory with no Maildir in it is swept"               "rc=0" "$(_rn_out)"
+assert_lacks "without a failure being shown"                            "FAILED" "$(_rn_out)"
+assert_lacks "or a word of find's"                                      "No such file" "$(_rn_out)"
+assert_eq    "or one logged"                                            "" "$(grep 'unexpected failure' "$_rn/log" || true)"
+assert_false "no rollback step is run"                                  test -e "$_rn/rolled"
+assert_false "and the directory goes"                                   test -e "$_rn/vmail/alpha.example/info"
+unset -f _rn_swept _rn_watched _rn_ran _rn_wrote
+unset _rn_st _rn_mu _rn_mode _rn_side
 # Dovecot looks at its user file at most once a second, and the rename did not wait for it
 # (2.3.21 on the test server: asked about an address earlier in the same second, it answered
 # from the file as it had been until that second was over - ten changes of the file, ten times

@@ -635,8 +635,33 @@ _domain_rename_mail_targets() {   # targets old new moved
 #    (_domain_rename_box_own): it is carried into the mailbox once that is in its place.
 #  - anything else: it is put aside beside where it lay, under a name no mailbox can have
 #    ("info~20261012-231500": "~" is in no address of lomp's), with all that is in it.
+#
+# Who takes these steps. The mail store belongs to the user the mail is stored as
+# (MAIL_VMAIL_USER): its top, the directory of every domain in it and all that lies below. A
+# process of that user - Dovecot delivers and serves as it, and so would a filter gone wrong -
+# can take any name there away and put a link in its place between the moment root looks at
+# the name and the moment root uses it. What root did there then happened where the link led:
+# an "rm -rf" or an "mv" of <store>/<domain>/<mailbox> to <elsewhere>/<mailbox>, the chown
+# behind a mkdir to whatever stood there by then, a message - written by whoever sent it -
+# into the directory a link called "new" names. So root makes, moves and removes nothing in
+# the store. Each such step is the mail user's (runuser), here and in the functions below:
+# led elsewhere by a name that was swapped, it does there what that user could have done
+# without lomp, and outside the store that is no more than any account may do - the mail user
+# owns nothing there. Root looks (is this a directory, does it hold a message), and what it
+# sees decides which step is asked for and never what a step may reach.
+#  - removing (the empty directory in the way, what was put aside once its mail is carried
+#    in, the leftover of _domain_rename_box_sweep): rm goes into no link below what it is
+#    given, and through a link above it it removes what the mail user may remove and no more.
+#  - moving a directory (the mailbox, what is put aside, and that back again): one rename;
+#    through a link above either name it is refused where the mail user may not write, and
+#    where the link leads to another disk and mv copies instead, the mail user copies.
+#  - making the directory of the new domain: its name is in the top of the store, which is
+#    in a directory of root's - so only the last part of that name can be swapped, and mkdir
+#    follows no link there. Made by the mail user, closed as the old domain's is, it needs
+#    no chown and no chmod behind it: those are what followed a link.
+#  - carrying messages: _domain_rename_box_carry.
 _domain_rename_box_move() {   # user@old new-domain
-  local a="$1" nd="$2" loc="${1%%@*}" od="${1#*@}" na="" hash="" quota="" src="" dst="" to="" way="" side="" n=0
+  local a="$1" nd="$2" loc="${1%%@*}" od="${1#*@}" na="" hash="" quota="" src="" dst="" to="" way="" side="" mode="" n=0
   na="${loc}@${nd}"
   src="${MAIL_VMAIL_HOME}/${od}/${loc}"; dst="${MAIL_VMAIL_HOME}/${nd}/${loc}"
   if lib_mail_box_exists "$na"; then MAIL_LAST_ERROR="${na} exists already"; return 1; fi
@@ -653,22 +678,22 @@ _domain_rename_box_move() {   # user@old new-domain
   quota="$(lib_mail_box_quota "$a")"
   if lib_have doveadm; then doveadm kick "$a" >/dev/null 2>&1 || true; fi
   if [[ "$way" == "vacant" ]]; then
-    rm -rf -- "$dst" || { MAIL_LAST_ERROR="${dst} is in the way"; return 1; }
+    runuser -u "$MAIL_VMAIL_USER" -- rm -rf -- "$dst" || { MAIL_LAST_ERROR="${dst} is in the way"; return 1; }
     lib_info "${dst} held no message and was in the way of ${na}: removed"
   elif [[ -n "$way" ]]; then
     side="${dst}~$(date +%Y%m%d-%H%M%S)"
-    if [[ -e "$side" || -L "$side" ]] || ! mv -T -- "$dst" "$side"; then MAIL_LAST_ERROR="${dst} is in the way"; return 1; fi
+    if [[ -e "$side" || -L "$side" ]] || ! runuser -u "$MAIL_VMAIL_USER" -- mv -T -- "$dst" "$side"; then MAIL_LAST_ERROR="${dst} is in the way"; return 1; fi
   fi
   if [[ -d "$src" && ! -L "$src" ]]; then
     if [[ ! -d "${MAIL_VMAIL_HOME}/${nd}" ]]; then
-      mkdir -- "${MAIL_VMAIL_HOME}/${nd}" \
-        && chown --reference="${MAIL_VMAIL_HOME}/${od}" "${MAIL_VMAIL_HOME}/${nd}" \
-        && chmod --reference="${MAIL_VMAIL_HOME}/${od}" "${MAIL_VMAIL_HOME}/${nd}" \
+      mode="$(stat -c %a -- "${MAIL_VMAIL_HOME}/${od}" 2>/dev/null || true)"
+      [[ "$mode" =~ ^[0-7]{3,4}$ ]] || mode="700"
+      runuser -u "$MAIL_VMAIL_USER" -- mkdir -m "$mode" -- "${MAIL_VMAIL_HOME}/${nd}" \
         || { MAIL_LAST_ERROR="could not make ${MAIL_VMAIL_HOME}/${nd}"; return 1; }
     fi
-    if ! mv -T -- "$src" "$dst"; then
+    if ! runuser -u "$MAIL_VMAIL_USER" -- mv -T -- "$src" "$dst"; then
       # what was put aside for it goes back where it lay: nothing has changed then
-      if [[ -n "$side" ]]; then mv -T -- "$side" "$dst" 2>/dev/null || true; fi
+      if [[ -n "$side" ]]; then runuser -u "$MAIL_VMAIL_USER" -- mv -T -- "$side" "$dst" 2>/dev/null || true; fi
       MAIL_LAST_ERROR="could not move ${src}"; return 1
     fi
   fi
@@ -678,7 +703,7 @@ _domain_rename_box_move() {   # user@old new-domain
   if [[ "$way" == "own" ]]; then
     _domain_rename_box_carry "$side" "${dst}/Maildir"
     if [[ -z "$(_domain_rename_box_messages "$side" -print -quit)" ]]; then
-      rm -rf -- "$side"
+      runuser -u "$MAIL_VMAIL_USER" -- rm -rf -- "$side"
       lib_info "${RENAME_CARRIED} message(s) that had been left under ${na} when the site was renamed are in the mailbox now"
       return 0
     fi
@@ -779,8 +804,25 @@ _domain_rename_box_inbox() {   # the Maildir, a directory to be like
 # name where the mailbox has one, and into its inbox where it has not. A mailbox that never
 # had mail gets its inbox for it; with nowhere to put a message - its place is taken by
 # something that is no directory - it stays where it is. RENAME_CARRIED says how many went.
+#
+# The mail user carries them (_domain_rename_box_move says why root does not). The list is that
+# user's own find - the one _domain_rename_box_messages makes - so that no name root could see
+# and the mail user could not is ever handed to it. It is started in "/": find wants to come
+# back to the directory it was started in, and started in one the mail user may not enter -
+# root's own - it ended with status 1 and "Failed to restore initial working directory" behind
+# a list that was whole (findutils 4.9.0 on the test server). And they are moved by its mv,
+# all that go into one folder in one go: a rename under mail carries hundreds, and a message
+# handed over by itself is a process started for it (3.5 ms each on the test server, where
+# 2000 in one go took 39 ms). Whatever the new/ of a folder has become by the time mv gets
+# there, a message - the words of whoever sent it - lands where the mail user could have put
+# it without lomp. mv ends with one status for all of them and leaves a message whose name is
+# taken where it is, so root counts afterwards, message by message: what is no longer where it
+# lay has gone. (Where it went is not looked at: a message does not stay in new/, under the
+# name it came with, once a mail program has seen it.)
 _domain_rename_box_carry() {   # the mailbox directory they lie in, the Maildir they go to
-  local src="$1" dst="$2" f="" to=""
+  local src="$1" dst="$2" f="" to="" i=0
+  local -a files=() into=() batch=()
+  local -A folders=()
   RENAME_CARRIED=0
   if [[ ! -d "${dst}/new" || -L "${dst}/new" ]]; then
     [[ -n "$(_domain_rename_box_messages "$src" -print -quit)" ]] || return 0
@@ -797,8 +839,18 @@ _domain_rename_box_carry() {   # the mailbox directory they lie in, the Maildir 
     # .../Maildir/new/<file> is the inbox, .../Maildir/.Junk/new/<file> the folder Junk
     to="${f%/*/*}"; to="${dst}${to#"${src}/Maildir"}/new"
     [[ -d "$to" && ! -L "$to" ]] || to="${dst}/new"
-    mv -n -- "$f" "${to}/" && RENAME_CARRIED=$((RENAME_CARRIED + 1))
-  done < <(_domain_rename_box_messages "$src" -print0)
+    files+=("$f"); into+=("$to"); folders[$to]=1
+  done < <(runuser -u "$MAIL_VMAIL_USER" -- env -C / find "${src}/Maildir" -type f -regextype posix-extended -regex '.*/(new|cur)/[^/]*' -print0 2>/dev/null || true)
+  for to in "${!folders[@]}"; do
+    batch=()
+    for i in "${!files[@]}"; do
+      if [[ "${into[i]}" == "$to" ]]; then batch+=("${files[i]}"); fi
+    done
+    printf '%s\0' "${batch[@]}" | runuser -u "$MAIL_VMAIL_USER" -- xargs -0 -r mv -n -t "$to" -- || true
+    for f in "${batch[@]}"; do
+      if [[ ! -e "$f" ]]; then RENAME_CARRIED=$((RENAME_CARRIED + 1)); fi
+    done
+  done
   return 0
 }
 
@@ -813,7 +865,7 @@ _domain_rename_box_sweep() {   # user@old new-domain
   [[ -d "$src" && ! -L "$src" ]] || return 0
   _domain_rename_box_carry "$src" "${MAIL_VMAIL_HOME}/${2}/${loc}/Maildir"
   if (( RENAME_CARRIED > 0 )); then lib_log_write INFO "${RENAME_CARRIED} message(s) that arrived for ${1} during the move went on to ${loc}@${2}"; fi
-  if [[ -z "$(_domain_rename_box_messages "$src" -print -quit)" ]]; then rm -rf -- "$src"; fi
+  if [[ -z "$(_domain_rename_box_messages "$src" -print -quit)" ]]; then runuser -u "$MAIL_VMAIL_USER" -- rm -rf -- "$src"; fi
   return 0
 }
 

@@ -431,6 +431,12 @@ until somebody removes it - no backup of the mail holds it, and it is deleted wi
 domain's mail). Each of these is said. Only what is not for lomp to judge is still in the way, and named: a link,
 a file, the mail of a mailbox that `mail disable` put aside.
 
+What a rename makes, moves and removes under `/var/vmail` is done by the user the mail is
+stored as, not by root: a name there can be swapped for a link by whatever runs as that user,
+and a step of root's would land where the link leads. So a directory in the mail store that the
+mail user itself may not move or remove - one that root made there by hand - stays where it is,
+and the mailbox with it; that is said like the rest.
+
 `--keep-mail` leaves the mail at the old domain instead: `example.com` becomes a mail domain of
 its own with everything as it was, and the site starts without mail under its new name. That is
 also what happens to mail that is switched off, and to a domain whose mail was added on its own
