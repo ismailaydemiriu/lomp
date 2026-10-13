@@ -1148,15 +1148,23 @@ So after every reload and restart of its own - a certificate put in place, a lis
 to learn of, `mail regenerate` - lomp looks at what Postfix was told to keep by Dovecot in that
 moment, and takes out of the queue what the mailbox has: the file names the queue file it was
 handed over from, is byte for byte what Postfix holds from that line on, and was written for
-the recipient the queue file waits for. The certbot deploy hook does the same after a renewed
-mail certificate (`lomp mail settle`, which looks back over the last four minutes and is what
-to run after reloading Dovecot by hand under mail). Nothing is taken out of a mailbox,
-and what cannot be told for certain stays in the queue and is delivered as before:
+the recipient the queue file waits for. Such a message is put on hold first, compared once
+more as it lies there - a queue file's name is given to another message once the first has
+gone - and deleted only then. The certbot deploy hook does the same after a renewed mail
+certificate (`lomp mail settle`, which looks back over the last four minutes and is what to
+run after reloading Dovecot by hand under mail), and it tells Dovecot first and Postfix
+afterwards: told in the same moment, Postfix was replacing its queue manager when Dovecot
+gave a message back, and offered it again by itself. Nothing is taken out of a mailbox, and
+what cannot be told for certain stays in the queue and is delivered as before:
 
 - a message for two mailboxes of which only one has it - Postfix holds a message for all of
   its recipients or for none, so it is offered to both again;
 - a message without a Message-ID that has a line of more than 998 characters, which Postfix
   breaks when it hands the message over (with a Message-ID it is told by that);
+- mail for a mailbox whose own filter does more than file it - sends it on, answers it: what
+  the filter had done of that when Dovecot was interrupted cannot be told from the mailbox;
+- what Postfix and Dovecot, reloaded by hand in the same moment, interrupted between them -
+  such a message is not in the deferred queue, and lomp takes nothing from anywhere else;
 - what a restart of Dovecot by anything else interrupted - a package upgrade, `systemctl`
   by hand - unless `lomp mail settle` is run in the four minutes after it (Postfix offers
   such a message again after five).

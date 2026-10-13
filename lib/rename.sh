@@ -899,12 +899,14 @@ UPDATE \`${WM_DB_NAME}\`.identities i JOIN \`${WM_DB_NAME}\`.users u ON u.user_i
 # Dovecot had written the message into the mailbox when it found the mailbox gone from under
 # it, could not take the file back - its path had moved - and answered 451; or it was told to
 # read its configuration again and answered "421 Shutting down" for a message it had saved.
-# Such a message has arrived. It is not sent again: it is taken out of the queue ("postsuper
-# -d") when the mailbox of every recipient it still waits for holds it beyond doubt - under
-# either name, in a file no older than this rename's work on the mail (lib_mail_arrived has
-# what that takes). Nothing is ever taken out of a mailbox for it: where it cannot be told
-# for certain, the message is sent on like the others, and may be there twice - as one that
-# also waits for an address which did not move, or for a mailbox that has not got it.
+# Such a message has arrived. It is not sent again: it is taken out of the queue when the
+# mailbox of every recipient it still waits for holds it beyond doubt - under either name, in
+# a file no older than this rename's work on the mail (lib_mail_arrived has what that takes;
+# lib_mail_queue_take puts it on hold, compares it once more there and deletes it then).
+# Nothing is ever taken out of a mailbox for it: where it cannot be told for certain, the
+# message is sent on like the others, and may be there twice - as one that also waits for an
+# address which did not move, for a mailbox that has not got it, or for one whose own filter
+# sends mail on.
 #
 # From the deferred queue only. A message in the active queue is being handed over at this
 # very moment, and what Dovecot answers is what becomes of it whatever is done to its file:
@@ -915,7 +917,7 @@ UPDATE \`${WM_DB_NAME}\`.identities i JOIN \`${WM_DB_NAME}\`.users u ON u.user_i
 # lower case and without the "+extension" Postfix delivers it with, and never matched as a
 # pattern: info@a-b.example is not info@a.b.example.
 _domain_rename_mail_requeue() {   # old new   (for the mailboxes RENAME_MAIL_MOVED names)
-  local old="$1" new="$2" held="" id="" nr="" a="" loc="" ids="" rows="" there="" put="" gone="" n=0 c=0
+  local old="$1" new="$2" held="" id="" nr="" a="" loc="" ids="" rows="" put="" gone="" n=0 c=0
   [[ -n "${RENAME_MAIL_MOVED:-}" ]] || return 0
   lib_have postqueue && lib_have postsuper || return 0
   # the queue file, how many recipients its message still waits for, and each of them that is
@@ -933,13 +935,13 @@ _domain_rename_mail_requeue() {   # old new   (for the mailboxes RENAME_MAIL_MOV
     rows+="${id}"$'\t'"${nr}"$'\t'"${a}"$'\t'"${MAIL_VMAIL_HOME}/${new}/${loc}"$'\t'"${MAIL_VMAIL_HOME}/${old}/${loc}"$'\n'
   done <<<"$held"
   [[ -n "$ids" ]] || return 0
-  # those that every mailbox they wait for has already go out of the queue:
-  # "postsuper: 4CC8113316: removed"
-  there="$(lib_mail_arrived "${RENAME_MAIL_SINCE:-}" <<<"$rows" || true)"
-  if [[ -n "$there" ]]; then
-    gone="$(postsuper -d - deferred <<<"$there" 2>&1 | sed -n 's/^postsuper: \([0-9A-Za-z][0-9A-Za-z]*\): removed$/\1/p' || true)"
+  # those that every mailbox they wait for has already go out of the queue; what that names
+  # is what it took, and the rest - what it looked at twice and let go again among it - is
+  # put back
+  gone="$(lib_mail_queue_take "${RENAME_MAIL_SINCE:-}" <<<"$rows" || true)"
+  if [[ -n "$gone" ]]; then
     c="$(grep -c . <<<"$gone" || true)"
-    ids="$(grep -vxF -- "$there" <<<"$ids" || true)"
+    ids="$(grep -vxF -- "$gone" <<<"$ids" || true)"
   fi
   # the others go where mail comes in; what postsuper names is what it took:
   # "postsuper: 4CC8113316: requeued"

@@ -693,6 +693,7 @@ LIB_TR_PAIRS=(
   'Dovecot now knows the addresses mailboxes had before a rename ({1})' 'Dovecot artık posta kutularının yeniden adlandırmadan önceki adreslerini biliyor ({1})'
   '{1} message(s) Postfix was told to keep when Dovecot was interrupted were in the mailbox already and are not sent a second time' 'Dovecot kesintiye uğradığında Postfix'\''in beklettiği {1} ileti posta kutusuna zaten yazılmıştı; ikinci kez gönderilmeyecek'
   'Nothing that Dovecot made Postfix keep in the last four minutes is in a mailbox already' 'Son dört dakikada Dovecot yüzünden Postfix'\''in beklettiği iletilerden posta kutusuna zaten yazılmış olan yok'
+  'Postfix did not take {1} message(s) back out of its hold queue, where they were put only to be compared: postsuper -H {2}' 'Postfix, yalnızca karşılaştırmak için bekletmeye alınan {1} iletiyi bekletme kuyruğundan geri almadı: postsuper -H {2}'
   '{1} is in the way' '{1} engel oluyor'
   'mail could not be switched on for {1}' '{1} için posta açılamadı'
   'The mail tables could not be rebuilt ({1}): setup.sh mail status' 'Posta tabloları yeniden oluşturulamadı ({1}): setup.sh mail status'
