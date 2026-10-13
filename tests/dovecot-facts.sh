@@ -194,6 +194,19 @@ if mode == "one":
     qid, subject = sys.argv[4], sys.argv[5]
     extra = b"X-Spam: Yes\n" if subject.startswith("spam") else b""
     data = message(qid, subject, extra)
+    if subject.startswith("named"):
+        # a line of Postfix's that begins like one of Dovecot's ("from a by b with LMTP"), and
+        # below it what a sender would write - the line and the Message-ID of another
+        # message
+        data = (b"Received: from a by b with LMTP (unknown [203.0.113.66])\n"
+                b"\tby mail.facts.test (Postfix) with ESMTPSA id " + qid.encode() + b"\n"
+                b"\tfor <info@new.facts.test>; Tue, 13 Oct 2026 12:00:05 +0300 (+03)\n" + message("4FACTS1ONE", subject))
+    if subject.startswith("long"):
+        # with a line of 3000 characters, which Postfix breaks when it hands the message over:
+        # what it holds (held.<queue id>) and what it hands over are not the same bytes
+        with open(out.replace("handed.", "held."), "wb") as fh:
+            fh.write(data + b"L" * 3000 + b"\n")
+        data += b"L" * 998 + b"\n " + b"L" * 997 + b"\n " + b"L" * 997 + b"\n " + b"L" * 8 + b"\n"
     with open(out, "wb") as fh:
         fh.write(data)
     for a in Lmtp(sock).hand_over(data, sys.argv[6:]):
@@ -243,6 +256,12 @@ files() {   # mailbox (domain/local), subject -> its message files of that subje
 same() {   # a mailbox file, the message as handed over -> "the same" when the file is that message below what Dovecot put on top
   if lib_mail_msg_as_queued "$1" | cmp -s - "$2"; then echo "the same"; else echo "DIFFERENT: $(lib_mail_msg_as_queued "$1" | cmp - "$2" 2>&1 | cut -c1-120)"; fi
 }
+# Postfix is not asked here: what it would show of a queue file is what this test handed over
+# under that name - or, where it holds other bytes than it hands over, what it holds
+postcat() { cat "$D/held.${2:-}" 2>/dev/null || cat "$D/handed.${2:-}" 2>/dev/null; }
+is() {   # a mailbox file, a queue id, the address -> lomp's whole proof that the file is the message of that queue file
+  if lib_mail_msg_is "$@"; then echo "that message"; else echo "another"; fi
+}
 
 sec "a message handed over for one recipient"
 a="$(hand 4FACTS1ONE one-recipient info@new.facts.test)"
@@ -253,10 +272,43 @@ printf '   what Dovecot %s put on top of it:\n' "$VERSION"; sed -n '1,/^Received
 eq "the first line is the Return-Path" "Return-Path: <>" "$(sed -n 1p "${f:-/dev/null}")"
 eq "Dovecot names the recipient it was handed over for, and lomp reads it" "info@new.facts.test" "$(lib_mail_msg_delivered_to "${f:-/dev/null}")"
 has "its own Received line says LMTP" "with LMTP" "$(sed -n '1,/^Received: from client/p' "${f:-/dev/null}" | tr '\n' ' ')"
+# how lomp knows those lines for Dovecot's: by where they stand, and by a line of its own in
+# the Received among them - "<tab>by <its name> with LMTP", nothing between the name and the with
+eq "above the message stand its Return-Path, its Delivered-To and one Received, in that order" "Return-Path: Delivered-To: Received:" \
+  "$(sed -n '1,/^Received: from client/p' "${f:-/dev/null}" | sed '$d' | grep -oE '^[A-Za-z-]+:' | tr '\n' ' ' | sed 's/ $//')"
+eq "and that Received has a line of its own that reads: by <its name> with LMTP" "1" \
+  "$(sed -n '1,/^Received: from client/p' "${f:-/dev/null}" | sed '$d' | grep -cE $'^[ \t]+by[ \t]+[^ \t]+[ \t]+with[ \t]+LMTP')"
 eq "below what Dovecot put on top, the file is the message as it was handed over, byte for byte" "the same" "$(same "${f:-/dev/null}" "$D/handed.4FACTS1ONE")"
 eq "the file names the queue file it was handed over from" "4FACTS1ONE" "$(lib_mail_msg_queue_file "${f:-/dev/null}" $'OTHER1\n4FACTS1ONE\n4FACTS1')"
-eq "and the line of that hop is the one the message came with" "$(lib_mail_msg_hop "$D/handed.4FACTS1ONE")" "$(lib_mail_msg_hop "${f:-/dev/null}")"
+eq "and the line of that hop is the one the message came with" "$(lib_mail_msg_hop <"$D/handed.4FACTS1ONE")" "$(lib_mail_msg_as_queued "${f:-/dev/null}" | lib_mail_msg_hop)"
 eq "the message's own Message-ID is read, not anything of Dovecot's" "<4facts1one@example.org>" "$(lib_mail_msg_id <"${f:-/dev/null}")"
+eq "by lomp's whole proof the file is the message of that queue file, for that recipient" "that message" "$(is "${f:-/dev/null}" 4FACTS1ONE info@new.facts.test)"
+eq "and not for another" "another" "$(is "${f:-/dev/null}" 4FACTS1ONE sales@new.facts.test)"
+one="${f:-/dev/null}"
+
+sec "a message whose line of Postfix's begins like a line of Dovecot's"
+# Postfix's own line begins with the name the client gave itself, and Postfix writes that name
+# with a "?" for every blank - so its line never begins "from a by b with LMTP". lomp's proof
+# does not rest on that: here Dovecot is handed a message with such a line all the same, and
+# below it what a sender would write - the Received line and the Message-ID of the message
+# above.
+a="$(hand 4FACTS5NAME named-like-dovecot info@new.facts.test)"
+has "Dovecot takes it" "250 " "$a"
+f="$(files new.facts.test/info named-like-dovecot | sed -n 1p)"
+eq "below what Dovecot put on top, the file is that message, Postfix's line and all" "the same" "$(same "${f:-/dev/null}" "$D/handed.4FACTS5NAME")"
+eq "it names the queue file it was handed over from - not the one its sender wrote into it" "4FACTS5NAME" "$(lib_mail_msg_queue_file "${f:-/dev/null}" $'4FACTS1ONE\n4FACTS5NAME')"
+eq "asked about that other one alone, it names none" "" "$(lib_mail_msg_queue_file "${f:-/dev/null}" 4FACTS1ONE)"
+eq "it is not the message of the queue file whose line and Message-ID it carries" "another" "$(is "${f:-/dev/null}" 4FACTS1ONE info@new.facts.test)"
+eq "it is the message of its own" "that message" "$(is "${f:-/dev/null}" 4FACTS5NAME info@new.facts.test)"
+eq "and the first message is not this one's" "another" "$(is "$one" 4FACTS5NAME info@new.facts.test)"
+
+sec "a message with a line Postfix breaks when it hands it over"
+a="$(hand 4FACTS6LONG long-line info@new.facts.test)"
+has "Dovecot takes it" "250 " "$a"
+f="$(files new.facts.test/info long-line | sed -n 1p)"
+has "what Postfix holds is not what the mailbox has, byte for byte" "DIFFERENT" "$(same "${f:-/dev/null}" "$D/held.4FACTS6LONG")"
+eq "it is that message all the same: its Message-ID, under the line Postfix wrote when it took it in" "that message" "$(is "${f:-/dev/null}" 4FACTS6LONG info@new.facts.test)"
+eq "and no other queue file's" "another" "$(is "${f:-/dev/null}" 4FACTS1ONE info@new.facts.test)"
 
 sec "a message handed over for two recipients in one go"
 a="$(hand 4FACTS2TWO two-recipients info@new.facts.test sales@new.facts.test)"

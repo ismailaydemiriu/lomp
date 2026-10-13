@@ -2229,12 +2229,14 @@ lib_mail_former_refresh() {
 # when it is that message beyond doubt, and nothing is ever taken out of a mailbox for it:
 #  - a file in a new/ or a cur/ of the mailbox the message waits for is no older than the
 #    moment before Dovecot was interrupted;
-#  - the topmost Received line of that file that is not Dovecot's own names that very queue
-#    file ("by host (Postfix) with ESMTP id 4CC8113316"): it was handed over out of it;
-#  - the file is, from that line on, byte for byte what Postfix holds in the queue file - or,
-#    where Postfix broke a line of more than 998 characters when it handed the message over,
-#    carries the same Message-ID under that very line (the name of the queue file and the
-#    moment Postfix took the message in: a name is given away again, a name at a moment not);
+#  - the first Received line of that file below Dovecot's own lines - Postfix's - names that
+#    very queue file ("by host (Postfix) with ESMTP id 4CC8113316"): it was handed over out
+#    of it;
+#  - below Dovecot's lines the file is, byte for byte, what Postfix holds in the queue file -
+#    or, where Postfix broke a line of more than 998 characters when it handed the message
+#    over, carries the same Message-ID under that very line (the name of the queue file and
+#    the moment Postfix took the message in: a name is given away again, a name at a moment
+#    not);
 #  - Dovecot's "Delivered-To:" on top of it, where there is one, is the recipient the queue
 #    file waits for;
 #  - and the queue file waits for nobody whose mailbox has not got it: it goes as a whole.
@@ -2242,17 +2244,26 @@ lib_mail_former_refresh() {
 # more as it lies there, and deleted only then (lib_mail_queue_take).
 #
 # What is not told that way stays in the queue, and Postfix offers it again as before:
-#  - a mailbox with a filter of its own that does more than file a message (sends it on,
-#    answers it): what the filter had done of that cannot be told from the mailbox;
+#  - a mailbox that has a filter of its own: what the filter had done when Dovecot was
+#    interrupted - filed a copy, sent one on - cannot be told from the mailbox
+#    (lib_mail_box_filtered);
 #  - a message for two mailboxes of which one has it; one that has neither a Message-ID nor
 #    only short lines;
+#  - a message whose sender asked to be told when it has been delivered: Postfix tells when it
+#    hands the message over and hears that it was saved (lib_mail_queue_notifies);
 #  - what lies anywhere but in the deferred queue.
 #
-# Which Received line is Dovecot's own is told by how the line begins and by nothing further
-# on in it - "Received: from <name> by <name> with LMTP": the name Postfix gives itself, and
-# Dovecot's. Postfix's own line has the client in brackets after the first name, and what a
-# sender can put into either line comes later in it: the address a message is for may be
-# <"x with LMTP y"@example.com>, and a line was once taken for Dovecot's by those words.
+# Which lines of a file are Dovecot's own is told by where they stand and how they are broken,
+# and by no word a sender can have put into one. They are the first of the file, and the
+# "Received:" among them has a line of its own that reads "<tab>by <name> with LMTP":
+# Dovecot's name, and nothing between it and the "with". Postfix writes "<tab>by <name>
+# (Postfix) with ESMTP id ..." there. What a sender can put into Postfix's line stands
+# elsewhere in it and never begins a line: the address a message is for, which Postfix writes
+# as it came - <"x by y with LMTP z"@example.com> where a catch-all takes such an address -
+# on a line that begins "<tab>for <". (The name a client gives itself it writes with every
+# blank turned into a "?": "from a?by?b?with?LMTP". Both measured, Postfix 3.8.) By such
+# words in an address Postfix's own line was once taken for Dovecot's and passed over, and
+# the next one - which the sender wrote - named the queue file.
 
 # The messages a mailbox directory holds: the files in a new/ or a cur/ of its Maildir,
 # whichever folder that is - told by the directory a file lies in and never by its whole path.
@@ -2273,50 +2284,66 @@ lib_mail_address_home() {   # address
   return 0
 }
 
-# Was this message handed to Dovecot out of one of these queue files of Postfix's? Its header
-# says: every hop writes a "Received:" line on top, Postfix with the id of the queue file the
-# message lies in ("by host (Postfix) with ESMTP id 4CC8113316"), and Dovecot one more for the
-# hop into the mailbox ("with LMTP"). The topmost one that is not Dovecot's is the queue file
-# the message came out of - and only that one is asked: a message that was put back and
-# delivered again carries the id of the file it had been in as well, one line further down.
-# Prints the id when it is one of those given; an id is compared, never matched.
-lib_mail_msg_queue_file() {   # a message file, the queue ids (one per line)
-  awk -v ids="$2" '
-    function own(h) { return (h ~ /^Received:[ \t]+from[ \t]+[^ \t]+[ \t]+by[ \t]+[^ \t]+[ \t]+with[ \t]+LMTP[SA]*([ \t;\r]|$)/) }
-    function judge(h,   n, w, k) {
-      if (tolower(substr(h, 1, 9)) != "received:") return 0
-      if (own(h)) return 0
-      n = split(h, w, /[ \t;]+/)
-      for (k = 1; k < n; k++) if (w[k] == "id" && (w[k + 1] in want)) { print w[k + 1]; break }
-      return 1
+# What Dovecot puts on top of a message it saves: "Return-Path:", "Delivered-To:" - only where
+# the message was handed over for one recipient; for two in one go it writes none - and its
+# own "Received:". Everything below is the message as Postfix held it. Of a message file,
+# with "to": the address of that "Delivered-To:", in lower case (one further down is an
+# earlier hop's and not asked; a file with two of them on top was not written that way, and
+# both are printed - which is nobody's address); with "rest": the message without those
+# lines, byte for byte.
+lib_mail_msg_top() {   # a message file, "to" or "rest"
+  awk -v want="$2" '
+    function ours() {   # the header that has just ended: one of those on top?
+      if (trace) return 0
+      if (h ~ /^(Return-Path|Delivered-To):/) return 1
+      if (lmtp && h ~ /^Received:/) { trace = 1; return 1 }
+      return 0
     }
-    BEGIN { m = split(ids, q, "\n"); for (i = 1; i <= m; i++) if (q[i] != "") want[q[i]] = 1 }
-    { sub(/\r$/, "") }
-    /^$/ { exit }
-    /^[ \t]/ { h = h " " $0; next }
-    { if (h != "" && judge(h)) { h = ""; exit } h = $0 }
-    END { if (h != "") judge(h) }
+    function ended(   v) {
+      if (h == "") return
+      if (!ours()) { below = 1; if (want == "rest") printf "%s", raw }
+      else if (h ~ /^Delivered-To:/) { v = substr(h, 14); gsub(/^[ \t<]+|[ \t>\r]+$/, "", v); to = to " " tolower(v) }
+      h = ""; raw = ""; lmtp = 0
+    }
+    below { if (want == "rest") print; next }
+    /^[ \t]/ { h = h " " $0; raw = raw $0 "\n"; if ($0 ~ /^[ \t]+by[ \t]+[^ \t]+[ \t]+with[ \t]+LMTP/) lmtp = 1; next }
+    { ended() }
+    below || /^$/ { below = 1; if (want == "rest") print; next }
+    { h = $0; raw = $0 "\n" }
+    END { ended(); if (want == "to" && to != "") print substr(to, 2) }
   ' "$1" 2>/dev/null || true
 }
+lib_mail_msg_delivered_to() { lib_mail_msg_top "$1" to; }     # a message file
+lib_mail_msg_as_queued()    { lib_mail_msg_top "$1" rest; }   # a message file
 
-# That line itself, as one line: the hop a message was handed to Dovecot from, with the name of
-# the queue file and the moment Postfix took the message in. Of a message as Postfix holds it,
-# it is the first Received line there is.
-lib_mail_msg_hop() {   # a message file
+# The first "Received:" line of a message as Postfix holds it, as one line: Postfix's own -
+# it writes one on top of every message it takes in - with the name of the queue file ("by
+# host (Postfix) with ESMTP id 4CC8113316") and the moment. The message on standard input,
+# read to its end (what writes it is not left with a reader that has gone).
+lib_mail_msg_hop() {
   awk '
-    function own(h) { return (h ~ /^Received:[ \t]+from[ \t]+[^ \t]+[ \t]+by[ \t]+[^ \t]+[ \t]+with[ \t]+LMTP[SA]*([ \t;\r]|$)/) }
-    function judge(h) {
-      if (tolower(substr(h, 1, 9)) != "received:") return 0
-      if (own(h)) return 0
-      gsub(/[ \t]+/, " ", h); print h
-      return 1
-    }
+    past { next }
     { sub(/\r$/, "") }
-    /^$/ { exit }
-    /^[ \t]/ { h = h " " $0; next }
-    { if (h != "" && judge(h)) { h = ""; exit } h = $0 }
-    END { if (h != "") judge(h) }
-  ' "$1" 2>/dev/null || true
+    /^$/ { past = 1; next }
+    /^[ \t]/ { if (h != "") h = h " " $0; next }
+    h != "" { past = 1; next }
+    /^Received:/ { h = $0 }
+    END { if (h != "") { gsub(/[ \t]+/, " ", h); print h } }
+  ' 2>/dev/null || true
+}
+
+# Was this message handed to Dovecot out of one of these queue files of Postfix's? That line
+# of the message below Dovecot's own says - and only that one is asked: a message that was put
+# back and delivered again carries the id of the file it had been in as well, one line further
+# down. Prints which of the ids given the line names, each compared and never matched. More
+# than one where words of a sender's in that line read like it - the address the message is
+# for, what a certificate says of its owner: whoever asks takes none of them on the word of
+# this (lib_mail_msg_is).
+lib_mail_msg_queue_file() {   # a message file, the queue ids (one per line)
+  lib_mail_msg_top "$1" rest | lib_mail_msg_hop | awk -v ids="$2" '
+    BEGIN { m = split(ids, q, "\n"); for (i = 1; i <= m; i++) if (q[i] != "") want[q[i]] = 1 }
+    { n = split($0, w, /[ \t;]+/); for (k = 1; k < n; k++) if (w[k] == "id" && (w[k + 1] in want)) print w[k + 1] }
+  ' 2>/dev/null || true
 }
 
 # The Message-ID of a message: of the headers on standard input, in lower case. Nothing when
@@ -2337,73 +2364,64 @@ lib_mail_msg_id() {
   ' 2>/dev/null || true
 }
 
-# What Dovecot puts on top of a message it saves: "Return-Path:", "Delivered-To:" - only where
-# the message was handed over for one recipient; for two in one go it writes none - and its
-# own "Received: ... with LMTP". Everything below that is the message as Postfix held it.
-# The first prints the address of that "Delivered-To:", in lower case; the second the message
-# without those lines. A "Delivered-To:" further down is an earlier hop's and not asked.
-lib_mail_msg_delivered_to() {   # a message file
-  awk '
-    function own(h) { return (h ~ /^Received:[ \t]+from[ \t]+[^ \t]+[ \t]+by[ \t]+[^ \t]+[ \t]+with[ \t]+LMTP[SA]*([ \t;\r]|$)/) }
-    function top(h) { return (h ~ /^(Return-Path|Delivered-To):/ || own(h)) }
-    function said(h,   v) { if (h !~ /^Delivered-To:/) return; v = substr(h, 14); gsub(/^[ \t<]+|[ \t>]+$/, "", v); print tolower(v); done = 1 }
-    { sub(/\r$/, "") }
-    /^$/ { exit }
-    /^[ \t]/ { h = h " " $0; next }
-    { if (h != "") { if (!top(h)) { h = ""; exit } said(h); if (done) { h = ""; exit } } h = $0 }
-    END { if (h != "" && top(h)) said(h) }
-  ' "$1" 2>/dev/null || true
-}
-lib_mail_msg_as_queued() {   # a message file
-  awk '
-    function own(h) { return (h ~ /^Received:[ \t]+from[ \t]+[^ \t]+[ \t]+by[ \t]+[^ \t]+[ \t]+with[ \t]+LMTP[SA]*([ \t;\r]|$)/) }
-    function flush() { if (h != "" && !(h ~ /^(Return-Path|Delivered-To):/ || own(h))) { on = 1; printf "%s", raw } h = ""; raw = "" }
-    on { print; next }
-    /^[ \t]/ { h = h " " $0; raw = raw $0 "\n"; next }
-    { flush(); if (on) { print; next } h = $0; raw = $0 "\n" }
-    END { flush() }
-  ' "$1" 2>/dev/null || true
-}
-
 # Is a file of a mailbox the very message a queue file of Postfix's holds for an address? The
 # file names the queue file it came out of (lib_mail_msg_queue_file) - and a name is not
 # enough to take a message out of the queue by: Postfix gives the name of a queue file to
-# another message once the first has gone. So the two are compared: the same bytes from
-# Postfix's own Received line on (the test server: an ordinary message, one without a
-# Message-ID, one with 8-bit text and lines that begin with a dot, one of 288 KB - each the
-# same), or, where they are not - Postfix breaks a line of more than 998 characters when it
-# hands a message over - the same Message-ID under the same line of that hop: the name of the
-# queue file and the moment the message was taken in, which no other message has. And what
-# Dovecot wrote on top is not another recipient's. A message Postfix will not show is not
-# known to be the same.
+# another message once the first has gone. So the two are compared: below Dovecot's lines the
+# file is, byte for byte, what Postfix holds (the test server: an ordinary message, one
+# without a Message-ID, one with 8-bit text and lines that begin with a dot, one of 288 KB -
+# each the same), or, where it is not - Postfix breaks a line of more than 998 characters when
+# it hands a message over - the two have the same Message-ID under the same line of Postfix's:
+# the name of the queue file and the moment the message was taken in, which no other message
+# has and which Postfix writes itself. And what Dovecot wrote on top is not another
+# recipient's. A message Postfix will not show is not known to be the same.
 lib_mail_msg_is() {   # a message file, a queue id, the address the queue file waits for
-  local dt="" q="" m="" n="" hop="" was=""
+  local dt="" q="" c="" m="" n="" hop="" was=""
   lib_have postcat || return 1
   dt="$(lib_mail_msg_delivered_to "$1")"
   [[ -z "$dt" || "$dt" == "${3,,}" ]] || return 1
-  q="$(lib_mktemp)"
+  q="$(lib_mktemp)"; c="$(lib_mktemp)"
   postcat -hbq "$2" >"$q" 2>/dev/null || true
-  if [[ -s "$q" ]] && lib_mail_msg_as_queued "$1" | cmp -s - "$q"; then rm -f "$q"; return 0; fi
-  m="$(lib_mail_msg_id 2>/dev/null <"$1" || true)"
+  lib_mail_msg_as_queued "$1" >"$c"
+  if [[ -s "$q" ]] && cmp -s "$c" "$q"; then rm -f "$q" "$c"; return 0; fi
+  m="$(lib_mail_msg_id <"$c" || true)"
   n="$(lib_mail_msg_id <"$q" || true)"
-  hop="$(lib_mail_msg_hop "$1")"
-  was="$(lib_mail_msg_hop "$q")"
-  rm -f "$q"
+  hop="$(lib_mail_msg_hop <"$c")"
+  was="$(lib_mail_msg_hop <"$q")"
+  rm -f "$q" "$c"
   [[ -n "$m" && "$m" == "$n" && -n "$hop" && "$hop" == "$was" ]]
 }
 
-# Has the mailbox a filter of its own that does more with a message than file it - sends it on,
-# answers it, turns it away? What such a filter had done of that when Dovecot was interrupted
-# cannot be told from the mailbox: the message may lie there while the copy for somebody else
-# was never sent. Such a mailbox is left to Postfix, which offers the message again and has
-# the filter run once more - a second copy, as before, and nothing that is missing. (The spam
-# rule of the server only files.) A filter that cannot be read is taken for one that acts.
-lib_mail_box_acts() {   # the mailbox directory
-  local s="${1}/.dovecot.sieve"
-  [[ -e "$s" || -L "$s" ]] || return 1
-  [[ -f "$s" && -r "$s" ]] || return 0
-  if grep -Eiq 'redirect|vacation|notify|reject|pipe|execute|include' -- "$s" 2>/dev/null; then return 0; fi
-  return 1
+# Has the mailbox a filter of its own - one its owner made, in the webmail or otherwise? Then
+# what Dovecot does with a message is that filter's to say: file a copy into one folder and
+# the message into another, send a copy on, answer. Interrupted in the middle of that, Dovecot
+# has done a part of it, and answers as it does for a message it has saved: on the test
+# server, restarted under mail for a mailbox whose filter files a copy, sends a copy on and
+# keeps the message, it had filed and sent the copies of one message and not kept it (one of
+# 30 deliveries it answered "Shutting down" for; told to read its configuration again, it had
+# done all three in 49 of 49). A file of such a mailbox does not say that the message is
+# everywhere its filter puts it, or that the copy for somebody else was sent. So the mailbox
+# is left to Postfix, which offers the message again and has the filter run once more - as
+# before. Without a filter of its own, Dovecot puts a message into one place and does nothing
+# else: into Junk by the spam rule of the server, or into the inbox.
+lib_mail_box_filtered() {   # the mailbox directory
+  [[ -e "${1}/.dovecot.sieve" || -L "${1}/.dovecot.sieve" ]]
+}
+
+# Does the sender of a queue file want to be told when its message has been delivered - the
+# "delivery receipt" of a mail program, NOTIFY=SUCCESS when it hands the message in? Postfix
+# sends that notice when it hands the message over and is told that it was saved; for a
+# message that is taken out of the queue here it never is, and the notice would never be
+# written. Such a message is left to Postfix: handed over once more, and the notice with it.
+# The envelope of the queue file says, as postcat shows it: "named_attribute: notify_flags=6"
+# - the 2 in it is "when delivered" (1 never, 4 when it fails, 8 when it is late). A queue
+# file whose envelope Postfix will not show is taken for one that asks.
+lib_mail_queue_notifies() {   # queue id
+  local e=""
+  e="$(postcat -eq "$1" 2>/dev/null || true)"
+  [[ -n "$e" ]] || return 0
+  awk '/notify_flags[=:][ \t]*[0-9]+[ \t]*$/ { n = $0; sub(/[ \t]+$/, "", n); sub(/^.*[^0-9]/, "", n); if (int(n / 2) % 2 == 1) asks = 1 }
+       END { exit !asks }' <<<"$e"
 }
 
 # Which of the queue files that are asked about have arrived? Rows on standard input, one for
@@ -2422,6 +2440,10 @@ lib_mail_arrived() {   # the file that marks since when   (rows on stdin)
     [[ "$id" =~ ^[0-9A-Za-z]+$ && "$nr" =~ ^[0-9]+$ && -n "$a" && "$a" != *" "* && -n "$h1" ]] || continue
     want[$id]="$nr"
     n=$((n + 1))
+    # A recipient is told about in none of its places when its mailbox has a filter of its own
+    # in one of them (lib_mail_box_filtered): a mailbox that is being renamed lies in two for
+    # a moment, and its filter moved with it.
+    if lib_mail_box_filtered "$h1" || lib_mail_box_filtered "$h2"; then continue; fi
     for home in "$h1" "$h2"; do
       [[ -n "$home" ]] || continue
       by[$home]+="${id} ${a} ${n}"$'\n'
@@ -2430,12 +2452,9 @@ lib_mail_arrived() {   # the file that marks since when   (rows on stdin)
   names="$(lib_mktemp)"
   store="$(realpath -e -- "$MAIL_VMAIL_HOME" 2>/dev/null || true)"
   for home in "${!by[@]}"; do
-    # The mailbox directory itself, reached from the mail store by no link: what lies behind
-    # one is not known to be that mailbox. And not a mailbox whose own filter does more than
-    # file a message (lib_mail_box_acts).
-    [[ -n "$store" && -d "$home" && ! -L "$home" ]] || continue
+    # The mailbox directory itself, reached from the mail store by no link (neither it nor the
+    # directory of its domain is one): what lies behind a link is not known to be that mailbox.
     [[ "$(realpath -e -- "$home" 2>/dev/null || true)" == "${store}/${home#"${MAIL_VMAIL_HOME}"/}" ]] || continue
-    if lib_mail_box_acts "$home"; then continue; fi
     # Which of the new files have the name of one of these queue files in them at all - "id
     # 4CC8113316", as Postfix writes it - is found by one grep, and only those are then asked
     # properly, each about the names it has in it. Neither the files nor the names are few: on
@@ -2446,11 +2465,14 @@ lib_mail_arrived() {   # the file that marks since when   (rows on stdin)
     awk 'NF { print "id " $1 }' <<<"${by[$home]}" | LC_ALL=C sort -u >"$names" || true
     [[ -s "$names" ]] || continue
     while IFS= read -r -d '' f; do
+      # (not a file that is older than the last change of the mailbox directory itself: a
+      # filter was taken away there since, and what it had done with the message is not known)
+      if [[ "$home" -nt "$f" ]]; then continue; fi
       in="$(grep -aoF -f "$names" -- "$f" 2>/dev/null | LC_ALL=C sort -u | sed 's/^id //' || true)"
       got="$(lib_mail_msg_queue_file "$f" "$in")"
       [[ -n "$got" ]] || continue
       while read -r id a row; do
-        [[ "$id" == "$got" && -n "$row" && -z "${proven[$row]:-}" ]] || continue
+        [[ $'\n'"${got}"$'\n' == *$'\n'"${id}"$'\n'* && -z "${proven[$row]:-}" ]] || continue
         if lib_mail_msg_is "$f" "$id" "$a"; then proven[$row]="$id"; break; fi
       done <<<"${by[$home]}"
     done < <(lib_mail_box_messages "$home" -newer "$since" -print0 | xargs -0 -r grep -alZF -f "$names" -- 2>/dev/null || true)
@@ -2458,19 +2480,77 @@ lib_mail_arrived() {   # the file that marks since when   (rows on stdin)
   rm -f "$names"
   for row in "${!proven[@]}"; do id="${proven[$row]}"; count[$id]=$(( ${count[$id]:-0} + 1 )); done
   for id in "${!want[@]}"; do
-    if (( ${count[$id]:-0} == want[$id] )); then printf '%s\n' "$id"; fi
+    (( ${count[$id]:-0} == want[$id] )) || continue
+    if lib_mail_queue_notifies "$id"; then continue; fi
+    printf '%s\n' "$id"
   done | LC_ALL=C sort || true
   return 0
+}
+
+# What lomp puts on hold it writes down first: the name of the queue file and the moment
+# Postfix took that message in - a name is given to another message once the first has gone,
+# a name with its moment is not. Mail on hold is never delivered and never expires, and
+# nothing would say that it lies there: should lomp be stopped before it has deleted or
+# released what it put there, the next look releases what is left of it.
+lib_mail_held_dir() { printf '%s/mail/held' "$STATE_DIR"; }
+lib_mail_held_note() {   # the queue ids (one a line)   -> the file they are written down in
+  local d="" f=""
+  d="$(lib_mail_held_dir)"
+  mkdir -p "$d" 2>/dev/null || return 0
+  f="$(mktemp "${d}/$$.XXXXXX" 2>/dev/null || true)"
+  [[ -n "$f" ]] || return 0
+  postqueue -j 2>/dev/null | jq -r --arg ids "$1" '
+      ($ids | split("\n")) as $h | select(.queue_id as $i | any($h[]; . == $i)) | "\(.queue_id) \(.arrival_time)"' >"$f" 2>/dev/null || true
+  printf '%s' "$f"
+}
+# ... and what an earlier look left there: written down more than ten minutes ago (a younger
+# note may be a look that is at work beside this one) and still on hold under that name with
+# that moment. Released, it waits as before and is looked at like any other.
+lib_mail_held_release() {
+  local d="" f="" left="" back=""
+  d="$(lib_mail_held_dir)"
+  lib_have postqueue && lib_have postsuper || return 0
+  while IFS= read -r -d '' f; do
+    left="$(postqueue -j 2>/dev/null | jq -r 'select(.queue_name == "hold") | "\(.queue_id) \(.arrival_time)"' 2>/dev/null \
+              | grep -xF -f "$f" | awk '{ print $1 }' || true)"
+    if [[ -n "$left" ]]; then
+      # "postsuper: 4CC8113316: released from hold"
+      back="$(postsuper -H - hold <<<"$left" 2>&1 | sed -n 's/^postsuper: \([0-9A-Za-z][0-9A-Za-z]*\): released from hold$/\1/p' || true)"
+      if [[ -n "$back" ]]; then
+        lib_warn "$(grep -c . <<<"$back" || true) message(s) an earlier look had put on hold to compare, and was stopped before it took them off again, are released: Postfix offers them as before"
+        left="$(grep -vxF -- "$back" <<<"$left" || true)"
+      fi
+    fi
+    [[ -n "$left" ]] || rm -f "$f"
+  done < <(find "$d" -type f -mmin +10 -print0 2>/dev/null || true)
+  return 0
+}
+
+# Which of these queue files wait, as Postfix shows them now, for whom the rows say they waited
+# for - no more of them, no fewer, nobody else, in that order? The names, one a line; rows on
+# standard input.
+lib_mail_held_same() {   # the queue ids   (rows on stdin)
+  local now=""
+  now="$(lib_mktemp)"
+  postqueue -j 2>/dev/null | jq -r '.queue_id as $id | (.recipients // [])[] | "\($id)\t\(.address // "" | ascii_downcase)"' >"$now" 2>/dev/null || true
+  awk -F'\t' -v ids="$1" '
+    BEGIN { n = split(ids, a, "\n"); for (i = 1; i <= n; i++) if (a[i] != "") h[a[i]] = 1 }
+    !rows { now[$1] = now[$1] $2 "\n"; next }
+    ($1 in h) { was[$1] = was[$1] $3 "\n" }
+    END { for (id in was) if (was[id] == now[id]) print id }' "$now" rows=1 - || true
+  rm -f "$now"
 }
 
 # What has arrived, out of Postfix's deferred queue - by a name that is still the message it
 # was. A queue file is known by its name, and Postfix gives a name to another message once the
 # first has gone (postsuper(1) says so of "-d"): between the look and the removal, what lies
-# under the name could be another message. So what the look found is put on hold first - there
-# nothing delivers it, nothing removes it and nothing takes its name - and asked about once
-# more as it lies there. What is still beyond doubt is deleted, out of the hold queue; the rest
-# is released and waits as before. (Should lomp be stopped between the two, what stays on hold
-# is what the first look had found in its mailbox.)
+# under the name could be another message - one that is in a mailbox the first was for, and
+# waits for somebody else. So what the look found is put on hold first - there nothing
+# delivers it, nothing removes it and nothing takes its name - and asked about once more as
+# it lies there: whom it waits for, which has to be whom it waited for (lib_mail_held_same),
+# and whether each of them has it. What is still beyond doubt is deleted, out of the hold
+# queue; the rest is released and waits as before. What is put on hold is written down first
+# (lib_mail_held_note), and nothing that is not written down is put there.
 #
 # From the deferred queue only. A message in the active queue is being handed over at this
 # moment. And where mail comes in lies new mail - and what Postfix laid back there when its
@@ -2483,14 +2563,17 @@ lib_mail_arrived() {   # the file that marks since when   (rows on stdin)
 #
 # Rows on standard input as for lib_mail_arrived; prints the ids that were removed.
 lib_mail_queue_take() {   # the file that marks since when   (rows on stdin)
-  local since="${1:-}" rows="" first="" held="" sure="" gone="" rest="" back=""
+  local since="${1:-}" rows="" first="" note="" held="" same="" sure="" gone="" rest="" back=""
   rows="$(cat)"
+  lib_mail_held_release
   first="$(lib_mail_arrived "$since" <<<"$rows" || true)"
   [[ -n "$first" ]] || return 0
+  note="$(lib_mail_held_note "$first")"
+  [[ -n "$note" ]] || return 0
   # what postsuper names is what it took: "postsuper: 4CC8113316: placed on hold"
-  held="$(postsuper -h - deferred <<<"$first" 2>&1 | sed -n 's/^postsuper: \([0-9A-Za-z][0-9A-Za-z]*\): placed on hold$/\1/p' || true)"
-  [[ -n "$held" ]] || return 0
-  sure="$(awk -F'\t' -v ids="$held" 'BEGIN { n = split(ids, a, "\n"); for (i = 1; i <= n; i++) if (a[i] != "") h[a[i]] = 1 } ($1 in h)' <<<"$rows" \
+  held="$(awk '{ print $1 }' "$note" | postsuper -h - deferred 2>&1 | sed -n 's/^postsuper: \([0-9A-Za-z][0-9A-Za-z]*\): placed on hold$/\1/p' || true)"
+  same="$(lib_mail_held_same "$held" <<<"$rows")"
+  sure="$(awk -F'\t' -v ids="$same" 'BEGIN { n = split(ids, a, "\n"); for (i = 1; i <= n; i++) if (a[i] != "") h[a[i]] = 1 } ($1 in h)' <<<"$rows" \
             | lib_mail_arrived "$since" || true)"
   if [[ -n "$sure" ]]; then
     # "postsuper: 4CC8113316: removed"
@@ -2506,6 +2589,8 @@ lib_mail_queue_take() {   # the file that marks since when   (rows on stdin)
       lib_warn "Postfix did not take $(grep -c . <<<"$rest" || true) message(s) back out of its hold queue, where they were put only to be compared: postsuper -H $(tr '\n' ' ' <<<"$rest" | sed 's/ *$//')"
     fi
   fi
+  # the note goes once nothing of it is left on hold
+  [[ -n "$rest" ]] || rm -f "$note"
   [[ -z "$gone" ]] || printf '%s\n' "$gone"
   return 0
 }
@@ -2521,6 +2606,7 @@ lib_mail_settle() {   # the file that marks since when
   MAIL_SETTLED=0
   [[ -n "$since" && -e "$since" ]] || return 0
   lib_have postqueue && lib_have postsuper && lib_have postcat || return 0
+  lib_mail_held_release
   rows="$(postqueue -j 2>/dev/null | jq -r '
             select(.queue_name == "deferred" and ((.recipients // []) | length) > 0)
             | select(all(.recipients[]; (.delay_reason // "") | test("dovecot-lmtp")))
@@ -2590,9 +2676,11 @@ lib_mail_stack_reload() {
 
 # "mail settle": the same look for whoever reloaded or restarted Dovecot outside lomp - the
 # certbot deploy hook does, after a renewed mail certificate, and so may whoever did it by
-# hand. It takes no lock (the hook runs inside a command that holds it) and never fails. What
-# it looks at is the last four minutes - Postfix offers a message it was told to keep again
-# after five - and what it found is said.
+# hand. It takes no lock and never fails: the hook runs inside a command that holds the lock
+# (renew-ssl) or with no lomp command around it (certbot's own timer), and a look beside
+# another command takes nothing from it - each deletes and releases only what it put on hold
+# itself. What it looks at is the last four minutes - Postfix offers a message it was told to
+# keep again after five - and what it found is said.
 lib_mail_settle_main() {
   local MAIL_SETTLE_SAID=1
   if ! lib_mail_installed; then lib_info "Mail is not installed"; return 0; fi

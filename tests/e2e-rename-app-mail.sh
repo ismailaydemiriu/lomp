@@ -507,6 +507,37 @@ eq "the one that had not been saved is delivered, once" "1" "$(in_box e2e-unsave
 eq "and the mailbox that lacked the fourth has it" "1" "$(in_box e2e-half "/var/vmail/$MB/side")"
 has "a second look finds nothing, and says so" "Nothing that Dovecot made Postfix keep in the last four minutes is in a mailbox already" "$($L mail settle --no-color 2>&1)"
 eq "asked to be quiet - as the certificate hook asks - it says nothing" "0|" "$(o="$($L mail settle --quiet --no-color 2>&1)"; printf '%s|%s' "$?" "$o")"
+# ... and what is never taken for delivered that way, whatever the mailbox has. A mailbox that
+# has a filter of its own - here one that sends a copy on: what the filter had done when
+# Dovecot was interrupted cannot be told from the mailbox. And a message whose sender asked
+# to be told when it has been delivered: Postfix tells when it hands the message over and
+# hears that it was saved.
+install -d -o vmail -g vmail -m 0700 "/var/vmail/$MB/side/sieve"
+printf 'require ["copy"];\nredirect :copy "info@%s";\n' "$MB" >"$T/own.sieve"
+install -o vmail -g vmail -m 0600 "$T/own.sieve" "/var/vmail/$MB/side/sieve/own.sieve"
+runuser -u vmail -- ln -s sieve/own.sieve "/var/vmail/$MB/side/.dovecot.sieve"
+chmod 000 "/var/vmail/$MB/info/Maildir/tmp" "/var/vmail/$MB/side/Maildir/tmp"
+swaks --server 127.0.0.1 --port 25 --helo client.example.org --from '<>' --to "side@$MB" --header "Subject: e2e-filtered" --body hello >/dev/null 2>&1
+printf 'Subject: e2e-receipt\n\nhello\n' | sendmail -N success -f "side@$MB" "info@$MB"
+for i in $(seq 1 20); do [ -n "$(subject_id e2e-filtered)" ] && [ -n "$(subject_id e2e-receipt)" ] && break; sleep 1; done
+chmod 700 "/var/vmail/$MB/info/Maildir/tmp" "/var/vmail/$MB/side/Maildir/tmp"
+qf="$(subject_id e2e-filtered)"; qr="$(subject_id e2e-receipt)"
+if [ -n "$qf" ] && [ -n "$qr" ]; then ok "Postfix holds one for a mailbox whose own filter sends mail on, and one whose sender asked to be told"; else bad "Postfix holds one for a mailbox whose own filter sends mail on, and one whose sender asked to be told" "$(postqueue -p 2>&1 | tail -n 8)"; fi
+has "(the envelope of the second says so)" "notify_flags=2" "$(postcat -eq "${qr:-none}" 2>/dev/null | grep notify_flags)"
+dovecot_wrote "${qf:-none}" "/var/vmail/$MB/side" "side@$MB"
+dovecot_wrote "${qr:-none}" "/var/vmail/$MB/info" "info@$MB"
+eq "(each lies in its mailbox as Dovecot writes one)" "1 1" "$(in_box e2e-filtered "/var/vmail/$MB/side") $(in_box e2e-receipt "/var/vmail/$MB/info")"
+has "neither is taken for delivered" "Nothing that Dovecot made Postfix keep in the last four minutes is in a mailbox already" "$($L mail settle --no-color 2>&1)"
+has "the one for the mailbox with the filter stays in the queue" "deferred" "$(queue_of "${qf:-none}")"
+has "and so does the one whose sender asked to be told" "deferred" "$(queue_of "${qr:-none}")"
+for i in $(seq 1 30); do [ -z "$(held_for "info@$MB")$(held_for "side@$MB")" ] && break; postqueue -f >/dev/null 2>&1; sleep 1; done
+for i in $(seq 1 15); do [ "$(in_box e2e-filtered "/var/vmail/$MB/info")" -ge 1 ] && [ "$(in_box 'Successful Mail Delivery Report' "/var/vmail/$MB/side")" -ge 1 ] && break; sleep 1; done
+# (the copy may be there twice: the filter had sent one on already when Dovecot could not write
+# the message itself and gave it back - which is why such a mailbox is left to Postfix)
+if [ "$(in_box e2e-filtered "/var/vmail/$MB/info")" -ge 1 ]; then ok "Postfix hands the first over, and the filter sends its copy on: whom it is for has it"
+else bad "Postfix hands the first over, and the filter sends its copy on: whom it is for has it" "$(postqueue -p 2>&1 | tail -n 4)"; fi
+eq "and the second: its sender is told that it has been delivered, once" "1" "$(in_box 'Successful Mail Delivery Report' "/var/vmail/$MB/side")"
+rm -f "/var/vmail/$MB/side/.dovecot.sieve"; rm -rf "/var/vmail/$MB/side/sieve"
 eq "nothing was bounced" "0" "$(journalctl -t postfix/lmtp --since "@$tb" --no-pager -o cat 2>/dev/null | grep -c "to=<[a-z]*@$MB>.*status=bounced")"
 # ... and a reload of lomp's own, with nothing held: Dovecot goes on taking mail, once
 if deliver "info@$MB" e2e-after-look "/var/vmail/$MB/info/Maildir"; then ok "mail to the mailbox arrives as before"; else bad "mail to the mailbox arrives as before" "$(postqueue -p 2>&1 | tail -n 4)"; fi

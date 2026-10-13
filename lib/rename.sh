@@ -905,8 +905,8 @@ UPDATE \`${WM_DB_NAME}\`.identities i JOIN \`${WM_DB_NAME}\`.users u ON u.user_i
 # lib_mail_queue_take puts it on hold, compares it once more there and deletes it then).
 # Nothing is ever taken out of a mailbox for it: where it cannot be told for certain, the
 # message is sent on like the others, and may be there twice - as one that also waits for an
-# address which did not move, for a mailbox that has not got it, or for one whose own filter
-# sends mail on.
+# address which did not move, for a mailbox that has not got it, or for one that has a filter
+# of its own.
 #
 # From the deferred queue only. A message in the active queue is being handed over at this
 # very moment, and what Dovecot answers is what becomes of it whatever is done to its file:

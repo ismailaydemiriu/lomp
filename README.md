@@ -409,11 +409,13 @@ rename, or by the move of the mailbox under a delivery - is sent through the ali
 being offered, minutes later, to an address that is no mailbox any more. Where Dovecot had
 written such a message into the mailbox before it gave it back to Postfix, the message has
 arrived: it is taken out of the queue instead and not sent a second time. That is told by the
-file itself - it names the queue file it was handed over from, and from that line on it is
-what Postfix holds, byte for byte - so a message without a Message-ID is told as well, and one
-for two mailboxes goes out of the queue once both have it. Nothing is ever removed from a
-mailbox for it; where it cannot be told for certain, the message is sent on (see "When
-Dovecot is interrupted" under Mail for the same look after a reload).
+file itself - below the lines Dovecot puts on top it is what Postfix holds, byte for byte, and
+names the queue file it was handed over from - so a message without a Message-ID is told as
+well, and one for two mailboxes goes out of the queue once both have it. Nothing is ever
+removed from a mailbox for it; where it cannot be told for certain, the message is sent on
+(see "When Dovecot is interrupted" under Mail for the same look after a reload, and for what
+is never told that way: a mailbox that has a filter of its own, a message whose sender asked
+for a delivery receipt).
 
 Dovecot is told the addresses the mailboxes had as well (`/etc/dovecot/lomp/former`, rewritten
 with the mail tables). Postfix applies an alias when a message comes in, not when it hands it
@@ -1146,23 +1148,30 @@ server, that was 15 of 629 messages after six reloads, 15 of 464 after four rest
 
 So after every reload and restart of its own - a certificate put in place, a list Dovecot has
 to learn of, `mail regenerate` - lomp looks at what Postfix was told to keep by Dovecot in that
-moment, and takes out of the queue what the mailbox has: the file names the queue file it was
-handed over from, is byte for byte what Postfix holds from that line on, and was written for
-the recipient the queue file waits for. Such a message is put on hold first, compared once
-more as it lies there - a queue file's name is given to another message once the first has
-gone - and deleted only then. The certbot deploy hook does the same after a renewed mail
-certificate (`lomp mail settle`, which looks back over the last four minutes and is what to
-run after reloading Dovecot by hand under mail), and it tells Dovecot first and Postfix
-afterwards: told in the same moment, Postfix was replacing its queue manager when Dovecot
-gave a message back, and offered it again by itself. Nothing is taken out of a mailbox, and
+moment, and takes out of the queue what the mailbox has: below the lines Dovecot puts on top,
+the file is byte for byte what Postfix holds, its first line there names the queue file it
+was handed over from, and it was written for the recipient the queue file waits for. Such a
+message is put on hold first, compared once more as it lies there - a queue file's name is
+given to another message once the first has gone - and deleted only then. The certbot deploy
+hook does the same after a renewed mail certificate (`lomp mail settle`, which looks back over
+the last four minutes and is what to run after reloading Dovecot by hand under mail), and it
+tells Dovecot first and Postfix afterwards: told in the same moment, Postfix was replacing its
+queue manager when Dovecot gave a message back, and offered it again by itself. In the mail
+log such a message ends with `postsuper: <id>: removed` after its `status=deferred`, not with
+`status=sent`; lomp's own log says how many there were. Nothing is taken out of a mailbox, and
 what cannot be told for certain stays in the queue and is delivered as before:
 
 - a message for two mailboxes of which only one has it - Postfix holds a message for all of
   its recipients or for none, so it is offered to both again;
 - a message without a Message-ID that has a line of more than 998 characters, which Postfix
   breaks when it hands the message over (with a Message-ID it is told by that);
-- mail for a mailbox whose own filter does more than file it - sends it on, answers it: what
-  the filter had done of that when Dovecot was interrupted cannot be told from the mailbox;
+- mail for a mailbox that has a filter of its own, as the webmail makes them - one that files
+  a copy into a folder, sends a copy on, answers: interrupted in the middle of that, Dovecot
+  has done a part of it (restarted under mail on the test server, it had filed and sent the
+  copies of one message of 30 and not kept the message itself), and which part cannot be told
+  from the mailbox;
+- a message whose sender asked to be told when it has been delivered (the delivery receipt of
+  a mail program): Postfix sends that notice when it hands the message over, so it does;
 - what Postfix and Dovecot, reloaded by hand in the same moment, interrupted between them -
   such a message is not in the deferred queue, and lomp takes nothing from anywhere else;
 - what a restart of Dovecot by anything else interrupted - a package upgrade, `systemctl`
