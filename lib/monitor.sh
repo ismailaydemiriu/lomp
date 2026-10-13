@@ -830,6 +830,23 @@ _doc_mail_shared_names() {
   return 0
 }
 
+# The list of the addresses mailboxes had before a rename (lib_mail_render_former), where
+# Dovecot's configuration names one. Without the file Dovecot has no answer for an address
+# that is no mailbox - and Postfix, which asks it at every RCPT TO, puts off the mail of every
+# alias and every forward for as long as the file is not there.
+_doc_mail_former() {
+  local former="" mode="" auth="${MAIL_DOVECOT_DIR}/auth-passwdfile.conf"
+  former="$(lib_mail_former_file)"
+  [[ -f "$auth" ]] && lib_grepq -F -- "$former" "$auth" || return 0
+  if [[ ! -f "$former" ]]; then
+    _doc_add FAIL "mail: former addresses" "${former} is missing and Dovecot is told to read it: mail for an alias or a forward is put off until it is there (setup.sh mail regenerate)"
+    return 0
+  fi
+  mode="$(stat -c '%U:%G %a' "$former" 2>/dev/null || true)"
+  [[ "$mode" == "root:dovecot 640" ]] || _doc_add FAIL "mail: former addresses" "${former} is ${mode:-unreadable}, expected root:dovecot 640"
+  return 0
+}
+
 _doc_check_mail() {
   local s="" days="" mode="" issuer="" p="" q="" ver="" d=""
   lib_mail_installed || return 0
@@ -859,6 +876,7 @@ _doc_check_mail() {
     mode="$(stat -c '%U:%G %a' "$MAIL_PASSWD_FILE" 2>/dev/null || true)"
     [[ "$mode" == "root:dovecot 640" ]] || _doc_add FAIL "mail: user store" "${MAIL_PASSWD_FILE} is ${mode:-unreadable}, expected root:dovecot 640"
   fi
+  _doc_mail_former
 
   days="$(lib_ssl_days_left "$MAIL_CERT_NAME")"
   issuer="$(lib_ssl_issuer "$MAIL_CERT_NAME")"

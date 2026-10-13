@@ -403,11 +403,33 @@ is renamed back to the name it had gets its mailboxes back under their first add
 
 Mail that arrives while the mailboxes move is not lost over it. What still reaches an old
 address in that moment is carried into the mailbox under its new one, into the folder it was
-filed in (the spam rule puts what Rspamd marked into Junk). A message Postfix was holding for
-an old address - put off before the rename, or by the move of the mailbox under a delivery -
-is sent through the alias instead of being offered, minutes later, to an address that is no
-mailbox any more. And a directory that lies where a mailbox goes keeps that mailbox where it is
-only when there is mail in it: an empty one is removed, and that is said.
+filed in (the spam rule puts what Rspamd marked into Junk) - also when it is the first mail
+that mailbox ever got. A message Postfix was holding for an old address - put off before the
+rename, or by the move of the mailbox under a delivery - is sent through the alias instead of
+being offered, minutes later, to an address that is no mailbox any more. Where Dovecot had
+written such a message into the mailbox before it gave it back to Postfix, the message has
+arrived: it is taken out of the queue instead and not sent a second time (told by the queue
+file the message names and by its Message-ID; nothing is ever removed from a mailbox for it).
+
+Dovecot is told the addresses the mailboxes had as well (`/etc/dovecot/lomp/former`, rewritten
+with the mail tables). Postfix applies an alias when a message comes in, not when it hands it
+over: a message whose sender was in the middle of it when the aliases took effect, or one that
+was on hold and is released days later, still names the old address when it reaches Dovecot.
+It is put into the mailbox that had the address, where it used to be sent back to its sender.
+Such an address is another name of the mailbox for what is handed over under it, with the
+mailbox's own quota and filters, and nothing more: nobody signs in with it.
+
+A directory that lies where a mailbox goes does not keep the mailbox where it is. An empty one
+is removed. Mail that was left under an address when its site was renamed away - a release
+before this one left the spam rule's folder so - is carried into the mailbox when the site
+comes back to that name. Anything else is put aside beside the mailbox with all that is in it,
+under a name no mailbox can have (`info~20261012-231500`): whose that mail is, lomp cannot
+say, so it says where it is, how many messages it holds and the command that copies them into
+the mailbox for whoever can (`doveadm import -u info@example.com
+maildir:/var/vmail/example.com/info~20261012-231500/Maildir "" all`; the directory stays
+until somebody removes it - no backup of the mail holds it, and it is deleted with the
+domain's mail). Each of these is said. Only what is not for lomp to judge is still in the way, and named: a link,
+a file, the mail of a mailbox that `mail disable` put aside.
 
 `--keep-mail` leaves the mail at the old domain instead: `example.com` becomes a mail domain of
 its own with everything as it was, and the site starts without mail under its new name. That is

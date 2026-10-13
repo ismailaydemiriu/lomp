@@ -685,9 +685,24 @@ mail_rows() {
   users=""
   if command -v doveadm >/dev/null 2>&1; then users="$(doveadm user '*' 2>/dev/null)"; fi
   [ -n "$users" ] || users="$(printf '%s\n' "$hashes" | cut -f1)"
-  printf '%s\n' "$users" | while IFS= read -r u; do
+  # A lomp server tells its Dovecot the addresses mailboxes had before a rename: each is
+  # another name of a mailbox there, which Dovecot lists among its users - and no mailbox.
+  # It comes over as the alias it is. An address that has a line among the mailboxes as well
+  # is a mailbox, whatever that list says of it, and is listed once.
+  former=""
+  if [ -r "$R/etc/dovecot/lomp/former" ]; then
+    former="$(awk -F: -v pw="$R/etc/dovecot/lomp/passwd" '
+      BEGIN { while ((getline l < pw) > 0) { split(l, p, ":"); box[p[1]] = 1 } }
+      !($1 in box) { print $1 }' "$R/etc/dovecot/lomp/former" 2>/dev/null)"
+  fi
+  printf '%s\n' "$users" | awk '!seen[$0]++' | while IFS= read -r u; do
     case "$u" in *@*) ;; *) continue ;; esac
     case "$u" in *[!A-Za-z0-9@._+-]*) continue ;; esac
+    case "
+$former
+" in *"
+$u
+"*) continue ;; esac
     n="${u%@*}"; d="${u#*@}"
     p=""
     if command -v doveadm >/dev/null 2>&1; then p="$(doveadm mailbox path -u "$u" INBOX 2>/dev/null | sed -n 1p)"; fi

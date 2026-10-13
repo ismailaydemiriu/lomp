@@ -59,6 +59,7 @@ MAIL_QUOTA_DEFAULT="${MAIL_QUOTA_DEFAULT:-1G}"
 MAIL_MSG_SIZE_MB="${MAIL_MSG_SIZE_MB:-25}"
 MAIL_MIN_RAM_MB="${MAIL_MIN_RAM_MB:-1800}"
 MAIL_LAST_ERROR=""
+MAIL_FORMER_TOLD=0     # lib_mail_former_apply: 1 when that call told Dovecot of the list
 
 # =============================================================================
 #  State
@@ -522,13 +523,24 @@ EOF
 }
 
 # The user store. One file, one format, and no driver that could reach a system account.
+# After it a second list that is a user database only - nobody signs in from it: the addresses
+# that are another name of a mailbox since its site was renamed (lib_mail_render_former).
+# Dovecot asks the lists in this order, so an address that is a mailbox is never looked for in
+# the second.
 lib_mail_render_dovecot_auth() {
   printf '# Managed by lompstack - the only place a mailbox password is checked.\n'
   printf '# Lines are written by "lomp mail box add"; they hold a BLF-CRYPT hash, never a password.\n\n'
   printf 'passdb {\n  driver = passwd-file\n  args = scheme=BLF-CRYPT username_format=%%Lu %s\n}\n\n' "$MAIL_PASSWD_FILE"
   printf 'userdb {\n  driver = passwd-file\n  args = username_format=%%Lu %s\n' "$MAIL_PASSWD_FILE"
   printf '  default_fields = uid=%s gid=%s home=%s/%%Ld/%%Ln\n}\n' "$MAIL_VMAIL_USER" "$MAIL_VMAIL_USER" "$MAIL_VMAIL_HOME"
+  printf '\n# The addresses mailboxes had before a rename: each is another name of its mailbox for what\n'
+  printf '# is still handed over under it. Written by lomp with the mail tables; no password is in it.\n'
+  printf 'userdb {\n  driver = passwd-file\n  args = username_format=%%Lu %s\n' "$(lib_mail_former_file)"
+  printf '  default_fields = uid=%s gid=%s\n}\n' "$MAIL_VMAIL_USER" "$MAIL_VMAIL_USER"
 }
+
+# Where that second list is: beside the user file, whose configuration names both.
+lib_mail_former_file() { printf '%s/former' "$(dirname "$MAIL_PASSWD_FILE")"; }
 
 # Mail Rspamd scored as spam goes to Junk instead of the inbox. Nothing is deleted here: a
 # false positive the user never sees is worse than one they can drag back.
@@ -1179,6 +1191,15 @@ lib_mail_configs_write() {   # host
   # the user store exists from the first install; without it Dovecot refuses to start
   if [[ ! -f "$MAIL_PASSWD_FILE" ]]; then
     printf '' | lib_write_file "$MAIL_PASSWD_FILE" 0640 root:dovecot secret
+    _mail_changed_note
+  fi
+  # ... and so does the list of former addresses the same configuration names. A list that is
+  # not there is no "unknown user" to Dovecot but a failure of its own: asked by Postfix at
+  # RCPT TO about an address that is no mailbox - every alias, every forward - it answered
+  # "Temporary internal error" on the test server (2.3.21), and Postfix puts such mail off.
+  # An empty list is an answer: "no such user", as without one.
+  if [[ ! -f "$(lib_mail_former_file)" ]]; then
+    printf '' | lib_write_file "$(lib_mail_former_file)" 0640 root:dovecot
     _mail_changed_note
   fi
   return 0
@@ -2053,6 +2074,129 @@ lib_mail_render_selectors() {
   return 0
 }
 
+# The addresses a mailbox had before. "rename" takes a site's mailboxes to the new domain and
+# leaves each old address behind as an alias of the same address there - and Postfix applies
+# an alias when a message comes in, not when it hands it over. A message that still names the
+# old address when it reaches Dovecot was answered "550 User doesn't exist" and returned to
+# its sender: one whose sender was in the middle of it when the aliases took effect (taken in
+# with the tables as they were when it began - seen with a sender that was slow across that
+# moment), one put on hold and released later, one put off after the rename had looked.
+# So Dovecot is told as well. Such an address is another name of the mailbox: its user, its
+# home, its quota, its own filters - a message handed over under it lands in the mailbox, and
+# nobody can sign in with it, because this list is a user database only.
+# One line for every alias that leads from an address to the same local part at another domain
+# and nowhere else, followed through aliases of that kind (a site renamed twice) to a mailbox
+# that is there. No other alias is in it. In Dovecot's passwd-file format: the address, the
+# mailbox's home, "userdb_user=" and the fields the mailbox's own line gives its user.
+lib_mail_render_former() {
+  local d="" f=""
+  local -a files=()
+  [[ -s "$MAIL_PASSWD_FILE" ]] || return 0
+  while read -r d; do
+    [[ -n "$d" ]] || continue
+    f="$(lib_mail_alias_file "$d")"
+    if [[ -s "$f" ]]; then files+=("$f"); fi
+  done < <(lib_mail_domains)
+  (( ${#files[@]} > 0 )) || return 0
+  # An address is compared and put together here, never matched: one that is not made of the
+  # characters an address of lomp's has is left out, and with it whatever a line of an alias
+  # file that was not written by lomp might have spelled into Dovecot's list.
+  awk -v home="$MAIL_VMAIL_HOME" '
+    function loc(a) { return substr(a, 1, index(a, "@") - 1) }
+    function dom(a) { return substr(a, index(a, "@") + 1) }
+    function plain(a,   l, d) {
+      if (a ~ /[^a-z0-9@._-]/ || index(a, "@") == 0 || index(a, "..") > 0) return 0
+      l = loc(a); d = dom(a)
+      return (l != "" && d != "" && index(d, "@") == 0 && d !~ /^[.-]/ && l !~ /^[.-]/)
+    }
+    FNR == NR {                # the user file: address:hash:uid:gid:gecos:home:shell:fields
+      n = split($0, p, ":")
+      if (n < 2 || !plain(p[1])) next
+      rest = ""
+      for (i = 8; i <= n; i++) rest = rest (i > 8 ? ":" : "") p[i]
+      box[p[1]] = 1; fields[p[1]] = rest
+      next
+    }
+    /^[ \t]*#/ || index($0, "\t") == 0 { next }
+    {
+      k = $0; sub(/\t.*$/, "", k)
+      t = $0; sub(/^[^\t]*\t/, "", t); gsub(/[ \t]/, "", t)
+      if (!plain(k) || !plain(t) || loc(k) != loc(t) || dom(k) == dom(t)) next
+      to[k] = t
+    }
+    END {
+      for (k in to) {
+        t = to[k]
+        for (hop = 0; hop < 8 && !(t in box) && (t in to); hop++) t = to[t]
+        if (!(t in box)) continue
+        printf "%s:::::%s/%s/%s::userdb_user=%s%s\n", k, home, dom(t), loc(t), t, (fields[t] != "" ? " " fields[t] : "")
+      }
+    }
+  ' "$MAIL_PASSWD_FILE" "${files[@]}" | LC_ALL=C sort || true
+  return 0
+}
+
+# That list where Dovecot reads it. Dovecot looks at the file by itself, as at the user file -
+# but a server that was set up by a release without such a list has to be told once that
+# there is one: its user configuration is written again, tested before anything is reloaded,
+# and put back if Dovecot will not have it (see lib_mail_dovecot_sni_apply for why). Only the
+# configuration that reads this very user file.
+#
+# Telling Dovecot costs a reload, and a reload ends the deliveries it is in the middle of. On
+# the test server, told when the list got its first line - in the middle of a rename, with
+# mail arriving - Dovecot answered one of them "421 Shutting down" after it had saved the
+# message, and the message arrived a second time when Postfix offered it again. So it is
+# told only where there is something to tell - the list has a line - or where the caller says
+# that now is the moment ("always"): "rename" says so before it moves a mailbox, when what a
+# reload puts off still waits under the old address and is sent on with the rest
+# (_domain_rename_mail_requeue). MAIL_FORMER_TOLD says whether this call told it.
+lib_mail_former_apply() {   # [always]
+  local list="" auth="${MAIL_DOVECOT_DIR}/auth-passwdfile.conf" bak=""
+  MAIL_FORMER_TOLD=0
+  list="$(lib_mail_former_file)"
+  lib_mail_render_former | lib_write_file "$list" 0640 root:dovecot
+  (( OPT_DRY_RUN )) && return 0
+  [[ -f "$auth" ]] || return 0
+  [[ -s "$list" || "${1:-}" == "always" ]] || return 0
+  lib_grepq -F -- "$MAIL_PASSWD_FILE" "$auth" || return 0
+  if lib_grepq -F -- "$list" "$auth"; then return 0; fi
+  bak="$(lib_backup_config "$auth")"
+  lib_mail_render_dovecot_auth | lib_write_file "$auth" 0644 root:root
+  if lib_have doveconf && ! doveconf -n >/dev/null 2>&1; then
+    if [[ -n "$bak" ]]; then cp -p "$bak" "$auth"; fi
+    MAIL_LAST_ERROR="Dovecot refused the list of former addresses; its configuration was put back"
+    return 1
+  fi
+  MAIL_FORMER_TOLD=1
+  lib_log_write INFO "Dovecot's user configuration now reads the list of former addresses (${list})"
+  lib_service_active dovecot && { lib_run doveadm reload || lib_warn "dovecot reload failed (see log)"; }
+  return 0
+}
+
+# What "migrate" does about that list. A server where a site with mail was renamed by a release
+# that did not tell Dovecot has such addresses already: it is told now, and what Postfix still
+# hands over under one of them - a message that was on hold - goes into the mailbox instead of
+# back to its sender. A server without such an address is left alone and says nothing: telling
+# Dovecot costs it a reload, and there is nothing to tell.
+lib_mail_former_migrate() {
+  lib_mail_installed || return 0
+  if ! lib_mail_former_apply; then
+    lib_warn "Dovecot does not know the addresses mailboxes had before a rename: ${MAIL_LAST_ERROR}"
+  elif (( MAIL_FORMER_TOLD )); then
+    lib_ok "Dovecot now knows the addresses mailboxes had before a rename ($(lib_mail_former_file))"
+  fi
+  return 0
+}
+
+# The list once more, where it has a line: for what changes a mailbox between two rebuilds of
+# the tables. A mailbox that is deleted takes its other names with it at once - left in the
+# list, a message handed over under one would make the directory again that is being removed -
+# and one whose quota is changed has the new quota under every name.
+lib_mail_former_refresh() {
+  [[ -s "$(lib_mail_former_file)" ]] || return 0
+  lib_mail_render_former | lib_write_file "$(lib_mail_former_file)" 0640 root:dovecot
+}
+
 # =============================================================================
 #  Putting the tables into effect
 # =============================================================================
@@ -2088,6 +2232,10 @@ lib_mail_tables_apply() {
   (( LIB_FILE_CHANGED )) && changed=1      # Rspamd watches this file; no reload needed
 
   lib_mail_dovecot_sni_apply || return 1
+  # Dovecot's half of the aliases a rename leaves: what Postfix still hands over under an old
+  # address goes into the mailbox that had it. Mail works without it as it did before there
+  # was such a list, so a Dovecot that will not have it is said and nothing more.
+  lib_mail_former_apply || lib_warn "Dovecot does not know the addresses mailboxes had before a rename: ${MAIL_LAST_ERROR}"
 
   if (( reload )) && (( ! OPT_DRY_RUN )) && lib_service_active postfix; then
     lib_run postfix reload || lib_warn "postfix reload failed (see log)"
@@ -2741,6 +2889,7 @@ lib_mail_box_quota_main() {   # address quota
   hash="$(awk -F: -v u="$a" '$1 == u {print $2}' "$MAIL_PASSWD_FILE" | sed -n 1p || true)"
   [[ -n "$hash" ]] || lib_die "Could not read the stored password of ${a}" "" "lomp mail box passwd ${a}"
   lib_mail_passwd_set "$a" "$hash" "$q"
+  lib_mail_former_refresh                  # the address it had before a rename counts against the same quota
   lib_ok "Quota of ${a} is now ${q}"
   return 0
 }
@@ -2756,6 +2905,8 @@ lib_mail_box_remove() {   # address   (no questions; the callers ask)
   if (( OPT_DRY_RUN )); then lib_info "[dry-run] would delete the mailbox ${a} and its mail"; return 0; fi
   if [[ -s "$MAIL_PASSWD_FILE" ]]; then
     awk -F: -v u="$a" '$1 != u' "$MAIL_PASSWD_FILE" | lib_write_file "$MAIL_PASSWD_FILE" 0640 root:dovecot secret
+    # ... and with it every former address that was another name of this mailbox
+    lib_mail_former_refresh
   fi
   sleep 1                                  # Dovecot re-reads the file about once a second
   if lib_have doveadm; then doveadm kick "$a" >/dev/null 2>&1 || true; fi   # 68 = nobody was logged in

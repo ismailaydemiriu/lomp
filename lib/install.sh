@@ -761,6 +761,9 @@ lib_install_migrate() {
   # the minute check hands uploads over: said here, because it changes whose files are whose
   if lib_domain_fix_owner_auto_enabled; then lib_ok "What root uploads into a site is handed to the site's user within a minute (lomp fix-owner --auto off stops that)"
   else lib_ok "What root uploads into a site stays root's until fix-owner is run (lomp fix-owner --auto on)"; fi
+  # where a site with mail was renamed by a release that did not tell Dovecot the addresses its
+  # mailboxes had before, it is told now
+  lib_mail_former_migrate
   # last: a vhost OpenLiteSpeed refuses ends the run here
   lib_domain_logs_repair
   if [[ -n "$DOMAIN_LOGS_MOVED" ]]; then

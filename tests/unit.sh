@@ -3677,6 +3677,17 @@ _da="$(lib_mail_render_dovecot_auth)"
 assert_has "the user store is a file of hashes" "scheme=BLF-CRYPT" "$_da"
 assert_has "owned by one user that owns no site" "uid=vmail gid=vmail" "$_da"
 assert_lacks "and there is no PAM anywhere near it" "pam" "$_da"
+# Dovecot is asked who a user is in two lists: the mailboxes, and after them the addresses
+# mailboxes had before a rename. Only the first is ever asked for a password.
+assert_eq  "passwords are checked in one place" "$MAIL_PASSWD_FILE" \
+  "$(awk '/^passdb \{/ { p = 1 } p && /args =/ { print $NF; p = 0 }' <<<"$_da" | tr '\n' ' ' | sed 's/ $//')"
+assert_eq  "a user is looked for among the mailboxes first, then among the addresses they had before" "$MAIL_PASSWD_FILE $(lib_mail_former_file)" \
+  "$(awk '/^userdb \{/ { u = 1 } u && /args =/ { print $NF; u = 0 }' <<<"$_da" | tr '\n' ' ' | sed 's/ $//')"
+assert_eq  "that second list lies beside the user file" "$(dirname "$MAIL_PASSWD_FILE")/former" "$(lib_mail_former_file)"
+assert_eq  "and gives its users the owner of all mail, nothing more: each line names its mailbox's home itself" "default_fields = uid=vmail gid=vmail" \
+  "$(awk '/^userdb \{/ { n++ } n == 2 && /default_fields/ { sub(/^[ \t]+/, ""); print }' <<<"$_da")"
+assert_has "the installation makes that list, empty: a list that is not there is a failure to Dovecot, not an unknown user" \
+  'lib_write_file "$(lib_mail_former_file)" 0640 root:dovecot' "$(declare -f lib_mail_configs_write)"
 
 _dk="$(lib_mail_render_rspamd_dkim dkim_signing)"
 assert_has "only an authenticated sender is signed for" "sign_authenticated = true" "$_dk"
@@ -6536,6 +6547,171 @@ assert_eq    "and as any address of a domain it catches all of"     1 "$(grep -c
 assert_eq    "but a mailbox there keeps its own address to itself"  1 "$(grep -c $'^box@all.example\tbox@all.example$' <<<"$_sn" || true)"
 assert_eq    "the renderers still exit 0" "0 0" "$(run_isolated lib_mail_render_valias) $(run_isolated lib_mail_render_senders)"
 
+# ---- what Dovecot reads beside the mailboxes: the addresses they had before ---------
+# "rename" leaves every address of the old domain behind as an alias of the same address at
+# the new one, and Postfix applies an alias when a message comes in. A message that still
+# names the old address when it is handed to Dovecot - its sender was in the middle of it when
+# the aliases took effect, it was on hold, it was put off after the rename had looked - was
+# answered "550 User doesn't exist" and returned (a sender that was slow across that moment,
+# on the test server: "250 2.0.0 Ok: queued", then "status=bounced"). Dovecot is given such an
+# address as another name of the mailbox: on that server a message handed over under one then
+# lay in the mailbox, filed by the mailbox's own filter and counted against its quota, and
+# the password of the mailbox did not sign in under it.
+_fm_saved_dir="$MAIL_DOVECOT_DIR"; MAIL_DOVECOT_DIR="$_md/dovecot"; mkdir -p "$MAIL_DOVECOT_DIR"
+_fm_saved_fns="$(declare -f doveconf doveadm lib_service_active 2>/dev/null || true)"
+_fm_o_pw="$(cat "$MAIL_PASSWD_FILE")"; _fm_o_keep="$(cat "$(lib_mail_alias_file keep.example)")"; _fm_o_col="$(cat "$(lib_mail_alias_file col.example)")"
+lib_mail_passwd_set "me@site.example" "$_md_hash" "3G"
+lib_mail_passwd_set "info@all.example" "$_md_hash" "2G"
+lib_mail_passwd_set "evil@site.example" "$_md_hash" "1G"
+lib_mail_passwd_set "gone@site.example" "$_md_hash" "1G"
+lib_mail_alias_set keep.example "me@keep.example" "me@site.example"            # what a rename leaves
+lib_mail_alias_set col.example  "me@col.example"  "me@keep.example"            # ... and a second rename
+lib_mail_alias_set keep.example "gone@keep.example" "gone@site.example"
+lib_mail_alias_set col.example  "box@col.example" "box@all.example,me@site.example"
+lib_mail_alias_set col.example  "ghost@col.example" "ghost@keep.example"
+lib_mail_alias_set col.example  "loop@col.example" "loop@keep.example"
+lib_mail_alias_set keep.example "loop@keep.example" "loop@col.example"
+printf 'info@keep.example\tinfo@all.example\n' >>"$(lib_mail_alias_file keep.example)"       # a mailbox whose line has not gone yet
+printf 'me@site.example\tme@site.example\n' >>"$(lib_mail_alias_file keep.example)"         # an address that leads to itself
+printf 'evil@col.example:x:0:0::/root:\tevil@site.example\n' >>"$(lib_mail_alias_file col.example)"
+printf 'Evil@col.example\tevil@site.example\nevil@../col.example\tevil@site.example\n' >>"$(lib_mail_alias_file col.example)"
+lib_mail_domain_register off.example
+printf 'me@off.example\tme@site.example\n' >"$(lib_mail_alias_file off.example)"
+_fm="$(lib_mail_render_former)"
+assert_eq    "an address that leads to the same name at another domain, and nowhere else, is another name of that mailbox: its home, its user, its quota" \
+  "me@keep.example:::::$MAIL_VMAIL_HOME/site.example/me::userdb_user=me@site.example userdb_quota_rule=*:storage=3G" "$(grep '^me@keep\.example:' <<<"$_fm" || true)"
+assert_eq    "one that leads there through such an address - a site renamed twice - is too" \
+  "me@col.example:::::$MAIL_VMAIL_HOME/site.example/me::userdb_user=me@site.example userdb_quota_rule=*:storage=3G" "$(grep '^me@col\.example:' <<<"$_fm" || true)"
+assert_eq    "one that is still a mailbox has its line already: Dovecot asks the mailboxes first, and finds this once the line has gone" \
+  "info@keep.example:::::$MAIL_VMAIL_HOME/all.example/info::userdb_user=info@all.example userdb_quota_rule=*:storage=2G" "$(grep '^info@keep\.example:' <<<"$_fm" || true)"
+assert_eq    "and those are all: no alias under another name, to itself, to two places, to no mailbox, in a circle, of a catch-all, or of a domain whose mail is off" \
+  "gone@keep.example info@keep.example me@col.example me@keep.example" "$(cut -d: -f1 <<<"$_fm" | tr '\n' ' ' | sed 's/ $//')"
+assert_lacks "a line of an alias file that is no address writes nothing into Dovecot's list" "evil" "$_fm"
+assert_eq    "every line has the eight fields of a passwd-file, the password among them empty" "" \
+  "$(awk -F: 'NF < 8 || $2 != "" || $3 != "" || $4 != "" { print }' <<<"$_fm")"
+assert_eq    "the renderer exits 0" 0 "$(run_isolated lib_mail_render_former)"
+_fm_pw="$MAIL_PASSWD_FILE"; MAIL_PASSWD_FILE="$_md/no-such-passwd"
+assert_eq    "with no mailbox there is no such address" "" "$(lib_mail_render_former)"
+assert_eq    "and that is no failure" 0 "$(run_isolated lib_mail_render_former)"
+MAIL_PASSWD_FILE="$_fm_pw"
+# where Dovecot reads it: beside the user file, written with the tables. A server that was set
+# up before there was such a list has its user configuration written again when the list
+# gets its first line - tested first, and put back when Dovecot will not have it
+doveconf() { [[ ! -e "$_md/doveconf-refuses" ]]; }
+doveadm() { printf 'doveadm %s\n' "$*" >>"$_md/dovecot.log"; }
+lib_service_active() { return 0; }
+_fm_old_auth() {   # the user configuration as a release without the list wrote it
+  printf '# Managed by lompstack - the only place a mailbox password is checked.\n\npassdb {\n  driver = passwd-file\n  args = scheme=BLF-CRYPT username_format=%%Lu %s\n}\n\n' "$MAIL_PASSWD_FILE"
+  printf 'userdb {\n  driver = passwd-file\n  args = username_format=%%Lu %s\n  default_fields = uid=vmail gid=vmail home=/var/vmail/%%Ld/%%Ln\n}\n' "$MAIL_PASSWD_FILE"
+}
+_fm_auth="$MAIL_DOVECOT_DIR/auth-passwdfile.conf"
+_fm_old_auth >"$_fm_auth"; : >"$_md/dovecot.log"
+assert_eq    "the list is written where Dovecot reads it" "0 $_fm" "$(run_isolated lib_mail_former_apply) $(cat "$(lib_mail_former_file)" 2>/dev/null || true)"
+if (( CAN_CHMOD )); then assert_eq "for root and Dovecot alone" "640" "$(stat -c %a "$(lib_mail_former_file)")"; fi
+assert_has   "a configuration without the list gets it"              "args = username_format=%Lu $(lib_mail_former_file)" "$(cat "$_fm_auth")"
+assert_eq    "after the mailboxes, which it still reads first"       "$MAIL_PASSWD_FILE $(lib_mail_former_file)" \
+  "$(awk '/^userdb \{/ { u = 1 } u && /args =/ { print $NF; u = 0 }' "$_fm_auth" | tr '\n' ' ' | sed 's/ $//')"
+assert_eq    "and Dovecot is told once"                              "doveadm reload" "$(cat "$_md/dovecot.log")"
+lib_mail_former_apply >/dev/null 2>&1
+assert_eq    "a configuration that has it is left alone, and Dovecot with it" "doveadm reload" "$(cat "$_md/dovecot.log")"
+# Dovecot will not have it: everything as it was
+_fm_old_auth >"$_fm_auth"; : >"$_md/dovecot.log"; : >"$_md/doveconf-refuses"
+_fm_rc=0; MAIL_LAST_ERROR=""; lib_mail_former_apply >/dev/null 2>&1 || _fm_rc=$?
+assert_eq    "a configuration Dovecot refuses is put back as it was" "$(_fm_old_auth)" "$(cat "$_fm_auth")"
+assert_eq    "that is said"                                          "1 Dovecot refused the list of former addresses; its configuration was put back" "$_fm_rc $MAIL_LAST_ERROR"
+assert_eq    "and nothing is reloaded"                               "" "$(cat "$_md/dovecot.log")"
+rm -f "$_md/doveconf-refuses"
+# the configuration of another user file is not this one's to write: a test never writes the
+# server's, and the server's commands never one that reads something else
+_fm_old_auth | sed "s|$MAIL_PASSWD_FILE|/etc/dovecot/elsewhere/passwd|" >"$_fm_auth"; _fm_before="$(cat "$_fm_auth")"; : >"$_md/dovecot.log"
+lib_mail_former_apply >/dev/null 2>&1
+assert_eq    "a configuration that reads another user file is not touched" "$_fm_before|" "$(cat "$_fm_auth")|$(cat "$_md/dovecot.log")"
+# no such address: the list is empty, and a configuration without it stays without it
+_fm_old_auth >"$_fm_auth"; : >"$_md/dovecot.log"
+_fm_al_keep="$(cat "$(lib_mail_alias_file keep.example)")"; _fm_al_col="$(cat "$(lib_mail_alias_file col.example)")"
+grep -v -E '^(me|info|gone)@keep\.example' <<<"$_fm_al_keep" >"$(lib_mail_alias_file keep.example)" || true
+grep -v '^me@col\.example' <<<"$_fm_al_col" >"$(lib_mail_alias_file col.example)" || true
+lib_mail_former_apply >/dev/null 2>&1
+assert_eq    "with no such address the list is empty, and Dovecot's configuration is not written for it" "0|$(_fm_old_auth)|" \
+  "$(wc -c <"$(lib_mail_former_file)" | tr -d ' ')|$(cat "$_fm_auth")|$(cat "$_md/dovecot.log")"
+assert_eq    "which is not said to have been told" 0 "$MAIL_FORMER_TOLD"
+# ... unless the caller says that now is the moment. Telling Dovecot costs a reload, and a
+# reload ends the deliveries it is in the middle of ("421 Shutting down" for one whose message
+# had been saved, on the test server: it arrived twice). "rename" asks for it before it moves a
+# mailbox, where that is put right with the rest - not when the list gets its first line.
+lib_mail_former_apply always >/dev/null 2>&1
+assert_eq    "asked to, Dovecot is told of a list that has no line yet, and that is said to the caller" "1|$MAIL_PASSWD_FILE $(lib_mail_former_file)|doveadm reload|0" \
+  "$MAIL_FORMER_TOLD|$(awk '/^userdb \{/ { u = 1 } u && /args =/ { print $NF; u = 0 }' "$_fm_auth" | tr '\n' ' ' | sed 's/ $//')|$(cat "$_md/dovecot.log")|$(wc -c <"$(lib_mail_former_file)" | tr -d ' ')"
+lib_mail_former_apply always >/dev/null 2>&1
+assert_eq    "asked again, there is nothing left to tell" "0|doveadm reload" "$MAIL_FORMER_TOLD|$(cat "$_md/dovecot.log")"
+: >"$_md/doveconf-refuses"; _fm_old_auth >"$_fm_auth"; : >"$_md/dovecot.log"
+_fm_rc=0; lib_mail_former_apply always >/dev/null 2>&1 || _fm_rc=$?
+assert_eq    "and a Dovecot that refuses is not said to have been told" "1|0|" "$_fm_rc|$MAIL_FORMER_TOLD|$(cat "$_md/dovecot.log")"
+rm -f "$_md/doveconf-refuses"
+# "migrate": a server where a site with mail was renamed by a release before this one has such
+# addresses already, and its Dovecot is told when the release is installed. One that has none
+# is left alone - there is nothing to tell, and telling costs a reload.
+_fm_migrate() { ( eval "$_md_stubs"; OPT_QUIET=0; lib_mail_former_migrate; printf 'rc=%s' "$?" ) 2>&1; }
+_fm_old_auth >"$_fm_auth"; : >"$_md/dovecot.log"
+assert_eq    "migrate leaves a server without such an address alone, and says nothing" "rc=0|$(_fm_old_auth)|" "$(_fm_migrate)|$(cat "$_fm_auth")|$(cat "$_md/dovecot.log")"
+printf '%s\n' "$_fm_al_keep" >"$(lib_mail_alias_file keep.example)"; printf '%s\n' "$_fm_al_col" >"$(lib_mail_alias_file col.example)"
+assert_has   "migrate tells the Dovecot of a server that has such addresses, and says so" \
+  "Dovecot now knows the addresses mailboxes had before a rename ($(lib_mail_former_file))" "$(_fm_migrate)"
+assert_eq    "with one reload, and the list in the configuration" "doveadm reload|$MAIL_PASSWD_FILE $(lib_mail_former_file)" \
+  "$(cat "$_md/dovecot.log")|$(awk '/^userdb \{/ { u = 1 } u && /args =/ { print $NF; u = 0 }' "$_fm_auth" | tr '\n' ' ' | sed 's/ $//')"
+assert_eq    "once: the next run finds nothing to do and says nothing" "rc=0|doveadm reload" "$(_fm_migrate)|$(cat "$_md/dovecot.log")"
+: >"$_md/doveconf-refuses"; _fm_old_auth >"$_fm_auth"
+assert_has   "a Dovecot that refuses is said, and migrate goes on" \
+  "Dovecot does not know the addresses mailboxes had before a rename: Dovecot refused the list of former addresses; its configuration was put back" "$(_fm_migrate)"
+assert_has   "(its status is no failure)"                            "rc=0" "$(_fm_migrate)"
+rm -f "$_md/doveconf-refuses"
+assert_has   "update and self-update run it"                         "lib_mail_former_migrate" "$(declare -f lib_install_migrate)"
+assert_has   "where there is a mail server"                          "lib_mail_installed || return 0" "$(declare -f lib_mail_former_migrate)"
+printf '%s\n' "$_fm_al_keep" >"$(lib_mail_alias_file keep.example)"; printf '%s\n' "$_fm_al_col" >"$(lib_mail_alias_file col.example)"
+# a dry run writes neither: the list is emptied by hand, and the addresses it would hold are there
+_fm_old_auth >"$_fm_auth"; : >"$_md/dovecot.log"; : >"$(lib_mail_former_file)"
+OPT_DRY_RUN=1; lib_mail_former_apply always >/dev/null 2>&1; OPT_DRY_RUN=0
+assert_eq    "a dry run writes no list and no configuration" "0|$(_fm_old_auth)|" "$(wc -c <"$(lib_mail_former_file)" | tr -d ' ')|$(cat "$_fm_auth")|$(cat "$_md/dovecot.log")"
+assert_eq    "and does not say that Dovecot was told" 0 "$MAIL_FORMER_TOLD"
+assert_has   "the mail tables carry the list with them"              "lib_mail_former_apply ||" "$(declare -f lib_mail_tables_apply)"
+# a mailbox that is deleted takes the names it had with it at once: left in Dovecot's list
+# until the tables are next rebuilt, a message handed over under one would make the directory
+# again that is being removed
+lib_mail_former_apply >/dev/null 2>&1
+assert_has   "(the mailbox has another name in the list)"            "gone@keep.example:" "$(cat "$(lib_mail_former_file)")"
+# A list Dovecot is told to read has to be there. Without the file Dovecot had no answer for an
+# address that is no mailbox - "Temporary internal error" to Postfix's question at RCPT TO on
+# the test server, which puts the mail of every alias off - so doctor looks for it.
+_fm_doc() { DOC_RESULTS=(); DOC_FAIL=0; DOC_WARN=0; DOC_OK=0; _doc_mail_former; printf '%s\n' "${DOC_RESULTS[@]-}"; }
+assert_lacks "doctor misses no list that is there"                   "is missing" "$(_fm_doc)"
+mv "$(lib_mail_former_file)" "$_md/former.away"
+assert_has   "a list Dovecot is told to read and that is not there is a failure, and doctor says what comes of it" \
+  "FAIL|mail: former addresses|$(lib_mail_former_file) is missing and Dovecot is told to read it: mail for an alias or a forward is put off until it is there (setup.sh mail regenerate)" "$(_fm_doc)"
+_fm_old_auth >"$_fm_auth"
+assert_eq    "where Dovecot is not told of a list, none is missed"   "" "$(_fm_doc)"
+mv "$_md/former.away" "$(lib_mail_former_file)"; lib_mail_render_dovecot_auth >"$_fm_auth"
+assert_has   "the mail check of doctor asks"                         "_doc_mail_former" "$(declare -f _doc_check_mail)"
+assert_eq    "and what it says is said in Turkish too" \
+  "posta: eski adresler|/etc/x/former yok, oysa Dovecot onu okuyacak şekilde ayarlı: dosya yerine gelene kadar takma adlara ve yönlendirmelere gelen posta bekletilir (setup.sh mail regenerate)" \
+  "$( LIB_LANG="tr"; lib_lang_build; _doc_tr "mail: former addresses"; printf '%s|' "$LIB_TR"
+      _doc_tr "/etc/x/former is missing and Dovecot is told to read it: mail for an alias or a forward is put off until it is there (setup.sh mail regenerate)"; printf '%s' "$LIB_TR" )"
+( eval "$_md_stubs"; lib_mail_box_remove gone@site.example ) >/dev/null 2>&1 || true
+assert_lacks "a mailbox that is deleted is no longer anybody's other name" "userdb_user=gone@site.example" "$(cat "$(lib_mail_former_file)")"
+assert_has   "the names of the other mailboxes stay"                 "me@keep.example:" "$(cat "$(lib_mail_former_file)")"
+# ... and one whose quota is changed has the new quota under every name, not only until the
+# tables are next rebuilt: mail handed over under the old address counts against the same one
+( eval "$_md_stubs"; lib_mail_box_quota_main me@site.example 7G ) >/dev/null 2>&1 || true
+assert_eq    "(the quota of the mailbox was changed)"                "7G" "$(lib_mail_box_quota me@site.example)"
+assert_eq    "a mailbox whose quota is changed has it under the address it had before as well" \
+  "me@keep.example:::::$MAIL_VMAIL_HOME/site.example/me::userdb_user=me@site.example userdb_quota_rule=*:storage=7G" "$(grep '^me@keep\.example:' "$(lib_mail_former_file)" || true)"
+# what this part added is taken out again: the tests below count what the commands made
+printf '%s\n' "$_fm_o_pw" >"$MAIL_PASSWD_FILE"
+printf '%s\n' "$_fm_o_keep" >"$(lib_mail_alias_file keep.example)"; printf '%s\n' "$_fm_o_col" >"$(lib_mail_alias_file col.example)"
+rm -rf "$MAIL_DOMAINS_DIR/off.example" "$(lib_mail_alias_file off.example)" "$(lib_mail_former_file)"
+unset -f doveconf doveadm lib_service_active _fm_old_auth _fm_doc _fm_migrate; eval "$_fm_saved_fns"
+MAIL_DOVECOT_DIR="$_fm_saved_dir"
+unset _fm _fm_pw _fm_auth _fm_rc _fm_before _fm_al_keep _fm_al_col _fm_saved_dir _fm_saved_fns _fm_o_pw _fm_o_keep _fm_o_col
+
 # ---- the alias commands -----------------------------------------------------
 assert_true  "@domain is a name an alias can have"  lib_mail_alias_key_valid "@col.example"
 assert_true  "so is an address, in any case"        lib_mail_alias_key_valid "Info@Col.Example"
@@ -7940,6 +8116,9 @@ _rn_stubs='
     fi
   }
   doveadm() { printf "doveadm %s\n" "$*" >>"$_rn/calls"; }
+  # (what tells Dovecot of the list of former addresses is tried where the lists are: here it
+  # is a record of when it was asked to)
+  lib_mail_former_apply() { printf "former-apply %s\n" "$*" >>"$_rn/calls"; MAIL_FORMER_TOLD=0; [[ ! -e "$_rn/dovecot-refuses" ]] || { MAIL_LAST_ERROR="Dovecot said no"; return 1; }; }
   # Postfix, standing in: what it holds is $_rn/queue, one message a line as "postqueue -j"
   # prints it. "postsuper -r - deferred" takes the ids it is handed out of the deferred ones
   # and says how many, in the words Postfix has for it; any other use of it is refused. What
@@ -7950,9 +8129,10 @@ _rn_stubs='
     cat "$_rn/queue" 2>/dev/null || true
   }
   postsuper() {
-    local id="" line="" n=0
+    local id="" line="" n=0 how="${1:-}" word="requeued" sum="Requeued"
     printf "postsuper %s\n" "$*" >>"$_rn/calls"
-    [[ "$*" == "-r - deferred" ]] || return 1
+    [[ "$*" == "-r - deferred" || "$*" == "-d - deferred" ]] || return 1
+    if [[ "$how" == "-d" ]]; then word="removed"; sum="Deleted"; fi
     # (Postfix went through its queue between the look and the request: nothing is left to take)
     if [[ -e "$_rn/queue-moves-on" ]]; then : >"$_rn/queue"; fi
     while read -r id; do
@@ -7960,11 +8140,13 @@ _rn_stubs='
       line="$(jq -c --arg id "$id" "select(.queue_id == \$id and .queue_name == \"deferred\")" "$_rn/queue" 2>/dev/null | sed -n 1p || true)"
       [[ -n "$line" ]] || continue
       jq -c --arg id "$id" "select(.queue_id != \$id)" "$_rn/queue" >"$_rn/queue.new"; mv "$_rn/queue.new" "$_rn/queue"
-      printf "postsuper: %s: requeued\n" "$id" >&2; n=$((n + 1))
-      _rn_requeued "$id" "$line"
+      printf "postsuper: %s: %s\n" "$id" "$word" >&2; n=$((n + 1))
+      if [[ "$how" == "-d" ]]; then printf "%s\n" "$id" >>"$_rn/deleted"; else _rn_requeued "$id" "$line"; fi
     done
-    if (( n == 1 )); then printf "postsuper: Requeued: 1 message\n" >&2; else printf "postsuper: Requeued: %s messages\n" "$n" >&2; fi
+    if (( n == 1 )); then printf "postsuper: %s: 1 message\n" "$sum" >&2; else printf "postsuper: %s: %s messages\n" "$sum" "$n" >&2; fi
   }
+  # ... and "postcat -hq": the header of a message it holds, as it lies in $_rn/qfiles
+  postcat() { [[ "${1:-}" == "-hq" && -n "${2:-}" ]] || return 1; cat "$_rn/qfiles/$2" 2>/dev/null; }
   postkick() { printf "postkick %s\n" "$*" >>"$_rn/calls"; }
   _rn_requeued() { printf "%s\n" "$1" >>"$_rn/requeued"; }
   lib_webmail_domain_enable() { printf "webmail-enable %s\n" "$1" >>"$_rn/calls"; }
@@ -8782,12 +8964,35 @@ assert_has   "the tables are rebuilt with both names of a mailbox there" "info@a
 assert_lacks "and again once the old lines are gone" "@alpha.example" "$(grep '^mail-tables' "$_rn/calls" | tail -n 1)"
 assert_eq    "twice in all" 2 "$(grep -c '^mail-tables' "$_rn/calls")"
 assert_true  "after the certificate: it is the last thing that takes time" bash -c 'm="$(grep -n "^mail-enable" "$1" | cut -d: -f1)"; s="$(grep -n "^add-ssl" "$1" | cut -d: -f1)"; [ "$s" -lt "$m" ]' _ "$_rn/calls"
+# Dovecot is told that mailboxes will have other names before the first one moves, and not by
+# the tables when the list gets its first line. Telling it costs a reload, and a reload ends
+# the deliveries Dovecot is in the middle of: after the aliases had taken effect, on the test
+# server, one was put off under the new address with its message saved, and arrived twice.
+# What a reload puts off before anything has moved waits under the old address, and that is
+# sent on with the rest.
+assert_eq    "Dovecot is told once that mailboxes will have other names, whether its list has a line or not" "former-apply always" "$(grep '^former-apply' "$_rn/calls" || true)"
+assert_true  "before mail is switched on for the new name, and so before a mailbox moves" \
+  bash -c 'f="$(grep -n "^former-apply always" "$1" | cut -d: -f1)"; m="$(grep -n "^mail-enable" "$1" | cut -d: -f1)"; [ -n "$f" ] && [ "$f" -lt "$m" ]' _ "$_rn/calls"
+assert_true  "after the certificate too" bash -c 'f="$(grep -n "^former-apply" "$1" | cut -d: -f1)"; s="$(grep -n "^add-ssl" "$1" | cut -d: -f1)"; [ "$s" -lt "$f" ]' _ "$_rn/calls"
+assert_lacks "and nothing is said about it when Dovecot takes it" "Dovecot does not know" "$_o"
 assert_has   "the webmail the old domain had is set up for the new one" "webmail-enable beta.example" "$_c"
 assert_has   "what the webmail kept for a mailbox follows its new name" "SET username = 'info@beta.example' WHERE LOWER(username) = 'info@alpha.example'" "$_c"
 assert_lacks "a mailbox that never signed in there has nothing to rename" "sales@beta.example' WHERE" "$_c"
 assert_has   "it is said where the mail is now" "Mail: now at @beta.example - info@beta.example, sales@beta.example" "$_o"
 assert_has   "and what the new domain's DNS needs" "setup.sh mail dns beta.example" "$_o"
 assert_has   "it is a step of its own" "Mailboxes to @beta.example" "$_o"
+# a Dovecot that will not have the list: said, and the mailboxes move as they did without one
+_rn_mail_boxes; : >"$_rn/dovecot-refuses"
+_rn_case _rn_rename alpha.example beta.example
+assert_has   "a Dovecot that will not be told is said so" "Dovecot does not know the addresses mailboxes had before a rename: Dovecot said no" "$(_rn_out)"
+assert_has   "and the mailboxes move all the same" 'info@beta.example:{H}infohash' "$(cat "$_rn/mail/passwd")"
+assert_has   "the rename is no failure for it" "rc=0" "$(_rn_out)"
+rm -f "$_rn/dovecot-refuses"
+# no mailbox, no other name: Dovecot is not reloaded for a site whose mail has none
+_rn_mail_site; mkdir -p "$_rn/mail/aliases"; : >"$_rn/mail/passwd"
+_rn_case _rn_rename alpha.example beta.example
+assert_has   "(a site with mail and no mailbox is renamed)" "rc=0" "$(_rn_out)"
+assert_lacks "with no mailbox to move, Dovecot is told nothing" "former-apply" "$(_rn_calls)"
 # a mailbox whose new address is taken stays where it is, and so does what points at it
 _rn_mail_boxes
 printf '%s\n' 'info@beta.example:{H}taken::::::userdb_quota_rule=*:storage=1G' >>"$_rn/mail/passwd"
@@ -8800,15 +9005,33 @@ assert_true  "its mail stays" test -s "$_rn/vmail/alpha.example/info/Maildir/new
 assert_eq    "it is not made an alias" "" "$(_rn_alias alpha.example info@alpha.example)"
 assert_has   "the others move" 'sales@beta.example:{H}saleshash' "$_p"
 assert_eq    "an alias names each target where it is now" "info@alpha.example,sales@beta.example,boss@elsewhere.example" "$(_rn_alias beta.example team@beta.example)"
-# mail of somebody else's lies where a mailbox would go: that mailbox stays too
+# A directory with mail in it lies where a mailbox would go, and no line of the user file says
+# whose it is. It is put aside beside where it lay, under a name no address can have, with all
+# that is in it - and the mailbox moves. (It kept the mailbox behind: the site had its new
+# name, its mail was at two domains, and no command takes one mailbox across.)
 _rn_mail_boxes
-mkdir -p "$_rn/vmail/beta.example/sales/Maildir/cur"; printf 'theirs\n' >"$_rn/vmail/beta.example/sales/Maildir/cur/m9:2,S"
+mkdir -p "$_rn/vmail/beta.example/sales/Maildir/cur" "$_rn/vmail/beta.example/sales/Maildir/new" "$_rn/vmail/beta.example/sales/Maildir/tmp"
+printf 'theirs\n' >"$_rn/vmail/beta.example/sales/Maildir/cur/m9:2,S"
 _rn_case _rn_rename alpha.example beta.example
-assert_has   "a directory in the way at the new domain is said" "sales@alpha.example stays a mailbox at alpha.example: $_rn/vmail/beta.example/sales is in the way" "$(_rn_out)"
-assert_has   "and that mailbox keeps its line" 'sales@alpha.example:{H}saleshash' "$(cat "$_rn/mail/passwd")"
-assert_true  "and its mail directory" test -d "$_rn/vmail/alpha.example/sales/Maildir/cur"
-assert_true  "the mail in the way is where it was" test -s "$_rn/vmail/beta.example/sales/Maildir/cur/m9:2,S"
-assert_lacks "and nothing is said to have been removed" "held no message" "$(_rn_out)"
+_o="$(_rn_out)"
+_rn_side="$(ls -d "$_rn/vmail/beta.example/sales~"* 2>/dev/null | tr '\n' ' ' | sed 's/ $//' || true)"
+assert_has   "a mailbox moves although a directory with mail in it lay where it goes" 'sales@beta.example:{H}saleshash' "$(cat "$_rn/mail/passwd")"
+assert_true  "with its mail"                                            test -d "$_rn/vmail/beta.example/sales/Maildir/cur"
+assert_true  "what lay there is beside it, with the mail that was in it" test -s "${_rn_side}/Maildir/cur/m9:2,S"
+assert_false "and not in the mailbox"                                   test -e "$_rn/vmail/beta.example/sales/Maildir/cur/m9:2,S"
+assert_has   "it is said, with where it is now and how much is in it"   "$_rn/vmail/beta.example/sales was in the way of sales@beta.example: it is ${_rn_side} now, with what was in it (1 message(s))" "$_o"
+assert_eq    "under a name no mailbox can be given: a ~ and the time"   1 "$(grep -c '/sales~[0-9]\{8\}-[0-9]\{6\}$' <<<"$_rn_side" || true)"
+# whose that mail is, lomp cannot say - so it says what copies it into the mailbox, for whoever
+# can, and what becomes of the directory otherwise: no backup of the mail copies it (a backup
+# asks Dovecot for each mailbox), and "mail domain del" and "remove" delete it with the rest.
+# On the test server the command put three messages of three into the mailbox, each into the
+# folder it lay in. It copies: nothing that removes the directory is printed.
+assert_has   "the command that copies its messages into the mailbox is given" \
+  "If that is mail of this mailbox, this copies it in: doveadm import -u sales@beta.example maildir:${_rn_side}/Maildir \"\" all" "$_o"
+assert_lacks "and no command that removes it"                           "rm -r ${_rn_side}" "$_o"
+assert_has   "and what becomes of it otherwise"                         "No backup of the mail holds that directory, and it is deleted with the mail of beta.example" "$_o"
+assert_lacks "no mailbox is said to stay behind"                        "stays a mailbox" "$_o"
+assert_lacks "and nothing is said to have been removed"                 "held no message" "$_o"
 # A directory with no message in it is nobody's mailbox, and no reason for one to stay behind.
 # It is what Dovecot makes by itself of an address it is asked about - and what a rename under
 # mail left under the old name before it waited for Dovecot (six renames of seven on the test
@@ -8841,18 +9064,61 @@ _rn_case _rn_rename alpha.example beta.example
 assert_has   "a mailbox comes back to its first address past what an older rename left there" 'info@beta.example:{H}infohash' "$(cat "$_rn/mail/passwd")"
 assert_true  "with its mail"                                            test -s "$_rn/vmail/beta.example/info/Maildir/new/m1"
 assert_eq    "and is no alias of itself"                                "" "$(_rn_alias beta.example info@beta.example)"
-# anything but that stays in the way: a message in any folder, something beside the Maildir, a
-# link, or the directory of a mailbox that is only put aside ("mail disable" keeps its mail)
-for _rn_way in junk beside link link-to-nothing linked-maildir parked file; do
+# So is whatever else makes a directory more than what Dovecot makes of an address by itself:
+# a message in any folder, something beside the Maildir, a Maildir that is a link.
+for _rn_way in junk half no-tmp no-cur beside linked-maildir; do
+  _rn_mail_boxes
+  mkdir -p "$_rn/elsewhere/Maildir/cur"; printf 'kept\n' >"$_rn/elsewhere/Maildir/cur/k1"
+  case "$_rn_way" in
+    # a folder that is not as Dovecot makes one: one of its three directories is not there
+    no-tmp) mkdir -p "$_rn/vmail/beta.example/sales/Maildir/new" "$_rn/vmail/beta.example/sales/Maildir/cur"; printf 'one\n' >"$_rn/vmail/beta.example/sales/Maildir/new/h1" ;;
+    no-cur) mkdir -p "$_rn/vmail/beta.example/sales/Maildir/new" "$_rn/vmail/beta.example/sales/Maildir/tmp"; printf 'one\n' >"$_rn/vmail/beta.example/sales/Maildir/new/h1" ;;
+    junk)   mkdir -p "$_rn/vmail/beta.example/sales/Maildir/.Junk/new" "$_rn/vmail/beta.example/sales/Maildir/.Junk/cur" "$_rn/vmail/beta.example/sales/Maildir/.Junk/tmp"
+            printf 'spam\n' >"$_rn/vmail/beta.example/sales/Maildir/.Junk/new/s1" ;;
+    # a folder Dovecot would pass: it has a new/ and a message in it, and no cur/ and no tmp/
+    half)   mkdir -p "$_rn/vmail/beta.example/sales/Maildir/new" "$_rn/vmail/beta.example/sales/Maildir/cur" "$_rn/vmail/beta.example/sales/Maildir/tmp" "$_rn/vmail/beta.example/sales/Maildir/.Junk/new"
+            printf 'one\n' >"$_rn/vmail/beta.example/sales/Maildir/new/h1"; printf 'spam\n' >"$_rn/vmail/beta.example/sales/Maildir/.Junk/new/s1" ;;
+    beside) mkdir -p "$_rn/vmail/beta.example/sales/Maildir" "$_rn/vmail/beta.example/sales/sieve"; printf 'keep;\n' >"$_rn/vmail/beta.example/sales/sieve/mine.sieve" ;;
+    linked-maildir) mkdir -p "$_rn/vmail/beta.example/sales"; ln -s "$_rn/elsewhere/Maildir" "$_rn/vmail/beta.example/sales/Maildir" ;;
+  esac
+  _rn_case _rn_rename alpha.example beta.example
+  _rn_side="$(ls -d "$_rn/vmail/beta.example/sales~"* 2>/dev/null | tr '\n' ' ' | sed 's/ $//' || true)"
+  assert_has   "put aside (${_rn_way}): the mailbox moves"              'sales@beta.example:{H}saleshash' "$(cat "$_rn/mail/passwd")"
+  assert_true  "put aside (${_rn_way}): with its mail"                  test -d "$_rn/vmail/beta.example/sales/Maildir/cur"
+  assert_false "put aside (${_rn_way}): its Maildir is its own"         test -L "$_rn/vmail/beta.example/sales/Maildir"
+  assert_has   "put aside (${_rn_way}): it is said"                     "$_rn/vmail/beta.example/sales was in the way of sales@beta.example: it is ${_rn_side} now, with what was in it" "$(_rn_out)"
+  case "$_rn_way" in
+    junk|half) assert_true "put aside (${_rn_way}): the message is in it, in its folder" test -s "${_rn_side}/Maildir/.Junk/new/s1" ;;
+    beside) assert_true "put aside (beside): the filter is in it"       test -s "${_rn_side}/sieve/mine.sieve" ;;
+    linked-maildir) assert_true "put aside (linked-maildir): the link is in it, as a link" test -L "${_rn_side}/Maildir" ;;
+  esac
+  assert_true  "put aside (${_rn_way}): nothing a link led to is touched" test -s "$_rn/elsewhere/Maildir/cur/k1"
+  assert_lacks "put aside (${_rn_way}): nothing is said to be removed"  "held no message" "$(_rn_out)"
+  # The command is given only where it would copy every message. Dovecot passes a folder that
+  # lacks cur/, new/ or tmp/ without a word ("doveadm import" from a Maildir with a new/ alone:
+  # nothing copied, nothing said, status 0, on the test server) - and a command that seems to
+  # have worked is the one after which a directory is removed.
+  case "$_rn_way" in
+    junk) assert_has   "put aside (junk): the command that copies its message in is given" "doveadm import -u sales@beta.example maildir:${_rn_side}/Maildir \"\" all" "$(_rn_out)" ;;
+    half) assert_lacks "put aside (half): with a folder Dovecot would pass, no command is offered that would leave a message behind" "doveadm import" "$(_rn_out)"
+          assert_has   "put aside (half): how many messages there are is still said" "with what was in it (2 message(s))" "$(_rn_out)" ;;
+    no-tmp|no-cur)
+          assert_lacks "put aside (${_rn_way}): a folder that is not as Dovecot makes one is not known to be read: no command" "doveadm import" "$(_rn_out)"
+          assert_has   "put aside (${_rn_way}): its message is counted all the same" "with what was in it (1 message(s))" "$(_rn_out)" ;;
+    *)    assert_lacks "put aside (${_rn_way}): with no message of its own in it, no such command is offered" "doveadm import" "$(_rn_out)" ;;
+  esac
+  assert_has   "put aside (${_rn_way}): what becomes of it is said"     "No backup of the mail holds that directory, and it is deleted with the mail of beta.example" "$(_rn_out)"
+done
+# What is not lomp's to judge stays in the way, and the mailbox where it is: a link, a file,
+# and the directory of a mailbox that is only put aside ("mail disable" keeps its mail).
+for _rn_way in link link-to-nothing parked file; do
   _rn_mail_boxes
   mkdir -p "$_rn/elsewhere/Maildir/cur" "$_rn/nothing/Maildir" "$_rn/mail/disabled"; printf 'kept\n' >"$_rn/elsewhere/Maildir/cur/k1"
   case "$_rn_way" in
-    junk)   mkdir -p "$_rn/vmail/beta.example/sales/Maildir/.Junk/new"; printf 'spam\n' >"$_rn/vmail/beta.example/sales/Maildir/.Junk/new/s1" ;;
-    beside) mkdir -p "$_rn/vmail/beta.example/sales/Maildir" "$_rn/vmail/beta.example/sales/sieve"; printf 'keep;\n' >"$_rn/vmail/beta.example/sales/sieve/mine.sieve" ;;
     link)   mkdir -p "$_rn/vmail/beta.example"; ln -s "$_rn/elsewhere" "$_rn/vmail/beta.example/sales" ;;
     link-to-nothing) mkdir -p "$_rn/vmail/beta.example"; ln -s "$_rn/nothing" "$_rn/vmail/beta.example/sales" ;;
-    linked-maildir) mkdir -p "$_rn/vmail/beta.example/sales"; ln -s "$_rn/elsewhere/Maildir" "$_rn/vmail/beta.example/sales/Maildir" ;;
-    parked) mkdir -p "$_rn/vmail/beta.example/sales/Maildir"; printf 'sales@beta.example:{H}parked::::::userdb_quota_rule=*:storage=1G\n' >"$_rn/mail/disabled/beta.example.passwd" ;;
+    parked) mkdir -p "$_rn/vmail/beta.example/sales/Maildir/cur"; printf 'theirs\n' >"$_rn/vmail/beta.example/sales/Maildir/cur/p1:2,S"
+            printf 'sales@beta.example:{H}parked::::::userdb_quota_rule=*:storage=1G\n' >"$_rn/mail/disabled/beta.example.passwd" ;;
     file)   mkdir -p "$_rn/vmail/beta.example"; printf 'not a directory\n' >"$_rn/vmail/beta.example/sales" ;;
   esac
   _rn_case _rn_rename alpha.example beta.example
@@ -8860,10 +9126,64 @@ for _rn_way in junk beside link link-to-nothing linked-maildir parked file; do
   assert_has   "in the way (${_rn_way}): the mailbox keeps its line"    'sales@alpha.example:{H}saleshash' "$(cat "$_rn/mail/passwd")"
   assert_true  "in the way (${_rn_way}): and its mail"                  test -d "$_rn/vmail/alpha.example/sales/Maildir/cur"
   assert_true  "in the way (${_rn_way}): what lay there is still there" test -e "$_rn/vmail/beta.example/sales"
+  assert_eq    "in the way (${_rn_way}): and nothing was put aside"     "" "$(ls -d "$_rn/vmail/beta.example/sales~"* 2>/dev/null || true)"
   assert_lacks "in the way (${_rn_way}): nothing is said to be removed" "held no message" "$(_rn_out)"
   assert_true  "in the way (${_rn_way}): and nothing a link led to is touched" test -s "$_rn/elsewhere/Maildir/cur/k1"
 done
 unset _rn_way
+# A site that is renamed back finds, under the name it comes back to, what arrived there for
+# its mailbox while it was being renamed away and was not carried over: a release before this
+# one left 35 messages so in one rename that had mail arriving, and the spam rule's folder in
+# every one that had marked mail (57 messages in one). It is that mailbox's mail: the address
+# leads to it, and nothing there is older than the rename that took the mailbox away - which
+# made the domain a mail domain of its own and wrote down when. It goes into the mailbox once
+# that is back in its place.
+_rn_left() {   # when the mail domain was made (nothing: no record), when its two messages arrived
+  _rn_mail_boxes
+  printf 'info@beta.example\tinfo@alpha.example\n' >"$_rn/mail/aliases/beta.example"
+  mkdir -p "$_rn/maildomains/beta.example" "$_rn/vmail/beta.example/info/Maildir/new" "$_rn/vmail/beta.example/info/Maildir/cur" "$_rn/vmail/beta.example/info/Maildir/.Junk/new"
+  if [[ -n "$1" ]]; then printf '{"domain":"beta.example","kind":"mail","created_at":"%s","mail":{"enabled":true}}\n' "$1" >"$_rn/maildomains/beta.example/domain.json"; fi
+  printf 'left\n' >"$_rn/vmail/beta.example/info/Maildir/new/left1"; printf 'spam\n' >"$_rn/vmail/beta.example/info/Maildir/.Junk/new/left2"
+  printf 'x' >"$_rn/vmail/beta.example/info/Maildir/dovecot-uidlist"
+  touch -d "$2" "$_rn/vmail/beta.example/info/Maildir/new/left1"; touch -d "$3" "$_rn/vmail/beta.example/info/Maildir/.Junk/new/left2"
+}
+_rn_left "2026-10-01T10:00:00Z" "2026-10-01T10:00:20Z" "2026-10-01T10:31:00Z"
+_rn_case _rn_rename alpha.example beta.example
+_o="$(_rn_out)"
+assert_has   "a mailbox comes back to its first address past the mail that was left there" 'info@beta.example:{H}infohash' "$(cat "$_rn/mail/passwd")"
+assert_true  "with its own mail"                                        test -s "$_rn/vmail/beta.example/info/Maildir/new/m1"
+assert_true  "and with what had arrived for it under that address"      test -s "$_rn/vmail/beta.example/info/Maildir/new/left1"
+assert_true  "what the spam rule had filed there too"                   test -s "$_rn/vmail/beta.example/info/Maildir/new/left2"
+assert_eq    "nothing of it is left beside the mailbox"                 "" "$(ls -d "$_rn/vmail/beta.example/info~"* 2>/dev/null || true)"
+assert_false "no index file of the directory that lay there came along" test -e "$_rn/vmail/beta.example/info/Maildir/dovecot-uidlist"
+assert_has   "it is said how many"                                      "2 message(s) that had been left under info@beta.example when the site was renamed are in the mailbox now" "$_o"
+assert_lacks "and nothing is said to be in the way"                     "in the way" "$_o"
+assert_eq    "the mailbox is no alias of itself"                        "" "$(_rn_alias beta.example info@beta.example)"
+# Mail that cannot be from that rename is not taken for the mailbox's: a message older than the
+# rename, one from long after it, a domain whose record does not date it, an address that does
+# not lead to this mailbox, a directory with more in it than a Maildir. It is put aside whole.
+for _rn_way in older later undated unaliased beside; do
+  case "$_rn_way" in
+    older)     _rn_left "2026-10-01T10:00:00Z" "2026-09-30T23:00:00Z" "2026-10-01T10:00:21Z" ;;
+    later)     _rn_left "2026-10-01T10:00:00Z" "2026-10-01T10:00:20Z" "2026-10-03T08:00:00Z" ;;
+    # (the first minutes of today: the time "date" makes of a date that is not there)
+    undated)   _rn_left "" "$(date +%F) 00:10:00" "$(date +%F) 00:20:00" ;;
+    unaliased) _rn_left "2026-10-01T10:00:00Z" "2026-10-01T10:00:20Z" "2026-10-01T10:00:21Z"; : >"$_rn/mail/aliases/beta.example" ;;
+    beside)    _rn_left "2026-10-01T10:00:00Z" "2026-10-01T10:00:20Z" "2026-10-01T10:00:21Z"
+               mkdir -p "$_rn/vmail/beta.example/info/sieve"; printf 'keep;\n' >"$_rn/vmail/beta.example/info/sieve/mine.sieve" ;;
+  esac
+  _rn_case _rn_rename alpha.example beta.example
+  _rn_side="$(ls -d "$_rn/vmail/beta.example/info~"* 2>/dev/null | tr '\n' ' ' | sed 's/ $//' || true)"
+  assert_has   "not its own (${_rn_way}): the mailbox comes back all the same" 'info@beta.example:{H}infohash' "$(cat "$_rn/mail/passwd")"
+  assert_true  "not its own (${_rn_way}): with its own mail"            test -s "$_rn/vmail/beta.example/info/Maildir/new/m1"
+  assert_false "not its own (${_rn_way}): and none that lay there"      test -e "$_rn/vmail/beta.example/info/Maildir/new/left1"
+  assert_true  "not its own (${_rn_way}): that is put aside, every message of it" test -s "${_rn_side}/Maildir/new/left1"
+  assert_true  "not its own (${_rn_way}): in the folder it was in"      test -s "${_rn_side}/Maildir/.Junk/new/left2"
+  assert_has   "not its own (${_rn_way}): it is said"                   "$_rn/vmail/beta.example/info was in the way of info@beta.example: it is ${_rn_side} now, with what was in it (2 message(s))" "$(_rn_out)"
+  assert_lacks "not its own (${_rn_way}): and not said to be in the mailbox" "are in the mailbox now" "$(_rn_out)"
+done
+unset _rn_way _rn_side
+unset -f _rn_left
 # a mailbox that is itself called "new" or "cur": its index files have ".../new/..." in their
 # path and are no messages for that
 _rn_mail_boxes
@@ -8932,9 +9252,48 @@ printf 'late\n' >"$_rn/vmail/alpha.example/info/Maildir/new/late"
 _rn_case _domain_rename_box_sweep info@alpha.example beta.example
 assert_true  "a message delivered to the old mailbox during the move goes on to the new one" test -s "$_rn/vmail/beta.example/info/Maildir/new/late"
 assert_false "and the directory made for it goes" test -e "$_rn/vmail/alpha.example/info"
-mkdir -p "$_rn/vmail/alpha.example/sales/Maildir/new"; printf 'x\n' >"$_rn/vmail/alpha.example/sales/Maildir/new/keep"
+# A mailbox that never had mail has no directory to carry a message into: Dovecot makes one at
+# the first message, and that first message arrived under the old name. It stayed there, where
+# nobody reads, with its directory in the way of a rename back. The mailbox gets its inbox for
+# it - the home, the Maildir, cur, new and tmp, as Dovecot makes them.
+_rn_mail_boxes
+rm -rf "$_rn/vmail/alpha.example/sales"; mkdir -p "$_rn/vmail/alpha.example/sales/Maildir/new" "$_rn/vmail/alpha.example/sales/Maildir/.Junk/new"
+printf 'x\n' >"$_rn/vmail/alpha.example/sales/Maildir/new/first"; printf 's\n' >"$_rn/vmail/alpha.example/sales/Maildir/.Junk/new/spam"
+if (( CAN_CHMOD )); then chmod 0700 "$_rn/vmail/alpha.example/sales"; fi
+: >"$_rn/log"; : >"$_rn/runuser.log"
 _rn_case _domain_rename_box_sweep sales@alpha.example beta.example
-assert_true  "with nowhere to put it, a message is left where it is" test -s "$_rn/vmail/alpha.example/sales/Maildir/new/keep"
+assert_true  "the first message of a mailbox that never had mail goes into an inbox made for it" test -s "$_rn/vmail/beta.example/sales/Maildir/new/first"
+assert_true  "and so does one that was filed: there is no such folder there yet" test -s "$_rn/vmail/beta.example/sales/Maildir/new/spam"
+assert_eq    "the inbox is made as Dovecot makes one"                   "cur new tmp" "$(ls "$_rn/vmail/beta.example/sales/Maildir" 2>/dev/null | tr '\n' ' ' | sed 's/ $//' || true)"
+if (( CAN_CHMOD )); then
+  assert_eq  "closed as the directory the mail came from was"           "700 700 700" \
+    "$(stat -c %a "$_rn/vmail/beta.example/sales" "$_rn/vmail/beta.example/sales/Maildir" "$_rn/vmail/beta.example/sales/Maildir/new" 2>/dev/null | tr '\n' ' ' | sed 's/ $//' || true)"
+fi
+# by the user the mail is stored as, never by root with a chown behind it: in a directory that
+# user owns a name can be swapped for a link, and a chown follows a link
+assert_eq    "every directory of it is made by the user the mail is stored as" "5" \
+  "$(grep -c -- "^-u ${MAIL_VMAIL_USER} -- mkdir -m [0-7]* -- $_rn/vmail/beta.example/sales" "$_rn/runuser.log" || true)"
+assert_lacks "and root hands nothing over there afterwards"             "chown" "$(declare -f _domain_rename_box_inbox)"
+assert_false "nothing is left under the old name"                       test -e "$_rn/vmail/alpha.example/sales"
+assert_has   "and the log says how many went on"                        "2 message(s) that arrived for sales@alpha.example during the move went on to sales@beta.example" "$(cat "$_rn/log")"
+# no message, no inbox: a directory that was only asked about makes nothing at the new name
+_rn_mail_boxes
+rm -rf "$_rn/vmail/alpha.example/sales"; mkdir -p "$_rn/vmail/alpha.example/sales/Maildir"
+_rn_case _domain_rename_box_sweep sales@alpha.example beta.example
+assert_false "a leftover without a message makes no mailbox directory"  test -e "$_rn/vmail/beta.example/sales"
+assert_false "and goes"                                                 test -e "$_rn/vmail/alpha.example/sales"
+# the place of the mailbox is taken by something that is no directory: nowhere to put it
+for _rn_way in link file; do
+  _rn_mail_boxes
+  mkdir -p "$_rn/vmail/alpha.example/sales/Maildir/new" "$_rn/vmail/beta.example" "$_rn/elsewhere"
+  printf 'x\n' >"$_rn/vmail/alpha.example/sales/Maildir/new/keep"
+  if [[ "$_rn_way" == link ]]; then ln -s "$_rn/elsewhere" "$_rn/vmail/beta.example/sales"; else printf 'no directory\n' >"$_rn/vmail/beta.example/sales"; fi
+  _rn_case _domain_rename_box_sweep sales@alpha.example beta.example
+  assert_true  "with nowhere to put it (a ${_rn_way}), a message is left where it is" test -s "$_rn/vmail/alpha.example/sales/Maildir/new/keep"
+  assert_false "and nothing is made where the ${_rn_way} leads or lies" test -e "$_rn/elsewhere/Maildir"
+  assert_has   "that is no failure"                                     "rc=0" "$(_rn_out)"
+done
+unset _rn_way
 # Not every message that arrives lies in the inbox. What Rspamd marked is filed into Junk by
 # the spam rule, under the old name as anywhere ("fileinto :create"), and a mail client that
 # signed in again in those seconds may have saved a draft or a sent message. Only the inbox
@@ -9226,6 +9585,195 @@ assert_has   "a message that left the queue in that moment is asked for" "asked-
 assert_lacks "and with none put back, pickup is not told"               "postkick" "$(_rn_calls)"
 assert_lacks "nor is one said to have been"                             "Postfix was holding" "$(cat "$_rn/log")"
 assert_has   "the rename ends well all the same"                        "rc=0" "$(_rn_out)"
+# A delivery that the move of the mailbox interrupts may have got as far as the file: Dovecot
+# writes the message into the mailbox, finds the mailbox gone from under it, cannot take the
+# file back - its path has moved - and answers 451; or it is told to read its configuration
+# again in that moment and answers "421 Shutting down" for a message it has saved. Postfix then
+# holds a message that lies in the mailbox already, and put back it arrived a second time: 11
+# of the 18 messages the move put off in three renames with mail arriving on three connections.
+# Such a message has arrived. It is taken out of the queue and not sent again - and nothing is
+# ever taken out of a mailbox for it. Which file it is, the file says itself: the hop it was
+# handed to Dovecot from is the topmost Received line that is not Dovecot's own, and the
+# Message-ID it carries is the one of the message Postfix holds.
+_rn_msg() {   # file, the address it was delivered under, the queue ids of its hops at this server (the last one first)
+  local f="$1" to="$2" id="" mid=""
+  shift 2
+  mid="${_rn_mid:-M.${*: -1}}"
+  mkdir -p "$(dirname "$f")"
+  {
+    printf 'Return-Path: <a@far.example>\nDelivered-To: %s\n' "$to"
+    printf 'Received: from mail.example\n\tby host.example with LMTP\n\tid cd9DI4I5zWrgOjsAb1/gCg\n\t(envelope-from <a@far.example>)\n\tfor <%s>; Mon, 12 Oct 2026 20:07:57 +0300\n' "$to"
+    for id in "$@"; do
+      if [[ "$id" == pickup:* ]]; then printf 'Received: by mail.example (Postfix, from userid 113)\n\tid %s; Mon, 12 Oct 2026 20:07:59 +0300 (+03)\n' "${id#pickup:}"
+      else printf 'Received: from client.far.example (unknown [203.0.113.5])\n\tby mail.example (Postfix) with ESMTPS id %s\n\tfor <info@alpha.example>; Mon, 12 Oct 2026 20:07:57 +0300 (+03)\n' "$id"; fi
+    done
+    printf 'Received: from elsewhere.example by client.far.example with ESMTP id FARAWAY1; Mon, 12 Oct 2026 20:07:50 +0300\n'
+    if [[ "$mid" != "-" ]]; then printf 'Message-Id: <%s@Far.Example>\n' "$mid"; fi
+    printf 'From: a@far.example\nSubject: one\n\nReceived: nothing in the body counts\n\tid BODY1\nMessage-ID: <in-the-body@far.example>\n'
+  } >"$f"
+}
+_rn_qfile() {   # queue id [the Message-ID it holds; "-": none] -> what "postcat -hq" shows of it
+  mkdir -p "$_rn/qfiles"
+  {
+    printf 'Received: from client.far.example (unknown [203.0.113.5])\n\tby mail.example (Postfix) with ESMTPS id %s\n\tfor <info@alpha.example>; Mon, 12 Oct 2026 20:07:57 +0300 (+03)\n' "$1"
+    printf 'Received: from elsewhere.example by client.far.example with ESMTP id FARAWAY1; Mon, 12 Oct 2026 20:07:50 +0300\n'
+    if [[ "${2:-}" != "-" ]]; then printf 'MESSAGE-ID:\n\t<%s@far.example>\n' "${2:-m.$1}"; fi
+    printf 'From: a@far.example\nSubject: one\n'
+  } >"$_rn/qfiles/$1"
+}
+_rn_copy() { _rn_case _domain_rename_mail_copy_of "$@"; _rn_out | tr '\n' ' ' | sed 's/ $//'; }
+_rn_msg "$_rn/m/first" info@alpha.example HELD1
+_rn_msg "$_rn/m/again" info@beta.example pickup:NEW1 HELD1
+_rn_msg "$_rn/m/twice" info@beta.example pickup:NEW2 pickup:NEW1 HELD1
+assert_eq    "a message that was handed to Dovecot out of a queue file names it"      "HELD1 rc=0" "$(_rn_copy "$_rn/m/first" HELD1)"
+assert_eq    "among several that are asked about"                                     "HELD1 rc=0" "$(_rn_copy "$_rn/m/first" $'HELD9\nHELD1\nHELD4')"
+assert_eq    "one that was put back and delivered again came out of another file"     "rc=0" "$(_rn_copy "$_rn/m/again" HELD1)"
+assert_eq    "that file is the one it names"                                          "NEW1 rc=0" "$(_rn_copy "$_rn/m/again" $'HELD1\nNEW1')"
+assert_eq    "put back twice, it is of the last"                                      "NEW2 rc=0" "$(_rn_copy "$_rn/m/twice" $'HELD1\nNEW1\nNEW2')"
+assert_eq    "an id is compared, not matched: HELD1 is not HELD10"                    "rc=0" "$(_rn_copy "$_rn/m/first" HELD10)"
+assert_eq    "nor a part of one"                                                      "rc=0" "$(_rn_copy "$_rn/m/first" HELD)"
+assert_eq    "a hop at another server is no queue file of this one"                   "rc=0" "$(_rn_copy "$_rn/m/first" FARAWAY1)"
+assert_eq    "and nothing in the body is a hop"                                       "rc=0" "$(_rn_copy "$_rn/m/first" BODY1)"
+sed 's/$/\r/' "$_rn/m/first" >"$_rn/m/crlf"
+assert_eq    "a message whose lines end in CR LF is read the same"                    "HELD1 rc=0" "$(_rn_copy "$_rn/m/crlf" HELD1)"
+printf 'Return-Path: <a@far.example>\nReceived: from client.far.example (unknown [203.0.113.5])\n\tby mail.example (Postfix) with ESMTPS id HELD1\n\tfor <info@alpha.example>; Mon, 12 Oct 2026\nSubject: no line of the hop into the mailbox\n\nbody\n' >"$_rn/m/nolmtp"
+assert_eq    "where Dovecot writes no line of its own, the first one is the hop"      "HELD1 rc=0" "$(_rn_copy "$_rn/m/nolmtp" HELD1)"
+printf 'Received: from id (id [203.0.113.5])\n\tby mail.example (Postfix) with ESMTP id HELD1\n\tfor <x@alpha.example>; Mon, 12 Oct 2026\nSubject: a client that calls itself id\n\nbody\n' >"$_rn/m/helo"
+assert_eq    "a client that calls itself id does not hide the queue file"             "HELD1 rc=0" "$(_rn_copy "$_rn/m/helo" HELD1)"
+printf 'Subject: no hop at all\n\nbody\n' >"$_rn/m/bare"
+assert_eq    "a file with no such line is nobody's copy"                              "rc=0" "$(_rn_copy "$_rn/m/bare" HELD1)"
+assert_eq    "and a file that is not there is no failure"                             "rc=0" "$(_rn_copy "$_rn/m/no-such-file" HELD1)"
+# ... and that it is the same message, not another one the queue file's name was given to:
+# the Message-ID of the file and the one Postfix shows of what it holds
+_rn_mid_of() { _domain_rename_mail_msgid <"$1"; }
+_rn_mid_is() { _rn_case _rn_mid_of "$1"; _rn_out | tr '\n' ' ' | sed 's/ $//'; }
+assert_eq    "the Message-ID of a message, in lower case"                             "<m.held1@far.example> rc=0" "$(_rn_mid_is "$_rn/m/first")"
+assert_eq    "of one whose lines end in CR LF"                                        "<m.held1@far.example> rc=0" "$(_rn_mid_is "$_rn/m/crlf")"
+_rn_qfile HELD1
+assert_eq    "of one that writes it on a line of its own, under a name in capitals"   "<m.held1@far.example> rc=0" "$(_rn_mid_is "$_rn/qfiles/HELD1")"
+_rn_mid="-" _rn_msg "$_rn/m/nomid" info@alpha.example HELD1
+assert_eq    "a message that has none has none: what its body says is no header"      "rc=0" "$(_rn_mid_is "$_rn/m/nomid")"
+printf 'Message-ID: <one@far.example>\nSubject: two of them\nMessage-ID: <two@far.example>\n\nbody\n' >"$_rn/m/two"
+assert_eq    "of one that has two, the first"                                         "<one@far.example> rc=0" "$(_rn_mid_is "$_rn/m/two")"
+_rn_same() { if _domain_rename_mail_same "$@"; then echo "the same"; else echo "another"; fi; }   # asked as the mail step asks: in a condition
+_rn_is_same() { _rn_case _rn_same "$@"; _rn_out | tr '\n' ' ' | sed 's/ $//'; }
+assert_eq    "a file is the message a queue file holds when both carry one Message-ID" "the same rc=0" "$(_rn_is_same "$_rn/m/first" HELD1)"
+_rn_qfile HELD2 another
+assert_eq    "under the same name with another Message-ID it is another message"      "another rc=0" "$(_rn_is_same "$_rn/m/first" HELD2)"
+assert_eq    "a file without a Message-ID is not known to be it"                      "another rc=0" "$(_rn_is_same "$_rn/m/nomid" HELD1)"
+_rn_qfile HELD3 -
+assert_eq    "nor is one that is compared with a message that has none"               "another rc=0" "$(_rn_is_same "$_rn/m/nomid" HELD3)"
+assert_eq    "nor one whose queue file Postfix does not show"                         "another rc=0" "$(_rn_is_same "$_rn/m/first" GONE1)"
+assert_eq    "a file that is not there is no failure, and not the message"            "another rc=0" "$(_rn_is_same "$_rn/m/no-such-file" HELD1)"
+unset -f _rn_mid_of _rn_mid_is _rn_same _rn_is_same
+# ... and the mail step: what has arrived goes out of the queue, the rest is put back
+_rn_requeue() {   # as the mail step calls it: the mailboxes that moved, and since when a file is of this rename
+  RENAME_MAIL_MOVED="info@beta.example sales@beta.example"; RENAME_MAIL_SINCE="$_rn/since"
+  _domain_rename_mail_requeue alpha.example beta.example
+}
+_rn_copies() {
+  _rn_mail_boxes
+  touch -d '10 minutes ago' "$_rn/since"
+  # in the mailbox since this rename began, each handed over out of a queue file Postfix still has:
+  _rn_msg "$_rn/vmail/beta.example/info/Maildir/new/first-HELD1" info@alpha.example HELD1                   # in the mailbox as it moved
+  _rn_msg "$_rn/vmail/alpha.example/info/Maildir/.Junk/new/first-HELD3" info@alpha.example HELD3             # under the old name, filed by the spam rule
+  _rn_msg "$_rn/vmail/beta.example/info/Maildir/cur/seen-HELD4:2,S" info@alpha.example HELD4                 # of a message that waits for two mailboxes
+  _rn_mid=other _rn_msg "$_rn/vmail/beta.example/info/Maildir/new/first-HELD6" info@alpha.example HELD6      # another message under that name
+  _rn_msg "$_rn/vmail/beta.example/info/Maildir/new/before-HELD7" info@alpha.example HELD7                   # from before this rename
+  touch -d '1 hour ago' "$_rn/vmail/beta.example/info/Maildir/new/before-HELD7"
+  _rn_mid="-" _rn_msg "$_rn/vmail/beta.example/info/Maildir/new/first-HELD8" info@alpha.example HELD8        # without a Message-ID
+  _rn_msg "$_rn/vmail/beta.example/sales/Maildir/new/sales-HELD10" sales@alpha.example HELD10                 # in another mailbox than it waits for
+  _rn_msg "$_rn/vmail/gamma.example/other/Maildir/new/gamma-HELD9" other@gamma.example HELD9                  # in a mailbox of another domain
+  _rn_msg "$_rn/vmail/beta.example/info/Maildir/new/again-HELD9" info@beta.example pickup:NEW1 HELD9          # put back before, and delivered
+  _rn_msg "$_rn/vmail/beta.example/info/Maildir/new/active-KEEP5" info@alpha.example KEEP5                   # of a message that is being handed over
+  _rn_msg "$_rn/vmail/beta.example/info/Maildir/new/other" info@beta.example OTHER1
+  printf 'x' >"$_rn/vmail/beta.example/info/Maildir/dovecot-uidlist"
+  for _rn_q in HELD1 HELD3 HELD4 HELD6 HELD7 HELD8 HELD9 HELD10 KEEP5; do _rn_qfile "$_rn_q"; done
+  {
+    _rn_held HELD1 info@alpha.example
+    _rn_held HELD3 info+tag@alpha.example
+    _rn_held HELD4 info@alpha.example sales@alpha.example
+    _rn_held HELD6 info@alpha.example
+    _rn_held HELD7 info@alpha.example
+    _rn_held HELD8 info@alpha.example
+    _rn_held HELD9 info@alpha.example
+    _rn_held HELD10 info@alpha.example
+    _rn_held KEEP5 info@alpha.example | sed 's/"queue_name":"deferred"/"queue_name":"active"/'
+  } >"$_rn/queue"
+  : >"$_rn/log"
+  ( cd "$_rn/vmail" && find . -type f | sort ) >"$_rn/files-before"
+}
+_rn_files() { ( cd "$_rn/vmail" && find . -type f | sort ); }
+_rn_copies
+_rn_case _rn_requeue
+assert_has   "what Postfix holds is seen to"                             "rc=0" "$(_rn_out)"
+assert_eq    "a message that lies in the mailbox it waits for is taken out of the queue: in the mailbox as it moved, and under the old name where the spam rule filed it" \
+  "HELD1 HELD3" "$(tr '\n' ' ' <"$_rn/deleted" 2>/dev/null | sed 's/ $//' || true)"
+assert_eq    "the others are put back: one that waits for a second mailbox too, one whose name another message has, one whose file is older than the rename, one without a Message-ID, one that is in no mailbox, one that lies in another mailbox" \
+  "HELD4 HELD6 HELD7 HELD8 HELD9 HELD10" "$(tr '\n' ' ' <"$_rn/requeued" 2>/dev/null | sed 's/ $//' || true)"
+assert_eq    "no file of any mailbox is touched for it"                  "$(cat "$_rn/files-before")" "$(_rn_files)"
+assert_has   "a message that is being handed over is left alone"         '"queue_id":"KEEP5"' "$(cat "$_rn/queue")"
+assert_has   "the log says how many were put back"                       "6 message(s) Postfix was holding for the addresses of alpha.example that moved go through their aliases now, to @beta.example" "$(cat "$_rn/log")"
+assert_has   "and how many had arrived"                                  "2 message(s) Postfix was holding for them were in the mailbox already - Dovecot had written each before it gave it back - and are not sent a second time" "$(cat "$_rn/log")"
+assert_eq    "what has arrived goes first, then the rest, then pickup is told" "postsuper -d - deferred|postsuper -r - deferred|postkick public pickup W|" \
+  "$(grep -E '^(postsuper|postkick)' "$_rn/calls" | tr '\n' '|' || true)"
+assert_eq    "postsuper is asked to remove those two and nothing else"  "HELD1 HELD3 " "$(awk '/^postsuper -d/ { on = 1; next } /^postsuper -r/ { on = 0 } on && /^asked-for/ { printf "%s ", $2 }' "$_rn/calls")"
+# every one of them had arrived: nothing is put back, and pickup has nothing to take
+_rn_copies
+{ _rn_held HELD1 info@alpha.example; _rn_held HELD3 info@alpha.example; } >"$_rn/queue"
+_rn_case _rn_requeue
+assert_eq    "with every message in its mailbox, none is put back"       "HELD1 HELD3|" "$(tr '\n' ' ' <"$_rn/deleted" 2>/dev/null | sed 's/ $//' || true)|$(cat "$_rn/requeued" 2>/dev/null || true)"
+assert_lacks "pickup is not told"                                        "postkick" "$(_rn_calls)"
+assert_lacks "and none is said to go through the aliases"                "go through their aliases" "$(cat "$_rn/log")"
+assert_eq    "the queue holds none of them any more"                     "" "$(cat "$_rn/queue")"
+# a message that left the queue between the look and the request is being delivered: nothing
+# is said to have been taken out, and nothing of a mailbox is touched
+_rn_copies
+: >"$_rn/queue-moves-on"
+_rn_case _rn_requeue
+assert_eq    "what Postfix no longer holds is neither removed nor put back" "|" "$(cat "$_rn/deleted" 2>/dev/null || true)|$(cat "$_rn/requeued" 2>/dev/null || true)"
+assert_eq    "nothing is written down"                                   "" "$(grep -E 'Postfix was holding' "$_rn/log" || true)"
+assert_eq    "and no file of a mailbox is touched"                       "$(cat "$_rn/files-before")" "$(_rn_files)"
+# only what postsuper names counts: of two it was asked to remove, it removed one
+_rn_copies
+_rn_take_one() {
+  eval 'postsuper() { printf "postsuper %s\n" "$*" >>"$_rn/calls"; cat >/dev/null
+          if [[ "$1" == "-d" ]]; then printf "postsuper: HELD3: removed\npostsuper: Deleted: 1 message\n" >&2; else printf "postsuper: Requeued: 0 messages\n" >&2; fi; }'
+  _rn_requeue
+}
+_rn_case _rn_take_one
+assert_has   "the log counts what postsuper names, not what it was asked for" "1 message(s) Postfix was holding for them were in the mailbox already" "$(cat "$_rn/log")"
+assert_lacks "and says nothing of what it did not put back"              "go through their aliases" "$(cat "$_rn/log")"
+# without the mark of when this rename began, no file is taken for this rename's: all are put back
+_rn_copies
+_rn_no_mark() { RENAME_MAIL_MOVED="info@beta.example sales@beta.example"; RENAME_MAIL_SINCE=""; _domain_rename_mail_requeue alpha.example beta.example; }
+_rn_case _rn_no_mark
+assert_eq    "without knowing since when, every message is put back and none removed" "HELD1 HELD3 HELD4 HELD6 HELD7 HELD8 HELD9 HELD10|" \
+  "$(tr '\n' ' ' <"$_rn/requeued" 2>/dev/null | sed 's/ $//' || true)|$(cat "$_rn/deleted" 2>/dev/null || true)"
+# a Postfix that will not show what it holds: nothing is known to have arrived
+_rn_copies
+rm -rf "$_rn/qfiles"
+_rn_case _rn_requeue
+assert_eq    "a message Postfix does not show is put back like the others" "HELD1 HELD3 HELD4 HELD6 HELD7 HELD8 HELD9 HELD10|" \
+  "$(tr '\n' ' ' <"$_rn/requeued" 2>/dev/null | sed 's/ $//' || true)|$(cat "$_rn/deleted" 2>/dev/null || true)"
+# the whole rename: since when a file is of its making is marked when the mail step begins
+_rn_mail_boxes
+_rn_msg "$_rn/vmail/alpha.example/info/Maildir/new/first-HELD1" info@alpha.example HELD1
+touch -d '1 minute' "$_rn/vmail/alpha.example/info/Maildir/new/first-HELD1"        # written while the mailbox moves
+_rn_msg "$_rn/vmail/alpha.example/info/Maildir/new/before-HELD2" info@alpha.example HELD2
+touch -d '1 hour ago' "$_rn/vmail/alpha.example/info/Maildir/new/before-HELD2"
+_rn_qfile HELD1; _rn_qfile HELD2
+{ _rn_held HELD1 info@alpha.example; _rn_held HELD2 info@alpha.example; } >"$_rn/queue"
+_rn_case _rn_rename_dovecot alpha.example beta.example
+assert_has   "a rename under which a delivery was interrupted ends well" "rc=0" "$(_rn_out)"
+assert_true  "the message Dovecot had written while the mailbox moved is in the mailbox" test -s "$_rn/vmail/beta.example/info/Maildir/new/first-HELD1"
+assert_eq    "and is not sent again: Postfix holds it no longer"         "HELD1" "$(tr '\n' ' ' <"$_rn/deleted" 2>/dev/null | sed 's/ $//' || true)"
+assert_false "(nothing was delivered a second time)"                     test -e "$_rn/vmail/beta.example/info/Maildir/new/requeued-HELD1"
+assert_true  "a message whose file is from before the rename is sent on: that file is not this rename's to judge" test -s "$_rn/vmail/beta.example/info/Maildir/new/requeued-HELD2"
+assert_true  "and the file stays"                                        test -s "$_rn/vmail/beta.example/info/Maildir/new/before-HELD2"
+assert_true  "the mail of the mailbox is all there"                      test -s "$_rn/vmail/beta.example/info/Maildir/new/m1"
+unset -f _rn_msg _rn_qfile _rn_copy _rn_requeue _rn_copies _rn_files _rn_take_one _rn_no_mark
+unset _rn_q
 unset -f _rn_rename_dovecot _rn_held _rn_held_mail _rn_holds
 _rn_case _domain_rename_mail_targets "a@old.example, b@old.example,c@old.example,x@other.example" old.example new.example "a@old.example
 c@old.example"
@@ -9692,6 +10240,18 @@ _rn_case _rn_say_tr "sales@alpha.example stays a mailbox at alpha.example: /var/
 assert_has   "or with something in its way" "posta kutusu olarak kalıyor: /var/vmail/beta.example/sales engel oluyor" "$(_rn_out)"
 _rn_case _rn_say_tr "/var/vmail/beta.example/sales held no message and was in the way of sales@beta.example: removed"
 assert_eq    "and the empty directory that was taken out of its way" "/var/vmail/beta.example/sales dizininde ileti yoktu ve sales@beta.example posta kutusuna engel oluyordu: kaldırıldırc=0" "$(_rn_out)"
+_rn_case _rn_say_tr "/var/vmail/beta.example/sales was in the way of sales@beta.example: it is /var/vmail/beta.example/sales~20261012-231500 now, with what was in it (3 message(s))"
+assert_eq    "the directory that was put aside" "/var/vmail/beta.example/sales, sales@beta.example posta kutusuna engel oluyordu: içindekilerle birlikte artık /var/vmail/beta.example/sales~20261012-231500 adını taşıyor (3 ileti)rc=0" "$(_rn_out)"
+_rn_case _rn_say_tr "2 message(s) that had been left under info@beta.example when the site was renamed are in the mailbox now"
+assert_eq    "and the mail that was found for the mailbox" "Site yeniden adlandırılırken info@beta.example adresinin altında kalan 2 ileti artık posta kutusundarc=0" "$(_rn_out)"
+_rn_case _rn_say_tr "If that is mail of this mailbox, this copies it in: doveadm import -u sales@beta.example maildir:/var/vmail/beta.example/sales~20261012-231500/Maildir \"\" all"
+assert_eq    "the command that copies what was put aside into the mailbox" "Bu posta o kutuya aitse şu komut onu kutuya kopyalar: doveadm import -u sales@beta.example maildir:/var/vmail/beta.example/sales~20261012-231500/Maildir \"\" allrc=0" "$(_rn_out)"
+_rn_case _rn_say_tr "No backup of the mail holds that directory, and it is deleted with the mail of beta.example"
+assert_eq    "and what becomes of it otherwise" "Bu dizin hiçbir posta yedeğinde yer almaz; beta.example alan adının postası silinirken o da silinirrc=0" "$(_rn_out)"
+_rn_case _rn_say_tr "Dovecot now knows the addresses mailboxes had before a rename (/etc/dovecot/lomp/former)"
+assert_eq    "what migrate says when it tells Dovecot" "Dovecot artık posta kutularının yeniden adlandırmadan önceki adreslerini biliyor (/etc/dovecot/lomp/former)rc=0" "$(_rn_out)"
+_rn_case _rn_say_tr "Dovecot does not know the addresses mailboxes had before a rename: Dovecot refused the list of former addresses; its configuration was put back"
+assert_eq    "and when Dovecot will not have it" "Dovecot, posta kutularının yeniden adlandırmadan önceki adreslerini bilmiyor: Dovecot eski adresler listesini kabul etmedi; yapılandırması geri kondurc=0" "$(_rn_out)"
 # the usage texts have their Turkish in the functions themselves
 _rn_case _rn_usage_tr
 _o="$(_rn_out)"
@@ -11195,6 +11755,21 @@ _im_mrow() { awk -F'\t' -v a="$1" '$1 == "M" && $2 == a { print $3 "|" $5; exit 
 assert_eq  "a mailbox Dovecot knows, where its mail lies and the hash it logs in with" "$_im_md|$_im_hash" "$(_im_mrow info@shop.example)"
 assert_eq  "one whose Maildir is not there, and whose hash is not known" "-|-" "$(_im_mrow sales@shop.example)"
 assert_has "a domain that has only mail there"                 "boss@mailonly.example" "$_im_scan"
+# A lomp server tells its Dovecot the addresses mailboxes had before a rename, and Dovecot
+# lists each among its users - with the Maildir of the mailbox that had it. Such an address is
+# no mailbox to bring over: it comes as the alias it is.
+printf 'was@renamed.example:::::%s/home/vmail/shop.example/info::userdb_user=info@shop.example userdb_quota_rule=*:storage=1G\n' "$_im_r" >"$_im_r/etc/dovecot/lomp/former"
+_im_scan_f="$(lib_import_remote_scan | env PATH="$_im_bin:$PATH" LOMP_IMPORT_ROOT="$_im_r" LOMP_IMPORT_OWNER="$_im_me" IM_MAIL_USERS="was@renamed.example $_im_users" sh -s)"
+assert_eq  "an address a mailbox had before a rename is no mailbox of the other server" "" "$(awk -F'\t' '$1 == "M" && $2 == "was@renamed.example"' <<<"$_im_scan_f")"
+assert_eq  "the mailboxes beside it are found as before" "$(grep -c $'^M\t' <<<"$_im_scan" || true)" "$(grep -c $'^M\t' <<<"$_im_scan_f" || true)"
+# ... and one that list names although it has a line among the mailboxes - a rename was at
+# work there, or somebody wrote an alias by hand - is a mailbox: brought over, and once
+printf 'info@shop.example:::::%s/home/vmail/other.example/info::userdb_user=info@other.example\n' "$_im_r" >>"$_im_r/etc/dovecot/lomp/former"
+_im_scan_f="$(lib_import_remote_scan | env PATH="$_im_bin:$PATH" LOMP_IMPORT_ROOT="$_im_r" LOMP_IMPORT_OWNER="$_im_me" IM_MAIL_USERS="$_im_users info@shop.example was@renamed.example" sh -s)"
+assert_eq  "an address that is a mailbox is one although the list names it too, and is listed once" "1 0" \
+  "$(awk -F'\t' '$1 == "M" && $2 == "info@shop.example"' <<<"$_im_scan_f" | grep -c . || true) $(awk -F'\t' '$1 == "M" && $2 == "was@renamed.example"' <<<"$_im_scan_f" | grep -c . || true)"
+assert_eq  "with its mail and its hash, as without the list" "$_im_md|$_im_hash" "$(awk -F'\t' '$1 == "M" && $2 == "info@shop.example" { print $3 "|" $5; exit }' <<<"$_im_scan_f")"
+rm -f "$_im_r/etc/dovecot/lomp/former"; unset _im_scan_f
 assert_has "an alias from lomp's own file"                     $'A\tsales2@shop.example\tinfo@shop.example' "$_im_scan"
 assert_has "a catch-all"                                       $'A\t@shop.example\tinfo@shop.example' "$_im_scan"
 assert_has "a forwarder from a file Postfix reads, its targets in one list" $'A\tfwd@fwdonly.example\ta@one.example,b@two.example' "$_im_scan"
