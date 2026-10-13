@@ -49,6 +49,14 @@ LOMPSTACK_INTEGRATION=yes bash tests/integration.sh
 Add a unit test for any new pure function (parsing, rendering, calculation). The unit
 suite runs without root and without network, and CI runs it on Ubuntu 22.04 and 24.04.
 
+A test stands in for every program that would change the machine it runs on or reach
+beyond it - `systemctl`, a firewall, the database, the mail server, `certbot`, `curl`:
+with a shell function where lomp calls the program from its own shell, with a small
+program in a directory the test puts first in `PATH` where lomp hands it to `timeout`,
+`env` or `runuser` (a program cannot start a function). The suite keeps stand-ins of its
+own for those names first in `PATH`. One of them that is reached writes the call down, and
+the suite then ends on a failed assertion that lists each call and the section it came from.
+
 ## Reporting bugs
 
 Include: Ubuntu version, the exact command, the relevant part of

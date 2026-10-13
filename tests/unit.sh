@@ -25,7 +25,18 @@ pm2_none_started() {
   done <<<"$socks"
   return "$rc"
 }
-cleanup() { pm2_none_started || true; rm -rf "$TMP"; }
+# Every other program of this machine that a test started without standing in for it: written
+# down by the stand-ins of $MACHINE_STUB (below). Says them, forgets them, and returns 1 when
+# there was one.
+MACHINE_STUB="$TMP/machine-stand-in"
+machine_none_started() {
+  [[ -s "$MACHINE_STUB/.asked" ]] || return 0
+  printf 'a test started a program of this machine it does not stand in for:\n' >&2
+  sort "$MACHINE_STUB/.asked" | uniq -c >&2 || true
+  rm -f "$MACHINE_STUB/.asked"
+  return 1
+}
+cleanup() { pm2_none_started || true; machine_none_started || true; rm -rf "$TMP"; }
 
 # ---- globals normally provided by setup.sh (all paths redirected into TMP) --
 SCRIPT_VERSION="test"; SCRIPT_VERSION_LINE="1.0"
@@ -77,6 +88,36 @@ exit 0
 PM2
 chmod +x "$PM2_STUB/pm2"
 PATH="$PM2_STUB:$PATH"
+# nor may it load a module into the kernel of this machine, which the renderer of the sysctl
+# file asks for where tcp_bbr is not offered yet: none comes
+modprobe() { return 1; }
+# Nor may it start anything else of this machine that changes it or reaches beyond it: a
+# service, a firewall, the database or the mail server of whoever runs this, a certificate
+# authority, an account, a package, another host. A test stands in for such a program itself -
+# with a function while lompstack calls it from its own shell, with a program in PATH where
+# lompstack hands it to another one. What a test did not stand in for meets one of these
+# instead: programs of those names, first in PATH, that write down what they were asked, and
+# in which section, and fail. The suite ends on the assertion that nothing was written down.
+# Out of their reach: a program named by its full path, one started after PATH was set anew,
+# and every program that is not in this list - those that only read the machine among them
+# (ss, id, hostname, sysctl -n, node -v).
+MACHINE_STUB_NAMES="systemctl systemd-run service loginctl hostnamectl timedatectl
+  iptables ip6tables iptables-restore ip6tables-restore ufw nft fail2ban-client certbot
+  mysql mariadb mysqldump mariadb-dump mysqladmin mariadb-admin mariadb-upgrade redis-cli
+  postfix postmap postalias postqueue postsuper postconf postcat postkick newaliases sendmail msmtp
+  doveadm doveconf rspamadm rspamc
+  useradd userdel usermod groupadd groupdel gpasswd chpasswd passwd crontab
+  apt-get apt apt-key apt-mark add-apt-repository npm npx corepack
+  curl wget ssh scp sftp ssh-keyscan dig host nslookup
+  lswsctrl openlitespeed wp logrotate mount umount swapon swapoff mkswap modprobe
+  pkill killall reboot shutdown sudo su"
+mkdir -p "$MACHINE_STUB"
+for _p in $MACHINE_STUB_NAMES; do
+  printf '%s\n' '#!/bin/sh' 'd="${0%/*}"; s=""' 'IFS= read -r s 2>/dev/null <"$d/.section" || :' \
+    'printf "%s %s   (in: %s)\n" "${0##*/}" "$*" "$s" >>"$d/.asked"' 'exit 127' >"$MACHINE_STUB/$_p"
+done
+chmod +x "$MACHINE_STUB"/*
+PATH="$MACHINE_STUB:$PATH"
 # Git Bash runs the native jq.exe, which writes CRLF unless given -b: a multi-line result then
 # carries a \r at the end of every line but the last. Servers and CI (Linux) are unaffected.
 if [[ "${OSTYPE:-}" == msys* || "${OSTYPE:-}" == cygwin* ]]; then
@@ -103,7 +144,7 @@ assert_true()  { local n="$1"; shift; if "$@"; then ok; else fail "$n"; fi; }
 assert_false() { local n="$1"; shift; if "$@"; then fail "$n (expected failure)"; else ok; fi; }
 assert_has()   { if [[ "$3" == *"$2"* ]]; then ok; else fail "$1: missing [$2]"; fi; }
 assert_lacks() { if [[ "$3" != *"$2"* ]]; then ok; else fail "$1: unexpected [$2]"; fi; }
-section() { printf '%s\n' "-- $*"; }
+section() { printf '%s\n' "-- $*"; printf '%s\n' "$*" >"$MACHINE_STUB/.section"; }
 # Run a function the way the installer does (errexit armed) and report its exit status.
 # A plain "if func; then" would disable errexit and hide exactly the bugs we look for.
 # The subshell must not be the left side of "||": that suppresses errexit inside it, which is
@@ -123,6 +164,26 @@ run_isolated() {
   [[ -z "$prev" ]] || eval "$prev"
   printf '%s' "$rc"
 }
+
+# =============================================================================
+section "the machine this runs on is stood in for, or the suite says so"
+# The stand-ins have to be what a program finds, not only what this shell finds: lompstack
+# hands commands to env, to timeout and to runuser, and those know no function of this shell.
+_ms_off=""
+for _p in pm2 $MACHINE_STUB_NAMES; do
+  case "$(type -P "$_p" || true)" in "$PM2_STUB/$_p"|"$MACHINE_STUB/$_p") ;; *) _ms_off+=" $_p" ;; esac
+done
+assert_eq    "every stand-in is the first of its name in PATH" "" "$_ms_off"
+# (asked for its version: should the line above ever fail, nothing of the machine is changed)
+_ms_rc=0
+if [[ -z "$_ms_off" ]]; then env curl --version >/dev/null 2>&1 || _ms_rc=$?; fi
+assert_eq    "started by another program, one of them fails where the machine's own would have run" 127 "$_ms_rc"
+assert_eq    "and writes down what it was asked, and in which section" \
+  "curl --version   (in: the machine this runs on is stood in for, or the suite says so)" "$(cat "$MACHINE_STUB/.asked" 2>/dev/null || true)"
+_ms_look() { machine_none_started 2>/dev/null; }
+assert_false "which the suite's last assertion fails on" _ms_look
+assert_true  "once: it is said, and then forgotten"      _ms_look
+unset -f _ms_look; unset _ms_off _ms_rc _p
 
 # =============================================================================
 section "domain helpers"
@@ -2220,6 +2281,8 @@ _orig_sc="$(declare -f lib_systemctl)"; _orig_act="$(declare -f lib_service_acti
 _orig_en="$(declare -f lib_service_enabled)"; _orig_wait="$(declare -f lib_app_wait_port)"; _orig_lock="$(declare -f _app_site_lock)"
 _orig_tools="$(declare -f lib_require_tools)"
 _sc_calls=""; lib_systemctl() { _sc_calls+="$* "; return 0; }
+# (one thing systemd is asked without lib_systemctl, when a site is removed: see the teardown)
+_sd_calls=""; systemctl() { _sd_calls+="$* "; return 0; }
 lib_service_active() { return 1; }; lib_service_enabled() { return 1; }
 lib_app_wait_port() { return 0; }; _app_site_lock() { return 0; }; lib_require_tools() { return 0; }
 APP_START="npm start"; APP_SCRIPT=""; APP_PORT=3000; APP_ENABLED=1; APP_MEMORY=""
@@ -2275,9 +2338,11 @@ assert_lacks "the log never sees a value"           "val with spaces" "$(cat "$L
 
 # remove: the service goes before the files and the user
 lib_domain_state_load app.example.com; D_HOME="$SITES_ROOT/app.example.com"
-_sc_calls=""; lib_app_teardown >/dev/null 2>&1
+_sc_calls=""; _sd_calls=""; lib_app_teardown >/dev/null 2>&1
 assert_has   "the service is disabled and stopped"   "disable --now pm2-app_example_com" "$_sc_calls"
 assert_false "and its unit file deleted"             test -e "$APP_UNIT_DIR/pm2-app_example_com.service"
+# this one call went to the systemd of the machine the suite ran on
+assert_eq    "and systemd is asked to forget what it remembers of the unit" "reset-failed pm2-app_example_com " "$_sd_calls"
 lib_domain_logrotate_regen
 assert_has   "PM2 logs are rotated as the site user" "su app_example_com app_example_com" "$(cat "$LOGROTATE_SITES_FILE")"
 assert_has   "the daemon's own log as well"          ".pm2/pm2.log" "$(cat "$LOGROTATE_SITES_FILE")"
@@ -2298,6 +2363,7 @@ assert_eq "a home the app files cannot be written to is reported, not fatal" "fa
 assert_eq "and apply exits 0 with errexit armed" 0 "$(run_isolated lib_app_apply)"
 eval "$_orig_write"
 eval "$_orig_as"; eval "$_orig_sc"; eval "$_orig_act"; eval "$_orig_en"; eval "$_orig_wait"; eval "$_orig_lock"; eval "$_orig_tools"
+unset -f systemctl
 unset -f _ev_vars _ev_run _ev _ev_watch
 unset _ev_long _ev_want _env_again
 lib_json_set "$(lib_domain_json app.example.com)" 'del(.app)'
@@ -4097,9 +4163,16 @@ assert_has "turning mail off puts the logins beyond use" "lib_mail_boxes_park" "
 assert_has "and takes the certificate cron with it"      'lib_cron_remove "mail-cert:' "$_dis"
 assert_has "the removal follows the traces, not the flag" "lib_mail_domain_has_traces" "$(declare -f lib_domain_remove_main)"
 # parked lines keep their hash, so enabling the domain again asks nobody for a new password
+# (Whoever is logged in to a mailbox that is put aside is put out, by Dovecot's own command.
+# It is stood in for until the domain is gone, and so is the second lompstack waits before
+# it: these two calls used to ask the Dovecot of the machine, where it had one.)
+_park_kicks="$TMP/park-kicks"; : >"$_park_kicks"
+doveadm() { printf '%s\n' "$*" >>"$_park_kicks"; return 68; }   # 68: nobody was logged in
+sleep() { :; }
 lib_mail_boxes_park alpha.example
 assert_false "a parked mailbox is out of the live store" lib_mail_box_exists "sales@alpha.example"
 assert_true  "but it is not lost"                        test -s "${MAIL_DISABLED_DIR}/alpha.example.passwd"
+assert_eq    "and whoever was logged in to one is put out" "kick info@alpha.example;kick sales@alpha.example;" "$(sort "$_park_kicks" | tr '\n' ';')"
 lib_mail_boxes_unpark alpha.example
 assert_true  "and comes back with the hash it had"       lib_mail_box_exists "sales@alpha.example"
 assert_eq    "and its quota"                             "500M" "$(lib_mail_box_quota sales@alpha.example)"
@@ -4115,6 +4188,7 @@ lib_mail_domain_purge alpha.example
 assert_false "and the parked hashes go with the domain" test -s "${MAIL_DISABLED_DIR}/alpha.example.passwd"
 assert_false "nothing of it is left"                    lib_mail_domain_has_traces alpha.example
 assert_has  "the purge names the parked file"           'MAIL_DISABLED_DIR' "$(declare -f lib_mail_domain_purge)"
+unset -f doveadm sleep; unset _park_kicks
 
 # The flag in domain.json goes down AFTER the logins are gone, not before: an interrupt in
 # between used to leave a domain the state called off whose mailboxes still answered, and the
@@ -4610,13 +4684,18 @@ assert_eq    "no token means no request" 1 "$(CF_API_TOKEN_OVERRIDE= CF_INI="$TM
 
 : >"$_curl_argv"; : >"$_curl_stdin"
 _tg_tok="123456:ABCdefGhiJklMnoPqr"
-NOTIFY_CONF="$TMP/notify.conf"
+_tg_conf_was="$NOTIFY_CONF"; NOTIFY_CONF="$TMP/notify.conf"
 printf 'TELEGRAM_TOKEN=%s\nTELEGRAM_CHAT=-1001234567\n' "$_tg_tok" >"$NOTIFY_CONF"
 lib_notify_send "disk almost full" "body" >/dev/null 2>&1 || true
 assert_lacks "the Telegram token stays out of curl's arguments" "$_tg_tok" "$(cat "$_curl_argv")"
 assert_has   "the URL holding it comes in on stdin" "api.telegram.org/bot${_tg_tok}/sendMessage" "$(cat "$_curl_stdin")"
 assert_has   "while the chat id may stay an argument" "chat_id=-1001234567" "$(cat "$_curl_argv")"
 unset -f curl
+# The channel goes when the test does. It used to stay, as the notification settings of every
+# test after this one: a backup that fails further down then sent its notice to
+# api.telegram.org with the curl of the machine the suite ran on, and the machine's name in it.
+rm -f "$NOTIFY_CONF"; NOTIFY_CONF="$_tg_conf_was"; unset _tg_conf_was
+assert_eq    "no channel is left behind for the tests that follow" "none" "$(lib_notify_channels)"
 
 CF_INI="$TMP/cf-live.ini"; CF_F2B_ACTION="$TMP/cf-action-live.conf"; CF_F2B_AUTH="$TMP/cf-auth-live.header"
 printf 'dns_cloudflare_api_token = %s\n' "$_cf_tok" >"$CF_INI"
@@ -6508,6 +6587,8 @@ _md_stubs='lib_mail_installed() { return 0; }
   lib_cf_token() { printf ""; }
   lib_require_tools() { return 0; }
   sleep() { return 0; }
+  doveadm() { printf "doveadm %s\n" "$*" >>"$_md/dovecot.log"; return 0; }
+  postqueue() { printf "Mail queue is empty\n"; }
   lib_webmail_user_forget() { return 0; }
   _mail_sendas_current() { printf "x\n" >>"$_md/sendas.log"; return 0; }
   lib_mail_backup_domain() { printf "%s\n" "$*" >>"$_md/backup.log"; MAIL_LAST_ERROR="no room"; return "${_md_backup_rc:-0}"; }'
@@ -6902,11 +6983,13 @@ assert_has   "a domain whose mail is off, in line too"  "mail  kapalı 1      3+
 # removing one: a last backup first, the mail and the lines gone, the record archived
 lib_mail_passwd_set "inbox@hub.example" "$_md_hash" "1G"
 lib_mail_alias_set col.example "x@col.example" "inbox@hub.example,me@site.example"
-rm -f "$_md/backup.log"
+rm -f "$_md/backup.log"; : >"$_md/dovecot.log"
 _md_run lib_mail_domain_del_main hub.example
 assert_false "a removed mail domain has no record"          lib_mail_domain_standalone hub.example
 assert_has   "a last backup was taken first"                "hub.example --tag pre-remove" "$(cat "$_md/backup.log" 2>/dev/null || true)"
 assert_false "its mailbox is gone"                          lib_mail_box_exists "inbox@hub.example"
+# (the Dovecot and the Postfix queue of the machine were asked here, where it had them)
+assert_has   "and whoever was logged in to it is put out"   "doveadm kick inbox@hub.example" "$(cat "$_md/dovecot.log")"
 assert_false "and nothing of it is left"                    lib_mail_domain_has_traces hub.example
 assert_true  "the record is archived, not deleted"          bash -c "compgen -G '${MAIL_DOMAINS_GONE_DIR}/hub.example.[0-9]*' >/dev/null"
 # an alias in another domain that was delivered into it would accept mail and bounce it
@@ -6949,6 +7032,10 @@ rm -f "$_md/backup.log"
 _md_run lib_backup_mail_domain col.example --no-mail
 assert_false "--no-mail leaves nothing to do for a mail domain" test -e "$_md/backup.log"
 assert_eq    "a mail backup that fails is a failed backup"      1 "$(_md_backup_rc=1 run_isolated _md_do lib_backup_mail_domain col.example)"
+( eval "$_md_stubs"; eval 'lib_notify_send() { printf "%s|%s\n" "$1" "$2" >"$_md/notice"; }'
+  _md_backup_rc=1; lib_backup_mail_domain col.example ) >/dev/null 2>&1 || true
+assert_has   "and whoever is to hear of it is told"             "Backup FAILED for col.example on " "$(cat "$_md/notice" 2>/dev/null || true)"
+assert_has   "with the reason"                                  "|Reason: no room." "$(cat "$_md/notice" 2>/dev/null || true)"
 # A restore onto a server that has never heard of the domain - the disaster recovery of a mail
 # server. It used to write the state into the SITES' registry, which made a "site" with no
 # user, no home and no virtual host.
@@ -12116,8 +12203,16 @@ assert_eq  "its name without www and in small letters"         "$_im_r/www/wwwro
 assert_has "a virtual host mapped to * has no name"            $'S\t-\t'"$_im_l/Example/html"$'\t' "$_im_scan"
 assert_has "nor has a user's public_html"                      $'S\t-\t'"$_im_r/home/bob/public_html"$'\t' "$_im_scan"
 assert_lacks "a directory that serves nothing is not listed"   "empty.example" "$_im_scan"
+# (on the other server of this section, like every listing here: run as it was, with nothing in
+# front of the fixed paths and the programs of this machine, this one asked the Dovecot and the
+# Postfix of the machine for every mailbox and alias they have, weighed each of those mailboxes
+# and read every crontab - and kept the one line it was after)
+_im_one="$(lib_import_remote_scan | env PATH="$_im_bin:$PATH" LOMP_IMPORT_ROOT="$_im_r" LOMP_IMPORT_OWNER="$_im_me" IM_MAIL_USERS="$_im_users" LOMP_IMPORT_ONLY="$_im_l/Example/html" sh -s)"
 assert_eq  "one directory on request"  "S|-|$_im_l/Example/html|static|path" \
-  "$(lib_import_remote_scan | LOMP_IMPORT_ONLY="$_im_l/Example/html" sh -s | awk -F'\t' '$1 == "S" { print $1 "|" $2 "|" $3 "|" $5 "|" $9 }')"
+  "$(awk -F'\t' '$1 == "S" { print $1 "|" $2 "|" $3 "|" $5 "|" $9 }' <<<"$_im_one")"
+assert_eq  "and with it the mailboxes of that server, not of this machine" "boss@mailonly.example info@shop.example sales@shop.example" \
+  "$(awk -F'\t' '$1 == "M" { print $2 }' <<<"$_im_one" | sort | tr '\n' ' ' | sed 's/ $//')"
+unset _im_one
 
 lib_import_scan_parse <<<"$_im_scan"
 assert_eq  "each site once, the virtual hosts first"           "shop.example blog.example crm.example panel.example mailonly.example fwdonly.example" "${IMP_DOMAIN[*]}"
@@ -13898,6 +13993,7 @@ unset -f $_ap_fns _ap_site _ap_rec _ap_file _ap_vh _ap_loaded _ap_run _ap_calls 
 lib_domain_state_reset
 
 assert_true "no test started the pm2 of this machine: it would have left a daemon behind" pm2_none_started
+assert_true "nor any other program of it that changes the machine or reaches beyond it" machine_none_started
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 if (( FAIL > 0 )); then exit 1; fi
 exit 0
