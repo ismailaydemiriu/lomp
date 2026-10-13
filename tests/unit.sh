@@ -10,7 +10,22 @@ shopt -s lastpipe
 HERE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 ROOT="$(dirname "$HERE")"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/ss-unit.XXXXXX")"
-cleanup() { rm -rf "$TMP"; }
+# A pm2 that was not the stand-in below starts a daemon, and that daemon outlives the suite. It
+# makes its sockets in its home, which is under $TMP for whatever a test starts (HOME is, and so
+# is every site home). Says where, ends the daemon, and returns 1 when there was one.
+pm2_none_started() {
+  local socks="" sock="" home="" pid="" rc=0
+  socks="$(find "$TMP" -name rpc.sock 2>/dev/null || true)"
+  while IFS= read -r sock; do
+    [[ -n "$sock" ]] || continue
+    rc=1; home="${sock%/*}"; pid="$(cat "$home/pm2.pid" 2>/dev/null || true)"
+    printf 'a test started the pm2 of this machine: its daemon (pid %s) made %s\n' "${pid:-unknown}" "$home" >&2
+    if [[ "$pid" =~ ^[0-9]+$ ]] && grep -qsF 'God Daemon' "/proc/$pid/cmdline"; then kill "$pid" 2>/dev/null || true; fi
+    rm -f "$sock"
+  done <<<"$socks"
+  return "$rc"
+}
+cleanup() { pm2_none_started || true; rm -rf "$TMP"; }
 
 # ---- globals normally provided by setup.sh (all paths redirected into TMP) --
 SCRIPT_VERSION="test"; SCRIPT_VERSION_LINE="1.0"
@@ -26,6 +41,9 @@ INSTALL_DIR="$TMP/install"; BIN_LINK="$TMP/lompstack"; BIN_SHORT="$TMP/lomp"; LO
 OPT_YES=1 OPT_DRY_RUN=0 OPT_QUIET=1 OPT_VERBOSE=0 OPT_NO_COLOR=1 OPT_JSON=0 OPT_NON_INTERACTIVE=1
 SCRIPT_PATH="$ROOT/setup.sh"; SCRIPT_DIR="$ROOT"
 export TMPDIR="$TMP"
+# the home of whoever runs this is the one path left: a program started by mistake would keep
+# its files there, and find what that person has running
+export HOME="$TMP/run-home"; mkdir -p "$HOME"; unset PM2_HOME
 for m in common lang system ols php db ssl domain harden scan speed proxy app mail webmail cloudflare backup monitor install importapp import rename menu; do
   # shellcheck source=/dev/null
   source "$ROOT/lib/$m.sh"
@@ -44,6 +62,21 @@ runuser() {
 # nor are there ACL tools everywhere, or an OpenLiteSpeed user to name: a record again
 SETFACL_LOG="$TMP/setfacl.log"
 setfacl() { printf '%s\n' "$*" >>"$SETFACL_LOG"; }
+# nor may it start this machine's pm2: every pm2 command starts a daemon when none runs. A shell
+# function cannot stand in for it - lompstack hands pm2 to timeout, to env and to runuser, and
+# a program starts a program, never a function - so the stand-in is a program, first in PATH.
+# It writes what it was asked into "calls" and answers "jlist" with the file "list" (no such
+# file: PM2 has nothing to say).
+PM2_STUB="$TMP/pm2-stand-in"; mkdir -p "$PM2_STUB"
+cat >"$PM2_STUB/pm2" <<'PM2'
+#!/bin/sh
+d="${0%/*}"
+printf '%s\n' "$*" >>"$d/calls"
+if [ "${1:-}" = jlist ] && [ -f "$d/list" ]; then cat "$d/list"; fi
+exit 0
+PM2
+chmod +x "$PM2_STUB/pm2"
+PATH="$PM2_STUB:$PATH"
 # Git Bash runs the native jq.exe, which writes CRLF unless given -b: a multi-line result then
 # carries a \r at the end of every line but the last. Servers and CI (Linux) are unaffected.
 if [[ "${OSTYPE:-}" == msys* || "${OSTYPE:-}" == cygwin* ]]; then
@@ -2180,7 +2213,8 @@ assert_eq "the first free port skips the taken ones" "3001" "$(lib_app_port_pick
 unset -f ss
 eval "$_orig_holder"
 
-# apply: files as the site user, the unit, then the service - with systemd and pm2 stubbed
+# apply: files as the site user, the unit, then the service - with systemd stubbed, and pm2
+# the stand-in of the whole suite
 APP_UNIT_DIR="$TMP/systemd"; mkdir -p "$APP_UNIT_DIR"
 _orig_sc="$(declare -f lib_systemctl)"; _orig_act="$(declare -f lib_service_active)"
 _orig_en="$(declare -f lib_service_enabled)"; _orig_wait="$(declare -f lib_app_wait_port)"; _orig_lock="$(declare -f _app_site_lock)"
@@ -2188,7 +2222,6 @@ _orig_tools="$(declare -f lib_require_tools)"
 _sc_calls=""; lib_systemctl() { _sc_calls+="$* "; return 0; }
 lib_service_active() { return 1; }; lib_service_enabled() { return 1; }
 lib_app_wait_port() { return 0; }; _app_site_lock() { return 0; }; lib_require_tools() { return 0; }
-pm2() { return 0; }
 APP_START="npm start"; APP_SCRIPT=""; APP_PORT=3000; APP_ENABLED=1; APP_MEMORY=""
 rm -f "$D_HOME/app/package.json"
 printf '{"API_KEY":"top-s3cr3t-value"}' >"$(lib_app_env_file app.example.com)"
@@ -2225,12 +2258,19 @@ assert_lacks "and prints no value"                   "top-s3cr3t-value" "$out"
 
 # env: the value comes from stdin, never from the command line, and never reaches the log
 APP_ENABLED=1; lib_app_state_write app.example.com
+# both start the application again, and for that PM2 is asked what runs: these two commands
+# were the ones that reached the pm2 of the machine while a function stood in for it
+_env_again="jlist;delete web;start $D_HOME/.pm2/lomp.ecosystem.json --only web;"
+: >"$PM2_STUB/calls"
 printf 'val with spaces & "quotes"\n' | lib_app_env app.example.com set DATABASE_URL >/dev/null 2>&1
 assert_eq "env set stores what stdin gave"          'val with spaces & "quotes"' "$(jq -r '.DATABASE_URL' "$(lib_app_env_file app.example.com)")"
+assert_eq "and starts the application again: PM2 is asked what runs, then told" "$_env_again" "$(tr '\n' ';' <"$PM2_STUB/calls")"
 assert_eq "a value on the command line is refused"  1 "$(run_isolated lib_app_env app.example.com set API_KEY oops)"
 assert_eq "a reserved name is refused"              1 "$(run_isolated lib_app_env app.example.com set PORT </dev/null)"
+: >"$PM2_STUB/calls"
 lib_app_env app.example.com unset DATABASE_URL >/dev/null 2>&1
 assert_eq "env unset removes it"                    "null" "$(jq -r '.DATABASE_URL' "$(lib_app_env_file app.example.com)")"
+assert_eq "and starts it again the same way"        "$_env_again" "$(tr '\n' ';' <"$PM2_STUB/calls")"
 assert_lacks "the log never sees a value"           "val with spaces" "$(cat "$LOG_FILE")"
 
 # remove: the service goes before the files and the user
@@ -2258,8 +2298,8 @@ assert_eq "a home the app files cannot be written to is reported, not fatal" "fa
 assert_eq "and apply exits 0 with errexit armed" 0 "$(run_isolated lib_app_apply)"
 eval "$_orig_write"
 eval "$_orig_as"; eval "$_orig_sc"; eval "$_orig_act"; eval "$_orig_en"; eval "$_orig_wait"; eval "$_orig_lock"; eval "$_orig_tools"
-unset -f pm2 _ev_vars _ev_run _ev _ev_watch
-unset _ev_long _ev_want
+unset -f _ev_vars _ev_run _ev _ev_watch
+unset _ev_long _ev_want _env_again
 lib_json_set "$(lib_domain_json app.example.com)" 'del(.app)'
 rm -f "$(lib_app_env_file app.example.com)"
 lib_domain_state_reset
@@ -2483,7 +2523,7 @@ assert_eq "changes: an ecosystem larger than an environment variable still recon
 # "app start", "stop", "restart" and "deploy" could not work out which processes to restart.
 _pc_many="$(jq -rn '[range(0; 4000) | "a-process-of-the-site-users-own-" + tostring] | join(" ")')"
 _pc_one="$(jq -rn '"n" * 131100')"
-_pc_out="$TMP/pc.out"; _pc_calls="$TMP/pc.calls"
+_pc_out="$TMP/pc.out"
 _pc_run() { _app_process_changes "$@" >"$_pc_out" 2>/dev/null; }
 _pc_tmp="$(find "$TMP" -name 'ss.*' 2>/dev/null | sort)"
 assert_true  "4000 names are longer than one argument may be"       test "${#_pc_many}" -gt 131072
@@ -2500,25 +2540,24 @@ _pc_list() {   # how many more, the length of their names -> what "pm2 jlist" pr
     def proc: {name: ., pm2_env: {status: "online", restart_time: 0}, monit: {cpu: 0, memory: 1048576}};
     [("api", "queue", "mybot", "Queue", "all" | proc), (range(0; $n) | ("p" + tostring) | . + ("x" * ($len - length)) | proc)]'
 }
-_pc_apply() {   # PM2's list -> how the command ends, and what it asked PM2 to do
-  local _pc_pl="$1"
+_pc_apply() {   # PM2's list -> how the command ends, and what it asked PM2, in that order
   lib_require_tools() { return 0; }; lib_service_active() { return 0; }; lib_service_enabled() { return 0; }
   lib_systemctl() { return 0; }; lib_app_wait_port() { return 0; }; _app_site_lock() { return 0; }
   _app_as() { local dir="$1"; shift; ( cd "$dir" && "$@" ); }
-  _app_jlist() { printf '%s' "$_pc_pl"; }
-  pm2() { printf '%s %s\n' "$1" "${@: -1}" >>"$_pc_calls"; }
+  printf '%s\n' "$1" >"$PM2_STUB/list"
   APP_UNIT_DIR="$TMP/pc-systemd"; mkdir -p "$APP_UNIT_DIR"
   lib_app_apply >/dev/null 2>&1   # the unit file is new: the service is restarted, nothing compared
-  : >"$_pc_calls"
+  : >"$PM2_STUB/calls"
   lib_app_apply >/dev/null 2>&1
-  printf '%s: ' "$APP_RESULT"; sort "$_pc_calls" | tr '\n' ';'
+  printf '%s: ' "$APP_RESULT"; tr '\n' ';' <"$PM2_STUB/calls"
 }
 assert_eq    "apply: a process the site user started under a name lompstack could have given goes, the others are not touched" \
-  "running: delete mybot;" "$(_pc_apply "$(_pc_list 0 0)")"
+  "running: jlist;delete mybot;" "$(_pc_apply "$(_pc_list 0 0)")"
 assert_eq    "apply: with 4000 more of them the processes are compared, and the same happens" \
-  "running: delete mybot;" "$(_pc_apply "$(_pc_list 4000 40)")"
+  "running: jlist;delete mybot;" "$(_pc_apply "$(_pc_list 4000 40)")"
 assert_eq    "apply: with one whose name has 128 KiB as well" \
-  "running: delete mybot;" "$(_pc_apply "$(_pc_list 1 131100)")"
+  "running: jlist;delete mybot;" "$(_pc_apply "$(_pc_list 1 131100)")"
+rm -f "$PM2_STUB/list"
 unset -f _pc_run _pc_list _pc_apply
 unset _pc_many _pc_one _pc_tmp
 assert_eq "a process list of the wrong shape leaves the workers alone" "not running" \
@@ -2564,7 +2603,7 @@ assert_eq    "a site without workers: an empty list, whatever PM2 runs"        "
 _ws_cmd() {
   lib_require_tools() { return 0; }; lib_service_active() { return 0; }; lib_service_enabled() { return 0; }; lib_service_exists() { return 0; }
   _app_as() { local dir="$1"; shift; ( cd "$dir" && "$@" ); }
-  _app_jlist() { printf '%s' "$_ws_long"; }
+  printf '%s\n' "$_ws_long" >"$PM2_STUB/list"
   _doc_add() { printf '%s|%s|%s\n' "$1" "$2" "$3"; }
   "$@"
 }
@@ -2642,6 +2681,7 @@ assert_eq    "app list --json too"                                   "api=online
   "$(_ws_with "$_ws_odd" lib_app_list --json 2>/dev/null | jq -r '.[] | select(.domain == "work.example.com") | .workers | map(.name + "=" + .status) | join(" ")' || true)"
 unset -f _ws_list _ws_run _ws_states _ws_watch _ws_cmd _ws_entry _ws_with
 unset _ws_short _ws_long _ws_want _ws_said _ws_api _ws_web _ws_none _ws_odd
+rm -f "$PM2_STUB/list"
 
 _job='{"name":"cleanup","start":"npm run cleanup","cwd":"app","cron":"*/5 * * * *","timeout":"30m","enabled":true}'
 _js="$(lib_app_render_job "$_job")"
@@ -2676,6 +2716,17 @@ assert_eq    "root never reads a file of theirs unbounded" "" "$(grep -nE '_app_
 assert_has   "PM2's list is read as the site user"                              '_app_as "$D_HOME"' "$(declare -f _app_jlist)"
 assert_has   "and bounded in time, generous and overridable (default 30 s)"     'timeout "${APP_JLIST_TIMEOUT:-30}"' "$(declare -f _app_jlist)"
 assert_lacks "with no size cap that could truncate a valid list into invalid JSON" "head -c" "$(declare -f _app_jlist)"
+# What comes back is the list as PM2 printed it: its last line, whatever PM2 says before it.
+# No test went through here with a list while a function stood in for pm2 - timeout starts a
+# program, so the function was never asked, and the tests that had a list replaced _app_jlist.
+_jl_ask() { ( _app_as() { shift; ( "$@" ); }; D_HOME="$TMP"; _app_jlist ); }
+printf '%s\n' '>>>> In-memory PM2 is out-of-date, do:' '>>>> pm2 update' '[{"name":"web"}]' >"$PM2_STUB/list"
+assert_eq    "the list is handed on as PM2 printed it, without what PM2 says before it" '[{"name":"web"}]' "$(_jl_ask)"
+rm -f "$PM2_STUB/list"
+assert_eq    "and a PM2 with nothing to say is no list"                                 "" "$(_jl_ask)"
+unset -f _jl_ask
+assert_eq    "no shell function stands in for pm2: timeout, env and runuser go past one, to the machine's own pm2" "" \
+  "$(grep -nE '(^|[;{[:space:]])pm2\(\)' "${BASH_SOURCE[0]}" || true)"
 if command -v timeout >/dev/null 2>&1; then
   # behaviour: a daemon that never answers (here a pm2 that just sleeps) is given up on at the
   # bound, not waited out; on the unbounded version the call waits the full sleep and fails -lt 10
@@ -13598,6 +13649,7 @@ STATE_DIR="$_ap_state"; HARDEN_PHP_INI_ROOT="$_ap_ini"
 unset -f $_ap_fns _ap_site _ap_rec _ap_file _ap_vh _ap_loaded _ap_run _ap_calls _ap_row _ap_tr _map; eval "$_ap_saved"
 lib_domain_state_reset
 
+assert_true "no test started the pm2 of this machine: it would have left a daemon behind" pm2_none_started
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 if (( FAIL > 0 )); then exit 1; fi
 exit 0
