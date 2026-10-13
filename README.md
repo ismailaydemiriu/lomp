@@ -1479,6 +1479,8 @@ LOMPSTACK_INTEGRATION=yes bash tests/e2e-rename-app-mail.sh   # a Node.js applic
                                                               # also while mail keeps arriving (spam, and mail Postfix
                                                               # was holding, among it), and back again
 LOMPSTACK_INTEGRATION=yes bash tests/e2e-rename-webmail.sh    # what Roundcube keeps for a mailbox
+LOMPSTACK_INTEGRATION=yes bash tests/e2e-rename-mail-store.sh # who takes the steps in the mail store: what is root's
+                                                              # there, the mail user cannot move, remove or fill
 ```
 
 One more of the same kind is for a WordPress that gets its certificate after it was installed

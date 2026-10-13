@@ -194,6 +194,8 @@ $L mail alias add "team@$ML" "info@$ML,sales@$ML" --yes --no-color >/dev/null 2>
 has "it has two mailboxes" "sales@$ML" "$($L mail box list --no-color 2>&1 | grep -c "@$ML" | sed "s/^2\$/sales@$ML/")"
 if deliver "info@$ML" e2e-before "/var/vmail/$ML/info/Maildir"; then ok "a message is in the mailbox before the rename"; else bad "a message is in the mailbox before the rename" "$(postqueue -p 2>&1 | tail -n 4)"; fi
 sel="$(jq -r '.mail.selector' "$ST/$ML/domain.json")"
+# (the directory of the old domain, closed in a way of its own: the new domain's is made like it)
+chmod 0750 "/var/vmail/$ML"
 out="$($L rename "$ML" "$MLN" --yes --no-color 2>&1)"; rc=$?
 printf '%s\n' "$out" >"$T/rename-mail.out"
 eq "the rename succeeds" "0" "$rc"
@@ -208,6 +210,11 @@ check "for the second mailbox too" doveadm auth test "sales@$MLN" "$PW2"
 nope "the old address is no login any more" doveadm auth test "info@$ML" "$PW1"
 check "the mail that was there moved with the mailbox" bash -c "grep -rlq '^Subject: e2e-before' /var/vmail/$MLN/info/Maildir"
 nope "nothing is left of the old mailbox directory" test -e "/var/vmail/$ML/info"
+# What a rename makes and moves in the mail store, the mail user makes and moves (root does
+# not: a name there can be swapped for a link by anything that runs as that user). The
+# directory of the new domain is that user's from the first moment, with no chown behind it.
+eq "the directory of the new domain is the mail user's, closed as the old domain's is" "vmail vmail 750" "$(stat -c '%U %G %a' "/var/vmail/$MLN" 2>/dev/null)"
+eq "and nothing in it is anybody else's" "" "$(find "/var/vmail/$MLN" \( ! -user vmail -o ! -group vmail \) -print -quit 2>/dev/null)"
 if deliver "info@$ML" e2e-to-old "/var/vmail/$MLN/info/Maildir"; then ok "mail to the old address arrives in the new mailbox"; else bad "mail to the old address arrives in the new mailbox" "$(postqueue -p 2>&1 | tail -n 4)"; fi
 if deliver "info@$MLN" e2e-to-new "/var/vmail/$MLN/info/Maildir"; then ok "mail to the new address arrives"; else bad "mail to the new address arrives" "$(postqueue -p 2>&1 | tail -n 4)"; fi
 if deliver "team@$ML" e2e-team-old "/var/vmail/$MLN/sales/Maildir"; then ok "mail to an old alias reaches the mailboxes behind it"; else bad "mail to an old alias reaches the mailboxes behind it" "$(postqueue -p 2>&1 | tail -n 4)"; fi
