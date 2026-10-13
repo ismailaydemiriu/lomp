@@ -6,9 +6,12 @@
 #  A PM2 application with a build step, a scheduled job and a variable is renamed and,
 #  after an injected failure, put back. A site with two mailboxes and an alias is renamed:
 #  same passwords under the new addresses, mail to the old ones delivered into the new
-#  mailboxes; once more while mail keeps arriving - marked spam among it, and a message
-#  Postfix was holding from before - and back to the name it had, past an empty directory
-#  left under it; and once more with --keep-mail.
+#  mailboxes, and what is still handed to Dovecot under an old address too; once more while
+#  mail keeps arriving - marked spam among it, a message Postfix was holding from before, one
+#  it holds although Dovecot had written it into the mailbox, one on hold, a sender that is
+#  slow across the rename, the first mail of a mailbox that never had any - and back to the
+#  name it had, past what was left under it: an empty directory, mail of the mailbox's own,
+#  mail nobody can say whose; and once more with --keep-mail.
 #
 #  RUN ONLY ON A THROWAWAY SERVER, AS ROOT. It adds, renames and removes real sites
 #  (names under .invalid, which no DNS answers for), reloads OpenLiteSpeed many times
@@ -49,7 +52,22 @@ HERE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 SRC="${1:-$(dirname "$HERE")}"
 # from a copy: the tree under test cannot change under the run, and the path has no spaces
 T="$(mktemp -d /tmp/lomp-e2e.XXXXXX)"
-trap 'rm -rf "$T"' EXIT
+# Dovecot's user configuration, as it is when this begins. A server that was set up before
+# lomp told Dovecot the addresses mailboxes had before a rename is told by the first rename
+# with mail below (its configuration then names that list); at the end it is put back as it
+# was, so that the next run finds such a server again.
+DAUTH=/etc/dovecot/lomp/auth-passwdfile.conf; DFORMER=/etc/dovecot/lomp/former
+cp -p "$DAUTH" "$T/auth.before" 2>/dev/null
+[[ -e "$DFORMER" ]] && : >"$T/former.was-there"
+dovecot_back() {
+  [[ -s "$T/auth.before" ]] || return 0
+  cmp -s "$T/auth.before" "$DAUTH" && return 0
+  cp -p "$T/auth.before" "$DAUTH"
+  [[ -e "$T/former.was-there" ]] || rm -f "$DFORMER"
+  doveconf -n >/dev/null 2>&1 && doveadm reload >/dev/null 2>&1
+  return 0
+}
+trap 'exec 7>&- 2>/dev/null; dovecot_back; rm -rf "$T"' EXIT
 mkdir -p "$T/src" "$T/shim"
 cp -r "$SRC/setup.sh" "$SRC/lib" "$SRC/tests" "$T/src/"
 L="bash $T/src/setup.sh"
@@ -194,6 +212,24 @@ if deliver "info@$ML" e2e-to-old "/var/vmail/$MLN/info/Maildir"; then ok "mail t
 if deliver "info@$MLN" e2e-to-new "/var/vmail/$MLN/info/Maildir"; then ok "mail to the new address arrives"; else bad "mail to the new address arrives" "$(postqueue -p 2>&1 | tail -n 4)"; fi
 if deliver "team@$ML" e2e-team-old "/var/vmail/$MLN/sales/Maildir"; then ok "mail to an old alias reaches the mailboxes behind it"; else bad "mail to an old alias reaches the mailboxes behind it" "$(postqueue -p 2>&1 | tail -n 4)"; fi
 if deliver "team@$MLN" e2e-team-new "/var/vmail/$MLN/info/Maildir"; then ok "the alias exists at the new domain"; else bad "the alias exists at the new domain" "$(postqueue -p 2>&1 | tail -n 4)"; fi
+# Postfix applies an alias when a message comes in, not when it hands it over. What it took in
+# under an old address before it had the alias - from a sender that was in the middle of it, or
+# kept on hold since - still names that address when it reaches Dovecot, and was answered "550
+# User doesn't exist" there and sent back. So Dovecot is told the addresses the mailboxes had:
+# each is another name of its mailbox, and no login.
+under() {   # address subject -> a message handed to Dovecot under that address, as Postfix hands one over
+  swaks --protocol LMTP --socket /var/spool/postfix/private/dovecot-lmtp --from '<>' --to "$1" --header "Subject: $2" --body hello >/dev/null 2>&1
+}
+has "Dovecot's user configuration names the list of the addresses mailboxes had before" "$DFORMER" "$(cat "$DAUTH" 2>/dev/null)"
+fl="$(cat "$DFORMER" 2>/dev/null)"
+has "an old address is in it as another name of its mailbox" "info@$ML:::::/var/vmail/$MLN/info::userdb_user=info@$MLN " "$fl"
+has "with the quota the mailbox has" "sales@$ML:::::/var/vmail/$MLN/sales::userdb_user=sales@$MLN userdb_quota_rule=*:storage=2G" "$fl"
+lacks "an alias with two mailboxes behind it is the name of neither" "team@$ML:" "$fl"
+check "Dovecot takes a message that is handed over under an old address" under "info@$ML" e2e-under-old
+check "and puts it into the mailbox that had the address" bash -c "grep -rl '^Subject: e2e-under-old' /var/vmail/$MLN/info/Maildir | grep -E '/(new|cur)/'"
+eq "under its old address a mailbox has its own quota" "2097152" "$(doveadm -f tab quota get -u "sales@$ML" 2>/dev/null | awk -F'\t' '$2 == "STORAGE" { print $4 }' | sed -n 1p)"
+nope "a message handed over under the old alias is refused as it was" under "team@$ML" e2e-under-team
+nope "and so is one for an address the old domain never had" under "nobody@$ML" e2e-under-nobody
 nope "nothing was delivered into a mailbox made afresh under the old name" bash -c "ls -d /var/vmail/$ML/*/Maildir"
 al="$($L mail alias list --no-color 2>&1)"
 has "the old address is listed as an alias of the new one" "info@$MLN" "$(printf '%s\n' "$al" | grep "^ *info@$ML")"
@@ -216,8 +252,13 @@ sec "a site with mail, renamed while mail keeps arriving"
 out="$($L add "$MB" --static --no-ssl --mail --email e2e@example.org --yes --no-color 2>&1)"
 check "the site is added" test -s "$ST/$MB/domain.json"
 printf '%s' "$PW1" | $L mail box add "info@$MB" --yes --no-color >/dev/null 2>&1
+# ... a mailbox that never had mail, and one more for the way back
+printf '%s' "$PW2" | $L mail box add "fresh@$MB" --yes --no-color >/dev/null 2>&1
+printf '%s' "$PW2" | $L mail box add "side@$MB" --yes --no-color >/dev/null 2>&1
 if deliver "info@$MB" e2e-first "/var/vmail/$MB/info/Maildir"; then ok "a message is in the mailbox before the rename"; else bad "a message is in the mailbox before the rename" "$(postqueue -p 2>&1 | tail -n 4)"; fi
-tb="$(date +%s)"
+# that message as this server's Postfix and Dovecot write one into a mailbox (see below)
+cp "$(grep -rl '^Subject: e2e-first' "/var/vmail/$MB/info/Maildir" 2>/dev/null | grep -E '/(new|cur)/' | sed -n 1p)" "$T/first.msg" 2>/dev/null
+tb="$(date +%s)"; ln0="$(wc -l </var/log/server_setup.log 2>/dev/null || echo 0)"
 # A message Postfix holds for the mailbox when the rename begins: Dovecot is refused the
 # mailbox's tmp/ for a moment and answers 451, and Postfix puts the message off - under the
 # address it came for, which it keeps: an alias is applied when a message comes in, not when
@@ -225,12 +266,26 @@ tb="$(date +%s)"
 held_for() {   # address -> the ids of the messages the deferred queue holds for it
   postqueue -j 2>/dev/null | jq -r --arg a "$1" 'select(.queue_name == "deferred" and any(.recipients[]; .address == $a)) | .queue_id' 2>/dev/null
 }
+queue_of() {   # queue id -> the queue it is in and whom it is for
+  postqueue -j 2>/dev/null | jq -r --arg id "$1" 'select(.queue_id == $id) | "\(.queue_name) \(.recipients[0].address)"' 2>/dev/null
+}
 chmod 000 "/var/vmail/$MB/info/Maildir/tmp"
+# ... one that somebody then put on hold: it is nobody's to send on, and is released days later
+swaks --server 127.0.0.1 --port 25 --helo client.example.org --from '<>' --to "info@$MB" --header "Subject: e2e-onhold" --body hello >/dev/null 2>&1
+for i in $(seq 1 15); do [ -n "$(held_for "info@$MB")" ] && break; sleep 1; done
+hid="$(held_for "info@$MB" | sed -n 1p)"
+[ -z "$hid" ] || postsuper -h "$hid" >/dev/null 2>&1
 swaks --server 127.0.0.1 --port 25 --helo client.example.org --from '<>' --to "info@$MB" --header "Subject: e2e-held" --body hello >/dev/null 2>&1
 for i in $(seq 1 15); do [ -n "$(held_for "info@$MB")" ] && break; sleep 1; done
+h="$(held_for "info@$MB" | sed -n 1p)"
+# ... and one that will turn out to be in the mailbox already (see below)
+swaks --server 127.0.0.1 --port 25 --helo client.example.org --from '<>' --to "info@$MB" --header "Subject: e2e-arrived" --body hello >/dev/null 2>&1
+for i in $(seq 1 15); do [ "$(held_for "info@$MB" | grep -c .)" -ge 2 ] && break; sleep 1; done
 chmod 700 "/var/vmail/$MB/info/Maildir/tmp"
-h="$(held_for "info@$MB")"
-if [ -n "$h" ]; then ok "Postfix holds a message for the mailbox when the rename begins"; else bad "Postfix holds a message for the mailbox when the rename begins" "$(postqueue -p 2>&1 | tail -n 6)"; fi
+ha="$(held_for "info@$MB" | grep -vxF -- "${h:-none}" | sed -n 1p)"
+hmid="$(postcat -hq "${ha:-none}" 2>/dev/null | grep -i -m1 '^Message-Id:')"
+if [ -n "$h" ] && [ -n "$ha" ]; then ok "Postfix holds two messages for the mailbox when the rename begins"; else bad "Postfix holds two messages for the mailbox when the rename begins" "$(postqueue -p 2>&1 | tail -n 6)"; fi
+eq "and one more that was put on hold" "hold info@$MB" "$(queue_of "${hid:-none}")"
 : >"$T/busy"
 for i in 1 2 3 4; do
   ( while [ -e "$T/busy" ]; do
@@ -242,14 +297,68 @@ done
 ( while [ -e "$T/busy" ]; do
     swaks --protocol LMTP --socket /var/spool/postfix/private/dovecot-lmtp --from '<>' --to "info@$MB" --header "Subject: e2e-junk" --header "X-Spam: Yes" --body hello >/dev/null 2>&1
   done ) &
+moved() {   # address -> waits until the rename has given the mailbox that address (its mail has moved by then)
+  while [ -e "$T/busy" ]; do grep -q "^$1:" /etc/dovecot/lomp/passwd 2>/dev/null && return 0; sleep 0.05; done
+  return 1
+}
+# ... the first mail a mailbox ever gets, handed over under its old address in the moments
+# after the mailbox was given its new one: Dovecot still answers for the old one then, and
+# makes a mailbox for it - which the mailbox that never had mail had no place to take it from
+( moved "fresh@$MBN" || exit 0
+  for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
+    under "fresh@$MB" e2e-fresh && echo took >>"$T/fresh.took"
+  done ) &
+# ... a delivery the move of the mailbox interrupts. Dovecot has written the message when it
+# finds the mailbox gone from under it, cannot take the file back - its path has moved - and
+# answers 451: Postfix puts the message off, and offered again it arrived a second time (11 of
+# the 18 the move put off in three renames on the test server). What Dovecot wrote is put
+# there by hand at the moment the mailbox has moved, as this server's Postfix and Dovecot
+# write a message: the one Postfix holds as "e2e-arrived", handed over out of that very queue
+# file, with the Message-ID it has there.
+( moved "info@$MBN" || exit 0
+  fid="$(grep -m1 -oE '\(Postfix\) with [A-Z]+ id [0-9A-Za-z]+' "$T/first.msg" 2>/dev/null | awk '{ print $NF }')"
+  [ -n "$fid" ] && [ -n "$ha" ] && [ -n "$hmid" ] && [ -d "/var/vmail/$MBN/info/Maildir/new" ] || exit 0
+  sed -e "s/$fid/$ha/g" -e 's/^Subject: e2e-first/Subject: e2e-arrived/' -e "s|^Message-I[dD]:.*|$hmid|" "$T/first.msg" >"$T/copy.msg"
+  install -o vmail -g vmail -m 0600 "$T/copy.msg" "/var/vmail/$MBN/info/Maildir/new/$(date +%s).M1P1.e2e-arrived" && : >"$T/copy.planted" ) &
+# ... and a sender that is in the middle of a message when the aliases take effect: Postfix
+# takes it in with the tables it had when the message began, under the old address
+smtp() {   # [a line to say] -> the line Postfix answers
+  local l=""
+  [ -z "${1:-}" ] || printf '%s\r\n' "$1" >&7
+  IFS= read -r -t 60 -u 7 l
+  printf '%s' "${l%$'\r'}"
+}
+exec 7<>/dev/tcp/127.0.0.1/25
+smtp >/dev/null; smtp "HELO client.example.org" >/dev/null; smtp "MAIL FROM:<>" >/dev/null
+slow="$(smtp "RCPT TO:<info@$MB>")"
+has "(a sender has begun a message for the old address)" "250 " "$slow"
 sleep 2
-out="$($L rename "$MB" "$MBN" --yes --no-color 2>&1)"; rc=$?
+out="$($L rename "$MB" "$MBN" --yes --no-color 2>&1 7<&-)"; rc=$?
+# the sender that was slow ends its message now: the mailbox has no line under the old name
+slow="$(smtp DATA)"; printf 'Subject: e2e-slow\r\n\r\nhello\r\n.\r\n' >&7; slow="$slow / $(smtp)"; smtp QUIT >/dev/null
+exec 7>&-
 rm -f "$T/busy"; wait
 eq "the rename succeeds" "0" "$rc"
 [ "$rc" = 0 ] || printf '%s\n' "$out" | tail -n 50
 lacks "with no failure shown on the way" "FAILED" "$out"
+has "Postfix takes the message of the sender that was slow across the rename" "250 2.0.0 Ok: queued" "$slow"
+# the message that is on hold stayed there, under the address it came for; released, it is
+# handed to Dovecot under that address
+eq "a message on hold is left on hold" "hold info@$MB" "$(queue_of "${hid:-none}")"
+postsuper -H "${hid:-none}" >/dev/null 2>&1; postqueue -i "${hid:-none}" >/dev/null 2>&1
+for i in $(seq 1 30); do
+  grep -rlq '^Subject: e2e-onhold' "/var/vmail/$MBN/info/Maildir" 2>/dev/null && grep -rlq '^Subject: e2e-slow' "/var/vmail/$MBN/info/Maildir" 2>/dev/null && break
+  sleep 1
+done
 for i in $(seq 1 20); do postqueue -p 2>/dev/null | grep -q 'Mail queue is empty' && break; sleep 1; done
-has "the mailbox is one of the new domain" "info@$MBN" "$($L mail box list --no-color 2>&1)"
+boxes="$($L mail box list --no-color 2>&1)"
+has "the mailbox is one of the new domain" "info@$MBN" "$boxes"
+has "and so is the one that never had mail" "fresh@$MBN" "$boxes"
+check "released, the message that was on hold is in the mailbox that had the address" bash -c "grep -rl '^Subject: e2e-onhold' /var/vmail/$MBN/info/Maildir | grep -E '/(new|cur)/'"
+check "and so is the message of the sender that was slow" bash -c "grep -rl '^Subject: e2e-slow' /var/vmail/$MBN/info/Maildir | grep -E '/(new|cur)/'"
+nf="$(grep -rl '^Subject: e2e-fresh' "/var/vmail/$MBN/fresh/Maildir" 2>/dev/null | grep -cE '/(new|cur)/')"; nt="$(grep -c took "$T/fresh.took" 2>/dev/null)"
+if [ "${nt:-0}" -ge 1 ] && [ "${nf:-0}" = "${nt:-0}" ]; then ok "every first message of the mailbox that never had mail is in it ($nf messages)"
+else bad "every first message of the mailbox that never had mail is in it" "${nt:-0} taken by Dovecot under the old address, ${nf:-0} in the mailbox; under the old name: $(find "/var/vmail/$MB" -type f 2>/dev/null | grep -cE '/(new|cur)/')"; fi
 n="$(grep -rl '^Subject: e2e-busy' "/var/vmail/$MBN/info/Maildir" 2>/dev/null | grep -cE '/(new|cur)/')"
 if [ "${n:-0}" -ge 20 ]; then ok "the mail that kept arriving is in it ($n messages)"; else bad "the mail that kept arriving is in it" "${n:-0} messages"; fi
 nj="$(grep -rl '^Subject: e2e-junk' "/var/vmail/$MBN/info/Maildir" 2>/dev/null | grep -cE '/\.Junk/(new|cur)/')"
@@ -259,31 +368,71 @@ nope "nothing is left under the old name, not a directory either" bash -c "ls -d
 eq "no message was refused at the new address" "0" "$(journalctl -t postfix/lmtp --since "@$tb" --no-pager -o cat 2>/dev/null | grep -c "to=<info@$MBN>.*status=bounced")"
 for i in $(seq 1 30); do grep -rlq '^Subject: e2e-held' "/var/vmail/$MBN/info/Maildir" 2>/dev/null && break; sleep 1; done
 check "the message Postfix was holding went on to the mailbox, under its new address" bash -c "grep -rl '^Subject: e2e-held' /var/vmail/$MBN/info/Maildir | grep -E '/(new|cur)/'"
+eq "and is there once" "1" "$(grep -rl '^Subject: e2e-held' "/var/vmail/$MBN/info/Maildir" 2>/dev/null | grep -cE '/(new|cur)/')"
+check "(what Dovecot had written of the other one was put into the mailbox as it moved)" test -e "$T/copy.planted"
+eq "a message that was in the mailbox already is there once: it is taken out of the queue, not sent again" "1" "$(grep -rl '^Subject: e2e-arrived' "/var/vmail/$MBN/info/Maildir" 2>/dev/null | grep -cE '/(new|cur)/')"
+eq "Postfix holds it no longer" "" "$(queue_of "${ha:-none}")"
+# (how many the log names depends on the mail that kept arriving: a delivery the move itself
+# interrupted after Dovecot had written the message is one more of them)
+has "which the log says" "message(s) Postfix was holding for them were in the mailbox already" "$(sed -n "$((ln0 + 1)),\$p" /var/log/server_setup.log 2>/dev/null | grep -F 'in the mailbox already')"
 eq "Postfix holds nothing for the old address any more" "" "$(held_for "info@$MB")"
-eq "and nothing was bounced there" "0" "$(journalctl -t postfix/lmtp --since "@$tb" --no-pager -o cat 2>/dev/null | grep -c "to=<info@$MB>.*status=bounced")"
+eq "and nothing was bounced there" "0" "$(journalctl -t postfix/lmtp --since "@$tb" --no-pager -o cat 2>/dev/null | grep -c "to=<[a-z]*@$MB>.*status=bounced")"
 
 sec "... and renamed back to the name it had"
 # Every address of the first name became an alias of the same address at the second. A mailbox
 # that comes back takes its address over from that alias: left in place, the two aliases sent
 # each other its mail, and Postfix answered "451 4.6.0 Alias expansion error".
 $L redirect del "$MB" --yes --no-color >/dev/null 2>&1
-# What a rename that did not wait for Dovecot left under the first name, put there by hand: the
-# Maildir Dovecot makes of an address it is asked about, with no message in it. It was "in the
-# way", and the mailbox stayed at the address of the meantime.
-install -d -o vmail -g vmail -m 0700 "/var/vmail/$MB" "/var/vmail/$MB/info" "/var/vmail/$MB/info/Maildir"
-install -o vmail -g vmail -m 0600 /dev/null "/var/vmail/$MB/info/Maildir/dovecot.list.index.log"
+# What a release that did not wait for Dovecot, or carried over the inbox alone, left under the
+# first name - put there by hand. Each was "in the way", and the mailbox stayed at the address
+# of the meantime:
+#  - fresh: the Maildir Dovecot makes of an address it is asked about, with no message in it
+#  - info:  mail that arrived for the mailbox under its first address while it moved, in the
+#           folder the spam rule files into
+#  - side:  a message from another time - nobody can say whose that is
+maildir() {   # directory... -> each made as Dovecot makes one
+  install -d -o vmail -g vmail -m 0700 "$@"
+}
+maildir "/var/vmail/$MB" "/var/vmail/$MB/fresh" "/var/vmail/$MB/fresh/Maildir"
+install -o vmail -g vmail -m 0600 /dev/null "/var/vmail/$MB/fresh/Maildir/dovecot.list.index.log"
+maildir "/var/vmail/$MB/info" "/var/vmail/$MB/info/Maildir" "/var/vmail/$MB/info/Maildir/.Junk" "/var/vmail/$MB/info/Maildir/.Junk/new"
+printf 'Subject: e2e-left-behind\n\nhello\n' >"$T/left.msg"
+install -o vmail -g vmail -m 0600 "$T/left.msg" "/var/vmail/$MB/info/Maildir/.Junk/new/$(date +%s).M2P2.e2e-left"
+maildir "/var/vmail/$MB/side" "/var/vmail/$MB/side/Maildir" "/var/vmail/$MB/side/Maildir/new" "/var/vmail/$MB/side/Maildir/cur" "/var/vmail/$MB/side/Maildir/tmp"
+printf 'Subject: e2e-whose\n\nhello\n' >"$T/whose.msg"
+install -o vmail -g vmail -m 0600 "$T/whose.msg" "/var/vmail/$MB/side/Maildir/new/1.M3P3.e2e-whose"
+touch -d '3 days ago' "/var/vmail/$MB/side/Maildir/new/1.M3P3.e2e-whose"
 out="$($L rename "$MBN" "$MB" --yes --no-color 2>&1)"; rc=$?
 eq "the rename back succeeds" "0" "$rc"
 [ "$rc" = 0 ] || printf '%s\n' "$out" | tail -n 50
-has "an empty directory under that name is taken out of the mailbox's way, and said" "/var/vmail/$MB/info held no message and was in the way of info@$MB: removed" "$out"
+has "an empty directory under that name is taken out of the mailbox's way, and said" "/var/vmail/$MB/fresh held no message and was in the way of fresh@$MB: removed" "$out"
+has "mail of the mailbox's own that had been left there is carried into it, and said" "1 message(s) that had been left under info@$MB when the site was renamed are in the mailbox now" "$out"
+check "into the folder it lay in" bash -c "grep -rl '^Subject: e2e-left-behind' /var/vmail/$MB/info/Maildir/.Junk | grep -E '/(new|cur)/'"
+has "a directory with mail nobody can say whose is put aside, and named" "/var/vmail/$MB/side was in the way of side@$MB: it is /var/vmail/$MB/side~" "$out"
+check "with the message that was in it" bash -c "grep -rlq '^Subject: e2e-whose' /var/vmail/$MB/side~*/Maildir/new"
+# whose that mail is, lomp cannot say: it gives the command that copies it into the mailbox to
+# whoever can - and that command, as it is printed, does
+imp="$(printf '%s\n' "$out" | grep -o "doveadm import -u side@$MB maildir:/var/vmail/$MB/side~[0-9-]*/Maildir \"\" all" | sed -n 1p)"
+if [ -n "$imp" ]; then ok "the command that copies its messages into the mailbox is printed"; else bad "the command that copies its messages into the mailbox is printed" "$(printf '%s\n' "$out" | grep -i 'side' | head -n 6)"; fi
+has "and what becomes of the directory otherwise" "No backup of the mail holds that directory, and it is deleted with the mail of $MB" "$out"
+nope "(the message is not in the mailbox yet)" bash -c "grep -rlq '^Subject: e2e-whose' /var/vmail/$MB/side/Maildir"
+[ -z "$imp" ] || bash -c "$imp" >/dev/null 2>&1
+check "run as printed, it puts the message into the mailbox" bash -c "grep -rl '^Subject: e2e-whose' /var/vmail/$MB/side/Maildir | grep -E '/(new|cur)/'"
+check "and the message is still in what was put aside: it is copied" bash -c "grep -rl '^Subject: e2e-whose' /var/vmail/$MB/side~*/Maildir | grep -E '/(new|cur)/'"
 boxes="$($L mail box list --no-color 2>&1)"
 has "the mailbox has its first address again" "info@$MB" "$boxes"
+has "the one whose place was empty too" "fresh@$MB" "$boxes"
+has "and the one whose place was taken" "side@$MB" "$boxes"
 lacks "and is none of the other domain" "@$MBN " "$boxes"
 check "the same password signs in under it" doveadm auth test "info@$MB" "$PW1"
 check "its mail came back with it" bash -c "grep -rlq '^Subject: e2e-busy' /var/vmail/$MB/info/Maildir"
 lacks "its address is no alias of the other one any more" "info@$MBN" "$($L mail alias list --no-color 2>&1 | grep "^ *info@$MB ")"
 if deliver "info@$MB" e2e-back "/var/vmail/$MB/info/Maildir"; then ok "mail to it arrives"; else bad "mail to it arrives" "$(postqueue -p 2>&1 | tail -n 4)"; fi
 if deliver "info@$MBN" e2e-back-other "/var/vmail/$MB/info/Maildir"; then ok "and so does mail to the address of the meantime"; else bad "and so does mail to the address of the meantime" "$(postqueue -p 2>&1 | tail -n 4)"; fi
+has "for Dovecot the address of the meantime is another name of the mailbox now" "info@$MBN:::::/var/vmail/$MB/info::userdb_user=info@$MB " "$(cat "$DFORMER" 2>/dev/null)"
+eq "and its first address, a mailbox again, is nobody's other name" "0" "$(grep -c "^info@$MB:" "$DFORMER" 2>/dev/null)"
+check "a message handed to Dovecot under the address of the meantime is taken" under "info@$MBN" e2e-under-meantime
+check "into the mailbox" bash -c "grep -rl '^Subject: e2e-under-meantime' /var/vmail/$MB/info/Maildir | grep -E '/(new|cur)/'"
 nope "nothing is left under the name of the meantime" bash -c "ls -d /var/vmail/$MBN/*"
 
 sec "a site with mail, renamed with --keep-mail"
@@ -304,6 +453,11 @@ nope "no test user is left" bash -c "getent passwd | grep -q '^rn.*_lomp_e2e_inv
 nope "no test unit is left" bash -c "ls /etc/systemd/system/pm2-rn*"
 nope "no test mailbox is left" bash -c "$L mail box list --no-color 2>&1 | grep -q '@rn'"
 nope "no test mail is left" bash -c "ls -d /var/vmail/rn*"
+n="$(grep -c '@rn[a-z]*\.lomp-e2e\.invalid' "$DFORMER" 2>/dev/null)"
+eq "Dovecot's list names no address of the test any more" "0" "${n:-0}"
+dovecot_back
+check "Dovecot's user configuration is as it was" cmp -s "$T/auth.before" "$DAUTH"
+check "and valid" doveconf -n
 check "OpenLiteSpeed's configuration is valid" /usr/local/lsws/bin/openlitespeed -t
 sed 's/^/   | /' "$T/rename-app.out" | sed -n '1,14p;/Node.js application/,/Certificate/p'
 sed 's/^/   | /' "$T/rename-mail.out" | grep -i 'mail' | head -n 8
