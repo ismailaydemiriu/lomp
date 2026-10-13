@@ -408,8 +408,12 @@ that mailbox ever got. A message Postfix was holding for an old address - put of
 rename, or by the move of the mailbox under a delivery - is sent through the alias instead of
 being offered, minutes later, to an address that is no mailbox any more. Where Dovecot had
 written such a message into the mailbox before it gave it back to Postfix, the message has
-arrived: it is taken out of the queue instead and not sent a second time (told by the queue
-file the message names and by its Message-ID; nothing is ever removed from a mailbox for it).
+arrived: it is taken out of the queue instead and not sent a second time. That is told by the
+file itself - it names the queue file it was handed over from, and from that line on it is
+what Postfix holds, byte for byte - so a message without a Message-ID is told as well, and one
+for two mailboxes goes out of the queue once both have it. Nothing is ever removed from a
+mailbox for it; where it cannot be told for certain, the message is sent on (see "When
+Dovecot is interrupted" under Mail for the same look after a reload).
 
 Dovecot is told the addresses the mailboxes had as well (`/etc/dovecot/lomp/former`, rewritten
 with the mail tables). Postfix applies an alias when a message comes in, not when it hands it
@@ -1130,6 +1134,32 @@ What the configuration insists on:
   Rspamd and nobody else; its web interface is a socket only root and Rspamd can open. Whoever
   speaks the milter protocol decides which account a message comes from, and that is what a
   DKIM signature is based on.
+
+### When Dovecot is interrupted
+
+Telling Dovecot to read its configuration again ends the deliveries it is in the middle of,
+and so does a restart. For a message it has already written into the mailbox it then answers
+"421 Shutting down" all the same: Postfix keeps the message, offers it again some minutes
+later, and the mailbox has it twice. With mail arriving on three connections on the test
+server, that was 15 of 629 messages after six reloads, 15 of 464 after four restarts and 8 of
+1625 after six renewals of the mail certificate.
+
+So after every reload and restart of its own - a certificate put in place, a list Dovecot has
+to learn of, `mail regenerate` - lomp looks at what Postfix was told to keep by Dovecot in that
+moment, and takes out of the queue what the mailbox has: the file names the queue file it was
+handed over from, is byte for byte what Postfix holds from that line on, and was written for
+the recipient the queue file waits for. The certbot deploy hook does the same after a renewed
+mail certificate (`lomp mail settle`, which looks back over the last four minutes and is what
+to run after reloading Dovecot by hand under mail). Nothing is taken out of a mailbox,
+and what cannot be told for certain stays in the queue and is delivered as before:
+
+- a message for two mailboxes of which only one has it - Postfix holds a message for all of
+  its recipients or for none, so it is offered to both again;
+- a message without a Message-ID that has a line of more than 998 characters, which Postfix
+  breaks when it hands the message over (with a Message-ID it is told by that);
+- what a restart of Dovecot by anything else interrupted - a package upgrade, `systemctl`
+  by hand - unless `lomp mail settle` is run in the four minutes after it (Postfix offers
+  such a message again after five).
 
 ### Giving a domain its own mail
 

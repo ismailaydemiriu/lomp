@@ -6690,7 +6690,7 @@ assert_eq    "the renderers still exit 0" "0 0" "$(run_isolated lib_mail_render_
 # lay in the mailbox, filed by the mailbox's own filter and counted against its quota, and
 # the password of the mailbox did not sign in under it.
 _fm_saved_dir="$MAIL_DOVECOT_DIR"; MAIL_DOVECOT_DIR="$_md/dovecot"; mkdir -p "$MAIL_DOVECOT_DIR"
-_fm_saved_fns="$(declare -f doveconf doveadm lib_service_active 2>/dev/null || true)"
+_fm_saved_fns="$(declare -f doveconf doveadm lib_service_active lib_mail_settle postqueue postsuper postcat 2>/dev/null || true)"
 _fm_o_pw="$(cat "$MAIL_PASSWD_FILE")"; _fm_o_keep="$(cat "$(lib_mail_alias_file keep.example)")"; _fm_o_col="$(cat "$(lib_mail_alias_file col.example)")"
 lib_mail_passwd_set "me@site.example" "$_md_hash" "3G"
 lib_mail_passwd_set "info@all.example" "$_md_hash" "2G"
@@ -6732,6 +6732,11 @@ MAIL_PASSWD_FILE="$_fm_pw"
 doveconf() { [[ ! -e "$_md/doveconf-refuses" ]]; }
 doveadm() { printf 'doveadm %s\n' "$*" >>"$_md/dovecot.log"; }
 lib_service_active() { return 0; }
+# (a reload is followed by a look at what it interrupted, which is tried with "rename", where
+# the queue is: here it is a record that the look was asked for - and never Postfix itself)
+postqueue() { :; }; postsuper() { return 1; }; postcat() { return 1; }
+lib_mail_settle() { printf 'settle\n' >>"$_md/settle.log"; }
+MAIL_RELOAD_WAIT=0
 _fm_old_auth() {   # the user configuration as a release without the list wrote it
   printf '# Managed by lompstack - the only place a mailbox password is checked.\n\npassdb {\n  driver = passwd-file\n  args = scheme=BLF-CRYPT username_format=%%Lu %s\n}\n\n' "$MAIL_PASSWD_FILE"
   printf 'userdb {\n  driver = passwd-file\n  args = username_format=%%Lu %s\n  default_fields = uid=vmail gid=vmail home=/var/vmail/%%Ld/%%Ln\n}\n' "$MAIL_PASSWD_FILE"
@@ -6744,8 +6749,9 @@ assert_has   "a configuration without the list gets it"              "args = use
 assert_eq    "after the mailboxes, which it still reads first"       "$MAIL_PASSWD_FILE $(lib_mail_former_file)" \
   "$(awk '/^userdb \{/ { u = 1 } u && /args =/ { print $NF; u = 0 }' "$_fm_auth" | tr '\n' ' ' | sed 's/ $//')"
 assert_eq    "and Dovecot is told once"                              "doveadm reload" "$(cat "$_md/dovecot.log")"
+assert_eq    "what that reload interrupted is looked at afterwards"  "settle" "$(cat "$_md/settle.log" 2>/dev/null || true)"
 lib_mail_former_apply >/dev/null 2>&1
-assert_eq    "a configuration that has it is left alone, and Dovecot with it" "doveadm reload" "$(cat "$_md/dovecot.log")"
+assert_eq    "a configuration that has it is left alone, and Dovecot with it" "doveadm reload|settle" "$(cat "$_md/dovecot.log")|$(cat "$_md/settle.log" 2>/dev/null || true)"
 # Dovecot will not have it: everything as it was
 _fm_old_auth >"$_fm_auth"; : >"$_md/dovecot.log"; : >"$_md/doveconf-refuses"
 _fm_rc=0; MAIL_LAST_ERROR=""; lib_mail_former_apply >/dev/null 2>&1 || _fm_rc=$?
@@ -6840,8 +6846,8 @@ assert_eq    "a mailbox whose quota is changed has it under the address it had b
 printf '%s\n' "$_fm_o_pw" >"$MAIL_PASSWD_FILE"
 printf '%s\n' "$_fm_o_keep" >"$(lib_mail_alias_file keep.example)"; printf '%s\n' "$_fm_o_col" >"$(lib_mail_alias_file col.example)"
 rm -rf "$MAIL_DOMAINS_DIR/off.example" "$(lib_mail_alias_file off.example)" "$(lib_mail_former_file)"
-unset -f doveconf doveadm lib_service_active _fm_old_auth _fm_doc _fm_migrate; eval "$_fm_saved_fns"
-MAIL_DOVECOT_DIR="$_fm_saved_dir"
+unset -f doveconf doveadm lib_service_active lib_mail_settle postqueue postsuper postcat _fm_old_auth _fm_doc _fm_migrate; eval "$_fm_saved_fns"
+MAIL_DOVECOT_DIR="$_fm_saved_dir"; unset MAIL_RELOAD_WAIT
 unset _fm _fm_pw _fm_auth _fm_rc _fm_before _fm_al_keep _fm_al_col _fm_saved_dir _fm_saved_fns _fm_o_pw _fm_o_keep _fm_o_col
 
 # ---- the alias commands -----------------------------------------------------
@@ -8259,23 +8265,25 @@ _rn_stubs='
   lib_mail_former_apply() { printf "former-apply %s\n" "$*" >>"$_rn/calls"; MAIL_FORMER_TOLD=0; [[ ! -e "$_rn/dovecot-refuses" ]] || { MAIL_LAST_ERROR="Dovecot said no"; return 1; }; }
   # Postfix, standing in: what it holds is $_rn/queue, one message a line as "postqueue -j"
   # prints it. "postsuper -r - deferred" takes the ids it is handed out of the deferred ones
-  # and says how many, in the words Postfix has for it; any other use of it is refused. What
-  # becomes of a message that was put back is _rn_requeued, which a test may replace.
+  # and says how many, in the words Postfix has for it ("-d - deferred [incoming]" removes them,
+  # from the queues it names and from no other); any other use of it is refused. What becomes
+  # of a message that was put back is _rn_requeued, which a test may replace.
   postqueue() {
     printf "postqueue %s\n" "$*" >>"$_rn/calls"
     if [[ "${1:-}" != "-j" || -e "$_rn/postqueue-down" ]]; then printf "postqueue: fatal: Queue report unavailable - mail system is down\n" >&2; return 69; fi
     cat "$_rn/queue" 2>/dev/null || true
   }
   postsuper() {
-    local id="" line="" n=0 how="${1:-}" word="requeued" sum="Requeued"
+    local id="" line="" n=0 how="${1:-}" word="requeued" sum="Requeued" where="deferred"
     printf "postsuper %s\n" "$*" >>"$_rn/calls"
-    [[ "$*" == "-r - deferred" || "$*" == "-d - deferred" ]] || return 1
+    [[ "$*" == "-r - deferred" || "$*" == "-d - deferred" || "$*" == "-d - deferred incoming" ]] || return 1
     if [[ "$how" == "-d" ]]; then word="removed"; sum="Deleted"; fi
+    if [[ "$*" == *" incoming" ]]; then where="deferred incoming"; fi
     # (Postfix went through its queue between the look and the request: nothing is left to take)
     if [[ -e "$_rn/queue-moves-on" ]]; then : >"$_rn/queue"; fi
     while read -r id; do
       printf "asked-for %s\n" "$id" >>"$_rn/calls"
-      line="$(jq -c --arg id "$id" "select(.queue_id == \$id and .queue_name == \"deferred\")" "$_rn/queue" 2>/dev/null | sed -n 1p || true)"
+      line="$(jq -c --arg id "$id" --arg where " $where " ".queue_name as \$q | select(.queue_id == \$id and (\$where | contains(\" \" + \$q + \" \")))" "$_rn/queue" 2>/dev/null | sed -n 1p || true)"
       [[ -n "$line" ]] || continue
       jq -c --arg id "$id" "select(.queue_id != \$id)" "$_rn/queue" >"$_rn/queue.new"; mv "$_rn/queue.new" "$_rn/queue"
       printf "postsuper: %s: %s\n" "$id" "$word" >&2; n=$((n + 1))
@@ -8283,8 +8291,8 @@ _rn_stubs='
     done
     if (( n == 1 )); then printf "postsuper: %s: 1 message\n" "$sum" >&2; else printf "postsuper: %s: %s messages\n" "$sum" "$n" >&2; fi
   }
-  # ... and "postcat -hq": the header of a message it holds, as it lies in $_rn/qfiles
-  postcat() { [[ "${1:-}" == "-hq" && -n "${2:-}" ]] || return 1; cat "$_rn/qfiles/$2" 2>/dev/null; }
+  # ... and "postcat -hbq": a message it holds, header and body, as it lies in $_rn/qfiles
+  postcat() { [[ "${1:-}" == "-hbq" && -n "${2:-}" ]] || return 1; cat "$_rn/qfiles/$2" 2>/dev/null; }
   postkick() { printf "postkick %s\n" "$*" >>"$_rn/calls"; }
   _rn_requeued() { printf "%s\n" "$1" >>"$_rn/requeued"; }
   lib_webmail_domain_enable() { printf "webmail-enable %s\n" "$1" >>"$_rn/calls"; }
@@ -9971,43 +9979,52 @@ assert_has   "a message that left the queue in that moment is asked for" "asked-
 assert_lacks "and with none put back, pickup is not told"               "postkick" "$(_rn_calls)"
 assert_lacks "nor is one said to have been"                             "Postfix was holding" "$(cat "$_rn/log")"
 assert_has   "the rename ends well all the same"                        "rc=0" "$(_rn_out)"
-# A delivery that the move of the mailbox interrupts may have got as far as the file: Dovecot
-# writes the message into the mailbox, finds the mailbox gone from under it, cannot take the
-# file back - its path has moved - and answers 451; or it is told to read its configuration
-# again in that moment and answers "421 Shutting down" for a message it has saved. Postfix then
-# holds a message that lies in the mailbox already, and put back it arrived a second time: 11
-# of the 18 messages the move put off in three renames with mail arriving on three connections.
+# A delivery that is interrupted may have got as far as the file. Dovecot writes the message
+# into the mailbox, finds the mailbox gone from under it, cannot take the file back - its path
+# has moved - and answers 451; or it is told to read its configuration again in that moment
+# and answers "421 Shutting down" for a message it has saved. Postfix then holds a message
+# that lies in the mailbox already, and offered again it arrived a second time: 11 of the 18
+# messages the move put off in three renames with mail arriving on three connections, and -
+# with no rename anywhere - 13 of 1156 messages in six reloads of Dovecot.
 # Such a message has arrived. It is taken out of the queue and not sent again - and nothing is
 # ever taken out of a mailbox for it. Which file it is, the file says itself: the hop it was
-# handed to Dovecot from is the topmost Received line that is not Dovecot's own, and the
-# Message-ID it carries is the one of the message Postfix holds.
-_rn_msg() {   # file, the address it was delivered under, the queue ids of its hops at this server (the last one first)
-  local f="$1" to="$2" id="" mid=""
+# handed to Dovecot from is the topmost Received line that is not Dovecot's own; from that
+# line on the file is what Postfix holds, byte for byte (the test server: four kinds of
+# message of five; the fifth had a line of 3000 characters, which Postfix breaks on the way -
+# for that the Message-ID); and what Dovecot wrote on top names the recipient it is for.
+_rn_msg() {   # file, the address it was handed over for ("-": two recipients in one go), the queue ids of its hops at this server (the last one first)
+  local f="$1" to="$2" id=""
   shift 2
-  mid="${_rn_mid:-M.${*: -1}}"
-  mkdir -p "$(dirname "$f")"
-  {
-    printf 'Return-Path: <a@far.example>\nDelivered-To: %s\n' "$to"
-    printf 'Received: from mail.example\n\tby host.example with LMTP\n\tid cd9DI4I5zWrgOjsAb1/gCg\n\t(envelope-from <a@far.example>)\n\tfor <%s>; Mon, 12 Oct 2026 20:07:57 +0300\n' "$to"
+  mkdir -p "$(dirname "$f")" "$_rn/qfiles"
+  {   # the message as Postfix holds it in the queue file of its last hop
     for id in "$@"; do
       if [[ "$id" == pickup:* ]]; then printf 'Received: by mail.example (Postfix, from userid 113)\n\tid %s; Mon, 12 Oct 2026 20:07:59 +0300 (+03)\n' "${id#pickup:}"
       else printf 'Received: from client.far.example (unknown [203.0.113.5])\n\tby mail.example (Postfix) with ESMTPS id %s\n\tfor <info@alpha.example>; Mon, 12 Oct 2026 20:07:57 +0300 (+03)\n' "$id"; fi
     done
     printf 'Received: from elsewhere.example by client.far.example with ESMTP id FARAWAY1; Mon, 12 Oct 2026 20:07:50 +0300\n'
-    if [[ "$mid" != "-" ]]; then printf 'Message-Id: <%s@Far.Example>\n' "$mid"; fi
-    printf 'From: a@far.example\nSubject: one\n\nReceived: nothing in the body counts\n\tid BODY1\nMessage-ID: <in-the-body@far.example>\n'
+    if [[ "${_rn_mid:-}" != "-" ]]; then printf 'Message-Id: <%s@Far.Example>\n' "${_rn_mid:-M.${*: -1}}"; fi
+    printf 'Delivered-To: somebody@an-earlier-hop.example\nFrom: a@far.example\nSubject: one\n\n'
+    printf 'Received: nothing in the body counts\n\tid BODY1\nMessage-ID: <in-the-body@far.example>\n.a line that begins with a dot\n%s' "${_rn_body:-}"
+  } >"$_rn/held.tmp"
+  {   # ... and what Dovecot puts on top of it
+    printf 'Return-Path: <a@far.example>\n'
+    if [[ "$to" == "-" ]]; then printf 'Received: from mail.example\n\tby host.example with LMTP\n\tid cd9DI4I5zWrgOjsAb1/gCg\n\t(envelope-from <a@far.example>); Mon, 12 Oct 2026 20:07:57 +0300\n'
+    else printf 'Delivered-To: %s\nReceived: from mail.example\n\tby host.example with LMTP\n\tid cd9DI4I5zWrgOjsAb1/gCg\n\t(envelope-from <a@far.example>)\n\tfor <%s>; Mon, 12 Oct 2026 20:07:57 +0300\n' "$to" "$to"; fi
+    cat "$_rn/held.tmp"
   } >"$f"
+  if [[ -z "${_rn_noq:-}" ]]; then cp "$_rn/held.tmp" "$_rn/qfiles/${1#pickup:}"; fi
 }
-_rn_qfile() {   # queue id [the Message-ID it holds; "-": none] -> what "postcat -hq" shows of it
+_rn_qfile() {   # queue id, what Postfix holds under that name: "other" another message, "broken <Message-ID>" the same one with other bytes, "later <Message-ID>" one with that Message-ID taken in at another moment, "-" nothing it will show
   mkdir -p "$_rn/qfiles"
-  {
-    printf 'Received: from client.far.example (unknown [203.0.113.5])\n\tby mail.example (Postfix) with ESMTPS id %s\n\tfor <info@alpha.example>; Mon, 12 Oct 2026 20:07:57 +0300 (+03)\n' "$1"
-    printf 'Received: from elsewhere.example by client.far.example with ESMTP id FARAWAY1; Mon, 12 Oct 2026 20:07:50 +0300\n'
-    if [[ "${2:-}" != "-" ]]; then printf 'MESSAGE-ID:\n\t<%s@far.example>\n' "${2:-m.$1}"; fi
-    printf 'From: a@far.example\nSubject: one\n'
-  } >"$_rn/qfiles/$1"
+  case "${2:-}" in
+    -)      rm -f "$_rn/qfiles/$1" ;;
+    later)  printf 'Received: from client.far.example (unknown [203.0.113.5])\n\tby mail.example (Postfix) with ESMTPS id %s\n\tfor <info@alpha.example>; Mon, 12 Oct 2026 20:09:41 +0300 (+03)\nMessage-Id: <%s@far.example>\nSubject: one\n\nsent once more by its author, and Postfix has given it the name of a queue file that was\n' "$1" "$3" >"$_rn/qfiles/$1" ;;
+    broken) printf 'Received: from client.far.example (unknown [203.0.113.5])\n\tby mail.example (Postfix) with ESMTPS id %s\n\tfor <info@alpha.example>; Mon, 12 Oct 2026 20:07:57 +0300 (+03)\nMESSAGE-ID:\n\t<%s@far.example>\nSubject: one\n\na line of three thousand characters, which Postfix breaks when it hands the message over\n' "$1" "$3" >"$_rn/qfiles/$1" ;;
+    nomid)  printf 'Received: from client.far.example (unknown [203.0.113.5])\n\tby mail.example (Postfix) with ESMTPS id %s\n\tfor <info@alpha.example>; Mon, 12 Oct 2026 20:07:57 +0300 (+03)\nSubject: another one, and no Message-ID\n\nbody\n' "$1" >"$_rn/qfiles/$1" ;;
+    *)      printf 'Received: from client.far.example (unknown [203.0.113.5])\n\tby mail.example (Postfix) with ESMTPS id %s\n\tfor <info@alpha.example>; Mon, 12 Oct 2026 20:07:57 +0300 (+03)\nMessage-Id: <another@far.example>\nSubject: another message, under the name of a queue file that was\n\nbody\n' "$1" >"$_rn/qfiles/$1" ;;
+  esac
 }
-_rn_copy() { _rn_case _domain_rename_mail_copy_of "$@"; _rn_out | tr '\n' ' ' | sed 's/ $//'; }
+_rn_copy() { _rn_case lib_mail_msg_queue_file "$@"; _rn_out | tr '\n' ' ' | sed 's/ $//'; }
 _rn_msg "$_rn/m/first" info@alpha.example HELD1
 _rn_msg "$_rn/m/again" info@beta.example pickup:NEW1 HELD1
 _rn_msg "$_rn/m/twice" info@beta.example pickup:NEW2 pickup:NEW1 HELD1
@@ -10029,29 +10046,68 @@ assert_eq    "a client that calls itself id does not hide the queue file"       
 printf 'Subject: no hop at all\n\nbody\n' >"$_rn/m/bare"
 assert_eq    "a file with no such line is nobody's copy"                              "rc=0" "$(_rn_copy "$_rn/m/bare" HELD1)"
 assert_eq    "and a file that is not there is no failure"                             "rc=0" "$(_rn_copy "$_rn/m/no-such-file" HELD1)"
-# ... and that it is the same message, not another one the queue file's name was given to:
-# the Message-ID of the file and the one Postfix shows of what it holds
-_rn_mid_of() { _domain_rename_mail_msgid <"$1"; }
-_rn_mid_is() { _rn_case _rn_mid_of "$1"; _rn_out | tr '\n' ' ' | sed 's/ $//'; }
-assert_eq    "the Message-ID of a message, in lower case"                             "<m.held1@far.example> rc=0" "$(_rn_mid_is "$_rn/m/first")"
-assert_eq    "of one whose lines end in CR LF"                                        "<m.held1@far.example> rc=0" "$(_rn_mid_is "$_rn/m/crlf")"
-_rn_qfile HELD1
-assert_eq    "of one that writes it on a line of its own, under a name in capitals"   "<m.held1@far.example> rc=0" "$(_rn_mid_is "$_rn/qfiles/HELD1")"
-_rn_mid="-" _rn_msg "$_rn/m/nomid" info@alpha.example HELD1
-assert_eq    "a message that has none has none: what its body says is no header"      "rc=0" "$(_rn_mid_is "$_rn/m/nomid")"
+# ... what Dovecot wrote on top of it: whom it is for, and where the message itself begins
+_rn_one() { _rn_case "$@"; _rn_out | tr '\n' ' ' | sed 's/ $//'; }
+_rn_mid_of() { lib_mail_msg_id <"$1"; }
+assert_eq    "Dovecot's Delivered-To names the recipient a message was handed over for" "info@alpha.example rc=0" "$(_rn_one lib_mail_msg_delivered_to "$_rn/m/first")"
+_rn_msg "$_rn/m/both" - HELD5
+assert_eq    "handed over for two in one go, a message has none: the one further down is an earlier hop's" "rc=0" "$(_rn_one lib_mail_msg_delivered_to "$_rn/m/both")"
+assert_eq    "a file that is not there has none, and that is no failure"              "rc=0" "$(_rn_one lib_mail_msg_delivered_to "$_rn/m/no-such-file")"
+_rn_case lib_mail_msg_as_queued "$_rn/m/first"
+assert_eq    "below what Dovecot put on top, the file is what Postfix held, byte for byte" "$(cksum <"$_rn/qfiles/HELD1")" "$(sed '$d' "$_rn/out" | cksum)"
+_rn_case lib_mail_msg_as_queued "$_rn/m/both"
+assert_eq    "handed over for two in one go too"                                      "$(cksum <"$_rn/qfiles/HELD5")" "$(sed '$d' "$_rn/out" | cksum)"
+_rn_case lib_mail_msg_as_queued "$_rn/m/nolmtp"
+assert_eq    "a file Dovecot put no Received line on begins after its Return-Path"    "Received: from client.far.example (unknown [203.0.113.5])" "$(sed -n 1p "$_rn/out")"
+assert_eq    "the Message-ID of a message, in lower case"                             "<m.held1@far.example> rc=0" "$(_rn_one _rn_mid_of "$_rn/m/first")"
+assert_eq    "of one whose lines end in CR LF"                                        "<m.held1@far.example> rc=0" "$(_rn_one _rn_mid_of "$_rn/m/crlf")"
+_rn_qfile HELD7 broken m.held7
+assert_eq    "of one that writes it on a line of its own, under a name in capitals"   "<m.held7@far.example> rc=0" "$(_rn_one _rn_mid_of "$_rn/qfiles/HELD7")"
+_rn_mid="-" _rn_msg "$_rn/m/nomid" info@alpha.example HELD6
+assert_eq    "a message that has none has none: what its body says is no header"      "rc=0" "$(_rn_one _rn_mid_of "$_rn/m/nomid")"
 printf 'Message-ID: <one@far.example>\nSubject: two of them\nMessage-ID: <two@far.example>\n\nbody\n' >"$_rn/m/two"
-assert_eq    "of one that has two, the first"                                         "<one@far.example> rc=0" "$(_rn_mid_is "$_rn/m/two")"
-_rn_same() { if _domain_rename_mail_same "$@"; then echo "the same"; else echo "another"; fi; }   # asked as the mail step asks: in a condition
-_rn_is_same() { _rn_case _rn_same "$@"; _rn_out | tr '\n' ' ' | sed 's/ $//'; }
-assert_eq    "a file is the message a queue file holds when both carry one Message-ID" "the same rc=0" "$(_rn_is_same "$_rn/m/first" HELD1)"
-_rn_qfile HELD2 another
-assert_eq    "under the same name with another Message-ID it is another message"      "another rc=0" "$(_rn_is_same "$_rn/m/first" HELD2)"
-assert_eq    "a file without a Message-ID is not known to be it"                      "another rc=0" "$(_rn_is_same "$_rn/m/nomid" HELD1)"
-_rn_qfile HELD3 -
-assert_eq    "nor is one that is compared with a message that has none"               "another rc=0" "$(_rn_is_same "$_rn/m/nomid" HELD3)"
-assert_eq    "nor one whose queue file Postfix does not show"                         "another rc=0" "$(_rn_is_same "$_rn/m/first" GONE1)"
-assert_eq    "a file that is not there is no failure, and not the message"            "another rc=0" "$(_rn_is_same "$_rn/m/no-such-file" HELD1)"
-unset -f _rn_mid_of _rn_mid_is _rn_same _rn_is_same
+assert_eq    "of one that has two, the first"                                         "<one@far.example> rc=0" "$(_rn_one _rn_mid_of "$_rn/m/two")"
+# ... and that it is the same message, not another one the queue file's name was given to
+_rn_same() { if lib_mail_msg_is "$@"; then echo "the same"; else echo "another"; fi; }   # asked as the code asks: in a condition
+assert_eq    "a file is the message a queue file holds for an address when it is the same bytes" "the same rc=0" "$(_rn_one _rn_same "$_rn/m/first" HELD1 info@alpha.example)"
+assert_eq    "also when neither has a Message-ID"                                     "the same rc=0" "$(_rn_one _rn_same "$_rn/m/nomid" HELD6 info@alpha.example)"
+assert_eq    "also when it was handed over for two in one go"                         "the same rc=0" "$(_rn_one _rn_same "$_rn/m/both" HELD5 sales@alpha.example)"
+assert_eq    "the address is compared whatever its capitals"                          "the same rc=0" "$(_rn_one _rn_same "$_rn/m/first" HELD1 Info@Alpha.Example)"
+assert_eq    "what Dovecot handed over for another address is not this recipient's"   "another rc=0" "$(_rn_one _rn_same "$_rn/m/first" HELD1 info+tag@alpha.example)"
+_rn_msg "$_rn/m/long" info@alpha.example HELD7; _rn_qfile HELD7 broken M.HELD7
+assert_eq    "other bytes and the same Message-ID - a line Postfix broke on the way - is the same message" "the same rc=0" "$(_rn_one _rn_same "$_rn/m/long" HELD7 info@alpha.example)"
+assert_eq    "the line of the hop a message was handed over from, as one line"       "Received: from client.far.example (unknown [203.0.113.5]) by mail.example (Postfix) with ESMTPS id HELD7 for <info@alpha.example>; Mon, 12 Oct 2026 20:07:57 +0300 (+03) rc=0" "$(_rn_one lib_mail_msg_hop "$_rn/m/long")"
+assert_eq    "of the message as Postfix holds it, the same line"                      "$(_rn_one lib_mail_msg_hop "$_rn/m/long")" "$(_rn_one lib_mail_msg_hop "$_rn/qfiles/HELD7")"
+assert_eq    "a file with no such line has none"                                      "rc=0" "$(_rn_one lib_mail_msg_hop "$_rn/m/bare")"
+_rn_qfile HELD7 later M.HELD7
+assert_eq    "that Message-ID under that name, taken in at another moment, is another message: its author sent it again and Postfix gave the name away" "another rc=0" "$(_rn_one _rn_same "$_rn/m/long" HELD7 info@alpha.example)"
+_rn_qfile HELD1 other
+assert_eq    "under the same name with other bytes and another Message-ID it is another message" "another rc=0" "$(_rn_one _rn_same "$_rn/m/first" HELD1 info@alpha.example)"
+_rn_qfile HELD6 nomid
+assert_eq    "other bytes and no Message-ID: not known to be it"                      "another rc=0" "$(_rn_one _rn_same "$_rn/m/nomid" HELD6 info@alpha.example)"
+_rn_qfile HELD1 -
+assert_eq    "nor is one whose queue file Postfix does not show"                      "another rc=0" "$(_rn_one _rn_same "$_rn/m/first" HELD1 info@alpha.example)"
+assert_eq    "a file that is not there is no failure, and not the message"            "another rc=0" "$(_rn_one _rn_same "$_rn/m/no-such-file" HELD5 info@alpha.example)"
+assert_eq    "nor is a file that has gone the message of a queue file Postfix does not show: nothing is not the same as nothing" "another rc=0" "$(_rn_one _rn_same "$_rn/m/no-such-file" NOSUCH1 info@alpha.example)"
+printf 'Message-ID: <same@far.example>\nSubject: no hop\n\nthe body as it was saved\n' >"$_rn/m/nohop"
+printf 'Message-ID: <same@far.example>\nSubject: no hop\n\nanother body\n' >"$_rn/qfiles/NOHOP1"
+assert_eq    "the same Message-ID and no line of a hop on either side is not known to be it" "another rc=0" "$(_rn_one _rn_same "$_rn/m/nohop" NOHOP1 info@alpha.example)"
+unset -f _rn_mid_of _rn_same
+# ... where the mailbox of an address lies: its own, or the one whose former address it is
+_rn_mail_boxes
+printf 'info@old.example:::::%s/vmail/alpha.example/info::userdb_user=info@alpha.example userdb_quota_rule=*:storage=2G\nevil@old.example:::::/etc::userdb_user=x\n' "$_rn" >"$_rn/mail/former"
+_rn_home() { local h=""; h="$(lib_mail_address_home "$1")"; printf 'in [%s]\n' "${h#"$_rn"/}"; }
+assert_eq    "mail for a mailbox is put into its directory"                           "in [vmail/alpha.example/info] rc=0" "$(_rn_one _rn_home info@alpha.example)"
+assert_eq    "whatever its capitals and its +extension"                               "in [vmail/alpha.example/info] rc=0" "$(_rn_one _rn_home Info+Tag@Alpha.Example)"
+assert_eq    "mail for a former address into the mailbox that had it"                 "in [vmail/alpha.example/info] rc=0" "$(_rn_one _rn_home info@old.example)"
+assert_eq    "an address nobody has here has no such place"                           "in [] rc=0" "$(_rn_one _rn_home nobody@alpha.example)"
+assert_eq    "nor has one the list sends outside the mail store"                      "in [] rc=0" "$(_rn_one _rn_home evil@old.example)"
+assert_eq    "nor what is no address"                                                 "in [] rc=0" "$(_rn_one _rn_home 'info@alpha.example/../x')"
+printf 'up@old.example:::::%s/vmail/alpha.example/../../elsewhere::userdb_user=x\n' "$_rn" >>"$_rn/mail/former"
+assert_eq    "nor one the list sends up and out of it"                                "in [] rc=0" "$(_rn_one _rn_home up@old.example)"
+rm -f "$_rn/mail/former"
+assert_eq    "without a list a mailbox still has its place, and nothing else has one" "in [vmail/alpha.example/info] in [] rc=0" "$(_rn_one eval '_rn_home info@alpha.example; _rn_home info@old.example')"
+unset -f _rn_home
 # ... and the mail step: what has arrived goes out of the queue, the rest is put back
 _rn_requeue() {   # as the mail step calls it: the mailboxes that moved, and since when a file is of this rename
   RENAME_MAIL_MOVED="info@beta.example sales@beta.example"; RENAME_MAIL_SINCE="$_rn/since"
@@ -10060,23 +10116,27 @@ _rn_requeue() {   # as the mail step calls it: the mailboxes that moved, and sin
 _rn_copies() {
   _rn_mail_boxes
   touch -d '10 minutes ago' "$_rn/since"
-  # in the mailbox since this rename began, each handed over out of a queue file Postfix still has:
+  # in a mailbox since this rename began, each handed over out of a queue file Postfix still has:
   _rn_msg "$_rn/vmail/beta.example/info/Maildir/new/first-HELD1" info@alpha.example HELD1                   # in the mailbox as it moved
-  _rn_msg "$_rn/vmail/alpha.example/info/Maildir/.Junk/new/first-HELD3" info@alpha.example HELD3             # under the old name, filed by the spam rule
-  _rn_msg "$_rn/vmail/beta.example/info/Maildir/cur/seen-HELD4:2,S" info@alpha.example HELD4                 # of a message that waits for two mailboxes
-  _rn_mid=other _rn_msg "$_rn/vmail/beta.example/info/Maildir/new/first-HELD6" info@alpha.example HELD6      # another message under that name
+  _rn_msg "$_rn/vmail/alpha.example/info/Maildir/.Junk/new/first-HELD3" info+tag@alpha.example HELD3         # under the old name, filed by the spam rule
+  _rn_msg "$_rn/vmail/beta.example/info/Maildir/cur/seen-HELD4:2,S" - HELD4                                  # waits for two mailboxes, and both have it
+  mkdir -p "$_rn/vmail/beta.example/sales/Maildir/cur"
+  cp "$_rn/vmail/beta.example/info/Maildir/cur/seen-HELD4:2,S" "$_rn/vmail/beta.example/sales/Maildir/cur/both-HELD4:2,"
+  _rn_msg "$_rn/vmail/beta.example/info/Maildir/new/first-HELD2" - HELD2                                     # waits for two mailboxes, and one has it
+  _rn_msg "$_rn/vmail/beta.example/info/Maildir/new/first-HELD6" info@alpha.example HELD6; _rn_qfile HELD6 other   # another message under that name
   _rn_msg "$_rn/vmail/beta.example/info/Maildir/new/before-HELD7" info@alpha.example HELD7                   # from before this rename
   touch -d '1 hour ago' "$_rn/vmail/beta.example/info/Maildir/new/before-HELD7"
-  _rn_mid="-" _rn_msg "$_rn/vmail/beta.example/info/Maildir/new/first-HELD8" info@alpha.example HELD8        # without a Message-ID
+  _rn_mid="-" _rn_msg "$_rn/vmail/beta.example/info/Maildir/new/first-HELD8" info@alpha.example HELD8        # without a Message-ID, the same bytes
   _rn_msg "$_rn/vmail/beta.example/sales/Maildir/new/sales-HELD10" sales@alpha.example HELD10                 # in another mailbox than it waits for
   _rn_msg "$_rn/vmail/gamma.example/other/Maildir/new/gamma-HELD9" other@gamma.example HELD9                  # in a mailbox of another domain
-  _rn_msg "$_rn/vmail/beta.example/info/Maildir/new/again-HELD9" info@beta.example pickup:NEW1 HELD9          # put back before, and delivered
+  _rn_noq=1 _rn_msg "$_rn/vmail/beta.example/info/Maildir/new/again-HELD9" info@beta.example pickup:NEW1 HELD9   # put back before, and delivered
+  _rn_msg "$_rn/vmail/beta.example/info/Maildir/new/first-HELD11" info@alpha.example HELD11                   # waits for an address elsewhere too
   _rn_msg "$_rn/vmail/beta.example/info/Maildir/new/active-KEEP5" info@alpha.example KEEP5                   # of a message that is being handed over
   _rn_msg "$_rn/vmail/beta.example/info/Maildir/new/other" info@beta.example OTHER1
   printf 'x' >"$_rn/vmail/beta.example/info/Maildir/dovecot-uidlist"
-  for _rn_q in HELD1 HELD3 HELD4 HELD6 HELD7 HELD8 HELD9 HELD10 KEEP5; do _rn_qfile "$_rn_q"; done
   {
     _rn_held HELD1 info@alpha.example
+    _rn_held HELD2 info@alpha.example sales@alpha.example
     _rn_held HELD3 info+tag@alpha.example
     _rn_held HELD4 info@alpha.example sales@alpha.example
     _rn_held HELD6 info@alpha.example
@@ -10084,31 +10144,34 @@ _rn_copies() {
     _rn_held HELD8 info@alpha.example
     _rn_held HELD9 info@alpha.example
     _rn_held HELD10 info@alpha.example
+    _rn_held HELD11 info@alpha.example boss@elsewhere.example
     _rn_held KEEP5 info@alpha.example | sed 's/"queue_name":"deferred"/"queue_name":"active"/'
   } >"$_rn/queue"
   : >"$_rn/log"
   ( cd "$_rn/vmail" && find . -type f | sort ) >"$_rn/files-before"
 }
 _rn_files() { ( cd "$_rn/vmail" && find . -type f | sort ); }
+_rn_list() { tr '\n' ' ' <"$1" 2>/dev/null | sed 's/ $//' || true; }
 _rn_copies
 _rn_case _rn_requeue
 assert_has   "what Postfix holds is seen to"                             "rc=0" "$(_rn_out)"
-assert_eq    "a message that lies in the mailbox it waits for is taken out of the queue: in the mailbox as it moved, and under the old name where the spam rule filed it" \
-  "HELD1 HELD3" "$(tr '\n' ' ' <"$_rn/deleted" 2>/dev/null | sed 's/ $//' || true)"
-assert_eq    "the others are put back: one that waits for a second mailbox too, one whose name another message has, one whose file is older than the rename, one without a Message-ID, one that is in no mailbox, one that lies in another mailbox" \
-  "HELD4 HELD6 HELD7 HELD8 HELD9 HELD10" "$(tr '\n' ' ' <"$_rn/requeued" 2>/dev/null | sed 's/ $//' || true)"
+assert_eq    "a message that lies in the mailbox of everybody it waits for is taken out of the queue: in the mailbox as it moved, under the old name where the spam rule filed it, in both of two mailboxes, and one that has no Message-ID" \
+  "HELD1 HELD3 HELD4 HELD8" "$(_rn_list "$_rn/deleted")"
+assert_eq    "the others are put back: one of whose two mailboxes only one has it, one whose name another message has, one whose file is older than the rename, one that is in no mailbox, one that lies in another mailbox, one that waits for an address elsewhere too" \
+  "HELD2 HELD6 HELD7 HELD9 HELD10 HELD11" "$(_rn_list "$_rn/requeued")"
 assert_eq    "no file of any mailbox is touched for it"                  "$(cat "$_rn/files-before")" "$(_rn_files)"
 assert_has   "a message that is being handed over is left alone"         '"queue_id":"KEEP5"' "$(cat "$_rn/queue")"
 assert_has   "the log says how many were put back"                       "6 message(s) Postfix was holding for the addresses of alpha.example that moved go through their aliases now, to @beta.example" "$(cat "$_rn/log")"
-assert_has   "and how many had arrived"                                  "2 message(s) Postfix was holding for them were in the mailbox already - Dovecot had written each before it gave it back - and are not sent a second time" "$(cat "$_rn/log")"
+assert_has   "and how many had arrived"                                  "4 message(s) Postfix was holding for them were in the mailbox already - Dovecot had written each before it gave it back - and are not sent a second time" "$(cat "$_rn/log")"
 assert_eq    "what has arrived goes first, then the rest, then pickup is told" "postsuper -d - deferred|postsuper -r - deferred|postkick public pickup W|" \
   "$(grep -E '^(postsuper|postkick)' "$_rn/calls" | tr '\n' '|' || true)"
-assert_eq    "postsuper is asked to remove those two and nothing else"  "HELD1 HELD3 " "$(awk '/^postsuper -d/ { on = 1; next } /^postsuper -r/ { on = 0 } on && /^asked-for/ { printf "%s ", $2 }' "$_rn/calls")"
+assert_eq    "postsuper is asked to remove those four and nothing else" "HELD1 HELD3 HELD4 HELD8 " "$(awk '/^postsuper -d/ { on = 1; next } /^postsuper -r/ { on = 0 } on && /^asked-for/ { printf "%s ", $2 }' "$_rn/calls")"
+assert_eq    "and to put back the six others, none of the four among them" "HELD2 HELD6 HELD7 HELD9 HELD10 HELD11 " "$(awk '/^postsuper -r/ { on = 1; next } /^postsuper -d/ { on = 0 } on && /^asked-for/ { printf "%s ", $2 }' "$_rn/calls")"
 # every one of them had arrived: nothing is put back, and pickup has nothing to take
 _rn_copies
-{ _rn_held HELD1 info@alpha.example; _rn_held HELD3 info@alpha.example; } >"$_rn/queue"
+{ _rn_held HELD1 info@alpha.example; _rn_held HELD3 info+tag@alpha.example; } >"$_rn/queue"
 _rn_case _rn_requeue
-assert_eq    "with every message in its mailbox, none is put back"       "HELD1 HELD3|" "$(tr '\n' ' ' <"$_rn/deleted" 2>/dev/null | sed 's/ $//' || true)|$(cat "$_rn/requeued" 2>/dev/null || true)"
+assert_eq    "with every message in its mailbox, none is put back"       "HELD1 HELD3|" "$(_rn_list "$_rn/deleted")|$(cat "$_rn/requeued" 2>/dev/null || true)"
 assert_lacks "pickup is not told"                                        "postkick" "$(_rn_calls)"
 assert_lacks "and none is said to go through the aliases"                "go through their aliases" "$(cat "$_rn/log")"
 assert_eq    "the queue holds none of them any more"                     "" "$(cat "$_rn/queue")"
@@ -10120,7 +10183,7 @@ _rn_case _rn_requeue
 assert_eq    "what Postfix no longer holds is neither removed nor put back" "|" "$(cat "$_rn/deleted" 2>/dev/null || true)|$(cat "$_rn/requeued" 2>/dev/null || true)"
 assert_eq    "nothing is written down"                                   "" "$(grep -E 'Postfix was holding' "$_rn/log" || true)"
 assert_eq    "and no file of a mailbox is touched"                       "$(cat "$_rn/files-before")" "$(_rn_files)"
-# only what postsuper names counts: of two it was asked to remove, it removed one
+# only what postsuper names counts: of four it was asked to remove, it removed one
 _rn_copies
 _rn_take_one() {
   eval 'postsuper() { printf "postsuper %s\n" "$*" >>"$_rn/calls"; cat >/dev/null
@@ -10134,32 +10197,279 @@ assert_lacks "and says nothing of what it did not put back"              "go thr
 _rn_copies
 _rn_no_mark() { RENAME_MAIL_MOVED="info@beta.example sales@beta.example"; RENAME_MAIL_SINCE=""; _domain_rename_mail_requeue alpha.example beta.example; }
 _rn_case _rn_no_mark
-assert_eq    "without knowing since when, every message is put back and none removed" "HELD1 HELD3 HELD4 HELD6 HELD7 HELD8 HELD9 HELD10|" \
-  "$(tr '\n' ' ' <"$_rn/requeued" 2>/dev/null | sed 's/ $//' || true)|$(cat "$_rn/deleted" 2>/dev/null || true)"
+assert_eq    "without knowing since when, every message is put back and none removed" "HELD1 HELD2 HELD3 HELD4 HELD6 HELD7 HELD8 HELD9 HELD10 HELD11|" \
+  "$(_rn_list "$_rn/requeued")|$(cat "$_rn/deleted" 2>/dev/null || true)"
 # a Postfix that will not show what it holds: nothing is known to have arrived
 _rn_copies
 rm -rf "$_rn/qfiles"
 _rn_case _rn_requeue
-assert_eq    "a message Postfix does not show is put back like the others" "HELD1 HELD3 HELD4 HELD6 HELD7 HELD8 HELD9 HELD10|" \
-  "$(tr '\n' ' ' <"$_rn/requeued" 2>/dev/null | sed 's/ $//' || true)|$(cat "$_rn/deleted" 2>/dev/null || true)"
+assert_eq    "a message Postfix does not show is put back like the others" "HELD1 HELD2 HELD3 HELD4 HELD6 HELD7 HELD8 HELD9 HELD10 HELD11|" \
+  "$(_rn_list "$_rn/requeued")|$(cat "$_rn/deleted" 2>/dev/null || true)"
 # the whole rename: since when a file is of its making is marked when the mail step begins
 _rn_mail_boxes
 _rn_msg "$_rn/vmail/alpha.example/info/Maildir/new/first-HELD1" info@alpha.example HELD1
 touch -d '1 minute' "$_rn/vmail/alpha.example/info/Maildir/new/first-HELD1"        # written while the mailbox moves
 _rn_msg "$_rn/vmail/alpha.example/info/Maildir/new/before-HELD2" info@alpha.example HELD2
 touch -d '1 hour ago' "$_rn/vmail/alpha.example/info/Maildir/new/before-HELD2"
-_rn_qfile HELD1; _rn_qfile HELD2
 { _rn_held HELD1 info@alpha.example; _rn_held HELD2 info@alpha.example; } >"$_rn/queue"
 _rn_case _rn_rename_dovecot alpha.example beta.example
 assert_has   "a rename under which a delivery was interrupted ends well" "rc=0" "$(_rn_out)"
 assert_true  "the message Dovecot had written while the mailbox moved is in the mailbox" test -s "$_rn/vmail/beta.example/info/Maildir/new/first-HELD1"
-assert_eq    "and is not sent again: Postfix holds it no longer"         "HELD1" "$(tr '\n' ' ' <"$_rn/deleted" 2>/dev/null | sed 's/ $//' || true)"
+assert_eq    "and is not sent again: Postfix holds it no longer"         "HELD1" "$(_rn_list "$_rn/deleted")"
 assert_false "(nothing was delivered a second time)"                     test -e "$_rn/vmail/beta.example/info/Maildir/new/requeued-HELD1"
 assert_true  "a message whose file is from before the rename is sent on: that file is not this rename's to judge" test -s "$_rn/vmail/beta.example/info/Maildir/new/requeued-HELD2"
 assert_true  "and the file stays"                                        test -s "$_rn/vmail/beta.example/info/Maildir/new/before-HELD2"
 assert_true  "the mail of the mailbox is all there"                      test -s "$_rn/vmail/beta.example/info/Maildir/new/m1"
-unset -f _rn_msg _rn_qfile _rn_copy _rn_requeue _rn_copies _rn_files _rn_take_one _rn_no_mark
-unset _rn_q
+
+# ---- and without a rename: Dovecot is told to read its configuration again ----------------
+# A reload ends the deliveries Dovecot is in the middle of, and it answers "421 Shutting down"
+# for a message it has saved: 13 of 13 on the test server, and each was in the mailbox twice
+# once Postfix had offered it again. lomp reloads Dovecot when a per-name certificate block
+# changes and when it is first told of the list of former addresses, and the certbot deploy
+# hook reloads it after a renewed mail certificate. After each, what Postfix was told to
+# keep by Dovecot and the mailbox has already goes out of the queue ("mail settle").
+_rn_settle() { MAIL_SETTLED=77; lib_mail_settle "$_rn/since"; echo "settled=$MAIL_SETTLED"; }
+_rn_held_why() {   # id, the reason Postfix gives, address... -> a line of the queue
+  _rn_held "$1" "${@:3}" | jq -c --arg why "$2" '.recipients |= map(.delay_reason = $why)'
+}
+_rn_settle_fix() {
+  _rn_mail_boxes
+  touch -d '10 minutes ago' "$_rn/since"
+  printf 'info@old.example:::::%s/vmail/alpha.example/info::userdb_user=info@alpha.example\n' "$_rn" >"$_rn/mail/former"
+  _rn_msg "$_rn/vmail/alpha.example/info/Maildir/new/saved-SHUT1" info@alpha.example SHUT1        # saved, and answered "Shutting down"
+  _rn_msg "$_rn/vmail/alpha.example/info/Maildir/.Junk/new/saved-SHUT2" info@old.example SHUT2    # handed over under a former address
+  _rn_msg "$_rn/vmail/alpha.example/info/Maildir/new/saved-LOST3" info@alpha.example LOST3        # saved, and the connection was lost
+  _rn_msg "$_rn/vmail/alpha.example/info/Maildir/cur/two-SHUT4:2,S" - SHUT4                       # waits for two, both have it
+  cp "$_rn/vmail/alpha.example/info/Maildir/cur/two-SHUT4:2,S" "$_rn/vmail/alpha.example/sales/Maildir/cur/two-SHUT4:2,"
+  _rn_msg "$_rn/vmail/alpha.example/info/Maildir/new/half-SHUT5" - SHUT5                          # waits for two, one has it
+  _rn_msg "$_rn/vmail/alpha.example/info/Maildir/new/old-SHUT6" info@alpha.example SHUT6          # a file from before
+  touch -d '1 hour ago' "$_rn/vmail/alpha.example/info/Maildir/new/old-SHUT6"
+  _rn_msg "$_rn/vmail/alpha.example/info/Maildir/new/saved-FULL7" info@alpha.example FULL7        # (cannot be: kept for another reason)
+  _rn_msg "$_rn/vmail/alpha.example/info/Maildir/new/saved-ACT8" info@alpha.example ACT8          # being handed over
+  _rn_msg "$_rn/vmail/alpha.example/info/Maildir/new/saved-OUT9" info@alpha.example OUT9          # waits for somebody elsewhere too
+  _rn_msg "$_rn/vmail/alpha.example/info/Maildir/new/both-SHUT11" - SHUT11                        # waits for two addresses of ONE mailbox, which has it twice
+  cp "$_rn/vmail/alpha.example/info/Maildir/new/both-SHUT11" "$_rn/vmail/alpha.example/info/Maildir/new/both-SHUT11.again"
+  _rn_msg "$_rn/vmail/alpha.example/info/Maildir/new/once-SHUT12" - SHUT12                        # waits for two addresses of one mailbox, which has it once
+  _rn_msg "$_rn/vmail/alpha.example/info/Maildir/new/saved-INC13" info@alpha.example INC13        # saved, given back while Postfix replaced its queue manager: laid back where mail comes in
+  _rn_msg "$_rn/vmail/alpha.example/info/Maildir/new/saved-INC14" info@alpha.example INC14        # (cannot be: new mail, which nobody was told to keep)
+  local shut="host mail.example[private/dovecot-lmtp] said: 421 4.3.2 mail.example. Shutting down (in reply to end of DATA command)"
+  {
+    _rn_held_why SHUT1 "$shut" info@alpha.example
+    _rn_held_why SHUT2 "$shut" info@old.example
+    _rn_held_why LOST3 "lost connection with mail.example[private/dovecot-lmtp] while sending end of data -- message may be sent more than once" Info@Alpha.Example
+    _rn_held_why SHUT4 "$shut" info@alpha.example sales@alpha.example
+    _rn_held_why SHUT5 "$shut" info@alpha.example sales@alpha.example
+    _rn_held_why SHUT6 "$shut" info@alpha.example
+    _rn_held_why FULL7 "connect to mx.elsewhere.example[203.0.113.9]:25: Connection timed out" info@alpha.example
+    _rn_held_why ACT8 "$shut" info@alpha.example | sed 's/"queue_name":"deferred"/"queue_name":"active"/'
+    _rn_held_why OUT9 "$shut" info@alpha.example nobody@alpha.example
+    _rn_held_why NONE10 "$shut" info@alpha.example
+    _rn_held_why SHUT11 "$shut" info@alpha.example info+second@alpha.example
+    _rn_held_why SHUT12 "$shut" info@alpha.example info+second@alpha.example
+    _rn_held_why INC13 "$shut" info@alpha.example | sed 's/"queue_name":"deferred"/"queue_name":"incoming"/'
+    _rn_held INC14 info@alpha.example | jq -c '.queue_name = "incoming" | .recipients |= map(del(.delay_reason))'
+  } >"$_rn/queue"
+  : >"$_rn/log"; : >"$_rn/calls"
+  ( cd "$_rn/vmail" && find . -type f | sort ) >"$_rn/files-before"
+}
+_rn_settle_fix
+_rn_case _rn_settle
+assert_has   "what Postfix was told to keep is looked at"                "rc=0" "$(_rn_out)"
+assert_eq    "a message Dovecot had saved before it was interrupted goes out of the queue: answered Shutting down, handed over under a former address, the connection lost, one both of whose mailboxes have it, one for two addresses of a mailbox that has it twice, and one that was laid back where mail comes in" \
+  "INC13 LOST3 SHUT1 SHUT11 SHUT2 SHUT4" "$(_rn_list "$_rn/deleted")"
+assert_eq    "the rest stays for Postfix to offer again: one of whose two mailboxes only one has it, one whose file is older, one kept for another reason, one being handed over, one that waits for nobody's mailbox too, one that is in no mailbox, one for two addresses of a mailbox that has it once - a file stands for one recipient - and new mail" \
+  "SHUT5 SHUT6 FULL7 ACT8 OUT9 NONE10 SHUT12 INC14" "$(jq -r '.queue_id' "$_rn/queue" | tr '\n' ' ' | sed 's/ $//')"
+assert_eq    "postsuper is asked for those six, in the deferred queue and where mail comes in, and for nothing else" "postsuper -d - deferred incoming|INC13 LOST3 SHUT1 SHUT11 SHUT2 SHUT4" \
+  "$(grep '^postsuper' "$_rn/calls" | tr '\n' ' ' | sed 's/ $//')|$(awk '/^asked-for/ { printf "%s ", $2 }' "$_rn/calls" | sed 's/ $//')"
+assert_eq    "no file of any mailbox is touched"                         "$(cat "$_rn/files-before")" "$(_rn_files)"
+assert_has   "and the log says how many"                                 "[INFO] 6 message(s) Postfix was told to keep when Dovecot was interrupted were in the mailbox already and are not sent a second time" "$(cat "$_rn/log")"
+assert_eq    "the caller is told how many too, and nothing is put on the screen" "settled=6 rc=0" "$(_rn_out | tr '\n' ' ' | sed 's/ $//')"
+# ... where somebody asked for the look ("mail settle"), it is said on the screen as well - once in the log
+_rn_settle_said() { local MAIL_SETTLE_SAID=1; lib_mail_settle "$_rn/since"; }
+_rn_settle_fix
+_rn_case _rn_settle_said
+assert_has   "asked for, the look says what it found"                    "6 message(s) Postfix was told to keep when Dovecot was interrupted were in the mailbox already and are not sent a second time" "$(_rn_out)"
+assert_eq    "and writes it down once"                                   "1" "$(grep -c 'Postfix was told to keep' "$_rn/log")"
+assert_eq    "which is said in Turkish too" "Dovecot kesintiye uğradığında Postfix'in beklettiği 5 ileti posta kutusuna zaten yazılmıştı; ikinci kez gönderilmeyecek|Son dört dakikada Dovecot yüzünden Postfix'in beklettiği iletilerden posta kutusuna zaten yazılmış olan yok" \
+  "$( LIB_LANG="tr"; lib_lang_build; lib_tr "5 message(s) Postfix was told to keep when Dovecot was interrupted were in the mailbox already and are not sent a second time"; printf '%s|' "$LIB_TR"
+      lib_tr "Nothing that Dovecot made Postfix keep in the last four minutes is in a mailbox already"; printf '%s' "$LIB_TR" )"
+unset -f _rn_settle_said
+# a mailbox directory that is a link is not gone through: what lies behind it is not known to be that mailbox's
+_rn_linked() {
+  ln -s "$_rn/vmail/alpha.example/info" "$_rn/vmail/alpha.example/link"
+  printf '%s\t1\tinfo@alpha.example\t%s\n' SHUT1 "$_rn/vmail/alpha.example/${1}" | lib_mail_arrived "$_rn/since"
+}
+_rn_settle_fix
+assert_eq    "(asked of the mailbox directory itself, the message has arrived)" "SHUT1 rc=0" "$(_rn_one _rn_linked info)"
+_rn_settle_fix
+assert_eq    "asked of a link to it, nothing has"                        "rc=0" "$(_rn_one _rn_linked link)"
+unset -f _rn_linked
+# nothing of the kind in the queue: Postfix is asked what it holds, and that is all
+_rn_settle_fix
+_rn_held_why FULL7 "connect to mx.elsewhere.example[203.0.113.9]:25: Connection timed out" info@alpha.example >"$_rn/queue"
+_rn_case _rn_settle
+assert_eq    "with nothing Dovecot made Postfix keep, nothing is removed and nothing said" "|" "$(cat "$_rn/deleted" 2>/dev/null || true)|$(cat "$_rn/log")"
+assert_lacks "and postsuper is not called"                               "postsuper" "$(_rn_calls)"
+assert_has   "the caller is told that there were none"                   "settled=0" "$(_rn_out)"
+# without knowing since when, nothing has arrived
+_rn_settle_fix
+_rn_settle_none() { lib_mail_settle ""; lib_mail_settle "$_rn/no-such-mark"; }
+_rn_case _rn_settle_none
+assert_eq    "without the mark of the moment, nothing is asked and nothing removed" "|" "$(cat "$_rn/deleted" 2>/dev/null || true)|$(grep -c postqueue "$_rn/calls" | sed 's/^0$//' || true)"
+# the reload itself: the mark is from before it, Postfix is given a moment, then the look
+_rn_src() { awk -v f="$1" '$0 ~ "^" f "\\(\\)" { on = 1 } on { print } on && /^}/ { exit }' "$ROOT/lib/$2.sh"; }   # a function as the source has it
+_rn_watch() {   # what stands in around a reload or a restart: who is called, in which order, and how old the mark is that the look is given
+  doveadm() { printf "doveadm %s\n" "$*" >>"$_rn/calls"; [[ ! -e "$_rn/reload-fails" ]]; }
+  sleep() { printf "sleep %s\n" "$*" >>"$_rn/calls"; }
+  systemctl() { printf "systemctl %s\n" "$*" >>"$_rn/calls"; [[ "${1:-}" != "restart" || ! -e "$_rn/no-start-${2:-}" ]]; }
+  lib_mail_settle() {
+    local how="WRONG"
+    if [[ -n "${_rn_first:-}" && "$1" == "${_rn_first:-}" ]]; then how="the one from before the first restarts"
+    elif [[ -z "${_rn_first:-}" && -e "$1" && -n "$(find "$1" -newermt "10 seconds ago" 2>/dev/null)" && -z "$(find "$1" -newermt "1 second ago" 2>/dev/null)" ]]; then how="from just before"; fi
+    printf "settle mark=%s\n" "$how" >>"$_rn/calls"
+  }
+}
+_rn_seen() { printf '%s%s' "$(grep -E '^(doveadm|sleep|settle|systemctl)' "$_rn/calls" | tr '\n' '|' || true)" "$(tail -n 1 "$_rn/out")"; }
+_rn_reload() { _rn_watch; lib_mail_dovecot_reload; }
+_rn_settle_fix
+_rn_case _rn_reload
+assert_eq    "Dovecot is told, Postfix is given a moment to write down what it was told, and then that is looked at - since just before the reload" \
+  "doveadm reload|sleep 3|settle mark=from just before|rc=0" "$(_rn_seen)"
+_rn_settle_fix; : >"$_rn/reload-fails"
+_rn_case _rn_reload
+assert_eq    "a reload that fails is a failure, and nothing is looked at" "doveadm reload|rc=1" "$(_rn_seen)"
+rm -f "$_rn/reload-fails"
+_rn_wait_said() { MAIL_RELOAD_WAIT=7; _rn_reload; }
+_rn_settle_fix
+_rn_case _rn_wait_said
+assert_eq    "whoever has reason to wait longer says so"                 "doveadm reload|sleep 7|settle mark=from just before|rc=0" "$(_rn_seen)"
+_rn_after() {   # the second half by itself: [dry] [no-postcat] [no-mark]
+  local mark=""
+  _rn_watch
+  mark="$(lib_mail_settle_mark)"
+  case "${1:-}" in
+    dry)        OPT_DRY_RUN=1 ;;
+    no-postcat) lib_have() { [[ "$1" != "postcat" ]]; } ;;
+    no-mark)    rm -f "$mark"; mark="" ;;
+  esac
+  lib_mail_settle_after "$mark" ${2:+"$2"}
+  if [[ -n "$mark" && -e "$mark" ]]; then echo "the mark was left behind"; fi
+}
+_rn_settle_fix
+_rn_case _rn_after "" 0
+assert_eq    "a caller that has waited already says so, and the mark is taken away afterwards" "sleep 0|settle mark=from just before|rc=0" "$(_rn_seen)$(grep -c 'left behind' "$_rn/out" | sed 's/^0$//' || true)"
+_rn_settle_fix
+_rn_case _rn_after dry
+assert_eq    "a dry run looks at nothing, and leaves no mark either"     "rc=0" "$(_rn_seen)$(grep -c 'left behind' "$_rn/out" | sed 's/^0$//' || true)"
+_rn_settle_fix
+_rn_case _rn_after no-postcat
+assert_eq    "nor does a server whose Postfix cannot show a message"     "rc=0" "$(_rn_seen)$(grep -c 'left behind' "$_rn/out" | sed 's/^0$//' || true)"
+_rn_settle_fix
+_rn_case _rn_after no-mark
+assert_eq    "and without a mark nothing is looked at"                   "rc=0" "$(_rn_seen)"
+_rn_mark_age() { local m=""; m="$(lib_mail_settle_mark "$@")"; if [[ -n "$(find "$m" -newermt '100 seconds ago' 2>/dev/null)" && -z "$(find "$m" -newermt '80 seconds ago' 2>/dev/null)" ]]; then echo "a minute and a half old"; fi; rm -f "$m"; }
+assert_eq    "a mark is as old as it is asked to be"                     "a minute and a half old rc=0" "$(_rn_one _rn_mark_age '90 seconds ago')"
+_rn_mark_bad() { local m=""; m="$(lib_mail_settle_mark 'no such moment')"; echo "mark=[${m}]"; }
+assert_eq    "one that cannot be made is none - and then nothing is taken for arrived" "mark=[] rc=0" "$(_rn_one _rn_mark_bad)"
+# ... a certificate put in place: Postfix and Dovecot are told to read it, the same way
+# Dovecot first, and Postfix after the look: told in the same moment, Postfix is replacing its
+# queue manager when Dovecot gives a message back, and the message is offered again by itself
+# (2 of 2019 were in the mailbox twice that way on the test server).
+_rn_stack_reload() { _rn_watch; lib_systemctl() { systemctl "$@"; }; lib_service_active() { [[ ! -e "$_rn/dead-$1" ]]; }; lib_mail_stack_reload; }
+_rn_settle_fix
+_rn_case _rn_stack_reload
+assert_eq    "a certificate that is put in place: Dovecot is told, what that interrupted is looked at, and only then Postfix is told" \
+  "doveadm reload|sleep 3|settle mark=from just before|systemctl reload postfix|rc=0" "$(_rn_seen)"
+_rn_settle_fix; : >"$_rn/dead-dovecot"
+_rn_case _rn_stack_reload
+assert_eq    "a Dovecot that does not run is not told, and Postfix is" "systemctl reload postfix|rc=0" "$(_rn_seen)"
+rm -f "$_rn/dead-dovecot"
+_rn_settle_fix; : >"$_rn/reload-fails"
+_rn_case _rn_stack_reload
+assert_eq    "a Dovecot that could not be told is said, and Postfix is told all the same" "doveadm reload|systemctl reload postfix|rc=0|1" \
+  "$(_rn_seen)|$(grep -c 'dovecot reload failed' "$_rn/out")"
+rm -f "$_rn/reload-fails"
+assert_has   "the certificate of the mail host is put into effect that way" "lib_mail_stack_reload" "$(_rn_src lib_mail_cert_ensure mail)"
+# ... and the whole stack restarted ("mail regenerate"): the same look once everything is up
+_rn_restart() {   # [what becomes of it: "" all come up, "rollback" one does not and the old configuration is put back, "refused" nothing was restarted before the put-back]
+  _rn_watch
+  lib_mail_services() { printf "%s\n" rspamd dovecot postfix; }
+  lib_systemctl() { :; }
+  lib_service_exists() { return 0; }
+  lib_service_active() { [[ "$1" != "fail2ban" && ! -e "$_rn/dead-$1" ]]; }
+  lib_port_listening() { return 0; }
+  lib_mail_restore_snapshot() { return 0; }
+  case "${1:-}" in
+    "")       lib_mail_services_apply ;;
+    rollback) if lib_mail_services_apply; then echo "came up"; else echo "did not come up: ${MAIL_LAST_ERROR}"; fi
+              _rn_first="$MAIL_RESTART_SINCE"; if [[ -n "$_rn_first" && -e "$_rn_first" ]]; then echo "the mark is kept"; fi
+              rm -f "$_rn/dead-dovecot"
+              _mail_apply_rollback "The mail stack did not come up" ;;
+    refused)  _mail_apply_rollback "The mail configuration was refused" ;;
+  esac
+  echo "mark afterwards=[${MAIL_RESTART_SINCE}]"
+}
+_rn_settle_fix
+_rn_case _rn_restart
+assert_eq    "a restart of the stack: every service, the moment a service takes to die, and then what the restart of Dovecot interrupted - since just before, and without a second wait" \
+  "systemctl restart rspamd|systemctl restart dovecot|systemctl restart postfix|sleep 2|sleep 0|settle mark=from just before|rc=0" "$(_rn_seen)"
+assert_has   "the mark is given up afterwards"                           "mark afterwards=[]" "$(_rn_out)"
+_rn_settle_fix; : >"$_rn/dead-dovecot"
+_rn_case _rn_restart rollback
+_o="$(_rn_out)"
+assert_has   "a stack that does not come up is a failure"                "did not come up: dovecot stopped right after starting" "$_o"
+assert_has   "the mark of that restart is kept for the put-back"         "the mark is kept" "$_o"
+assert_eq    "nothing is looked at while a service is down; after the old configuration is back and everything restarted once more, what both restarts interrupted is" \
+  "systemctl restart rspamd|systemctl restart dovecot|systemctl restart postfix|sleep 2|systemctl daemon-reload|systemctl restart rspamd|systemctl restart dovecot|systemctl restart postfix|sleep 3|settle mark=the one from before the first restarts|rc=0" "$(_rn_seen)"
+assert_has   "and the mark is given up"                                  "mark afterwards=[]" "$_o"
+rm -f "$_rn/dead-dovecot"
+_rn_settle_fix
+_rn_case _rn_restart refused
+assert_eq    "a configuration that was refused before anything was restarted: the put-back restarts, and looks since just before that" \
+  "systemctl daemon-reload|systemctl restart rspamd|systemctl restart dovecot|systemctl restart postfix|sleep 3|settle mark=from just before|rc=0" "$(_rn_seen)"
+assert_has   "the per-name certificate block reloads Dovecot that way"   "lib_mail_dovecot_reload ||" "$(_rn_src lib_mail_dovecot_sni_apply mail)"
+assert_has   "and so does telling it of the list of former addresses"    "lib_mail_dovecot_reload ||" "$(_rn_src lib_mail_former_apply mail)"
+assert_eq    "nothing else in lomp reloads Dovecot: the one that does looks afterwards, and so does the deploy hook" "lib_mail_dovecot_reload lib_ssl_hook_render" \
+  "$(for _f in "$ROOT"/lib/*.sh; do awk '/^(lib_|_)[A-Za-z_0-9]+\(\)/ { fn = $1; sub(/\(\).*/, "", fn) } /^[^#]*(doveadm reload|systemctl reload( postfix)? dovecot)/ { print fn }' "$_f"; done | sort -u | tr '\n' ' ' | sed 's/ $//')"
+assert_eq    "and nothing restarts it but the two that look afterwards" "_mail_apply_rollback lib_mail_services_apply" \
+  "$(for _f in "$ROOT"/lib/*.sh; do awk '/^(lib_|_)[A-Za-z_0-9]+\(\)/ { fn = $1; sub(/\(\).*/, "", fn) } /^[^#]*systemctl restart ("\$s"|dovecot)/ { print fn }' "$_f"; done | sort -u | tr '\n' ' ' | sed 's/ $//')"
+# "mail settle": for the certbot deploy hook, which reloads Dovecot outside lomp
+_rn_settle_cmd() {
+  sleep() { printf "sleep %s\n" "$*" >>"$_rn/calls"; }
+  lib_mail_settle() {   # (what it finds is _rn_found; whether it was asked to say so is written down)
+    printf "settle mark=%s said=%s\n" "$( [[ -e "$1" && -z "$(find "$1" -newermt '230 seconds ago' 2>/dev/null)" && -n "$(find "$1" -newermt '250 seconds ago' 2>/dev/null)" ]] && echo "of four minutes ago" || echo "WRONG" )" "${MAIL_SETTLE_SAID:-0}" >>"$_rn/calls"
+    MAIL_SETTLED="${_rn_found:-0}"
+  }
+  lib_mail_main settle
+}
+_rn_settle_fix
+_rn_case _rn_settle_cmd
+assert_eq    "mail settle looks at what Postfix was told to keep in the last four minutes - it offers such a message again after five - and asks for it to be said" "sleep 3|settle mark=of four minutes ago said=1|rc=0" "$(_rn_seen)"
+assert_has   "where nothing was found, that is said"                     "Nothing that Dovecot made Postfix keep in the last four minutes is in a mailbox already" "$(_rn_out)"
+_rn_settle_fix
+_rn_found=2 _rn_case _rn_settle_cmd
+assert_lacks "where something was, it is not said that nothing was"      "Nothing that Dovecot" "$(_rn_out)"
+_rn_settle_fix; rm -f "$_rn/mail-installed"
+_rn_case _rn_settle_cmd
+assert_eq    "on a server without mail it looks at nothing, and that is no failure" "rc=0" "$(_rn_seen)"
+assert_has   "which it says"                                             "Mail is not installed" "$(_rn_out)"
+_rn_settle_dry() { OPT_DRY_RUN=1; _rn_settle_cmd; }
+_rn_settle_fix
+_rn_case _rn_settle_dry
+assert_eq    "a dry run looks at nothing"                                "rc=0" "$(_rn_seen)"
+assert_lacks "and says nothing of what it did not look at"               "Dovecot" "$(_rn_out)"
+assert_has   "the command is in the reference of the mail commands"      "  settle " "$(_rn_case lib_mail_usage; _rn_out)"
+assert_has   "it takes no lock: the hook runs inside a command that holds it" 'settle) ;;' "$(sed -n '/^    mail)   case/,/^            esac ;;/p' "$ROOT/setup.sh")"
+_rn_hook="$(_rn_case lib_ssl_hook_render; _rn_out)"
+assert_has   "the deploy hook runs it after it has reloaded Dovecot"     '"$BIN" mail settle --quiet' "$_rn_hook"
+assert_eq    "after, not before, and once - and Postfix is told to read the certificate only after that look" "dovecot settle postfix" \
+  "$(awk '/systemctl reload dovecot/ { printf "dovecot " } /mail settle --quiet/ { printf "settle " } /postfix reload/ { printf "postfix " }' <<<"$_rn_hook" | sed 's/ $//')"
+assert_has   "and a failure of it fails no renewal"                      'mail settle --quiet >/dev/null 2>&1 || true' "$_rn_hook"
+assert_has   "a server set up before gets that hook when it is updated"  'if [[ -e "$CERTBOT_DEPLOY_HOOK" ]]; then lib_ssl_hook_install; fi' "$(_rn_src lib_install_migrate install)"
+unset -f _rn_msg _rn_qfile _rn_copy _rn_one _rn_requeue _rn_copies _rn_files _rn_list _rn_take_one _rn_no_mark _rn_src
+unset -f _rn_settle _rn_held_why _rn_settle_fix _rn_settle_none _rn_reload _rn_settle_cmd _rn_settle_dry
+unset -f _rn_watch _rn_seen _rn_wait_said _rn_after _rn_mark_age _rn_mark_bad _rn_stack_reload _rn_restart
+unset _rn_hook _f
 unset -f _rn_rename_dovecot _rn_held _rn_held_mail _rn_holds
 _rn_case _domain_rename_mail_targets "a@old.example, b@old.example,c@old.example,x@other.example" old.example new.example "a@old.example
 c@old.example"

@@ -11,7 +11,8 @@
 #  it holds although Dovecot had written it into the mailbox, one on hold, a sender that is
 #  slow across the rename, the first mail of a mailbox that never had any - and back to the
 #  name it had, past what was left under it: an empty directory, mail of the mailbox's own,
-#  mail nobody can say whose; and once more with --keep-mail.
+#  mail nobody can say whose; what Postfix was told to keep when Dovecot was interrupted with
+#  no rename anywhere ("mail settle"); and once more with --keep-mail.
 #
 #  RUN ONLY ON A THROWAWAY SERVER, AS ROOT. It adds, renames and removes real sites
 #  (names under .invalid, which no DNS answers for), reloads OpenLiteSpeed many times
@@ -183,6 +184,20 @@ deliver() {   # to subject maildir -> 0 when a message with that subject is in t
   done
   return 1
 }
+# A message as Dovecot has written it into a mailbox when it gives it back to Postfix all the
+# same (the mailbox moved from under it, or Dovecot was told to read its configuration again):
+# its own lines on top - the recipient it was handed over for among them, unless it was handed
+# over for two in one go - and below them what Postfix holds in the queue file, byte for byte.
+dovecot_wrote() {   # queue id, the mailbox directory, the address it was handed over for ("-": for two in one go)
+  local mh="" f="$T/wrote.$RANDOM"
+  mh="$(postconf -h myhostname 2>/dev/null)"
+  { printf 'Return-Path: <>\n'
+    if [ "$3" = "-" ]; then printf 'Received: from %s\n\tby %s with LMTP\n\tid e2eWrOtEbYhAnD\n\t(envelope-from <>); %s\n' "$mh" "$mh" "$(date -R)"
+    else printf 'Delivered-To: %s\nReceived: from %s\n\tby %s with LMTP\n\tid e2eWrOtEbYhAnD\n\t(envelope-from <>)\n\tfor <%s>; %s\n' "$3" "$mh" "$mh" "$3" "$(date -R)"; fi
+    postcat -hbq "$1" 2>/dev/null
+  } >"$f"
+  [ "$(wc -l <"$f")" -ge 8 ] && [ -d "$2/Maildir/new" ] && install -o vmail -g vmail -m 0600 "$f" "$2/Maildir/new/$(date +%s).M${RANDOM}P1.e2e-wrote"
+}
 PW1='Passw0rd-e2e-Rn1'; PW2='Passw0rd-e2e-Rn2'
 
 sec "a site with mail: the mailboxes follow it"
@@ -263,8 +278,6 @@ printf '%s' "$PW1" | $L mail box add "info@$MB" --yes --no-color >/dev/null 2>&1
 printf '%s' "$PW2" | $L mail box add "fresh@$MB" --yes --no-color >/dev/null 2>&1
 printf '%s' "$PW2" | $L mail box add "side@$MB" --yes --no-color >/dev/null 2>&1
 if deliver "info@$MB" e2e-first "/var/vmail/$MB/info/Maildir"; then ok "a message is in the mailbox before the rename"; else bad "a message is in the mailbox before the rename" "$(postqueue -p 2>&1 | tail -n 4)"; fi
-# that message as this server's Postfix and Dovecot write one into a mailbox (see below)
-cp "$(grep -rl '^Subject: e2e-first' "/var/vmail/$MB/info/Maildir" 2>/dev/null | grep -E '/(new|cur)/' | sed -n 1p)" "$T/first.msg" 2>/dev/null
 tb="$(date +%s)"; ln0="$(wc -l </var/log/server_setup.log 2>/dev/null || echo 0)"
 # A message Postfix holds for the mailbox when the rename begins: Dovecot is refused the
 # mailbox's tmp/ for a moment and answers 451, and Postfix puts the message off - under the
@@ -290,7 +303,6 @@ swaks --server 127.0.0.1 --port 25 --helo client.example.org --from '<>' --to "i
 for i in $(seq 1 15); do [ "$(held_for "info@$MB" | grep -c .)" -ge 2 ] && break; sleep 1; done
 chmod 700 "/var/vmail/$MB/info/Maildir/tmp"
 ha="$(held_for "info@$MB" | grep -vxF -- "${h:-none}" | sed -n 1p)"
-hmid="$(postcat -hq "${ha:-none}" 2>/dev/null | grep -i -m1 '^Message-Id:')"
 if [ -n "$h" ] && [ -n "$ha" ]; then ok "Postfix holds two messages for the mailbox when the rename begins"; else bad "Postfix holds two messages for the mailbox when the rename begins" "$(postqueue -p 2>&1 | tail -n 6)"; fi
 eq "and one more that was put on hold" "hold info@$MB" "$(queue_of "${hid:-none}")"
 : >"$T/busy"
@@ -319,14 +331,12 @@ moved() {   # address -> waits until the rename has given the mailbox that addre
 # finds the mailbox gone from under it, cannot take the file back - its path has moved - and
 # answers 451: Postfix puts the message off, and offered again it arrived a second time (11 of
 # the 18 the move put off in three renames on the test server). What Dovecot wrote is put
-# there by hand at the moment the mailbox has moved, as this server's Postfix and Dovecot
-# write a message: the one Postfix holds as "e2e-arrived", handed over out of that very queue
-# file, with the Message-ID it has there.
+# there by hand at the moment the mailbox has moved, as Dovecot writes a message: the one
+# Postfix holds as "e2e-arrived", handed over out of that very queue file for the address it
+# waits for.
 ( moved "info@$MBN" || exit 0
-  fid="$(grep -m1 -oE '\(Postfix\) with [A-Z]+ id [0-9A-Za-z]+' "$T/first.msg" 2>/dev/null | awk '{ print $NF }')"
-  [ -n "$fid" ] && [ -n "$ha" ] && [ -n "$hmid" ] && [ -d "/var/vmail/$MBN/info/Maildir/new" ] || exit 0
-  sed -e "s/$fid/$ha/g" -e 's/^Subject: e2e-first/Subject: e2e-arrived/' -e "s|^Message-I[dD]:.*|$hmid|" "$T/first.msg" >"$T/copy.msg"
-  install -o vmail -g vmail -m 0600 "$T/copy.msg" "/var/vmail/$MBN/info/Maildir/new/$(date +%s).M1P1.e2e-arrived" && : >"$T/copy.planted" ) &
+  [ -n "$ha" ] || exit 0
+  dovecot_wrote "$ha" "/var/vmail/$MBN/info" "info@$MB" && : >"$T/copy.planted" ) &
 # ... and a sender that is in the middle of a message when the aliases take effect: Postfix
 # takes it in with the tables it had when the message began, under the old address
 smtp() {   # [a line to say] -> the line Postfix answers
@@ -441,6 +451,66 @@ eq "and its first address, a mailbox again, is nobody's other name" "0" "$(grep 
 check "a message handed to Dovecot under the address of the meantime is taken" under "info@$MBN" e2e-under-meantime
 check "into the mailbox" bash -c "grep -rl '^Subject: e2e-under-meantime' /var/vmail/$MB/info/Maildir | grep -E '/(new|cur)/'"
 nope "nothing is left under the name of the meantime" bash -c "ls -d /var/vmail/$MBN/*"
+
+sec "Dovecot interrupted with no rename anywhere: what it had saved is not sent a second time"
+# A reload or a restart ends the deliveries Dovecot is in the middle of, and it answers "421
+# Shutting down" for a message it has saved. Postfix keeps such a message and offers it again:
+# with mail arriving on three connections, 13 of 1156 messages were in the mailbox twice after
+# six reloads on the test server, and 8 of 791 after four restarts. lomp looks after each
+# reload and restart of its own, and "mail settle" is that look for whoever reloaded Dovecot
+# otherwise - the certbot deploy hook runs it. What an interruption leaves is made here one
+# case at a time: Postfix holds a message it was told to keep by Dovecot (the mailbox's tmp/
+# is closed for a moment), and the mailbox is given that message as Dovecot writes one.
+subject_id() {   # subject -> the id of the message of that subject in the deferred queue
+  local id=""
+  for id in $(postqueue -j 2>/dev/null | jq -r 'select(.queue_name == "deferred") | .queue_id' 2>/dev/null); do
+    if postcat -hq "$id" 2>/dev/null | grep -qx "Subject: $1"; then printf '%s' "$id"; return 0; fi
+  done
+}
+in_box() {   # subject, mailbox directory -> how many messages of that subject the mailbox has
+  grep -rl "^Subject: $1\$" "$2/Maildir" 2>/dev/null | grep -cE '/(new|cur)/'
+}
+chmod 000 "/var/vmail/$MB/info/Maildir/tmp" "/var/vmail/$MB/side/Maildir/tmp"
+for s in e2e-saved e2e-unsaved; do
+  swaks --server 127.0.0.1 --port 25 --helo client.example.org --from '<>' --to "info@$MB" --header "Subject: $s" --body hello >/dev/null 2>&1
+done
+for s in e2e-both e2e-half; do
+  swaks --server 127.0.0.1 --port 25 --helo client.example.org --from '<>' --to "info@$MB,side@$MB" --header "Subject: $s" --body hello >/dev/null 2>&1
+done
+for i in $(seq 1 20); do [ "$(held_for "info@$MB" | grep -c .)" -ge 4 ] && break; sleep 1; done
+chmod 700 "/var/vmail/$MB/info/Maildir/tmp" "/var/vmail/$MB/side/Maildir/tmp"
+qs="$(subject_id e2e-saved)"; qu="$(subject_id e2e-unsaved)"; qb="$(subject_id e2e-both)"; qh="$(subject_id e2e-half)"
+if [ -n "$qs" ] && [ -n "$qu" ] && [ -n "$qb" ] && [ -n "$qh" ]; then ok "Postfix holds four messages Dovecot made it keep"; else bad "Postfix holds four messages Dovecot made it keep" "$(postqueue -p 2>&1 | tail -n 8)"; fi
+has "(two of them for two mailboxes)" "2" "$(postqueue -j 2>/dev/null | jq -r --arg id "${qb:-none}" 'select(.queue_id == $id) | .recipients | length')"
+ln1="$(wc -l </var/log/server_setup.log 2>/dev/null || echo 0)"
+# ... the first is in its mailbox; the third in both of its mailboxes; the fourth in one of two
+dovecot_wrote "${qs:-none}" "/var/vmail/$MB/info" "info@$MB"
+dovecot_wrote "${qb:-none}" "/var/vmail/$MB/info" -
+dovecot_wrote "${qb:-none}" "/var/vmail/$MB/side" -
+dovecot_wrote "${qh:-none}" "/var/vmail/$MB/info" -
+eq "(as Dovecot wrote it: once each)" "1 1 1 1 0" "$(in_box e2e-saved "/var/vmail/$MB/info") $(in_box e2e-both "/var/vmail/$MB/info") $(in_box e2e-both "/var/vmail/$MB/side") $(in_box e2e-half "/var/vmail/$MB/info") $(in_box e2e-half "/var/vmail/$MB/side")"
+files_before="$(find "/var/vmail/$MB" -type f -path '*/Maildir/*' ! -name 'dovecot*' 2>/dev/null | sort)"
+out="$($L mail settle --no-color 2>&1)"; rc=$?
+eq "mail settle succeeds" "0" "$rc"
+has "and says how many were in their mailbox already" "2 message(s) Postfix was told to keep when Dovecot was interrupted were in the mailbox already and are not sent a second time" "$out"
+eq "a message its mailbox has is taken out of the queue" "" "$(queue_of "${qs:-none}")"
+eq "and so is one both of its mailboxes have" "" "$(queue_of "${qb:-none}")"
+has "one that only one of its two mailboxes has stays: Postfix holds a message for all of them or none" "deferred" "$(queue_of "${qh:-none}")"
+has "and one that no mailbox has stays" "deferred" "$(queue_of "${qu:-none}")"
+eq "no file of a mailbox was touched for it" "$files_before" "$(find "/var/vmail/$MB" -type f -path '*/Maildir/*' ! -name 'dovecot*' 2>/dev/null | sort)"
+has "which the log has as well" "2 message(s) Postfix was told to keep when Dovecot was interrupted were in the mailbox already and are not sent a second time" "$(sed -n "$((ln1 + 1)),\$p" /var/log/server_setup.log 2>/dev/null)"
+# Postfix offers what it still holds, as it does by itself some minutes later
+for i in $(seq 1 30); do [ -z "$(held_for "info@$MB")$(held_for "side@$MB")" ] && break; postqueue -f >/dev/null 2>&1; sleep 1; done
+eq "the message that had been saved is in the mailbox once" "1" "$(in_box e2e-saved "/var/vmail/$MB/info")"
+eq "the one for two mailboxes is in each of them once" "1 1" "$(in_box e2e-both "/var/vmail/$MB/info") $(in_box e2e-both "/var/vmail/$MB/side")"
+eq "the one that had not been saved is delivered, once" "1" "$(in_box e2e-unsaved "/var/vmail/$MB/info")"
+eq "and the mailbox that lacked the fourth has it" "1" "$(in_box e2e-half "/var/vmail/$MB/side")"
+has "a second look finds nothing, and says so" "Nothing that Dovecot made Postfix keep in the last four minutes is in a mailbox already" "$($L mail settle --no-color 2>&1)"
+eq "asked to be quiet - as the certificate hook asks - it says nothing" "0|" "$(o="$($L mail settle --quiet --no-color 2>&1)"; printf '%s|%s' "$?" "$o")"
+eq "nothing was bounced" "0" "$(journalctl -t postfix/lmtp --since "@$tb" --no-pager -o cat 2>/dev/null | grep -c "to=<[a-z]*@$MB>.*status=bounced")"
+# ... and a reload of lomp's own, with nothing held: Dovecot goes on taking mail, once
+if deliver "info@$MB" e2e-after-look "/var/vmail/$MB/info/Maildir"; then ok "mail to the mailbox arrives as before"; else bad "mail to the mailbox arrives as before" "$(postqueue -p 2>&1 | tail -n 4)"; fi
+eq "once" "1" "$(in_box e2e-after-look "/var/vmail/$MB/info")"
 
 sec "a site with mail, renamed with --keep-mail"
 out="$($L add "$MK" --static --no-ssl --mail --email e2e@example.org --yes --no-color 2>&1)"

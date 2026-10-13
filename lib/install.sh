@@ -764,6 +764,10 @@ lib_install_migrate() {
   # where a site with mail was renamed by a release that did not tell Dovecot the addresses its
   # mailboxes had before, it is told now
   lib_mail_former_migrate
+  # the certbot deploy hook as this release writes it, where the server has one: after a
+  # renewed mail certificate it now has Postfix's queue looked at for what the reload of
+  # Dovecot made it keep although the mailbox has it ("mail settle")
+  if [[ -e "$CERTBOT_DEPLOY_HOOK" ]]; then lib_ssl_hook_install; fi
   # last: a vhost OpenLiteSpeed refuses ends the run here
   lib_domain_logs_repair
   if [[ -n "$DOMAIN_LOGS_MOVED" ]]; then

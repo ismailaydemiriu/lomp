@@ -202,6 +202,8 @@ main() {
               # MX and updating domain.json with nothing holding the lock.
               dns) if [[ " ${rest[*]:-} " == *" --apply "* || " ${rest[*]:-} " == *" --replace-mx "* ]]; then lib_lock; fi ;;
               status|test|queue|help|-h|--help) ;;
+              # run by the certbot deploy hook, inside a command that holds the lock already
+              settle) ;;
               box|alias|domain) if [[ "${rest[1]:-list}" != "list" ]]; then lib_lock; fi ;;
               *) lib_lock ;;
             esac ;;

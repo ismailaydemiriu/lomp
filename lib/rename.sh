@@ -882,63 +882,6 @@ _domain_rename_webmail_user() {   # user@old user@new
 UPDATE \`${WM_DB_NAME}\`.identities i JOIN \`${WM_DB_NAME}\`.users u ON u.user_id = i.user_id SET i.email = '${n}' WHERE u.username = '${n}' AND LOWER(i.email) = '${o}';" >/dev/null 2>&1
 }
 
-# Was this message handed to Dovecot out of one of these queue files of Postfix's? Its header
-# says: every hop writes a "Received:" line on top, Postfix with the id of the queue file the
-# message lies in ("by host (Postfix) with ESMTP id 4CC8113316"), and Dovecot one more for the
-# hop into the mailbox ("with LMTP"). The topmost one that is not Dovecot's is the queue file
-# the message came out of - and only that one is asked: a message that was put back and
-# delivered again carries the id of the file it had been in as well, one line further down.
-# Prints the id when it is one of those given; an id is compared, never matched.
-_domain_rename_mail_copy_of() {   # a message file, the queue ids (one per line)
-  awk -v ids="$2" '
-    function judge(h,   n, w, k) {
-      if (tolower(substr(h, 1, 9)) != "received:") return 0
-      if (tolower(h) ~ /[ \t]with[ \t]+lmtp/) return 0
-      n = split(h, w, /[ \t;]+/)
-      for (k = 1; k < n; k++) if (w[k] == "id" && (w[k + 1] in want)) { print w[k + 1]; break }
-      return 1
-    }
-    BEGIN { m = split(ids, q, "\n"); for (i = 1; i <= m; i++) if (q[i] != "") want[q[i]] = 1 }
-    { sub(/\r$/, "") }
-    /^$/ { exit }
-    /^[ \t]/ { h = h " " $0; next }
-    { if (h != "" && judge(h)) { h = ""; exit } h = $0 }
-    END { if (h != "") judge(h) }
-  ' "$1" 2>/dev/null || true
-}
-
-# The Message-ID of a message: of the headers on standard input, in lower case. Nothing when
-# it has none.
-_domain_rename_mail_msgid() {
-  awk '
-    function said(h,   v) {
-      if (tolower(substr(h, 1, 11)) != "message-id:") return 0
-      v = substr(h, 12); gsub(/^[ \t]+|[ \t]+$/, "", v)
-      print tolower(v)
-      return 1
-    }
-    { sub(/\r$/, "") }
-    /^$/ { exit }
-    /^[ \t]/ { h = h " " $0; next }
-    { if (h != "" && said(h)) { h = ""; exit } h = $0 }
-    END { if (h != "") said(h) }
-  ' 2>/dev/null || true
-}
-
-# Is a file of a mailbox the very message one of Postfix's queue files holds? The file names
-# the queue file it came out of (_domain_rename_mail_copy_of) - and a name is not enough to
-# take a message out of the queue by: Postfix gives the name of a queue file to another
-# message once the first has gone. So the two are compared by the Message-ID each carries.
-# A message without one is not known to be the same, and neither is one Postfix will not show.
-_domain_rename_mail_same() {   # a message file, a queue id
-  local m="" q=""
-  lib_have postcat || return 1
-  m="$(_domain_rename_mail_msgid 2>/dev/null <"$1" || true)"
-  [[ -n "$m" ]] || return 1
-  q="$(postcat -hq "$2" 2>/dev/null | _domain_rename_mail_msgid || true)"
-  [[ "$m" == "$q" ]]
-}
-
 # A message Postfix took in for an address keeps that address: an alias is applied when a
 # message comes in, not when it is handed over. So what Postfix could not hand over at the
 # time waits in its deferred queue under the old address, and its next attempt, minutes after
@@ -957,12 +900,11 @@ _domain_rename_mail_same() {   # a message file, a queue id
 # it, could not take the file back - its path had moved - and answered 451; or it was told to
 # read its configuration again and answered "421 Shutting down" for a message it had saved.
 # Such a message has arrived. It is not sent again: it is taken out of the queue ("postsuper
-# -d") when a file of the mailbox, under either name, is no older than this rename's work on
-# the mail, names that very queue file as the one it was handed over out of
-# (_domain_rename_mail_copy_of) and carries the same Message-ID (_domain_rename_mail_same) -
-# and when the message waits for this one mailbox and for nobody else, because a queue file
-# goes as a whole. Nothing is ever taken out of a mailbox for it: where it cannot be told for
-# certain, the message is sent on like the others, and may be there twice.
+# -d") when the mailbox of every recipient it still waits for holds it beyond doubt - under
+# either name, in a file no older than this rename's work on the mail (lib_mail_arrived has
+# what that takes). Nothing is ever taken out of a mailbox for it: where it cannot be told
+# for certain, the message is sent on like the others, and may be there twice - as one that
+# also waits for an address which did not move, or for a mailbox that has not got it.
 #
 # From the deferred queue only. A message in the active queue is being handed over at this
 # very moment, and what Dovecot answers is what becomes of it whatever is done to its file:
@@ -973,8 +915,7 @@ _domain_rename_mail_same() {   # a message file, a queue id
 # lower case and without the "+extension" Postfix delivers it with, and never matched as a
 # pattern: info@a-b.example is not info@a.b.example.
 _domain_rename_mail_requeue() {   # old new   (for the mailboxes RENAME_MAIL_MOVED names)
-  local old="$1" new="$2" held="" id="" nr="" a="" loc="" ids="" there="" put="" gone="" home="" f="" got="" n=0 c=0
-  local -A sole=()
+  local old="$1" new="$2" held="" id="" nr="" a="" loc="" ids="" rows="" there="" put="" gone="" n=0 c=0
   [[ -n "${RENAME_MAIL_MOVED:-}" ]] || return 0
   lib_have postqueue && lib_have postsuper || return 0
   # the queue file, how many recipients its message still waits for, and each of them that is
@@ -987,23 +928,14 @@ _domain_rename_mail_requeue() {   # old new   (for the mailboxes RENAME_MAIL_MOV
     loc="${a%@*}"; loc="${loc%%+*}"
     [[ "$loc" =~ ^[a-z0-9._-]+$ && " ${RENAME_MAIL_MOVED} " == *" ${loc}@${new} "* ]] || continue
     if [[ $'\n'"${ids}"$'\n' != *$'\n'"${id}"$'\n'* ]]; then ids+="${ids:+$'\n'}${id}"; fi
-    if [[ "$nr" == "1" ]]; then sole[$loc]+="${sole[$loc]:+$'\n'}${id}"; fi
+    # where the mailbox of that address may lie: under the new name, and under the old one
+    # until that is swept
+    rows+="${id}"$'\t'"${nr}"$'\t'"${a}"$'\t'"${MAIL_VMAIL_HOME}/${new}/${loc}"$'\t'"${MAIL_VMAIL_HOME}/${old}/${loc}"$'\n'
   done <<<"$held"
   [[ -n "$ids" ]] || return 0
-  # which of them are in the mailbox they wait for
-  if [[ -n "${RENAME_MAIL_SINCE:-}" && -e "${RENAME_MAIL_SINCE:-}" ]]; then
-    for loc in "${!sole[@]}"; do
-      for home in "${MAIL_VMAIL_HOME}/${new}/${loc}" "${MAIL_VMAIL_HOME}/${old}/${loc}"; do
-        [[ -d "$home" && ! -L "$home" ]] || continue
-        while IFS= read -r -d '' f; do
-          got="$(_domain_rename_mail_copy_of "$f" "${sole[$loc]}")"
-          [[ -n "$got" && $'\n'"${there}"$'\n' != *$'\n'"${got}"$'\n'* ]] || continue
-          if _domain_rename_mail_same "$f" "$got"; then there+="${there:+$'\n'}${got}"; fi
-        done < <(_domain_rename_box_messages "$home" -newer "$RENAME_MAIL_SINCE" -print0)
-      done
-    done
-  fi
-  # those have arrived, and go out of the queue: "postsuper: 4CC8113316: removed"
+  # those that every mailbox they wait for has already go out of the queue:
+  # "postsuper: 4CC8113316: removed"
+  there="$(lib_mail_arrived "${RENAME_MAIL_SINCE:-}" <<<"$rows" || true)"
   if [[ -n "$there" ]]; then
     gone="$(postsuper -d - deferred <<<"$there" 2>&1 | sed -n 's/^postsuper: \([0-9A-Za-z][0-9A-Za-z]*\): removed$/\1/p' || true)"
     c="$(grep -c . <<<"$gone" || true)"

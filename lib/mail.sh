@@ -60,6 +60,8 @@ MAIL_MSG_SIZE_MB="${MAIL_MSG_SIZE_MB:-25}"
 MAIL_MIN_RAM_MB="${MAIL_MIN_RAM_MB:-1800}"
 MAIL_LAST_ERROR=""
 MAIL_FORMER_TOLD=0     # lib_mail_former_apply: 1 when that call told Dovecot of the list
+MAIL_RESTART_SINCE=""  # lib_mail_services_apply: the mark of the moment before it restarted the stack (lib_mail_settle_mark)
+MAIL_SETTLED=0         # lib_mail_settle: how many messages its last look took out of Postfix's queue
 
 # =============================================================================
 #  State
@@ -1027,7 +1029,7 @@ lib_mail_cert_ensure() {   # host
     if [[ " $names " == *" ${host} "* ]]; then
       lib_ssl_deploy_files "$MAIL_CERT_NAME" || lib_warn "certificate ${MAIL_CERT_NAME} could not be deployed: ${SSL_LAST_ERROR}"
       lib_cron_remove "mail-cert"
-      (( OPT_DRY_RUN )) || lib_systemctl reload postfix dovecot >/dev/null 2>&1 || true
+      (( OPT_DRY_RUN )) || lib_mail_stack_reload
       lib_ok "Certificate for ${host} in place ($(lib_ssl_days_left "$MAIL_CERT_NAME") days left)"
       return 0
     fi
@@ -1035,7 +1037,7 @@ lib_mail_cert_ensure() {   # host
   fi
   if lib_ssl_obtain_names "$MAIL_CERT_NAME" "$host"; then
     lib_cron_remove "mail-cert"
-    lib_systemctl reload postfix dovecot >/dev/null 2>&1 || true
+    lib_mail_stack_reload
     return 0
   fi
   lib_warn "No certificate for ${host} yet: ${SSL_LAST_ERROR}"
@@ -1264,6 +1266,11 @@ lib_mail_services_apply() {
   local s="" p=""
   (( OPT_DRY_RUN )) && { lib_info "[dry-run] would enable and restart: $(lib_mail_services | tr '\n' ' ')"; return 0; }
   lib_systemctl daemon-reload >/dev/null 2>&1 || true
+  # A restart ends the deliveries Dovecot is in the middle of, as a reload does: what Postfix
+  # was told to keep over it and the mailbox has already is seen to once everything is up
+  # again (lib_mail_settle) - or, where it does not come up, once the configuration that
+  # worked has been put back (_mail_apply_rollback).
+  MAIL_RESTART_SINCE="$(lib_mail_settle_mark)"
   while read -r s; do
     [[ -n "$s" ]] || continue
     lib_service_exists "$s" || continue
@@ -1280,6 +1287,9 @@ lib_mail_services_apply() {
   for p in 25 587 993; do
     lib_port_listening "$p" || { MAIL_LAST_ERROR="nothing is listening on port ${p}"; return 1; }
   done
+  # (the two seconds above were the wait)
+  lib_mail_settle_after "$MAIL_RESTART_SINCE" 0
+  MAIL_RESTART_SINCE=""
   return 0
 }
 
@@ -1298,11 +1308,15 @@ _mail_apply_rollback() {   # reason
   # that fails, so the ones already restarted are running on files that have just been taken
   # away from them. Unit files were restored too, hence the daemon-reload.
   systemctl daemon-reload >/dev/null 2>&1 || true
+  # since before the restarts that did not work out, where there were any
+  [[ -n "${MAIL_RESTART_SINCE:-}" ]] || MAIL_RESTART_SINCE="$(lib_mail_settle_mark)"
   while read -r s; do
     [[ -n "$s" ]] || continue
     lib_service_exists "$s" || continue
     systemctl restart "$s" >/dev/null 2>&1 || dead+=("$s")
   done < <(lib_mail_services)
+  lib_mail_settle_after "$MAIL_RESTART_SINCE"
+  MAIL_RESTART_SINCE=""
   if lib_service_active fail2ban; then fail2ban-client reload >/dev/null 2>&1 || true; fi
   if ((${#dead[@]})); then
     lib_warn "These did not come back on the previous configuration either: ${dead[*]} (journalctl -u ${dead[0]})"
@@ -2169,7 +2183,7 @@ lib_mail_former_apply() {   # [always]
   fi
   MAIL_FORMER_TOLD=1
   lib_log_write INFO "Dovecot's user configuration now reads the list of former addresses (${list})"
-  lib_service_active dovecot && { lib_run doveadm reload || lib_warn "dovecot reload failed (see log)"; }
+  lib_service_active dovecot && { lib_mail_dovecot_reload || lib_warn "dovecot reload failed (see log)"; }
   return 0
 }
 
@@ -2195,6 +2209,319 @@ lib_mail_former_migrate() {
 lib_mail_former_refresh() {
   [[ -s "$(lib_mail_former_file)" ]] || return 0
   lib_mail_render_former | lib_write_file "$(lib_mail_former_file)" 0640 root:dovecot
+}
+
+# =============================================================================
+#  A message Postfix holds although it has arrived
+# =============================================================================
+# Dovecot can answer for a message it has saved as if it had not. When a mailbox is moved from
+# under a delivery: "451 4.2.0 Mailbox was deleted under us" - the file is written, its path
+# has gone, and it cannot be taken back. When Dovecot is told to read its configuration
+# again: "421 4.3.2 Shutting down", in reply to the end of a message it has saved. When it is
+# restarted: Postfix writes "lost connection ... while sending end of data -- message may be
+# sent more than once". Postfix keeps such a message, offers it again some minutes later, and
+# the mailbox has it twice. On the test server: 11 of the 18 deliveries that three renames
+# interrupted; and with mail arriving on three connections and no rename anywhere, 13 of 1156
+# messages in six reloads and 8 of 791 in four restarts - every message Dovecot had answered
+# "Shutting down" for lay in the mailbox already, 21 of 21.
+#
+# Such a message has arrived, and is taken out of the queue instead of being sent again -
+# when it is that message beyond doubt, and nothing is ever taken out of a mailbox for it:
+#  - a file in a new/ or a cur/ of the mailbox the message waits for is no older than the
+#    moment before Dovecot was interrupted;
+#  - the topmost Received line of that file that is not Dovecot's own names that very queue
+#    file ("by host (Postfix) with ESMTP id 4CC8113316"): it was handed over out of it;
+#  - the file is, from that line on, byte for byte what Postfix holds in the queue file - or,
+#    where Postfix broke a line of more than 998 characters when it handed the message over,
+#    carries the same Message-ID under that very line (the name of the queue file and the
+#    moment Postfix took the message in: a name is given away again, a name at a moment not);
+#  - Dovecot's "Delivered-To:" on top of it, where there is one, is the recipient the queue
+#    file waits for;
+#  - and the queue file waits for nobody whose mailbox has not got it: it goes as a whole.
+
+# The messages a mailbox directory holds: the files in a new/ or a cur/ of its Maildir,
+# whichever folder that is - told by the directory a file lies in and never by its whole path.
+lib_mail_box_messages() {   # the mailbox directory [what find does with each, e.g. -print0]
+  find "${1}/Maildir" -type f -regextype posix-extended -regex '.*/(new|cur)/[^/]*' "${@:2}" 2>/dev/null || true
+}
+
+# Where mail for an address is put: the directory of the mailbox it is, or of the mailbox whose
+# former address it is (lib_mail_render_former). Nothing when it is neither. Without the
+# "+extension" Postfix hands an address over with.
+lib_mail_address_home() {   # address
+  local a="${1,,}" loc="" d="" h=""
+  loc="${a%@*}"; loc="${loc%%+*}"; d="${a#*@}"
+  [[ "$a" == *@* && "$loc" =~ ^[a-z0-9._-]+$ && "$d" =~ ^[a-z0-9.-]+$ && "$d" != *..* ]] || return 0
+  if lib_mail_box_exists "${loc}@${d}"; then printf '%s/%s/%s' "$MAIL_VMAIL_HOME" "$d" "$loc"; return 0; fi
+  h="$(awk -F: -v k="${loc}@${d}" '$1 == k { print $6; exit }' "$(lib_mail_former_file)" 2>/dev/null || true)"
+  if [[ "$h" == "${MAIL_VMAIL_HOME}/"* && "$h" != *..* ]]; then printf '%s' "$h"; fi
+  return 0
+}
+
+# Was this message handed to Dovecot out of one of these queue files of Postfix's? Its header
+# says: every hop writes a "Received:" line on top, Postfix with the id of the queue file the
+# message lies in ("by host (Postfix) with ESMTP id 4CC8113316"), and Dovecot one more for the
+# hop into the mailbox ("with LMTP"). The topmost one that is not Dovecot's is the queue file
+# the message came out of - and only that one is asked: a message that was put back and
+# delivered again carries the id of the file it had been in as well, one line further down.
+# Prints the id when it is one of those given; an id is compared, never matched.
+lib_mail_msg_queue_file() {   # a message file, the queue ids (one per line)
+  awk -v ids="$2" '
+    function judge(h,   n, w, k) {
+      if (tolower(substr(h, 1, 9)) != "received:") return 0
+      if (tolower(h) ~ /[ \t]with[ \t]+lmtp/) return 0
+      n = split(h, w, /[ \t;]+/)
+      for (k = 1; k < n; k++) if (w[k] == "id" && (w[k + 1] in want)) { print w[k + 1]; break }
+      return 1
+    }
+    BEGIN { m = split(ids, q, "\n"); for (i = 1; i <= m; i++) if (q[i] != "") want[q[i]] = 1 }
+    { sub(/\r$/, "") }
+    /^$/ { exit }
+    /^[ \t]/ { h = h " " $0; next }
+    { if (h != "" && judge(h)) { h = ""; exit } h = $0 }
+    END { if (h != "") judge(h) }
+  ' "$1" 2>/dev/null || true
+}
+
+# That line itself, as one line: the hop a message was handed to Dovecot from, with the name of
+# the queue file and the moment Postfix took the message in. Of a message as Postfix holds it,
+# it is the first Received line there is.
+lib_mail_msg_hop() {   # a message file
+  awk '
+    function judge(h) {
+      if (tolower(substr(h, 1, 9)) != "received:") return 0
+      if (tolower(h) ~ /[ \t]with[ \t]+lmtp/) return 0
+      gsub(/[ \t]+/, " ", h); print h
+      return 1
+    }
+    { sub(/\r$/, "") }
+    /^$/ { exit }
+    /^[ \t]/ { h = h " " $0; next }
+    { if (h != "" && judge(h)) { h = ""; exit } h = $0 }
+    END { if (h != "") judge(h) }
+  ' "$1" 2>/dev/null || true
+}
+
+# The Message-ID of a message: of the headers on standard input, in lower case. Nothing when
+# it has none.
+lib_mail_msg_id() {
+  awk '
+    function said(h,   v) {
+      if (tolower(substr(h, 1, 11)) != "message-id:") return 0
+      v = substr(h, 12); gsub(/^[ \t]+|[ \t]+$/, "", v)
+      print tolower(v)
+      return 1
+    }
+    { sub(/\r$/, "") }
+    /^$/ { exit }
+    /^[ \t]/ { h = h " " $0; next }
+    { if (h != "" && said(h)) { h = ""; exit } h = $0 }
+    END { if (h != "") said(h) }
+  ' 2>/dev/null || true
+}
+
+# What Dovecot puts on top of a message it saves: "Return-Path:", "Delivered-To:" - only where
+# the message was handed over for one recipient; for two in one go it writes none - and its
+# own "Received: ... with LMTP". Everything below that is the message as Postfix held it.
+# The first prints the address of that "Delivered-To:", in lower case; the second the message
+# without those lines. A "Delivered-To:" further down is an earlier hop's and not asked.
+lib_mail_msg_delivered_to() {   # a message file
+  awk '
+    function top(h) { return (h ~ /^(Return-Path|Delivered-To):/ || (h ~ /^Received:/ && h ~ /with LMTP/)) }
+    function said(h,   v) { if (h !~ /^Delivered-To:/) return; v = substr(h, 14); gsub(/^[ \t<]+|[ \t>]+$/, "", v); print tolower(v); done = 1 }
+    { sub(/\r$/, "") }
+    /^$/ { exit }
+    /^[ \t]/ { h = h " " $0; next }
+    { if (h != "") { if (!top(h)) { h = ""; exit } said(h); if (done) { h = ""; exit } } h = $0 }
+    END { if (h != "" && top(h)) said(h) }
+  ' "$1" 2>/dev/null || true
+}
+lib_mail_msg_as_queued() {   # a message file
+  awk '
+    function flush() { if (h != "" && !(h ~ /^(Return-Path|Delivered-To):/ || (h ~ /^Received:/ && h ~ /with LMTP/))) { on = 1; printf "%s", raw } h = ""; raw = "" }
+    on { print; next }
+    /^[ \t]/ { h = h " " $0; raw = raw $0 "\n"; next }
+    { flush(); if (on) { print; next } h = $0; raw = $0 "\n" }
+    END { flush() }
+  ' "$1" 2>/dev/null || true
+}
+
+# Is a file of a mailbox the very message a queue file of Postfix's holds for an address? The
+# file names the queue file it came out of (lib_mail_msg_queue_file) - and a name is not
+# enough to take a message out of the queue by: Postfix gives the name of a queue file to
+# another message once the first has gone. So the two are compared: the same bytes from
+# Postfix's own Received line on (the test server: an ordinary message, one without a
+# Message-ID, one with 8-bit text and lines that begin with a dot, one of 288 KB - each the
+# same), or, where they are not - Postfix breaks a line of more than 998 characters when it
+# hands a message over - the same Message-ID under the same line of that hop: the name of the
+# queue file and the moment the message was taken in, which no other message has. And what
+# Dovecot wrote on top is not another recipient's. A message Postfix will not show is not
+# known to be the same.
+lib_mail_msg_is() {   # a message file, a queue id, the address the queue file waits for
+  local dt="" q="" m="" n="" hop="" was=""
+  lib_have postcat || return 1
+  dt="$(lib_mail_msg_delivered_to "$1")"
+  [[ -z "$dt" || "$dt" == "${3,,}" ]] || return 1
+  q="$(lib_mktemp)"
+  postcat -hbq "$2" >"$q" 2>/dev/null || true
+  if [[ -s "$q" ]] && lib_mail_msg_as_queued "$1" | cmp -s - "$q"; then rm -f "$q"; return 0; fi
+  m="$(lib_mail_msg_id 2>/dev/null <"$1" || true)"
+  n="$(lib_mail_msg_id <"$q" || true)"
+  hop="$(lib_mail_msg_hop "$1")"
+  was="$(lib_mail_msg_hop "$q")"
+  rm -f "$q"
+  [[ -n "$m" && "$m" == "$n" && -n "$hop" && "$hop" == "$was" ]]
+}
+
+# Which of the queue files that are asked about have arrived? Rows on standard input, one for
+# every recipient a queue file still waits for: the queue id, how many recipients it waits for
+# in all, the address, and the one or two directories the mailbox of that address may lie in
+# (a mailbox that is being renamed has two). Prints the ids of those whose every recipient
+# has the message, by the proof above; a file stands for one recipient, and a recipient is
+# counted once. The first argument is a file as old as the moment before Dovecot was
+# interrupted: nothing older than it is looked at, and without it nothing has arrived.
+lib_mail_arrived() {   # the file that marks since when   (rows on stdin)
+  local since="${1:-}" id="" nr="" a="" h1="" h2="" home="" f="" got="" key="" names="" in=""
+  local -A want=() by=() proven=() count=()
+  [[ -n "$since" && -e "$since" ]] || return 0
+  lib_have postcat || return 0
+  while IFS=$'\t' read -r id nr a h1 h2; do
+    [[ "$id" =~ ^[0-9A-Za-z]+$ && "$nr" =~ ^[0-9]+$ && -n "$a" && "$a" != *" "* && -n "$h1" ]] || continue
+    want[$id]="$nr"
+    for home in "$h1" "$h2"; do
+      [[ -n "$home" ]] || continue
+      by[$home]+="${id} ${a}"$'\n'
+    done
+  done
+  names="$(lib_mktemp)"
+  for home in "${!by[@]}"; do
+    [[ -d "$home" && ! -L "$home" ]] || continue
+    # Which of the new files have the name of one of these queue files in them at all - "id
+    # 4CC8113316", as Postfix writes it - is found by one grep, and only those are then asked
+    # properly, each about the names it has in it. Neither the files nor the names are few: on
+    # the test server 3000 messages had arrived in the minute and a half "mail settle" then
+    # looked back over (each asked by itself, that took half a minute), and after a restart of
+    # Dovecot under that mail Postfix held a thousand messages it had not even offered
+    # ("delivery temporarily suspended"), every one of them asked about here.
+    awk 'NF { print "id " $1 }' <<<"${by[$home]}" | LC_ALL=C sort -u >"$names" || true
+    [[ -s "$names" ]] || continue
+    while IFS= read -r -d '' f; do
+      in="$(grep -aoF -f "$names" -- "$f" 2>/dev/null | LC_ALL=C sort -u | sed 's/^id //' || true)"
+      got="$(lib_mail_msg_queue_file "$f" "$in")"
+      [[ -n "$got" ]] || continue
+      while read -r id a; do
+        [[ "$id" == "$got" && -z "${proven[${id} ${a}]:-}" ]] || continue
+        if lib_mail_msg_is "$f" "$id" "$a"; then proven[${id} ${a}]=1; break; fi
+      done <<<"${by[$home]}"
+    done < <(lib_mail_box_messages "$home" -newer "$since" -print0 | xargs -0 -r grep -alZF -f "$names" -- 2>/dev/null || true)
+  done
+  rm -f "$names"
+  for key in "${!proven[@]}"; do id="${key%% *}"; count[$id]=$(( ${count[$id]:-0} + 1 )); done
+  for id in "${!want[@]}"; do
+    if (( ${count[$id]:-0} == want[$id] )); then printf '%s\n' "$id"; fi
+  done | LC_ALL=C sort || true
+  return 0
+}
+
+# What Postfix was told to keep when Dovecot was interrupted, looked at: the messages it holds
+# because Dovecot's LMTP did not take them - every recipient of them - and that lie in the
+# mailbox they wait for all the same go out of the queue. The rest stays: Postfix offers it
+# again by itself. Never out of the active queue (a message there is being handed over at this
+# moment); the first argument as for lib_mail_arrived.
+lib_mail_settle() {   # the file that marks since when
+  local since="${1:-}" rows="" id="" nr="" a="" home="" there="" gone="" c=0
+  local -A homes=()
+  MAIL_SETTLED=0
+  [[ -n "$since" && -e "$since" ]] || return 0
+  lib_have postqueue && lib_have postsuper && lib_have postcat || return 0
+  # ("incoming" with such a reason: a message Dovecot gave back while Postfix was replacing its
+  # queue manager - "postfix reload" in the same moment. Nobody put it off; the new queue manager
+  # found it still being delivered and laid it back where mail comes in, to be offered again a
+  # minute later: 7 of 886 messages were in the mailbox twice that way after six such moments
+  # on the test server. New mail has no reason on it.)
+  rows="$(postqueue -j 2>/dev/null | jq -r '
+            select((.queue_name == "deferred" or .queue_name == "incoming") and ((.recipients // []) | length) > 0)
+            | select(all(.recipients[]; (.delay_reason // "") | test("dovecot-lmtp")))
+            | .queue_id as $id | (.recipients | length) as $n | .recipients[]
+            | "\($id)\t\($n)\t\(.address // "" | ascii_downcase)"' 2>/dev/null || true)"
+  [[ -n "$rows" ]] || return 0
+  # (where the mailbox of an address lies is asked once an address, not once a message)
+  there="$(while IFS=$'\t' read -r id nr a; do
+             [[ -n "$a" ]] || continue
+             if [[ -z "${homes[$a]+x}" ]]; then homes[$a]="$(lib_mail_address_home "$a")"; fi
+             home="${homes[$a]}"
+             if [[ -n "$home" ]]; then printf '%s\t%s\t%s\t%s\n' "$id" "$nr" "$a" "$home"; fi
+           done <<<"$rows" | lib_mail_arrived "$since" || true)"
+  [[ -n "$there" ]] || return 0
+  # what postsuper names is what it took: "postsuper: 4CC8113316: removed"
+  gone="$(postsuper -d - deferred incoming <<<"$there" 2>&1 | sed -n 's/^postsuper: \([0-9A-Za-z][0-9A-Za-z]*\): removed$/\1/p' || true)"
+  c="$(grep -c . <<<"$gone" || true)"
+  MAIL_SETTLED="$c"
+  if (( c > 0 )); then
+    # written down - and said, where somebody asked for the look ("mail settle")
+    if (( ${MAIL_SETTLE_SAID:-0} )); then lib_ok "${c} message(s) Postfix was told to keep when Dovecot was interrupted were in the mailbox already and are not sent a second time"
+    else lib_log_write INFO "${c} message(s) Postfix was told to keep when Dovecot was interrupted were in the mailbox already and are not sent a second time"; fi
+  fi
+  return 0
+}
+
+# The two halves of that look around something that interrupts Dovecot. Before it: a file as
+# old as that moment (a little older: a message is written before it is answered for).
+# Afterwards: what Postfix was told to keep since then. The deliveries Dovecot was in the
+# middle of end within a moment (the longest of 1078 took 85 ms; one that was answered
+# "Shutting down" took 1.9 s to be), and Postfix has written down by then what it was told:
+# hence the wait, which a caller that has waited already leaves out. MAIL_RELOAD_WAIT is for
+# whoever has reason to wait longer or not at all. Neither ever fails.
+lib_mail_settle_mark() {   # [how long ago; "2 seconds ago" when not said]   -> the file
+  local f=""
+  f="$(lib_mktemp)"
+  if ! touch -d "${1:-2 seconds ago}" "$f" 2>/dev/null; then rm -f "$f"; return 0; fi
+  printf '%s' "$f"
+}
+lib_mail_settle_after() {   # the file lib_mail_settle_mark printed [the seconds to wait first]
+  [[ -n "${1:-}" ]] || return 0
+  if (( ! OPT_DRY_RUN )) && lib_have postqueue && lib_have postsuper && lib_have postcat; then
+    sleep "${2:-${MAIL_RELOAD_WAIT:-3}}"
+    lib_mail_settle "$1" || true
+  fi
+  rm -f "$1"
+  return 0
+}
+
+# Dovecot told to read its configuration again - and what that did to the deliveries it was in
+# the middle of looked at afterwards.
+lib_mail_dovecot_reload() {
+  local since=""
+  since="$(lib_mail_settle_mark)"
+  if ! lib_run doveadm reload; then [[ -z "$since" ]] || rm -f "$since"; return 1; fi
+  lib_mail_settle_after "$since"
+  return 0
+}
+
+# Postfix and Dovecot told to read a certificate again: Dovecot first, the same way, and
+# Postfix once what that interrupted has been seen to. Told in the same moment, Postfix is
+# replacing its queue manager when Dovecot gives a message back, and nobody puts that message
+# off: it is offered again by itself later, whatever the mailbox has (the certificate hook,
+# which reloaded both at once, had 2 of 2019 messages in the mailbox twice that way).
+lib_mail_stack_reload() {
+  if lib_service_active dovecot; then lib_mail_dovecot_reload || lib_warn "dovecot reload failed (see log)"; fi
+  lib_systemctl reload postfix >/dev/null 2>&1 || true
+  return 0
+}
+
+# "mail settle": the same look for whoever reloaded or restarted Dovecot outside lomp - the
+# certbot deploy hook does, after a renewed mail certificate, and so may whoever did it by
+# hand. It takes no lock (the hook runs inside a command that holds it) and never fails. What
+# it looks at is the last four minutes - Postfix offers a message it was told to keep again
+# after five - and what it found is said.
+lib_mail_settle_main() {
+  local MAIL_SETTLE_SAID=1
+  if ! lib_mail_installed; then lib_info "Mail is not installed"; return 0; fi
+  (( OPT_DRY_RUN )) && return 0
+  MAIL_SETTLED=0
+  lib_mail_settle_after "$(lib_mail_settle_mark '4 minutes ago')"
+  (( MAIL_SETTLED > 0 )) || lib_info "Nothing that Dovecot made Postfix keep in the last four minutes is in a mailbox already"
+  return 0
 }
 
 # =============================================================================
@@ -2282,7 +2609,7 @@ lib_mail_dovecot_sni_apply() {
     MAIL_LAST_ERROR="Dovecot refused the per-name certificate file; it was put back"
     return 1
   fi
-  lib_service_active dovecot && { lib_run doveadm reload || lib_warn "dovecot reload failed (see log)"; }
+  lib_service_active dovecot && { lib_mail_dovecot_reload || lib_warn "dovecot reload failed (see log)"; }
   return 0
 }
 
@@ -3990,6 +4317,9 @@ Usage: lomp mail <command>
   test                   check reverse DNS and whether outgoing port 25 is open
   queue                  show the Postfix queue
   regenerate             rewrite every mail configuration file and restart the stack
+  settle                 after Dovecot was reloaded or restarted by hand under mail: what Postfix
+                         was told to keep and the mailbox has already is not sent a second time
+                         (lomp does this after its own reloads, and so does the certificate hook)
   relay set --host H [--port 587] --user U [--spf-include NAME] [--tls secure|encrypt]
                          send outgoing mail through another server; the password is read
                          from standard input, never from an argument
@@ -4158,6 +4488,7 @@ lib_mail_main() {
                 lib_mail_dirs_ensure
                 lib_mail_apply "$(lib_mail_host)" || lib_die "The mail configuration could not be applied" "${MAIL_LAST_ERROR}" "lomp mail status"
                 lib_ok "Mail configuration rewritten and the stack restarted" ;;
+    settle)     lib_mail_settle_main ;;   # (the certbot deploy hook runs it after it has reloaded Dovecot)
     relay)      _mail_relay_cmd "$@" ;;
     webmail)    lib_mail_installed || lib_die "Mail is not installed" "" "lomp install --with-mail"
                 _mail_webmail_cmd "$@" ;;

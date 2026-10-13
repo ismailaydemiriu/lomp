@@ -64,6 +64,30 @@ jobs:
           PATH="$RUNNER_TEMP/mawk:$PATH" awk -W version 2>&1 | head -1
           PATH="$RUNNER_TEMP/mawk:$PATH" bash tests/unit.sh
 
+  dovecot:
+    name: what lomp takes for granted about Dovecot (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Dovecot
+        run: |
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq jq dovecot-core dovecot-lmtpd dovecot-sieve
+          dovecot --version
+
+      - name: Ask the Dovecot of this release
+        # lomp tells that a message Postfix still holds has arrived by the file Dovecot wrote
+        # into the mailbox, and has Dovecot take mail for the address a mailbox had before a
+        # rename out of a second user database. Both rest on how Dovecot behaves, and the two
+        # releases lomp supports have two Dovecots: 2.3.16 and 2.3.21. A Dovecot of its own
+        # beside the runner's, with lomp's configuration of the user databases.
+        run: sudo bash tests/dovecot-facts.sh
+
   dryrun:
     name: install --dry-run (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

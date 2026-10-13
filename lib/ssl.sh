@@ -87,19 +87,27 @@ case "\$name" in
   _mailhost|_mail_*)
     if deploy; then
       log "deployed renewed mail certificate \$name (\${RENEWED_DOMAINS:-})"
+      # Dovecot first, and Postfix only after what that did has been seen to. A reload ends the
+      # deliveries Dovecot is in the middle of, and it answers "Shutting down" for a message it
+      # has saved: what Postfix was told to keep and the mailbox has already goes out of the
+      # queue instead of arriving twice ("mail settle"). Reloaded in the same moment, Postfix
+      # replaces its queue manager while such a message is given back to it: nobody puts the
+      # message off then, it is offered again by itself - twice in the mailbox, 2 of 2019 with
+      # mail arriving on three connections on the test server in this order's reverse.
+      if command -v doveconf >/dev/null 2>&1; then
+        if doveconf -n >/dev/null 2>&1 && systemctl reload dovecot >/dev/null 2>&1; then
+          log "Dovecot reloaded after renewal of \$name"
+          if [[ -x "\$BIN" ]]; then "\$BIN" mail settle --quiet >/dev/null 2>&1 || true; fi
+        else
+          fail "Dovecot could not be reloaded after renewal of \$name."; rc=1
+        fi
+      fi
       if command -v postfix >/dev/null 2>&1; then
         if [[ -f "\$MAIL_SNI" ]]; then postmap -F "hash:\$MAIL_SNI" >/dev/null 2>&1 || fail "postmap failed for \$MAIL_SNI"; fi
         if postfix check >/dev/null 2>&1 && postfix reload >/dev/null 2>&1; then
           log "Postfix reloaded after renewal of \$name"
         else
           fail "Postfix could not be reloaded after renewal of \$name."; rc=1
-        fi
-      fi
-      if command -v doveconf >/dev/null 2>&1; then
-        if doveconf -n >/dev/null 2>&1 && systemctl reload dovecot >/dev/null 2>&1; then
-          log "Dovecot reloaded after renewal of \$name"
-        else
-          fail "Dovecot could not be reloaded after renewal of \$name."; rc=1
         fi
       fi
       # This lineage also carries webmail.<domain>, and OpenLiteSpeed holds the certificate it
