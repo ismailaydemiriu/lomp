@@ -100,7 +100,7 @@ _ss_load_module() {
   # shellcheck source=/dev/null
   source "$file"
 }
-for _m in common lang system ols php db ssl domain harden scan speed proxy app mail webmail cloudflare backup monitor install importapp import rename menu; do
+for _m in common lang system ols php db ssl domain harden scan speed proxy app mail webmail cloudflare backup monitor install nginx importapp import rename menu; do
   _ss_load_module "$_m"
 done
 unset _m
@@ -181,6 +181,8 @@ main() {
     list|status|doctor|credentials|logs|menu|scan|speed) ;;
     # cron runs it every minute: it takes the lock itself, without waiting for it
     htaccess-check) ;;
+    # (cron, every 10 minutes on an image server: it only makes uploads readable)
+    nginx-perms) ;;
     panel) if [[ "${rest[0]:-open}" != "status" ]]; then lib_lock; fi ;;
     harden) case "${rest[0]:-help}" in status|help|-h|--help) ;; *) lib_lock ;; esac ;;
     apcu)   case "${rest[0]:-status}" in status|help|-h|--help) ;; *) lib_lock ;; esac ;;
@@ -218,6 +220,13 @@ main() {
   # (not for the check cron runs every minute: it writes to the log only when it acts)
   if [[ "$cmd" != "htaccess-check" ]]; then
     lib_log_write INFO "=== setup.sh ${SCRIPT_VERSION} command='${cmd}' args='${rest[*]:-}' dry-run=${OPT_DRY_RUN} ==="
+  fi
+
+  # an image server (install --images) runs its sites' commands in lib/nginx.sh and refuses
+  # what only a server of OpenLiteSpeed sites has
+  if [[ "$cmd" != "install" ]] && lib_server_images && lib_nginx_owns "$cmd"; then
+    lib_nginx_dispatch "$cmd" "${rest[@]}"
+    return 0
   fi
 
   # commands that report problems through their exit status use "|| exit" so the

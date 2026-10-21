@@ -39,6 +39,11 @@ KOMUTLAR
                                 Yalnızca posta için sunucu: aynı posta sunucusu; web yığını
                                 yalnızca webmail gerektirdiği için kurulur. Alan adları site
                                 değil posta alır ("mail domain add"). --role web bunu geri alır
+      --images                  Resim sunucusu: yalnızca nginx (OpenLiteSpeed, PHP, MariaDB,
+                                Redis yok), işlemciye ve belleğe göre ayarlı; ardından
+                                "add <domain>" /home/<domain>/public_html'i uzun önbellek
+                                başlıklarıyla sunan bir nginx sitesi yapar. Oradaki add
+                                seçenekleri: --www --no-ssl --email --cache-days N (varsayılan 30)
       --cloudflare              Cloudflare proxy'lerine güvenir (gerçek istemci IP'si)
       --cf-api-token TOKEN      Cloudflare API token'ını saklar (DNS-01 / fail2ban); "-" onu
                                 stdin'den okur, böylece süreç listesinde görünmez
@@ -316,6 +321,11 @@ COMMANDS
                                 A server for mail alone: the same mail server, and the web
                                 stack only because the webmail needs one. Domains get mail
                                 ("mail domain add"), not sites. --role web undoes it
+      --images                  An image server: nginx alone (no OpenLiteSpeed, PHP, MariaDB,
+                                Redis), sized for the CPU and memory; "add <domain>" then
+                                makes an nginx site that serves /home/<domain>/public_html
+                                with long cache headers. Options of add there: --www
+                                --no-ssl --email --cache-days N (default 30)
       --cloudflare              Trust Cloudflare proxies (real client IP)
       --cf-api-token TOKEN      Store Cloudflare API token (DNS-01 / fail2ban); "-" reads it
                                 from stdin so it stays out of the process list
@@ -778,6 +788,7 @@ _menu_not_installed() {
     _menu_item 2 "Show what the installation would do, changing nothing (dry run)"
     _menu_item 3 "Command reference"
     _menu_item 4 "Install a mail-only server (mail and webmail for your domains, no web sites)"
+    _menu_item 6 "Install an image server (nginx only: images and other files for any number of domains)"
     _menu_item 5 "Language: Türkçe or English"
     _menu_item 0 "Exit"
     printf '\n'; _menu_prompt "Choice"
@@ -788,6 +799,7 @@ _menu_not_installed() {
       2) _menu_run install --dry-run ;;
       3) lib_usage | ${PAGER:-less} 2>/dev/null || lib_usage; _menu_pause ;;
       4) _menu_install_mail_only ;;
+      6) _menu_install_images ;;
       5) _menu_language ;;
       0|q|Q|"") return 0 ;;
       *) _menu_printf '%sPick a number from the list.%s\n' "$C_YEL" "$C_RST" ;;
@@ -809,6 +821,8 @@ lib_menu_main() {
   if ! lib_installed; then _menu_not_installed; return 0; fi
   # a server installed for mail alone has no site to list: its menu is the mail menu
   if lib_server_mail_only; then _menu_mail top; return 0; fi
+  # and one installed for images has nginx's sites and nothing else
+  if lib_server_images; then _menu_images; return 0; fi
 
   local choice="" domain="" answer=""
   while true; do
@@ -1732,6 +1746,117 @@ _menu_install_mail_only() {
   _menu_run "${args[@]}"
 }
 
+# An image server from the menu: nginx alone, for any number of domains (lib/nginx.sh).
+_menu_install_images() {
+  local email="" cf=""
+  local -a args=(install --images)
+  printf '\n'
+  _menu_note "A server that only serves files - images first - for as many domains as you add." \
+    "nginx is installed and sized for this machine's CPU and memory; no PHP, database or mail." \
+    "Each domain gets /home/<domain>/public_html: upload the files there over SFTP (WinSCP)."
+  printf '\n'
+  _menu_ask email "E-mail for Let's Encrypt and alerts" "$DEFAULT_EMAIL"
+  [[ -n "$email" ]] && args+=(--email "$email")
+  _menu_ask cf "Will these domains be proxied through Cloudflare (orange cloud)? (y/n)" "n"
+  [[ "${cf,,}" == y* ]] && args+=(--cloudflare)
+  _menu_run "${args[@]}"
+}
+
+_menu_images_header() {
+  local sites=0 d="" svc="" label=""
+  while read -r d; do [[ -n "$d" ]] && sites=$((sites + 1)); done < <(lib_domains_list)
+  printf '\n %s%slompstack%s  %s  images  %s site(s) ' "$C_BLD" "$C_CYN" "$C_RST" "$(hostname -s 2>/dev/null || hostname)" "$sites"
+  for svc in nginx:web fail2ban:f2b; do
+    label="${svc#*:}"; svc="${svc%%:*}"
+    if lib_service_active "$svc"; then printf ' %s%s:up%s' "$C_GRN" "$label" "$C_RST"
+    else printf ' %s%s:DOWN%s' "$C_RED" "$label" "$C_RST"; fi
+  done
+  printf '\n'
+  _menu_rule
+}
+
+_menu_images_add() {
+  local domain="" www="" ssl="" days="" email=""
+  local -a args=()
+  _menu_ask domain "Domain (without www, e.g. example.com)"
+  [[ -n "$domain" ]] || return 0
+  if ! lib_domain_valid "${domain,,}"; then
+    _menu_printf '%s"%s" is not a valid domain name.%s\n' "$C_YEL" "$domain" "$C_RST"
+    _menu_pause; return 0
+  fi
+  args=("$domain")
+  _menu_hint "A name of its own for the images works best, e.g. img.example.com or cdn.example.com."
+  _menu_ask www "$(_menu_tf 'Also serve www.%s? (y/n)' "$domain")" "n"
+  [[ "${www,,}" == y* ]] && args+=(--www)
+  _menu_ask ssl "Request a Let's Encrypt certificate now? DNS must already point here (y/n)" "n"
+  [[ "${ssl,,}" == y* ]] || args+=(--no-ssl)
+  if [[ "${ssl,,}" == y* ]]; then
+    _menu_ask email "Contact e-mail" "${DEFAULT_EMAIL:-info@${domain,,}}"
+    [[ -n "$email" ]] && args+=(--email "$email")
+  fi
+  _menu_hint "Browsers and Cloudflare keep an image this long before they ask for it again." \
+    "Replacing a file under the same name shows up after that time, so keep it short if you do."
+  _menu_ask days "Days an image may be kept in a cache" "30"
+  [[ -n "$days" && "$days" != "30" ]] && args+=(--cache-days "$days")
+  _menu_run add "${args[@]}"
+}
+
+_menu_images_remove() {
+  local domain="" keep=""
+  local -a args=()
+  domain="$(_menu_pick_domain)" || { _menu_pause; return 0; }
+  args=("$domain")
+  _menu_printf '\n%sRemoving %s deletes its nginx site, its certificate and its files.%s\n' "$C_YEL" "$domain" "$C_RST"
+  _menu_ask keep "Keep the files? (y/n)" "n"
+  [[ "${keep,,}" == y* ]] && args+=(--keep-files)
+  _menu_run remove "${args[@]}"
+}
+
+# The menu of an image server: its sites are nginx's, and there is nothing of PHP, databases
+# or mail to offer.
+_menu_images() {
+  local choice="" domain=""
+  while true; do
+    _menu_images_header
+    _menu_group "SITES"
+    _menu_item  1 "List sites"
+    _menu_item  2 "Add a site (a domain whose files nginx serves)"
+    _menu_item  3 "Remove a site"
+    _menu_item  4 "Site logs"
+    _menu_item  5 "Certificate for a site (Let's Encrypt, the first one or a new one)"
+    _menu_group "SERVER"
+    _menu_item  6 "Status"
+    _menu_item  7 "Health check"
+    _menu_item  8 "Re-tune nginx to this machine's CPU and memory"
+    _menu_group "MAINTENANCE"
+    _menu_item  9 "Update packages"
+    _menu_item 10 "Update lompstack"
+    _menu_item 11 "Notifications"
+    _menu_item 12 "Command reference"
+    _menu_item 13 "Language: Türkçe or English"
+    _menu_item  0 "Exit"
+    printf '\n'; _menu_prompt "Choice"
+    read -r choice </dev/tty || return 0
+    case "$choice" in
+      1) _menu_run list ;;
+      2) _menu_images_add ;;
+      3) _menu_images_remove ;;
+      4) domain="$(_menu_pick_domain)" && _menu_run logs "$domain" || _menu_pause ;;
+      5) domain="$(_menu_pick_domain)" && _menu_run renew-ssl "$domain" || _menu_pause ;;
+      6) _menu_run status ;;
+      7) _menu_run doctor ;;
+      8) _menu_run optimize ;;
+      9) _menu_run update ;;
+      10) _menu_run self-update ;;
+      11) _menu_run notify --show ;;
+      12) lib_usage | ${PAGER:-less} 2>/dev/null || lib_usage; _menu_pause ;;
+      13) _menu_language ;;
+      0|q|Q|"") printf '\n'; return 0 ;;
+      *) _menu_printf '%sPick a number from the list.%s\n' "$C_YEL" "$C_RST" ;;
+    esac
+  done
+}
+
 # Optional components are never installed unless asked for, on the command line with
 # --with-node / --with-python / --with-netdata / --with-mail, or from here.
 _menu_runtimes() {
@@ -1879,6 +2004,19 @@ MENU_TR['Install the server (OpenLiteSpeed, PHP, MariaDB, Redis, firewall)']='Su
 MENU_TR['Show what the installation would do, changing nothing (dry run)']='Hiçbir şeyi değiştirmeden kurulumun ne yapacağını göster (deneme)'
 MENU_TR['Command reference']='Komut kılavuzu'
 MENU_TR['Install a mail-only server (mail and webmail for your domains, no web sites)']='Yalnızca posta için sunucu kur (alan adlarınız için posta ve webmail, web sitesi yok)'
+MENU_TR['Install an image server (nginx only: images and other files for any number of domains)']='Resim sunucusu kur (yalnızca nginx: istediğiniz kadar alan adı için resimler ve diğer dosyalar)'
+MENU_TR['A server that only serves files - images first - for as many domains as you add.']='Yalnızca dosya - önce de resim - sunan bir sunucu; eklediğiniz kadar alan adı için.'
+MENU_TR['nginx is installed and sized for this machine'\''s CPU and memory; no PHP, database or mail.']='nginx kurulur ve bu makinenin işlemcisine ve belleğine göre ayarlanır; PHP, veritabanı ya da posta yok.'
+MENU_TR['Each domain gets /home/<domain>/public_html: upload the files there over SFTP (WinSCP).']='Her alan adı /home/<domain>/public_html alır: dosyaları oraya SFTP (WinSCP) ile yükleyin.'
+MENU_TR['Will these domains be proxied through Cloudflare (orange cloud)? (y/n)']='Bu alan adları Cloudflare üzerinden (turuncu bulut) mu yayınlanacak? (y/n)'
+MENU_TR['A name of its own for the images works best, e.g. img.example.com or cdn.example.com.']='Resimler için ayrı bir ad en iyisidir, ör. img.example.com ya da cdn.example.com.'
+MENU_TR['Browsers and Cloudflare keep an image this long before they ask for it again.']='Tarayıcılar ve Cloudflare bir resmi yeniden istemeden önce bu kadar süre saklar.'
+MENU_TR['Replacing a file under the same name shows up after that time, so keep it short if you do.']='Aynı adla değiştirilen bir dosya bu süreden sonra görünür; bunu yapıyorsanız kısa tutun.'
+MENU_TR['Days an image may be kept in a cache']='Bir resmin önbellekte tutulabileceği gün sayısı'
+MENU_TR['\n%sRemoving %s deletes its nginx site, its certificate and its files.%s\n']='\n%s%s kaldırılınca nginx sitesi, sertifikası ve dosyaları silinir.%s\n'
+MENU_TR['Add a site (a domain whose files nginx serves)']='Site ekle (dosyalarını nginx'\''in sunduğu bir alan adı)'
+MENU_TR['Certificate for a site (Let'\''s Encrypt, the first one or a new one)']='Bir sitenin sertifikası (Let'\''s Encrypt, ilki ya da yenisi)'
+MENU_TR['Re-tune nginx to this machine'\''s CPU and memory']='nginx'\''i bu makinenin işlemcisine ve belleğine göre yeniden ayarla'
 MENU_TR['Language: Türkçe or English']='Dil: Türkçe ya da English'
 MENU_TR['Exit']='Çıkış'
 MENU_TR['E-mail for Let'\''s Encrypt and alerts']='Let'\''s Encrypt ve uyarılar için e-posta'

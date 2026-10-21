@@ -43,6 +43,7 @@ after it is applied, and rolled back if the verification fails.
 | Operations | Backups with retention/encryption/remote upload, daily health check, e-mail / Telegram / webhook alerts, `status` and `doctor` |
 | Optional | Node.js + PM2, Python venv tooling, Netdata, Cloudflare real-client-IP mode, a mail server with webmail (Postfix + Dovecot + Rspamd + Roundcube). None of these is installed unless you ask for it, on the command line or from the menu. |
 | Mail only | `install --mail-only` makes a server that carries mail and nothing else: every domain's mailboxes on one machine, their web sites wherever they are. See [A server for mail alone](#a-server-for-mail-alone). |
+| Images only | `install --images` makes a server that serves files and nothing else: nginx alone, sized for the CPU and memory, any number of domains. See [A server for images](#a-server-for-images). |
 
 Everything is sized from the machine it runs on: CPU count, RAM, and whether the disk is
 NVMe, SSD or spinning rust all feed into the OpenLiteSpeed, PHP, MariaDB and Redis settings.
@@ -127,6 +128,9 @@ sudo ./setup.sh install --with-mail --mail-hostname mail.example.com
 
 # Or a server for mail alone: no sites, the mail of all your domains (see "A server for mail alone")
 sudo ./setup.sh install --mail-only --mail-hostname mail.example.com --email you@example.com
+
+# Or a server for images alone: nginx, no PHP or database (see "A server for images")
+sudo ./setup.sh install --images --email you@example.com
 
 # Change the SSH port safely (UFW is opened first, sshd is tested before it is restarted)
 sudo ./setup.sh install --ssh-port 2222
@@ -994,6 +998,45 @@ space on the filesystem that holds `/var/log`, not the one with `/home`.
 
 ---
 
+## A server for images
+
+```bash
+sudo ./setup.sh install --images --email you@example.com [--cloudflare]
+sudo lomp add img.example.com                    # Let's Encrypt when DNS points here already
+sudo lomp add cdn.example.org --www --cache-days 365 --no-ssl
+```
+
+`--images` (menu: "Install an image server") installs nginx and nothing of the web stack:
+no OpenLiteSpeed, PHP, MariaDB or Redis. The firewall, Fail2ban, SSH hardening, unattended
+updates, certbot and the health check are the same as on any other server.
+
+`nginx.conf` is sized from the machine: one worker per CPU core, about two connections per MB
+of memory (1024 to 16384 per worker), the open-file cache and the TLS session cache from the
+memory too, `aio threads` on a spinning disk and `sendfile` everywhere else. `lomp optimize`
+sizes it again after the VPS got more CPU or memory, and `lomp doctor` warns when it no longer
+fits.
+
+Every `add` makes one nginx site in `/etc/nginx/lomp/sites/<domain>.conf` serving
+`/home/<domain>/public_html`. Upload the files there over SFTP (WinSCP as root is fine: every 10
+minutes lomp makes what nginx could not read readable). Each site:
+
+- answers only its own name (and `www.` with `--www`); a name nobody added and a bare IP get
+  no answer at all
+- gets a Let's Encrypt certificate by webroot, HTTP/2, and http sent on to https; without DNS
+  yet it stays on http, and `lomp renew-ssl <domain>` gets the certificate later
+- sends images with `Cache-Control: public, max-age=<30 days by default, --cache-days N>` and
+  `Access-Control-Allow-Origin: *`, so any of your sites can show them; svg gets a sandboxing
+  Content-Security-Policy
+- serves GET and HEAD only, no directory listings, no dotted names (`.env`, `.git`) and no
+  script source (`.php`, `.sh`, `.sql` ...)
+- logs to `/var/log/lomp-sites/<domain>/` (rotated daily, watched by the Fail2ban scanner jail)
+
+`list`, `remove [--keep-files] [--keep-ssl]`, `logs`, `renew-ssl`, `status`, `doctor`,
+`optimize`, `update` and `self-update` work on it; what needs PHP, a database or mail is refused
+with the reason. `--cloudflare` makes nginx take the visitor's address from `CF-Connecting-IP`,
+believed from Cloudflare's ranges only. A server that already runs OpenLiteSpeed cannot become
+an image server, and an image server stays one.
+
 ## Fixed paths
 
 | Path | Contents |
@@ -1535,6 +1578,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
 | `lib/rename.sh` | `rename`: a site under another domain name; `redirect`: a name that only sends its visitors on |
 | `lib/import.sh` | `import`: the sites of another server, brought here over SSH |
 | `lib/importapp.sh` | `import`: the names another server passes on to a port - Node.js applications and proxies |
+| `lib/nginx.sh` | `install --images`: an image server, nginx alone - its tuning, sites, certificates, status and doctor |
 | `lib/menu.sh` | Command reference and the interactive menu |
 
 ---

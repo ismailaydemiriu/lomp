@@ -221,6 +221,7 @@ _status_mail_json() {
 }
 
 lib_status_main() {
+  if lib_server_images; then lib_nginx_status_main "$@"; return 0; fi
   local json=0 d="" svc="" st=""
   [[ "${1:-}" == "--json" ]] && json=1
   (( OPT_JSON )) && json=1
@@ -1098,6 +1099,8 @@ _doc_check_webmail() {
 lib_doctor_run() {
   DOC_RESULTS=(); DOC_FAIL=0; DOC_WARN=0; DOC_OK=0
   lib_system_analyze --no-net
+  # an image server has nginx and its sites, and none of what the checks below look for
+  if lib_server_images; then lib_nginx_doctor_checks; return 0; fi
   _doc_check_services
   _doc_check_resources
   _doc_check_ssl_infra

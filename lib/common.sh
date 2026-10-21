@@ -903,14 +903,16 @@ lib_require_installed() {
 }
 
 # What this server is for. "mail" is one installed with "install --mail-only": it carries the
-# web stack because the webmail needs one, and hosts no site. Anything else - a server set up
-# before the question existed included - is a web server, with or without mail beside it.
+# web stack because the webmail needs one, and hosts no site. "images" is one installed with
+# "install --images": nginx alone serves the files of its domains (lib/nginx.sh). Anything
+# else - a server set up before the question existed included - is a web server, with or
+# without mail beside it.
 lib_server_role() {
   # what "install" was asked for on this run comes first: a dry run writes no manifest, and
   # would otherwise describe the server it is not going to be
   local r="${INS_ROLE:-}"
   [[ -n "$r" ]] || r="$(lib_manifest_get '.params.role')"
-  if [[ "$r" == "mail" ]]; then printf 'mail'; else printf 'web'; fi
+  case "$r" in mail|images) printf '%s' "$r" ;; *) printf 'web' ;; esac
 }
 lib_server_mail_only() { [[ "$(lib_server_role)" == "mail" ]]; }
 

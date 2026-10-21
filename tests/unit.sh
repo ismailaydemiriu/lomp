@@ -55,7 +55,7 @@ export TMPDIR="$TMP"
 # the home of whoever runs this is the one path left: a program started by mistake would keep
 # its files there, and find what that person has running
 export HOME="$TMP/run-home"; mkdir -p "$HOME"; unset PM2_HOME
-for m in common lang system ols php db ssl domain harden scan speed proxy app mail webmail cloudflare backup monitor install importapp import rename menu; do
+for m in common lang system ols php db ssl domain harden scan speed proxy app mail webmail cloudflare backup monitor install nginx importapp import rename menu; do
   # shellcheck source=/dev/null
   source "$ROOT/lib/$m.sh"
 done
@@ -13990,6 +13990,296 @@ assert_eq "no site to pick: nothing is run" "" "$( eval '_menu_ask() { local -n 
 STATE_DIR="$_ap_state"; HARDEN_PHP_INI_ROOT="$_ap_ini"
 # shellcheck disable=SC2086
 unset -f $_ap_fns _ap_site _ap_rec _ap_file _ap_vh _ap_loaded _ap_run _ap_calls _ap_row _ap_tr _map; eval "$_ap_saved"
+lib_domain_state_reset
+
+# =============================================================================
+section "image server: nginx alone (install --images, lib/nginx.sh)"
+# =============================================================================
+_ng_saved="$(declare -p STATE_DIR SITES_ROOT SITES_LOG_ROOT SSL_DEPLOY_DIR ACME_ROOT NGX_ETC NGX_CONF NGX_LOMP_DIR NGX_SITES_DIR NGX_IPV6_PROC NGX_DEPLOY_HOOK 2>/dev/null)"
+_ng_root="$TMP/ngx"; mkdir -p "$_ng_root"
+STATE_DIR="$_ng_root/state"; SITES_ROOT="$_ng_root/home"; SITES_LOG_ROOT="$_ng_root/sitelogs"
+SSL_DEPLOY_DIR="$_ng_root/ssl"; ACME_ROOT="$_ng_root/acme"
+NGX_ETC="$_ng_root/etc-nginx"; NGX_CONF="$NGX_ETC/nginx.conf"; NGX_LOMP_DIR="$NGX_ETC/lomp"; NGX_SITES_DIR="$NGX_LOMP_DIR/sites"
+NGX_IPV6_PROC="$_ng_root/if_inet6"; NGX_DEPLOY_HOOK="$_ng_root/hook-nginx.sh"
+mkdir -p "$STATE_DIR/domains" "$SITES_ROOT" "$NGX_ETC/sites-enabled"
+printf 'types {\n    image/avif avif;\n    image/png png;\n}\n' >"$NGX_ETC/mime.types"
+_ng_ver="1.24.0"
+eval 'nginx() { case "${1:-}" in -v) printf "nginx version: nginx/%s\n" "$_ng_ver" >&2 ;; -t) return "${_ng_t_rc:-0}" ;; esac; return 0; }'
+_ng_t_rc=0
+
+# ---- the role
+printf '{"params":{"role":"images"}}\n' >"$STATE_DIR/manifest.json"
+assert_eq   "a server installed with --images says so"  "images" "$(INS_ROLE=""; lib_server_role)"
+assert_true "and is an image server"                     lib_server_images
+assert_false "but no mail-only one"                      lib_server_mail_only
+assert_eq   "what install is asked for comes first"      "mail" "$(INS_ROLE=mail; lib_server_role)"
+printf '{"params":{"role":"web"}}\n' >"$STATE_DIR/manifest.json"
+assert_false "a server of sites is no image server"      lib_server_images
+assert_eq   "--images asks for one" "images" "$( INS_ROLE=""; lib_install_parse_args --images --non-interactive 2>/dev/null >/dev/null; printf '%s' "$INS_ROLE")"
+printf '{"params":{"role":"images"}}\n' >"$STATE_DIR/manifest.json"
+assert_eq   "a re-run without flags stays an image server" "images" "$( INS_ROLE=""; lib_install_parse_args --non-interactive 2>/dev/null >/dev/null; printf '%s' "$INS_ROLE")"
+_ng_out="$( ( INS_ROLE=""; lib_install_parse_args --role web --non-interactive ) 2>&1 || true)"
+assert_has  "and does not become a server of sites"      "This is an image server, so it cannot become a web server" "$_ng_out"
+_ng_out="$( ( INS_ROLE=""; lib_install_parse_args --mail-only --non-interactive ) 2>&1 || true)"
+assert_has  "nor a mail server"                          "cannot become a mail server" "$_ng_out"
+INS_ROLE=""
+
+# ---- what nginx.conf is sized to
+SYS_CPU_CORES=1 SYS_RAM_MB=961 SYS_DISK_TYPE=ssd; lib_nginx_tune
+assert_eq "1 core, 1 GB: one worker"                     "1" "$NGX_T_WORKERS"
+assert_eq "about two connections per MB"                 "1922" "$NGX_T_CONNS"
+assert_eq "at least 4096 open files"                     "4096" "$NGX_T_NOFILE"
+assert_eq "ten cached files per MB"                      "9610" "$NGX_T_FILE_CACHE"
+assert_eq "a 7 MB TLS session cache"                     "7" "$NGX_T_SSL_CACHE_MB"
+assert_eq "gzip light on one core"                       "2" "$NGX_T_GZIP_LEVEL"
+assert_eq "small log buffer below 1 GB"                  "32k" "$NGX_T_LOG_BUFFER"
+assert_eq "sendfile on an ssd"                           "0" "$NGX_T_AIO"
+SYS_CPU_CORES=8 SYS_RAM_MB=32000 SYS_DISK_TYPE=hdd; lib_nginx_tune
+assert_eq "8 cores: eight workers"                       "8" "$NGX_T_WORKERS"
+assert_eq "connections stop at 16384"                    "16384" "$NGX_T_CONNS"
+assert_eq "twice as many files"                          "32768" "$NGX_T_NOFILE"
+assert_eq "the file cache stops at 100000"               "100000" "$NGX_T_FILE_CACHE"
+assert_eq "the TLS cache stops at 64 MB"                 "64" "$NGX_T_SSL_CACHE_MB"
+assert_eq "threads on a spinning disk"                   "1" "$NGX_T_AIO"
+SYS_CPU_CORES="" SYS_RAM_MB=""; lib_nginx_tune
+assert_eq "nothing known: one worker"                    "1" "$NGX_T_WORKERS"
+assert_eq "and the sizes of 1 GB"                        "2048" "$NGX_T_CONNS"
+
+SYS_CPU_CORES=2 SYS_RAM_MB=2048 SYS_DISK_TYPE=nvme
+: >"$NGX_IPV6_PROC"
+_ng_conf="$(lib_nginx_render_conf)"
+assert_has  "two workers"                                "worker_processes 2;" "$_ng_conf"
+assert_has  "4096 connections each"                      "worker_connections 4096;" "$_ng_conf"
+assert_has  "8192 open files"                            "worker_rlimit_nofile 8192;" "$_ng_conf"
+assert_has  "the file cache"                             "open_file_cache max=20480 inactive=60s;" "$_ng_conf"
+assert_has  "the TLS session cache"                      "ssl_session_cache shared:lompSSL:16m;" "$_ng_conf"
+assert_lacks "no threads off a spinning disk"            "aio threads;" "$_ng_conf"
+assert_has  "names nobody added are closed"              "return 444;" "$_ng_conf"
+assert_has  "and TLS for them refused (nginx >= 1.19.4)" "ssl_reject_handshake on;" "$_ng_conf"
+assert_lacks "no IPv6 listener where the kernel has none" "listen [::]:80" "$_ng_conf"
+assert_has  "the sites are included"                     "include ${NGX_SITES_DIR}/*.conf;" "$_ng_conf"
+assert_has  "and the Cloudflare ranges"                  "include ${NGX_LOMP_DIR}/cloudflare.conf;" "$_ng_conf"
+assert_lacks "a type mime.types has is not named twice"  "image/avif avif;" "$(printf '%s' "$_ng_conf" | sed -n '/^  types {/,/^  }/p')"
+assert_has  "one it lacks is added"                      "image/jxl jxl;" "$_ng_conf"
+printf 'fe80::1\n' >"$NGX_IPV6_PROC"
+assert_has  "IPv6 where the kernel has it"               "listen [::]:80 default_server;" "$(lib_nginx_render_conf)"
+_ng_ver="1.18.0"
+assert_lacks "nginx 1.18 cannot refuse the handshake"   "ssl_reject_handshake" "$(lib_nginx_render_conf)"
+SYS_DISK_TYPE=hdd
+assert_has  "threads on a spinning disk"                 "aio threads;" "$(lib_nginx_render_conf)"
+SYS_DISK_TYPE=nvme; _ng_ver="1.24.0"; : >"$NGX_IPV6_PROC"
+
+# ---- what a site is
+_ng_site="$(lib_nginx_render_site img.example 1 0 30)"
+assert_has  "http only: port 80"                         "listen 80;" "$_ng_site"
+assert_lacks "and nothing on 443"                        "443" "$_ng_site"
+assert_has  "both names"                                 "server_name img.example www.img.example;" "$_ng_site"
+assert_has  "the files of the home"                      "root ${SITES_ROOT}/img.example/public_html;" "$_ng_site"
+assert_has  "its own access log"                         "access_log ${SITES_LOG_ROOT}/img.example/access.log combined" "$_ng_site"
+assert_has  "what every site serves"                     "include ${NGX_LOMP_DIR}/common-30d.conf;" "$_ng_site"
+_ng_site="$(lib_nginx_render_site img.example 0 1 365)"
+assert_has  "with a certificate: http sends on"          'location / { return 301 https://$host$request_uri; }' "$_ng_site"
+assert_has  "but answers Let's Encrypt itself"           "root ${ACME_ROOT};" "$_ng_site"
+assert_has  "nginx 1.24: http2 on the listen line"       "listen 443 ssl http2;" "$_ng_site"
+assert_has  "the deployed certificate"                   "ssl_certificate ${SSL_DEPLOY_DIR}/img.example/fullchain.pem;" "$_ng_site"
+assert_has  "and its key"                                "ssl_certificate_key ${SSL_DEPLOY_DIR}/img.example/privkey.pem;" "$_ng_site"
+assert_has  "a year's cache"                             "common-365d.conf" "$_ng_site"
+assert_lacks "one name only"                             "www.img.example" "$_ng_site"
+_ng_ver="1.26.1"
+_ng_site="$(lib_nginx_render_site img.example 0 1 30)"
+assert_has  "nginx 1.25.1 and later: http2 on"           "http2 on;" "$_ng_site"
+assert_lacks "and not on the listen line"                "ssl http2" "$_ng_site"
+_ng_ver="1.24.0"
+
+_ng_common="$(lib_nginx_render_common 365)"
+assert_has  "images are kept a year"                     'Cache-Control "public, max-age=31536000" always;' "$_ng_common"
+assert_has  "and may be shown on any site"               'Access-Control-Allow-Origin "*" always;' "$_ng_common"
+assert_has  "the image types"                            "location ~* \\.(?:${NGX_IMAGE_EXT})\$ {" "$_ng_common"
+assert_has  "svg cannot run script on its own"           "Content-Security-Policy \"default-src 'none'; img-src data:; style-src 'unsafe-inline'; sandbox\"" "$_ng_common"
+assert_has  "dotted names are not served"                'location ~ /\. {' "$_ng_common"
+assert_has  "nor a script's source"                      'location ~* \.(?:php[0-9]?|phtml|phar|pl|py|cgi|sh|asp|aspx|jsp|sql|bak|log|ini|conf)$ { return 404; }' "$_ng_common"
+assert_has  "only GET and HEAD"                          'if ($request_method !~ ^(GET|HEAD)$) { return 405; }' "$_ng_common"
+assert_has  "no directory listings"                      "autoindex off;" "$_ng_common"
+assert_has  "30 days is the default"                     "max-age=2592000" "$(lib_nginx_render_common)"
+
+# ---- Cloudflare: the ranges, only while the mode is on
+_ng_cf="$CF_IPS_FILE"; CF_IPS_FILE="$_ng_root/cf-ips"
+printf '# x\n173.245.48.0/20\n2400:cb00::/32\n' >"$CF_IPS_FILE"
+assert_lacks "mode off: no range is believed"            "set_real_ip_from" "$(lib_nginx_render_cloudflare)"
+printf '{"params":{"role":"images"},"cloudflare":{"enabled":true}}\n' >"$STATE_DIR/manifest.json"
+_ng_out="$(lib_nginx_render_cloudflare)"
+assert_has  "mode on: each range"                        "set_real_ip_from 173.245.48.0/20;" "$_ng_out"
+assert_has  "IPv6 too"                                   "set_real_ip_from 2400:cb00::/32;" "$_ng_out"
+assert_has  "and the visitor's header"                   "real_ip_header CF-Connecting-IP;" "$_ng_out"
+CF_IPS_FILE="$_ng_cf"
+printf '{"params":{"role":"images"}}\n' >"$STATE_DIR/manifest.json"
+
+# ---- which commands are nginx's
+for _ng_c in add remove delete list renew-ssl nginx-perms htaccess-check db wordpress mail app proxy rename backup; do
+  assert_true "${_ng_c} is the image server's to run or refuse" lib_nginx_owns "$_ng_c"
+done
+for _ng_c in install self-update migrate update optimize status doctor healthcheck logs notify menu update-cf-ips; do
+  assert_false "${_ng_c} is every server's" lib_nginx_owns "$_ng_c"
+done
+_ng_out="$( (lib_nginx_dispatch wordpress example.com) 2>&1 || true)"
+assert_has  "WordPress is refused"                       "'wordpress' is not part of an image server" "$_ng_out"
+assert_has  "with what the server is"                    "installed with --images" "$_ng_out"
+assert_eq   "an old cron line is a quiet no-op"          "" "$(lib_nginx_dispatch htaccess-check 2>&1)"
+assert_has  "setup.sh asks before its own dispatch"      'if [[ "$cmd" != "install" ]] && lib_server_images && lib_nginx_owns "$cmd"; then' "$(cat "$ROOT/setup.sh")"
+assert_has  "the 10-minute check takes no lock"          'nginx-perms) ;;' "$(cat "$ROOT/setup.sh")"
+assert_has  "setup.sh loads the module before the menu"  'install nginx importapp import rename menu' "$(cat "$ROOT/setup.sh")"
+assert_has  "status looks at the role"                   'lib_nginx_status_main "$@"' "$(declare -f lib_status_main)"
+assert_has  "so does doctor"                             'lib_nginx_doctor_checks' "$(declare -f lib_doctor_run)"
+assert_has  "optimize"                                   'lib_nginx_optimize_main "$@"' "$(declare -f lib_optimize_main)"
+assert_has  "update"                                     'lib_nginx_update_main "$@"' "$(declare -f lib_update_main)"
+assert_has  "and what self-update runs"                  'lib_nginx_migrate' "$(declare -f lib_install_migrate)"
+assert_has  "install"                                    'lib_nginx_install_main "$rerun"' "$(declare -f lib_install_main)"
+
+# ---- the cron entries of an image server
+_ng_cron="$CRON_FILE"; CRON_FILE="$_ng_root/cron"
+printf '# x\n* * * * * root /x htaccess-check # server-setup:htaccess\n' >"$CRON_FILE"
+lib_install_cron_base
+assert_has  "the health check"                           "healthcheck" "$(cat "$CRON_FILE")"
+assert_has  "uploads made readable every 10 minutes"     "*/10 * * * * root ${BIN_LINK} nginx-perms" "$(cat "$CRON_FILE")"
+assert_lacks "no OpenLiteSpeed check"                    "htaccess-check" "$(cat "$CRON_FILE")"
+CRON_FILE="$_ng_cron"
+
+# ---- a site, added and removed (nginx, systemd and certbot stood in for)
+_ng_fns="lib_systemctl lib_service_active lib_ssl_dns_check lib_ssl_obtain lib_domain_fail2ban_regen lib_system_analyze lib_ssl_delete"
+_ng_fsaved="$(declare -f $_ng_fns)"
+_ng_calls=""
+eval 'lib_systemctl() { _ng_calls+="systemctl $* "; return 0; }
+      lib_service_active() { [[ "$1" == nginx ]]; }
+      lib_ssl_dns_check() { return 0; }
+      lib_ssl_obtain() { _ng_calls+="obtain $1 www=$2 staging=$4 email=$6 method=$7 "; mkdir -p "$SSL_DEPLOY_DIR/$1"; return "${_ng_obtain_rc:-0}"; }
+      lib_domain_fail2ban_regen() { _ng_calls+="f2b "; }
+      lib_system_analyze() { SYS_CPU_CORES=2; SYS_RAM_MB=2048; SYS_DISK_TYPE=nvme; }
+      lib_ssl_delete() { _ng_calls+="ssl-delete $1 "; }'
+OPT_YES=1
+lib_nginx_add_main img.example --no-ssl --cache-days 7 >/dev/null 2>&1
+assert_true "the site's file"                            test -s "$NGX_SITES_DIR/img.example.conf"
+assert_has  "on port 80"                                 "server_name img.example;" "$(cat "$NGX_SITES_DIR/img.example.conf")"
+assert_true "its cache lifetime has its common file"     test -s "$NGX_LOMP_DIR/common-7d.conf"
+assert_has  "of a week"                                  "max-age=604800" "$(cat "$NGX_LOMP_DIR/common-7d.conf")"
+assert_true "the upload directory"                       test -d "$SITES_ROOT/img.example/public_html"
+assert_eq   "registered as an image site"                "images" "$(jq -r .mode "$STATE_DIR/domains/img.example/domain.json")"
+assert_eq   "without a certificate"                      "false" "$(jq -r .ssl.enabled "$STATE_DIR/domains/img.example/domain.json")"
+assert_eq   "and active"                                 "active" "$(jq -r .status "$STATE_DIR/domains/img.example/domain.json")"
+assert_has  "nginx was reloaded"                         "systemctl reload nginx" "$_ng_calls"
+assert_lacks "no certificate asked for"                  "obtain" "$_ng_calls"
+if (( CAN_SYMLINK )); then assert_eq "logs/ in the home is a link" "$SITES_LOG_ROOT/img.example" "$(readlink "$SITES_ROOT/img.example/logs")"; fi
+_ng_out="$( (lib_nginx_add_main img.example) 2>&1 || true)"
+assert_has  "a second add is refused"                    "Site img.example already exists" "$_ng_out"
+_ng_out="$( (lib_nginx_add_main www.other.example) 2>&1 || true)"
+assert_has  "a www name is the second name of a site"    "Add other.example with --www instead of www.other.example" "$_ng_out"
+_ng_out="$( (lib_nginx_add_main other.example --wordpress) 2>&1 || true)"
+assert_has  "a sites' option is refused"                 "Unknown option for add on an image server: --wordpress" "$_ng_out"
+_ng_out="$( (lib_nginx_add_main other.example --cache-days 0) 2>&1 || true)"
+assert_has  "a cache of no days is refused"              "Invalid --cache-days '0'" "$_ng_out"
+
+_ng_calls=""
+lib_nginx_add_main pics.example --www --email ops@pics.example >/dev/null 2>&1
+assert_has  "a certificate by webroot for both names"    "obtain pics.example www=1 staging=0 email=ops@pics.example method=webroot" "$_ng_calls"
+assert_has  "then the https server"                      "listen 443 ssl http2;" "$(cat "$NGX_SITES_DIR/pics.example.conf")"
+assert_eq   "recorded"                                   "true" "$(jq -r .ssl.enabled "$STATE_DIR/domains/pics.example/domain.json")"
+assert_has  "the 30-day common file"                     "common-30d.conf" "$(cat "$NGX_SITES_DIR/pics.example.conf")"
+assert_has  "fail2ban hears of the new log"              "f2b" "$_ng_calls"
+
+_ng_obtain_rc=1; _ng_calls=""
+lib_nginx_add_main late.example >/dev/null 2>&1
+assert_lacks "no certificate: the site stays on http"    "443" "$(cat "$NGX_SITES_DIR/late.example.conf")"
+assert_eq   "and says so"                                "false" "$(jq -r .ssl.enabled "$STATE_DIR/domains/late.example/domain.json")"
+assert_eq   "but is there"                               "active" "$(jq -r .status "$STATE_DIR/domains/late.example/domain.json")"
+_ng_obtain_rc=0
+
+# the state file keeps what lib_ssl_deploy writes under .ssl
+jq '.ssl.cert_name = "pics.example" | .ssl.expires = "Jan 1 2030"' "$STATE_DIR/domains/pics.example/domain.json" >"$_ng_root/j" && mv "$_ng_root/j" "$STATE_DIR/domains/pics.example/domain.json"
+_ngx_site_json_write pics.example 1 1 30 active
+assert_eq   "the certificate's fields stay"              "pics.example|Jan 1 2030|true" "$(jq -r '[.ssl.cert_name, .ssl.expires, (.ssl.enabled|tostring)] | join("|")' "$STATE_DIR/domains/pics.example/domain.json")"
+lib_nginx_site_load pics.example
+assert_eq   "and it reads back"                          "1 1 30" "${NGX_S_WWW} ${NGX_S_SSL} ${NGX_S_DAYS}"
+mkdir -p "$STATE_DIR/domains/php.example"; printf '{"mode":"php"}\n' >"$STATE_DIR/domains/php.example/domain.json"
+assert_false "a site of another kind is none of nginx's" lib_nginx_site_load php.example
+rm -rf "$STATE_DIR/domains/php.example"
+
+_ng_list="$(lib_nginx_list_main 2>&1)"
+assert_has  "list names each site"                       "img.example" "$_ng_list"
+assert_has  "with its cache"                             "7d" "$_ng_list"
+assert_has  "and counts them"                            "3 site(s)" "$_ng_list"
+
+# nginx refusing a new site: nothing is left behind
+_ng_t_rc=1
+_ng_out="$( (lib_nginx_add_main bad.example --no-ssl) 2>&1 || true)"
+_ng_t_rc=0
+assert_has  "nginx refusing the site ends the add"       "nginx refused the site bad.example" "$_ng_out"
+assert_false "its file is gone"                          test -e "$NGX_SITES_DIR/bad.example.conf"
+assert_false "and its state"                             test -e "$STATE_DIR/domains/bad.example"
+
+# configure writes every site as this release writes it
+printf 'old\n' >"$NGX_SITES_DIR/img.example.conf"
+: >"$NGX_ETC/sites-enabled/default"
+lib_nginx_configure >/dev/null 2>&1
+assert_has  "configure writes a site again"              "server_name img.example;" "$(cat "$NGX_SITES_DIR/img.example.conf")"
+assert_false "and takes Ubuntu's welcome page away"      test -e "$NGX_ETC/sites-enabled/default"
+assert_has  "nginx.conf is lompstack's"                  "Managed by lompstack - image server" "$(cat "$NGX_CONF")"
+assert_true "every cache lifetime has its file"          test -s "$NGX_LOMP_DIR/common-7d.conf"
+
+# uploads that nginx could not read
+if (( CAN_CHMOD )); then
+  mkdir -p "$SITES_ROOT/img.example/public_html/a"; : >"$SITES_ROOT/img.example/public_html/a/x.jpg"
+  chmod 0600 "$SITES_ROOT/img.example/public_html/a/x.jpg"; chmod 0700 "$SITES_ROOT/img.example/public_html/a"
+  lib_nginx_perms_main
+  assert_eq "a 0600 upload becomes readable"             "604" "$(stat -c %a "$SITES_ROOT/img.example/public_html/a/x.jpg")"
+  assert_eq "a closed directory enterable"               "705" "$(stat -c %a "$SITES_ROOT/img.example/public_html/a")"
+fi
+
+_ng_calls=""
+lib_nginx_remove_main pics.example >/dev/null 2>&1
+assert_false "remove takes the site's file"              test -e "$NGX_SITES_DIR/pics.example.conf"
+assert_false "its files"                                 test -e "$SITES_ROOT/pics.example"
+assert_false "and its state"                             test -e "$STATE_DIR/domains/pics.example"
+assert_has  "and its certificate"                        "ssl-delete pics.example" "$_ng_calls"
+lib_nginx_remove_main late.example --keep-files --keep-ssl >/dev/null 2>&1
+assert_true "--keep-files keeps them"                    test -d "$SITES_ROOT/late.example/public_html"
+assert_lacks "--keep-ssl keeps the certificate"          "ssl-delete late.example" "$_ng_calls"
+
+# doctor on an image server
+DOC_RESULTS=(); DOC_FAIL=0; DOC_WARN=0; DOC_OK=0
+eval 'ufw() { printf "Status: active\n"; }'
+lib_nginx_doctor_checks >/dev/null 2>&1
+_ng_out="$(printf '%s\n' "${DOC_RESULTS[@]}")"
+assert_has  "doctor checks nginx"                        "OK|nginx service|running" "$_ng_out"
+assert_has  "its configuration"                          "OK|nginx configuration|nginx -t passes" "$_ng_out"
+assert_has  "each site"                                  "OK|site img.example|http only" "$_ng_out"
+unset -f ufw
+
+# the menu
+_ng_menu="$(awk '/^_menu_images\(\) \{/{f=1} f{print} f && /^}/{exit}' "$ROOT/lib/menu.sh")"
+assert_has  "the image server's menu adds a site"        '2) _menu_images_add ;;' "$_ng_menu"
+assert_has  "and gets its certificate"                   '5) domain="$(_menu_pick_domain)" && _menu_run renew-ssl "$domain" || _menu_pause ;;' "$_ng_menu"
+assert_has  "a menu of its own"                          'if lib_server_images; then _menu_images; return 0; fi' "$(cat "$ROOT/lib/menu.sh")"
+assert_has  "the first menu offers an image server"      '6) _menu_install_images ;;' "$(cat "$ROOT/lib/menu.sh")"
+_ng_map() {   # answers... -> the command the menu runs
+  ( _ng_ans=("$@"); _ng_i=0
+    eval '_menu_ask() { local -n _o="$1"; _o="${_ng_ans[$_ng_i]:-${3:-}}"; _ng_i=$((_ng_i + 1)); }
+          _menu_run() { printf "%s\n" "$*"; }
+          _menu_pause() { :; }'
+    _menu_images_add 2>/dev/null | tail -n 1 )
+}
+assert_eq "add: defaults"                                "add img.example --no-ssl" "$(_ng_map img.example "" "")"
+assert_eq "add: www, a certificate and a year"           "add img.example --www --email a@b.example --cache-days 365" "$(_ng_map img.example y y a@b.example 365)"
+_ng_map_install() { ( _ng_ans=("$@"); _ng_i=0
+    eval '_menu_ask() { local -n _o="$1"; _o="${_ng_ans[$_ng_i]:-${3:-}}"; _ng_i=$((_ng_i + 1)); }
+          _menu_run() { printf "%s\n" "$*"; }'
+    _menu_install_images 2>/dev/null | tail -n 1 ); }
+assert_eq "install from the menu, behind Cloudflare"     "install --images --email a@b.example --cloudflare" "$(_ng_map_install a@b.example y)"
+
+# the Turkish of the messages above
+assert_eq "a message of lib/nginx.sh in Turkish"         "nginx artık img.example alan adını sunmuyor" "$(LIB_LANG=tr; lib_lang_build; lib_tr "nginx no longer serves img.example"; printf '%s' "$LIB_TR")"
+
+eval "$_ng_fsaved"
+unset -f nginx _ng_map _ng_map_install
+eval "$_ng_saved"
 lib_domain_state_reset
 
 assert_true "no test started the pm2 of this machine: it would have left a daemon behind" pm2_none_started

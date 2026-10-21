@@ -5,7 +5,7 @@
 
 INS_WITH_NODE=0 INS_NODE_MAJOR="" INS_WITH_PYTHON=0 INS_WITH_NETDATA=0 INS_CLOUDFLARE=0 INS_CF_TOKEN=""
 INS_WITH_MAIL=0 INS_MAIL_HOSTNAME=""
-INS_ROLE=""              # "mail" (--mail-only) or "web" when given on THIS run; empty keeps what the server is
+INS_ROLE=""              # "mail" (--mail-only), "images" (--images) or "web" when given on THIS run; empty keeps what the server is
 # Node.js major for a server that has never had Node (Active LTS). A server that already runs
 # Node keeps its own major unless --node asks for another: see lib_install_node_major_resolve.
 INS_NODE_DEFAULT_MAJOR=24
@@ -36,6 +36,7 @@ lib_install_parse_args() {
       --with-mail)       INS_WITH_MAIL=1 ;;
       --mail-hostname)   INS_MAIL_HOSTNAME="${1:-}"; INS_WITH_MAIL=1; shift ;;
       --mail-only)       INS_ROLE="mail" ;;
+      --images)          INS_ROLE="images" ;;
       --role)            INS_ROLE="${1:-}"; shift ;;
       --with-netdata)    INS_WITH_NETDATA=1 ;;
       --cloudflare)      INS_CLOUDFLARE=1 ;;
@@ -85,12 +86,19 @@ lib_install_parse_args() {
   # every optional component the menu adds is one - must not turn a mail server back into a
   # web server by saying nothing about it.
   case "$INS_ROLE" in
-    ""|web|mail) ;;
-    *) lib_die "Invalid --role '${INS_ROLE}'" "a server is for web sites (with or without mail), or for mail alone" \
-         "--role web | --role mail   (--mail-only is the same as --role mail)" ;;
+    ""|web|mail|images) ;;
+    *) lib_die "Invalid --role '${INS_ROLE}'" "a server is for web sites (with or without mail), for mail alone, or for images alone" \
+         "--role web | --role mail | --role images   (--mail-only and --images are the same as the last two)" ;;
   esac
-  if [[ -z "$INS_ROLE" && -s "$STATE_DIR/manifest.json" ]] && lib_have jq; then
-    INS_ROLE="$(lib_manifest_get '.params.role')"
+  local role_was=""
+  if [[ -s "$STATE_DIR/manifest.json" ]] && lib_have jq; then role_was="$(lib_manifest_get '.params.role')"; fi
+  [[ -n "$INS_ROLE" ]] || INS_ROLE="$role_was"
+  # nginx and OpenLiteSpeed do not share ports 80 and 443: an image server stays one, and a
+  # server of sites or mail does not become one (lib_nginx_install_guard says why)
+  if [[ "$role_was" == "images" && "$INS_ROLE" != "images" ]]; then
+    lib_die "This is an image server, so it cannot become a ${INS_ROLE} server" \
+      "it was installed with --images: nginx serves its files, and OpenLiteSpeed would want the same ports" \
+      "use another server for sites or mail; here: lomp install --images"
   fi
   if [[ "$INS_ROLE" == "mail" ]]; then INS_WITH_MAIL=1; fi
   lib_php_valid_version "$PHP_VERSION" || lib_die "Invalid --php '${PHP_VERSION}'${php_kept}" "expected e.g. 8.3" "--php 8.3"
@@ -174,6 +182,11 @@ lib_install_main() {
   local rerun=0
   lib_installed && rerun=1
   (( rerun )) && lib_info "Server was provisioned on $(lib_manifest_get '.installed_at') - verifying and repairing the configuration (idempotent re-run)"
+  # an image server is nginx alone: its own, much shorter, installation (lib/nginx.sh)
+  if [[ "$INS_ROLE" == "images" ]]; then
+    lib_nginx_install_main "$rerun"
+    return 0
+  fi
   # A server that already hosts sites cannot be declared mail-only over their heads: "add" would
   # refuse from then on, and the sites would sit on a machine tuned as if they were not there.
   if [[ "$INS_ROLE" == "mail" && -n "$(lib_domains_list)" ]]; then
@@ -578,6 +591,7 @@ EOF
 # which knows how they were configured.
 lib_install_cron_base() {
   local id="" added=()
+  if lib_server_images; then lib_nginx_cron_base; return 0; fi
   for id in healthcheck htaccess ols-logs; do lib_cron_has "$id" || added+=("$id"); done
   lib_cron_set healthcheck "15 6 * * * root ${BIN_LINK} healthcheck"
   lib_ols_htaccess_watch_ensure
@@ -747,6 +761,7 @@ lib_selfupdate_migrate() {
 # Run by "update" after the packages, and by "self-update" through the copy it installed. No
 # package is touched here. Every step finds its own work and is silent work when there is none.
 lib_install_migrate() {
+  if lib_server_images; then lib_nginx_migrate; return 0; fi
   lib_install_cron_base
   if [[ -z "$INS_CRON_ADDED" ]]; then lib_ok "Scheduled tasks in ${CRON_FILE} are all in place"
   elif (( OPT_DRY_RUN )); then lib_info "[dry-run] would add to ${CRON_FILE}, which this server is missing: ${INS_CRON_ADDED}"
@@ -1130,6 +1145,7 @@ lib_install_netdata() {
 _ver_report_line() { printf '  %-16s %-18s -> %s\n' "$1" "${2:-none}" "${3:-none}"; }
 
 lib_update_main() {
+  if lib_server_images; then lib_nginx_update_main "$@"; return 0; fi
   lib_require_tools
   lib_require_installed
   lib_system_analyze --no-net
@@ -1222,6 +1238,7 @@ _opt_diff() {   # title file  (new content on stdin) -> prints diff, returns 0 w
 }
 
 lib_optimize_main() {
+  if lib_server_images; then lib_nginx_optimize_main "$@"; return 0; fi
   lib_require_tools
   lib_require_installed
   lib_ols_service_repair

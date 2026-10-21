@@ -406,6 +406,7 @@ lib_cf_update_ips() {
     ( CF_LOCK_RENEWING=1; lib_cf_origin_relock ) \
       || lib_warn "the origin lock could not be renewed: ${CF_LAST_ERROR:-see the log} (lomp firewall status)"
   fi
+  if (( changed )) && lib_cf_enabled && lib_server_images; then lib_nginx_cf_apply; fi
   if (( changed )) && lib_cf_enabled && lib_ols_is_installed; then
     lib_ols_change_begin
     lib_ols_tx_begin
