@@ -244,13 +244,58 @@ lib_nginx_render_cloudflare() {
   return 0
 }
 
-# One site: http only, or http that sends on to https and the https server itself.
+# Where a name that was renamed sends its visitors: https://<new> once the new name has its
+# certificate, http://<new> until then. Nothing for a site that is no such record.
+_ngx_redirect_target() {   # domain
+  local f="" to=""
+  f="$(lib_domain_json "$1")"
+  [[ -s "$f" ]] || return 0
+  to="$(lib_json_get "$f" '.redirect_to')"
+  [[ -n "$to" ]] || return 0
+  if [[ "$(lib_json_get "$(lib_domain_json "$to")" '.ssl.enabled')" == "true" ]]; then printf 'https://%s' "$to"
+  else printf 'http://%s' "$to"; fi
+}
+
+_ngx_listen_443() {   # version v6(0/1)
+  if lib_nginx_version_ge "$1" 1.25.1; then
+    printf '  listen 443 ssl;\n'; (( $2 )) && printf '  listen [::]:443 ssl;\n'
+    printf '  http2 on;\n'
+  else
+    printf '  listen 443 ssl http2;\n'; (( $2 )) && printf '  listen [::]:443 ssl http2;\n'
+  fi
+  return 0
+}
+
+# A name that was renamed: every path answers 301 to the same path under the new name. Its
+# certificate stays and renews, so https:// links to it keep working too.
+_ngx_render_redirect() {   # domain names ssl(0/1) target version v6(0/1)
+  local d="$1" names="$2" ssl="$3" to="$4" ver="$5" v6="$6"
+  printf '# Managed by lompstack - %s was renamed and redirects to %s ("lomp remove %s" ends that)\n' "$d" "$to" "$d"
+  printf 'server {\n  listen 80;\n'
+  (( v6 )) && printf '  listen [::]:80;\n'
+  printf '  server_name %s;\n  access_log off;\n' "$names"
+  printf '  location ^~ /.well-known/acme-challenge/ {\n    root %s;\n    default_type text/plain;\n    try_files $uri =404;\n  }\n' "$ACME_ROOT"
+  printf '  location / { return 301 %s$request_uri; }\n}\n' "$to"
+  if (( ssl )); then
+    printf 'server {\n'
+    _ngx_listen_443 "$ver" "$v6"
+    printf '  server_name %s;\n' "$names"
+    printf '  ssl_certificate %s/%s/fullchain.pem;\n  ssl_certificate_key %s/%s/privkey.pem;\n' "$SSL_DEPLOY_DIR" "$d" "$SSL_DEPLOY_DIR" "$d"
+    printf '  access_log off;\n  location / { return 301 %s$request_uri; }\n}\n' "$to"
+  fi
+  return 0
+}
+
+# One site: http only, or http that sends on to https and the https server itself - or, for a
+# name that was renamed, the redirect to the new one.
 lib_nginx_render_site() {   # domain www(0/1) ssl(0/1) cache_days
-  local d="$1" www="${2:-0}" ssl="${3:-0}" days="${4:-$NGX_CACHE_DAYS_DEFAULT}" names="" ver="" v6=0 logdir=""
+  local d="$1" www="${2:-0}" ssl="${3:-0}" days="${4:-$NGX_CACHE_DAYS_DEFAULT}" names="" ver="" v6=0 logdir="" to=""
   names="$d"; (( www )) && names+=" www.${d}"
   ver="$(lib_nginx_version)"
   _ngx_ipv6 && v6=1
   logdir="$(lib_domain_log_dir "$d")"
+  to="$(_ngx_redirect_target "$d")"
+  if [[ -n "$to" ]]; then _ngx_render_redirect "$d" "$names" "$ssl" "$to" "$ver" "$v6"; return 0; fi
   printf '# Managed by lompstack - image site %s ("lomp remove %s" takes it away)\n' "$d" "$d"
   if (( ssl )); then
     printf 'server {\n  listen 80;\n'
@@ -260,12 +305,7 @@ lib_nginx_render_site() {   # domain www(0/1) ssl(0/1) cache_days
     printf '  location ^~ /.well-known/acme-challenge/ {\n    root %s;\n    default_type text/plain;\n    try_files $uri =404;\n  }\n' "$ACME_ROOT"
     printf '  location / { return 301 https://$host$request_uri; }\n}\n'
     printf 'server {\n'
-    if lib_nginx_version_ge "$ver" 1.25.1; then
-      printf '  listen 443 ssl;\n'; (( v6 )) && printf '  listen [::]:443 ssl;\n'
-      printf '  http2 on;\n'
-    else
-      printf '  listen 443 ssl http2;\n'; (( v6 )) && printf '  listen [::]:443 ssl http2;\n'
-    fi
+    _ngx_listen_443 "$ver" "$v6"
     printf '  server_name %s;\n' "$names"
     printf '  ssl_certificate %s/%s/fullchain.pem;\n  ssl_certificate_key %s/%s/privkey.pem;\n' "$SSL_DEPLOY_DIR" "$d" "$SSL_DEPLOY_DIR" "$d"
   else
@@ -394,13 +434,14 @@ lib_nginx_cf_apply() {
 # =============================================================================
 _ngx_site_file() { printf '%s/%s.conf' "$NGX_SITES_DIR" "$1"; }
 
-NGX_S_WWW=0 NGX_S_SSL=0 NGX_S_DAYS="$NGX_CACHE_DAYS_DEFAULT"
+NGX_S_WWW=0 NGX_S_SSL=0 NGX_S_DAYS="$NGX_CACHE_DAYS_DEFAULT" NGX_S_REDIRECT=""
 lib_nginx_site_load() {   # domain -> NGX_S_*; 1 when it is no image site
   local f="" v=""
   f="$(lib_domain_json "$1")"
   [[ -s "$f" ]] || return 1
   [[ "$(lib_json_get "$f" '.mode')" == "images" ]] || return 1
   NGX_S_WWW=0; NGX_S_SSL=0
+  NGX_S_REDIRECT="$(lib_json_get "$f" '.redirect_to')"
   [[ "$(lib_json_get "$f" '.www')" == "true" ]] && NGX_S_WWW=1
   [[ "$(lib_json_get "$f" '.ssl.enabled')" == "true" ]] && NGX_S_SSL=1
   v="$(lib_json_get "$f" '.cache_days')"
@@ -563,7 +604,8 @@ lib_nginx_remove_main() {
   home="$(lib_domain_home "$domain")"
   local what="its nginx site"
   (( keep_ssl )) || what+=", its certificate"
-  (( keep_files )) || what+=" and every file under ${home}"
+  if [[ -n "$NGX_S_REDIRECT" ]]; then what="its redirect to ${NGX_S_REDIRECT}"; (( keep_ssl )) || what+=" and its certificate"
+  elif (( ! keep_files )); then what+=" and every file under ${home}"; fi
   lib_confirm "Remove ${domain}: ${what}?" n || lib_die "Removal cancelled" "" "lomp remove ${domain} --yes"
   lib_rm "$(_ngx_site_file "$domain")"
   if (( ! OPT_DRY_RUN )); then lib_nginx_test || lib_die "nginx refuses its configuration without ${domain}" "${NGX_TEST_OUTPUT##*$'\n'}" "sudo nginx -t"; fi
@@ -594,6 +636,10 @@ lib_nginx_list_main() {
     [[ -n "$d" ]] || continue
     lib_nginx_site_load "$d" || continue
     ssl="$( (( NGX_S_SSL )) && lib_ssl_status_line "$d" || printf -- '-')"
+    if [[ -n "$NGX_S_REDIRECT" ]]; then
+      lib_tprintf '%-32s %-5s %-26s %-6s %s\n' "$d" "$( (( NGX_S_WWW )) && printf yes || printf no)" "${ssl:0:26}" "-" "-> ${NGX_S_REDIRECT}"
+      continue
+    fi
     lib_tprintf '%-32s %-5s %-26s %-6s %-10s\n' "$d" "$( (( NGX_S_WWW )) && printf yes || printf no)" "${ssl:0:26}" "${NGX_S_DAYS}d" \
       "$(lib_json_get "$(lib_domain_json "$d")" '.status')$( [[ -d "$(lib_domain_home "$d")/public_html" ]] || printf ' (missing dir!)')"
     n=$((n + 1))
@@ -635,10 +681,178 @@ lib_nginx_renew_ssl_main() {
   fi
   lib_ssl_obtain "$domain" "$www" 0 "$staging" "$force" "$email" webroot || lib_die "No certificate for ${domain}" "$SSL_LAST_ERROR" "lomp renew-ssl ${domain} --staging   (to test without the rate limit)"
   (( OPT_DRY_RUN )) && return 0
-  _ngx_site_json_write "$domain" "$www" 1 "$days" "active"
+  _ngx_site_json_write "$domain" "$www" 1 "$days" "$( [[ -n "$NGX_S_REDIRECT" ]] && printf redirect || printf active)"
   lib_nginx_render_site "$domain" "$www" 1 "$days" | lib_nginx_write "$(_ngx_site_file "$domain")" 0644 || _ngx_refused "$(_ngx_site_file "$domain")"
+  # a name that redirects here sends visitors to https:// from now on
+  _ngx_redirects_render_to "$domain"
   lib_nginx_reload
   lib_ok "https://${domain}/ is served with the new certificate"
+}
+
+# =============================================================================
+#  rename: a site under another name; the old one answers 301 to it
+# =============================================================================
+# Every record that redirects to <domain> is written again: its target's scheme follows the
+# certificate of <domain>.
+_ngx_redirects_render_to() {   # domain
+  local d=""
+  while read -r d; do
+    [[ -n "$d" ]] || continue
+    lib_nginx_site_load "$d" || continue
+    [[ "$NGX_S_REDIRECT" == "$1" ]] || continue
+    lib_nginx_render_site "$d" "$NGX_S_WWW" "$NGX_S_SSL" "$NGX_S_DAYS" | lib_nginx_write "$(_ngx_site_file "$d")" 0644 || _ngx_refused "$(_ngx_site_file "$d")"
+  done < <(lib_domains_list)
+  return 0
+}
+
+lib_nginx_rename_usage() {
+  cat <<'EOF'
+Usage: lomp rename <old> <new> [--www|--no-www] [--no-ssl] [--no-redirect] [--email a@b.c] [--yes]
+  The image site <old> moves to <new>: its files (/home/<old> becomes /home/<new>), its logs
+  and its cache lifetime. <new> gets its own Let's Encrypt certificate. <old> then answers
+  every path with "301 Moved Permanently" to the same path under <new>, over http and - with
+  the certificate it had, which keeps renewing - over https. "lomp remove <old>" ends that.
+  --www / --no-www  whether <new> also answers www.<new> (default: as <old> did)
+  --no-ssl          no certificate for <new> now (later: lomp renew-ssl <new>)
+  --no-redirect     <old> is removed instead, with its certificate
+  Point the DNS of <new> to this server first.
+EOF
+}
+
+lib_nginx_rename_main() {
+  local old="" new="" www="" ssl=1 redirect=1 email="${DEFAULT_EMAIL:-}" a="" rc=0 got=0 d=""
+  if [[ -z "${1:-}" || "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+    lib_nginx_rename_usage
+    [[ -n "${1:-}" ]] && return 0
+    lib_die "Old and new domain missing" "" "lomp rename old.example.com new.example.com"
+  fi
+  old="${1,,}"; new="${2:-}"; new="${new,,}"; shift; (($# > 0)) && shift
+  while (($# > 0)); do
+    a="$1"; shift
+    case "$a" in
+      --www)         www=1 ;;
+      --no-www)      www=0 ;;
+      --no-ssl)      ssl=0 ;;
+      --no-redirect) redirect=0 ;;
+      --email)       email="${1:-}"; shift ;;
+      *) lib_die "Unknown option for rename: ${a}" "" "lomp rename <old> <new> [--www|--no-www] [--no-ssl] [--no-redirect] [--email a@b.c]" ;;
+    esac
+  done
+  lib_require_tools
+  lib_require_installed
+  [[ -n "$new" ]] || lib_die "New domain missing" "" "lomp rename ${old} new.example.com"
+  lib_domain_registered "$old" || lib_die "Site ${old} is not registered" "" "lomp list"
+  lib_nginx_site_load "$old" || lib_die "${old} is no image site" "" "lomp list"
+  [[ -z "$NGX_S_REDIRECT" ]] || lib_die "${old} only redirects to ${NGX_S_REDIRECT}" "there are no files under that name to move" "lomp rename ${NGX_S_REDIRECT} ${new}"
+  lib_domain_valid "$new" || lib_die "Invalid domain '${new}'" "not a valid FQDN (use the bare domain, without http:// or paths)" "lomp rename ${old} new.example.com"
+  [[ "$new" != www.* ]] || lib_die "Rename to ${new#www.} with --www instead of ${new}" "the www name is the second name of a site" "lomp rename ${old} ${new#www.} --www"
+  [[ "$new" != "$old" ]] || lib_die "${old} already has that name" "" "lomp rename ${old} another.example.com"
+  if lib_domain_registered "$new"; then
+    lib_die "Site ${new} already exists" "registered in $(lib_domain_state_dir "$new")" "lomp remove ${new} first, then rename again"
+  fi
+  if [[ -n "$email" ]]; then lib_email_valid "$email" || lib_die "Invalid --email '${email}'" "" "--email you@example.com"; fi
+  local days="$NGX_S_DAYS" old_www="$NGX_S_WWW" old_ssl="$NGX_S_SSL"
+  [[ -n "$www" ]] || www="$old_www"
+  local home_old="" home_new="" log_old="" log_new=""
+  home_old="$(lib_domain_home "$old")"; home_new="$(lib_domain_home "$new")"
+  log_old="$(lib_domain_log_dir "$old")"; log_new="$(lib_domain_log_dir "$new")"
+  [[ ! -e "$home_new" && ! -L "$home_new" ]] || lib_die "${home_new} is already there" "the files of ${old} would be moved into it" "move it away (or remove it) and rename again"
+  [[ -d "$home_old" && ! -L "$home_old" ]] || lib_die "${home_old} is missing" "there are no files to move" "lomp remove ${old}, then lomp add ${new}"
+
+  local what="its files move to ${home_new}"
+  if (( redirect )); then what+=", and ${old} answers 301 to ${new}"; else what+=", and ${old} is removed with its certificate"; fi
+  lib_confirm "Rename ${old} to ${new}: ${what}?" n || lib_die "Rename cancelled" "" "lomp rename ${old} ${new} --yes"
+
+  if (( ssl )); then lib_system_analyze; else lib_system_analyze --no-net; fi
+  lib_nginx_tune
+  lib_steps_begin 4
+
+  # first what nginx can refuse, while nothing has moved yet
+  lib_step "nginx site for ${new}"
+  # "nginx -t" opens the log files a site names, and refuses one in a directory that is not there
+  local log_new_made=0
+  [[ -d "$log_new" ]] || log_new_made=1
+  lib_mkdir "$SITES_LOG_ROOT" 0711 root:root
+  lib_mkdir "$log_new" 0750 root:adm
+  _ngx_site_json_write "$new" "$www" 0 "$days" "installing"
+  if ! lib_nginx_render_site "$new" "$www" 0 "$days" | lib_nginx_write "$(_ngx_site_file "$new")" 0644; then
+    lib_rm "$(lib_domain_state_dir "$new")"
+    (( log_new_made )) && lib_rm "$log_new"
+    lib_die "nginx refused the site ${new}" "${NGX_TEST_OUTPUT##*$'\n'}" "sudo nginx -t"
+  fi
+  lib_ok "nginx site for ${new} written"
+
+  lib_step "Files and logs"
+  if (( OPT_DRY_RUN )); then
+    lib_info "[dry-run] would move ${home_old} to ${home_new} and ${log_old} to ${log_new}"
+  else
+    mv -T -- "$home_old" "$home_new" || lib_die "Could not move ${home_old} to ${home_new}" "see the log" "nothing else was changed; lomp remove ${new} undoes the new site"
+    # the logs go along; "nginx -t" above made empty files of the same names, which give way
+    local f="" t=""
+    if [[ -d "$log_old" && ! -L "$log_old" ]]; then
+      for f in "$log_old"/*; do
+        [[ -f "$f" && ! -L "$f" ]] || continue
+        t="${log_new}/${f##*/}"
+        if [[ ! -s "$t" ]]; then mv -f -- "$f" "$t" || true; fi
+      done
+      rmdir -- "$log_old" 2>/dev/null || lib_warn "some logs of ${old} stayed in ${log_old}"
+    fi
+    if [[ -L "${home_new}/logs" || ! -e "${home_new}/logs" ]]; then ln -sfnT -- "$log_new" "${home_new}/logs"; fi
+  fi
+  lib_json_set "$(lib_domain_json "$new")" '.renamed_from = $o' --arg o "$old"
+  if (( redirect )); then
+    lib_json_set "$(lib_domain_json "$old")" '.redirect_to = $n | .status = "redirect" | del(.home)' --arg n "$new"
+    lib_nginx_render_site "$old" "$old_www" "$old_ssl" "$days" | lib_nginx_write "$(_ngx_site_file "$old")" 0644 || _ngx_refused "$(_ngx_site_file "$old")"
+  else
+    lib_rm "$(_ngx_site_file "$old")"
+  fi
+  # a name that redirected to the old one goes straight to the new one now
+  while read -r d; do
+    [[ -n "$d" && "$d" != "$old" ]] || continue
+    lib_nginx_site_load "$d" || continue
+    [[ "$NGX_S_REDIRECT" == "$old" ]] || continue
+    lib_json_set "$(lib_domain_json "$d")" '.redirect_to = $n' --arg n "$new"
+    lib_nginx_render_site "$d" "$NGX_S_WWW" "$NGX_S_SSL" "$NGX_S_DAYS" | lib_nginx_write "$(_ngx_site_file "$d")" 0644 || _ngx_refused "$(_ngx_site_file "$d")"
+  done < <(lib_domains_list)
+  lib_nginx_reload
+  lib_ok "http://${new}/ serves the files of ${old}"
+
+  lib_step "SSL certificate"
+  if (( ! ssl )); then
+    lib_info "No certificate requested (--no-ssl). Later: lomp renew-ssl ${new}"
+  else
+    rc=0; lib_ssl_dns_check "$new" "$www" || rc=$?
+    if (( rc == 1 )); then
+      lib_warn "DNS of ${new} does not point here yet: ${SSL_LAST_ERROR}"
+      lib_note "the site works over http meanwhile; once DNS is right: lomp renew-ssl ${new}"
+    elif lib_ssl_obtain "$new" "$www" 0 0 0 "$email" webroot; then
+      got=1
+    else
+      lib_warn "No certificate for ${new}: ${SSL_LAST_ERROR}"
+      lib_note "the site works over http meanwhile; try again with: lomp renew-ssl ${new}"
+    fi
+  fi
+  if (( got )); then
+    _ngx_site_json_write "$new" "$www" 1 "$days" "installing"
+    lib_nginx_render_site "$new" "$www" 1 "$days" | lib_nginx_write "$(_ngx_site_file "$new")" 0644 || _ngx_refused "$(_ngx_site_file "$new")"
+    _ngx_redirects_render_to "$new"
+    lib_nginx_reload
+    lib_ok "https://${new}/ is served with a Let's Encrypt certificate"
+  fi
+
+  lib_step "Finishing"
+  _ngx_site_json_write "$new" "$www" "$got" "$days" "active"
+  if (( ! redirect )); then
+    if (( old_ssl )); then lib_ssl_delete "$old"; fi
+    lib_rm "$log_old" "$(lib_domain_state_dir "$old")"
+    lib_ok "${old} removed"
+  fi
+  lib_domain_fail2ban_regen
+  printf '\n'
+  lib_print_kv "Site" "$( (( got )) && printf 'https' || printf 'http')://${new}/"
+  lib_print_kv "Files" "${home_new}/public_html"
+  if (( redirect )); then lib_print_kv "Old name" "${old} -> 301 to ${new}   (lomp remove ${old} ends it)"; fi
+  return 0
 }
 
 # =============================================================================
@@ -1058,6 +1272,12 @@ lib_nginx_doctor_checks() {
     lib_nginx_site_load "$d" || continue
     home="$(lib_domain_home "$d")"
     if [[ ! -f "$(_ngx_site_file "$d")" ]]; then _doc_add FAIL "site ${d}" "no nginx site file (lomp update writes it again)"; continue; fi
+    if [[ -n "$NGX_S_REDIRECT" ]]; then
+      if ! lib_domain_registered "$NGX_S_REDIRECT"; then _doc_add WARN "site ${d}" "redirects to ${NGX_S_REDIRECT}, which is no site here any more (lomp remove ${d})"
+      elif (( NGX_S_SSL )) && [[ -z "$(lib_ssl_days_left "$d")" ]]; then _doc_add FAIL "site ${d}" "redirects to ${NGX_S_REDIRECT}, but its certificate is missing (lomp renew-ssl ${d})"
+      else _doc_add OK "site ${d}" "redirects to ${NGX_S_REDIRECT}"; fi
+      continue
+    fi
     if [[ ! -d "${home}/public_html" ]]; then _doc_add FAIL "site ${d}" "${home}/public_html is missing"; continue; fi
     if (( NGX_S_SSL )); then
       days="$(lib_ssl_days_left "$d")"
@@ -1094,12 +1314,13 @@ lib_nginx_dispatch() {   # command args...
     remove|delete)  lib_nginx_remove_main "$@" ;;
     list)           lib_nginx_list_main "$@" ;;
     renew-ssl)      lib_nginx_renew_ssl_main "$@" ;;
+    rename)         lib_nginx_rename_main "$@" ;;
     nginx-perms)    lib_nginx_perms_main ;;
     htaccess-check) ;;   # an older cron line: nothing of OpenLiteSpeed to watch here
     *)
       lib_die "'${cmd}' is not part of an image server" \
         "this server was installed with --images: nginx serves files; there is no PHP, database, mail or OpenLiteSpeed here" \
-        "lomp help   (an image server: add, remove, list, logs, renew-ssl, status, doctor, optimize, update, self-update)" ;;
+        "lomp help   (an image server: add, remove, rename, list, logs, renew-ssl, status, doctor, optimize, update, self-update)" ;;
   esac
   return 0
 }
@@ -1169,4 +1390,23 @@ LIB_TR_PAIRS+=(
   '@doctor renewed certificates reload nginx' 'yenilenen sertifikalar nginx'\''i yeniden yükler'
   '@doctor http only (lomp renew-ssl {1} for https)' 'yalnızca http (https için lomp renew-ssl {1})'
   '@doctor https, certificate {1} days' 'https, sertifika {1} gün'
+  '@doctor redirects to {1}' '{1} adresine yönlendiriyor'
+  '@doctor redirects to {1}, which is no site here any more (lomp remove {2})' '{1} adresine yönlendiriyor, ama o artık burada bir site değil (lomp remove {2})'
+  '@doctor redirects to {1}, but its certificate is missing (lomp renew-ssl {2})' '{1} adresine yönlendiriyor, ama sertifikası yok (lomp renew-ssl {2})'
+  'Rename {1} to {2}: {3}?' '{1} adı {2} olarak değiştirilsin mi: {3}?'
+  'its files move to {1}, and {2} answers 301 to {3}' 'dosyaları {1} konumuna taşınır ve {2} adresi {3} adresine 301 ile yönlenir'
+  'its files move to {1}, and {2} is removed with its certificate' 'dosyaları {1} konumuna taşınır ve {2} sertifikasıyla birlikte kaldırılır'
+  'nginx site for {1}' '{1} için nginx sitesi'
+  'nginx site for {1} written' '{1} için nginx sitesi yazıldı'
+  'Files and logs' 'Dosyalar ve günlükler'
+  'http://{1}/ serves the files of {2}' 'http://{1}/ artık {2} dosyalarını sunuyor'
+  '{1} only redirects to {2}' '{1} yalnızca {2} adresine yönlendiriyor'
+  'there are no files under that name to move' 'o adın altında taşınacak dosya yok'
+  '{1} already has that name' '{1} zaten bu adı taşıyor'
+  '{1} is already there' '{1} zaten var'
+  'the files of {1} would be moved into it' '{1} dosyaları onun içine taşınırdı'
+  'there are no files to move' 'taşınacak dosya yok'
+  'Rename to {1} with --www instead of {2}' '{2} yerine {1} adını --www ile kullanın'
+  'Old and new domain missing' 'Eski ve yeni alan adı eksik'
+  'New domain missing' 'Yeni alan adı eksik'
 )

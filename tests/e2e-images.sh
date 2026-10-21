@@ -6,8 +6,8 @@
 #  A real install (a dry run first on a fresh machine), sites added and removed, what each one
 #  answers (cache headers, svg sandbox, no script source, no dotted names, GET/HEAD only, names
 #  nobody added closed), uploads made readable, list/status/doctor/optimize, what the server
-#  refuses, https with a self-made certificate standing in for Let's Encrypt, an install re-run
-#  and a self-update.
+#  refuses, https with a self-made certificate standing in for Let's Encrypt, an install re-run,
+#  a rename (the old name answering 301, over http and https) and a self-update.
 #
 #  UFW is stood in for: WSL distros share one network namespace, and a real "default deny
 #  incoming" would close the other distros too. Never run it on a server you use.
@@ -190,6 +190,43 @@ check "  nginx still fine" nginx -t -q
 eq "  still served" "200" "$(code -H 'Host: img.test' http://127.0.0.1/photos/a.jpg)"
 run "update (apt, no upgrade wait)" 0 "$L" update --dry-run --no-color
 run "logrotate config parses" 0 logrotate -d /etc/logrotate.d/lomp-nginx-sites
+echo "== rename: the old name answers 301"
+D=/etc/server-setup/ssl/img.test; mkdir -p "$D"; chmod 0700 /etc/server-setup/ssl "$D"
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 30 -subj /CN=img.test \
+  -keyout "$D/privkey.pem" -out "$D/fullchain.pem" >/dev/null 2>&1
+jq '.ssl.enabled = true' /root/.server-setup/domains/img.test/domain.json >/tmp/j && mv /tmp/j /root/.server-setup/domains/img.test/domain.json
+run "  img.test on https first" 0 "$L" migrate --no-color
+run "rename img.test pic.test" 0 "$L" rename img.test pic.test --no-ssl --yes --no-color
+printf '%s\n' "$LAST_OUT" | tail -n 4
+check "  files moved" test -s /home/pic.test/public_html/photos/a.jpg
+check "  nothing left under the old name" test ! -e /home/img.test
+eq "  the new name serves them at once" "200" "$(code -H 'Host: pic.test' http://127.0.0.1/photos/a.jpg)"
+H="$(hdrs -H 'Host: img.test' 'http://127.0.0.1/photos/a.jpg?v=2')"
+has "  old http: 301" "301 Moved Permanently" "$H"
+has "  to the same path under the new name" "Location: http://pic.test/photos/a.jpg?v=2" "$H"
+H="$(curl -sk -D - -o /dev/null --resolve img.test:443:127.0.0.1 https://img.test/photos/a.jpg || true)"
+has "  old https: 301 too, with its own certificate" "location: http://pic.test/photos/a.jpg" "${H,,}"
+run "  list" 0 "$L" list --no-color
+has "  shows the redirect" "-> pic.test" "$LAST_OUT"
+run "  doctor" 0 "$L" doctor --no-color
+has "  knows it" "redirects to pic.test" "$LAST_OUT"
+D=/etc/server-setup/ssl/pic.test; mkdir -p "$D"; chmod 0700 "$D"
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 30 -subj /CN=pic.test \
+  -keyout "$D/privkey.pem" -out "$D/fullchain.pem" >/dev/null 2>&1
+jq '.ssl.enabled = true' /root/.server-setup/domains/pic.test/domain.json >/tmp/j && mv /tmp/j /root/.server-setup/domains/pic.test/domain.json
+run "  the new name gets https" 0 "$L" migrate --no-color
+H="$(hdrs -H 'Host: img.test' http://127.0.0.1/photos/a.jpg)"
+has "  the old name now sends to https" "Location: https://pic.test/photos/a.jpg" "$H"
+eq "  and the new one serves over https" "200" "$(curl -sk -o /dev/null -w '%{http_code}' --resolve pic.test:443:127.0.0.1 https://pic.test/photos/a.jpg || true)"
+run "  a redirect cannot be renamed" 1 "$L" rename img.test x.test --yes --no-color
+run "rename back to the old name is refused while the redirect is there" 1 "$L" rename pic.test img.test --yes --no-color
+run "remove the redirect" 0 "$L" remove img.test --yes --no-color
+eq "  the old name is closed" "000" "$(code -H 'Host: img.test' http://127.0.0.1/photos/a.jpg)"
+run "rename back, without a redirect" 0 "$L" rename pic.test img.test --no-ssl --no-redirect --yes --no-color
+eq "  served under the old name again" "200" "$(code -H 'Host: img.test' http://127.0.0.1/photos/a.jpg)"
+eq "  and pic.test is gone" "000" "$(code -H 'Host: pic.test' http://127.0.0.1/photos/a.jpg)"
+check "  its state too" test ! -e /root/.server-setup/domains/pic.test
+check "  nginx fine" nginx -t -q
 run "self-update from the tree" 0 "$L" self-update --from "$SRC" --no-color
 printf '\n%d passed, %d failed\n' "$PASS" "$FAILN"
 (( FAILN == 0 ))

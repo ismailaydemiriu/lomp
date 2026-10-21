@@ -1031,6 +1031,12 @@ minutes lomp makes what nginx could not read readable). Each site:
   script source (`.php`, `.sh`, `.sql` ...)
 - logs to `/var/log/lomp-sites/<domain>/` (rotated daily, watched by the Fail2ban scanner jail)
 
+`lomp rename <old> <new>` (menu: "Rename a site") moves a site to another name: its files,
+logs and cache lifetime go along, `<new>` gets its own certificate, and `<old>` answers every
+path with a 301 to the same path under `<new>` - over http, and over https with the certificate
+it had, which keeps renewing. `--no-redirect` removes `<old>` instead; `lomp remove <old>`
+ends the redirect later.
+
 `list`, `remove [--keep-files] [--keep-ssl]`, `logs`, `renew-ssl`, `status`, `doctor`,
 `optimize`, `update` and `self-update` work on it; what needs PHP, a database or mail is refused
 with the reason. `--cloudflare` makes nginx take the visitor's address from `CF-Connecting-IP`,

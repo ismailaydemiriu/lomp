@@ -14274,6 +14274,71 @@ _ng_map_install() { ( _ng_ans=("$@"); _ng_i=0
     _menu_install_images 2>/dev/null | tail -n 1 ); }
 assert_eq "install from the menu, behind Cloudflare"     "install --images --email a@b.example --cloudflare" "$(_ng_map_install a@b.example y)"
 
+# ---- rename: the files move, the old name answers 301
+_ng_calls=""
+lib_nginx_rename_main img.example img2.example --no-ssl >/dev/null 2>&1
+assert_true "rename moves the files"                    test -d "$SITES_ROOT/img2.example/public_html"
+assert_false "nothing is left under the old name"        test -e "$SITES_ROOT/img.example"
+assert_has  "the new site serves them"                   "root ${SITES_ROOT}/img2.example/public_html;" "$(cat "$NGX_SITES_DIR/img2.example.conf")"
+assert_has  "with the old cache lifetime"                "common-7d.conf" "$(cat "$NGX_SITES_DIR/img2.example.conf")"
+assert_eq   "the new name is a site"                     "images active img.example" "$(jq -r '[.mode, .status, .renamed_from] | join(" ")' "$STATE_DIR/domains/img2.example/domain.json")"
+assert_eq   "the old one a redirect"                     "img2.example redirect" "$(jq -r '[.redirect_to, .status] | join(" ")' "$STATE_DIR/domains/img.example/domain.json")"
+assert_has  "every path: 301 to the same path"           'location / { return 301 http://img2.example$request_uri; }' "$(cat "$NGX_SITES_DIR/img.example.conf")"
+assert_has  "Let's Encrypt still reaches the old name"   "root ${ACME_ROOT};" "$(cat "$NGX_SITES_DIR/img.example.conf")"
+assert_lacks "and no files are served under it"          "public_html" "$(cat "$NGX_SITES_DIR/img.example.conf")"
+assert_has  "list shows where it goes"                   "-> img2.example" "$(lib_nginx_list_main 2>&1)"
+if (( CAN_SYMLINK )); then assert_eq "the logs moved with the site" "$SITES_LOG_ROOT/img2.example" "$(readlink "$SITES_ROOT/img2.example/logs")"; fi
+DOC_RESULTS=(); DOC_FAIL=0; DOC_WARN=0; DOC_OK=0
+eval 'ufw() { printf "Status: active\n"; }'
+lib_nginx_doctor_checks >/dev/null 2>&1; unset -f ufw
+assert_has  "doctor knows a redirect"                    "OK|site img.example|redirects to img2.example" "$(printf '%s\n' "${DOC_RESULTS[@]}")"
+_ng_out="$( (lib_nginx_rename_main img.example z.example) 2>&1 || true)"
+assert_has  "a redirect has no files to rename"          "img.example only redirects to img2.example" "$_ng_out"
+_ng_out="$( (lib_nginx_rename_main img2.example late.example) 2>&1 || true)"
+assert_has  "files already under the new name stop it"   "${SITES_ROOT}/late.example is already there" "$_ng_out"
+assert_true "and nothing moved"                          test -d "$SITES_ROOT/img2.example/public_html"
+_ng_out="$( (lib_nginx_rename_main img2.example img2.example) 2>&1 || true)"
+assert_has  "the same name is refused"                   "img2.example already has that name" "$_ng_out"
+_ng_out="$( (lib_nginx_rename_main img2.example www.img3.example) 2>&1 || true)"
+assert_has  "so is a www name"                           "Rename to img3.example with --www instead of www.img3.example" "$_ng_out"
+
+_ng_calls=""
+lib_nginx_rename_main img2.example img3.example --www --email ops@img3.example >/dev/null 2>&1
+assert_has  "the new name gets its certificate"          "obtain img3.example www=1 staging=0 email=ops@img3.example method=webroot" "$_ng_calls"
+assert_has  "and https"                                  "listen 443 ssl http2;" "$(cat "$NGX_SITES_DIR/img3.example.conf")"
+assert_has  "the name before redirects to https now"     'return 301 https://img3.example$request_uri;' "$(cat "$NGX_SITES_DIR/img2.example.conf")"
+assert_has  "and so does the first one, straight there"  'return 301 https://img3.example$request_uri;' "$(cat "$NGX_SITES_DIR/img.example.conf")"
+assert_eq   "its record says so"                         "img3.example" "$(jq -r .redirect_to "$STATE_DIR/domains/img.example/domain.json")"
+
+# a redirect that had a certificate keeps answering https with it
+jq '.ssl.enabled = true' "$STATE_DIR/domains/img.example/domain.json" >"$_ng_root/j" && mv "$_ng_root/j" "$STATE_DIR/domains/img.example/domain.json"
+_ng_out="$(lib_nginx_render_site img.example 0 1 7)"
+assert_has  "an https redirect"                          "ssl_certificate ${SSL_DEPLOY_DIR}/img.example/fullchain.pem;" "$_ng_out"
+assert_eq   "both servers redirect"                      "2" "$(grep -c 'return 301 https://img3.example' <<<"$_ng_out")"
+
+lib_nginx_add_main x.example --no-ssl >/dev/null 2>&1
+_ng_calls=""
+lib_nginx_rename_main x.example y.example --no-ssl --no-redirect >/dev/null 2>&1
+assert_false "--no-redirect: the old name is gone"       test -e "$STATE_DIR/domains/x.example"
+assert_false "with its nginx site"                       test -e "$NGX_SITES_DIR/x.example.conf"
+assert_true "the new one is there"                       test -s "$NGX_SITES_DIR/y.example.conf"
+assert_has  "setup.sh's dispatch reaches it"             'rename)         lib_nginx_rename_main "$@" ;;' "$(cat "$ROOT/lib/nginx.sh")"
+
+lib_nginx_remove_main img.example >/dev/null 2>&1
+assert_false "remove ends a redirect"                    test -e "$NGX_SITES_DIR/img.example.conf"
+assert_true "and leaves the site it went to"             test -s "$NGX_SITES_DIR/img3.example.conf"
+
+_ng_map_rn() { ( _ng_ans=("$@"); _ng_i=0
+    eval '_menu_ask() { local -n _o="$1"; _o="${_ng_ans[$_ng_i]:-${3:-}}"; _ng_i=$((_ng_i + 1)); }
+          _menu_run() { printf "%s\n" "$*"; }
+          _menu_pick_domain() { printf "a.example"; }
+          _menu_pause() { :; }'
+    _menu_images_rename 2>/dev/null | tail -n 1 ); }
+assert_eq "menu rename: the old name redirects"          "rename a.example b.example" "$(_ng_map_rn B.example "")"
+assert_eq "menu rename: or goes"                         "rename a.example b.example --no-redirect" "$(_ng_map_rn b.example n)"
+assert_has "it is item 14 of the image server's menu"    '14) _menu_images_rename ;;' "$_ng_menu"
+unset -f _ng_map_rn
+
 # the Turkish of the messages above
 assert_eq "a message of lib/nginx.sh in Turkish"         "nginx artık img.example alan adını sunmuyor" "$(LIB_LANG=tr; lib_lang_build; lib_tr "nginx no longer serves img.example"; printf '%s' "$LIB_TR")"
 

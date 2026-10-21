@@ -43,7 +43,8 @@ KOMUTLAR
                                 Redis yok), işlemciye ve belleğe göre ayarlı; ardından
                                 "add <domain>" /home/<domain>/public_html'i uzun önbellek
                                 başlıklarıyla sunan bir nginx sitesi yapar. Oradaki add
-                                seçenekleri: --www --no-ssl --email --cache-days N (varsayılan 30)
+                                seçenekleri: --www --no-ssl --email --cache-days N (varsayılan 30);
+                                "rename <eski> <yeni>" siteyi taşır, <eski> <yeni>'ye 301 olur
       --cloudflare              Cloudflare proxy'lerine güvenir (gerçek istemci IP'si)
       --cf-api-token TOKEN      Cloudflare API token'ını saklar (DNS-01 / fail2ban); "-" onu
                                 stdin'den okur, böylece süreç listesinde görünmez
@@ -325,7 +326,8 @@ COMMANDS
                                 Redis), sized for the CPU and memory; "add <domain>" then
                                 makes an nginx site that serves /home/<domain>/public_html
                                 with long cache headers. Options of add there: --www
-                                --no-ssl --email --cache-days N (default 30)
+                                --no-ssl --email --cache-days N (default 30); "rename <old>
+                                <new>" moves a site and leaves <old> as a 301 to <new>
       --cloudflare              Trust Cloudflare proxies (real client IP)
       --cf-api-token TOKEN      Store Cloudflare API token (DNS-01 / fail2ban); "-" reads it
                                 from stdin so it stays out of the process list
@@ -1812,6 +1814,24 @@ _menu_images_remove() {
   _menu_run remove "${args[@]}"
 }
 
+_menu_images_rename() {
+  local domain="" new="" keep=""
+  local -a args=()
+  domain="$(_menu_pick_domain)" || { _menu_pause; return 0; }
+  printf '\n'; _menu_note "The files move to the new name as they are; nothing is copied, nothing is uploaded again." \
+    "Point the DNS of the new name to this server first, so that it gets its certificate right away."
+  _menu_ask new "$(_menu_tf 'New domain for %s (without www, e.g. example.net)' "$domain")"
+  [[ -n "$new" ]] || return 0
+  if ! lib_domain_valid "${new,,}"; then
+    _menu_printf '%s"%s" is not a valid domain name.%s\n' "$C_YEL" "$new" "$C_RST"
+    _menu_pause; return 0
+  fi
+  args=("$domain" "${new,,}")
+  _menu_ask keep "$(_menu_tf 'Keep %s as a redirect (301) to %s? (y/n)' "$domain" "${new,,}")" "y"
+  [[ "${keep,,}" == y* ]] || args+=(--no-redirect)
+  _menu_run rename "${args[@]}"
+}
+
 # The menu of an image server: its sites are nginx's, and there is nothing of PHP, databases
 # or mail to offer.
 _menu_images() {
@@ -1824,6 +1844,7 @@ _menu_images() {
     _menu_item  3 "Remove a site"
     _menu_item  4 "Site logs"
     _menu_item  5 "Certificate for a site (Let's Encrypt, the first one or a new one)"
+    _menu_item 14 "Rename a site (new domain name; the old one redirects to it)"
     _menu_group "SERVER"
     _menu_item  6 "Status"
     _menu_item  7 "Health check"
@@ -1843,6 +1864,7 @@ _menu_images() {
       3) _menu_images_remove ;;
       4) domain="$(_menu_pick_domain)" && _menu_run logs "$domain" || _menu_pause ;;
       5) domain="$(_menu_pick_domain)" && _menu_run renew-ssl "$domain" || _menu_pause ;;
+      14) _menu_images_rename ;;
       6) _menu_run status ;;
       7) _menu_run doctor ;;
       8) _menu_run optimize ;;
@@ -2016,6 +2038,7 @@ MENU_TR['Days an image may be kept in a cache']='Bir resmin önbellekte tutulabi
 MENU_TR['\n%sRemoving %s deletes its nginx site, its certificate and its files.%s\n']='\n%s%s kaldırılınca nginx sitesi, sertifikası ve dosyaları silinir.%s\n'
 MENU_TR['Add a site (a domain whose files nginx serves)']='Site ekle (dosyalarını nginx'\''in sunduğu bir alan adı)'
 MENU_TR['Certificate for a site (Let'\''s Encrypt, the first one or a new one)']='Bir sitenin sertifikası (Let'\''s Encrypt, ilki ya da yenisi)'
+MENU_TR['The files move to the new name as they are; nothing is copied, nothing is uploaded again.']='Dosyalar yeni ada oldukları gibi taşınır; hiçbir şey kopyalanmaz, yeniden yüklenmez.'
 MENU_TR['Re-tune nginx to this machine'\''s CPU and memory']='nginx'\''i bu makinenin işlemcisine ve belleğine göre yeniden ayarla'
 MENU_TR['Language: Türkçe or English']='Dil: Türkçe ya da English'
 MENU_TR['Exit']='Çıkış'
