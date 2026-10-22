@@ -631,9 +631,11 @@ lib_set_kv() {
   tmp="$(lib_mktemp)"
   if [[ -f "$file" ]]; then cp "$file" "$tmp"; else : >"$tmp"; fi
   if grep -qE "^[[:space:]]*[;#]?[[:space:]]*${ekey}[[:space:]]*${sep}" "$tmp"; then
-    # replace the first occurrence, drop other (duplicate/commented) occurrences
-    awk -v k="$key" -v v="$value" -v s="$sep" -v re="^[[:space:]]*[;#]?[[:space:]]*${ekey}[[:space:]]*${sep}" '
-      BEGIN{done=0}
+    # replace the first occurrence, drop other (duplicate/commented) occurrences. ENVIRON rather
+    # than -v, which reads the backslashes of the escaped key (and of a value) as escapes:
+    # gawk said "escape sequence `\.' treated as plain `.'" for every dotted php.ini key.
+    KV_K="$key" KV_V="$value" KV_S="$sep" KV_RE="^[[:space:]]*[;#]?[[:space:]]*${ekey}[[:space:]]*${sep}" awk '
+      BEGIN{done=0; k=ENVIRON["KV_K"]; v=ENVIRON["KV_V"]; s=ENVIRON["KV_S"]; re=ENVIRON["KV_RE"]}
       $0 ~ re { if(!done){ print k " " s " " v; done=1 } ; next }
       { print }' "$tmp" >"${tmp}.2" && mv -f "${tmp}.2" "$tmp"
   else

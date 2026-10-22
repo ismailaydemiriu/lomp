@@ -14420,6 +14420,18 @@ assert_eq "the hook without its script fails no apt run" 0 "$(sh -c "$_lu_cmd" >
 printf '#!/bin/sh\nexit 3\n' >"$TMP/lu-none"; chmod +x "$TMP/lu-none"
 assert_eq "nor one whose script fails"           0 "$(sh -c "$_lu_cmd" >/dev/null 2>&1; printf '%s' "$?")"
 
+# ---- lib_set_kv hands awk the escaped key through the environment: the dots of a php.ini key
+# are dots, nothing else, and awk says nothing about them (gawk warned on every migrate)
+printf '%s\n' 'sessionXupload_progressXenabled = 1' 'session.upload_progress.enabled = 1' 'x = 1' >"$TMP/lu-kv.ini"
+_out="$(lib_set_kv "$TMP/lu-kv.ini" session.upload_progress.enabled 0 "=" 2>&1)"
+assert_eq "awk says nothing"                                  "" "$_out"
+assert_eq "the key is replaced, a look-alike is not"          $'sessionXupload_progressXenabled = 1\nsession.upload_progress.enabled = 0\nx = 1' "$(cat "$TMP/lu-kv.ini")"
+lib_set_kv "$TMP/lu-kv.ini" x 'a\tb' "=" >/dev/null 2>&1
+assert_eq "a backslash in a value stays a backslash"          'x = a\tb' "$(grep '^x ' "$TMP/lu-kv.ini")"
+if command -v gawk >/dev/null 2>&1; then
+  assert_eq "nor does gawk"                                   "" "$(awk() { gawk "$@"; }; lib_set_kv "$TMP/lu-kv.ini" session.upload_progress.enabled 0 "=" 2>&1)"
+fi
+
 # ---- migrate on a server set up before: the guards go into the ini there, the rest stays
 mkdir -p "$TMP/lu-scan"
 printf '%s\n' '; Managed by lompstack' 'memory_limit = 512M' 'session.upload_progress.enabled = 1' >"$TMP/lu-scan/99-server-setup.ini"
