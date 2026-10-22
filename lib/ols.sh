@@ -558,6 +558,34 @@ lib_ols_reload() {
   if lib_ols_running; then lib_systemctl stop "$OLS_SERVICE" || true; fi
   lib_ols_admin_port_release
   lib_systemctl start "$OLS_SERVICE"
+  lib_ols_reap_orphans
+}
+
+# The unit ships KillMode=none and stops with "lswsctrl delay-stop", so an lsphp worker
+# that is busy (a stream.php that never ends) outlives the server that started it. Its
+# client socket died with the old master; nothing will ever reach it again, yet it keeps
+# the old php.ini and the old code in memory, and every restart adds more. A worker is an
+# orphan when walking up its parents ends at init instead of at a litespeed process.
+lib_ols_reap_orphans() {
+  (( OPT_DRY_RUN )) && return 0
+  local d="" pid="" cur="" comm="" stat="" n=0 hops=0
+  for d in /proc/[0-9]*; do
+    pid="${d#/proc/}"
+    comm="$(<"$d/comm")" 2>/dev/null || continue
+    [[ "$comm" == lsphp* ]] || continue
+    cur="$pid"; hops=0
+    while (( cur > 1 && hops < 8 )); do
+      stat="$(<"/proc/${cur}/stat")" 2>/dev/null || break
+      comm="${stat#*(}"; comm="${comm%)*}"
+      [[ "$comm" == litespeed || "$comm" == openlitespeed || "$comm" == lshttpd ]] && { cur=0; break; }
+      stat="${stat##*) }"; stat="${stat#* }"; cur="${stat%% *}"
+      hops=$(( hops + 1 ))
+    done
+    (( cur == 1 )) || continue
+    kill "$pid" 2>/dev/null && n=$(( n + 1 ))
+  done
+  (( n == 0 )) || lib_info "Ended ${n} lsphp workers left over from the previous OpenLiteSpeed"
+  return 0
 }
 
 # OpenLiteSpeed refuses to start AT ALL when it cannot bind its WebAdmin listener:
