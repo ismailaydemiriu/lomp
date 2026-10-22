@@ -237,6 +237,39 @@ _db_name_base() {   # domain suffix maxlen -> base
   printf '%s_%s' "$id" "$suffix"
 }
 
+# Is this database or user name (kind db|user) in some site's db.info / db.extra?
+_db_name_claimed() {   # name kind
+  local name="$1" kind="$2" d=""
+  while IFS= read -r d; do
+    [[ -n "$d" ]] || continue
+    if ( lib_db_info_load "$d" 2>/dev/null || exit 1
+         if [[ "$kind" == db ]]; then [[ "$DBI_NAME" == "$name" ]] || lib_db_extra_names "$d" | lib_grepq -Fx -- "$name"
+         else [[ "$DBI_USER" == "$name" ]]; fi ); then return 0; fi
+  done < <(lib_domains_list)
+  return 1
+}
+
+# A database or login a removed site left behind (no site names it) would push the next site
+# of that name to example_db_2. An orphan database without a single table and an orphan login
+# hold nothing: they go, and the new site gets the plain name. An orphan with tables is
+# somebody's data and stays; the new site then takes the _2 name.
+_db_reclaim_orphans() {   # dbbase userbase
+  local db="$1" user="$2" tables=""
+  if lib_db_exists "$db" && ! _db_name_claimed "$db" db; then
+    tables="$(lib_db_sql "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='${db}'" 2>/dev/null || printf '1')"
+    if [[ "$tables" == "0" ]]; then
+      lib_db_sql "DROP DATABASE \`${db}\`" >/dev/null 2>&1 && lib_info "empty database ${db} that no site uses was removed"
+    else
+      lib_warn "database ${db} has data and belongs to no site; the new site gets another name"
+    fi
+  fi
+  if lib_db_user_exists "$user" && ! _db_name_claimed "$user" user && ! lib_db_exists "$db"; then
+    lib_db_sql "DROP USER IF EXISTS '${user}'@'localhost'; DROP USER IF EXISTS '${user}'@'127.0.0.1'; FLUSH PRIVILEGES" >/dev/null 2>&1 \
+      && lib_info "login ${user} that no site uses was removed"
+  fi
+  return 0
+}
+
 # Create DB + user for a registered domain, store credentials (600).
 lib_db_create_for_domain() {
   local domain="$1" dbbase="" userbase="" dbname="" dbuser="" dbpass="" info="" sql=""
@@ -247,6 +280,7 @@ lib_db_create_for_domain() {
   userbase="$(_db_name_base "$domain" user 32)"
   if (( OPT_DRY_RUN )); then lib_info "[dry-run] would create database ${dbbase} with user ${userbase} and store ${info}"; return 0; fi
   lib_db_wait_ready 10 || lib_die "MariaDB not reachable" "service down" "systemctl status mariadb"
+  _db_reclaim_orphans "$dbbase" "$userbase"
   dbname="$(_db_unique_name "$dbbase" db 60)"     || lib_die "Could not find a free database name" "too many collisions" "clean up old databases"
   dbuser="$(_db_unique_name "$userbase" user 32)" || lib_die "Could not find a free database user name" "too many collisions" "clean up old users"
   dbpass="$(lib_random_password 32)"
