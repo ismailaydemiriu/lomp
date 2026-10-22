@@ -404,7 +404,38 @@ _doc_check_services() {
   for svc in unattended-upgrades; do
     if [[ "$(apt-config dump 2>/dev/null | awk -F'"' '/^APT::Periodic::Unattended-Upgrade /{print $2}')" == "1" ]]; then _doc_add OK "$svc" "enabled (security updates)"; else _doc_add WARN "$svc" "not enabled"; fi
   done
+  _doc_check_lsphp_updates
+
   if [[ "$(timedatectl show -p NTPSynchronized --value 2>/dev/null)" == "yes" ]]; then _doc_add OK "time sync" "NTP synchronised ($(timedatectl show -p Timezone --value 2>/dev/null))"; else _doc_add WARN "time sync" "clock not NTP-synchronised"; fi
+}
+
+# PHP's security releases reach the server through unattended-upgrades, and its workers do not
+# keep the old files after one (lib/php.sh).
+_doc_check_lsphp_updates() {
+  local stale="" n=0 ver=""
+  [[ -n "$(lib_php_installed_versions)" ]] || return 0
+  if apt-config dump 2>/dev/null | lib_grepq -F '"LiteSpeedTech:'; then
+    _doc_add OK "lsphp updates" "unattended-upgrades installs them from the LiteSpeed repository"
+  else
+    _doc_add WARN "lsphp updates" "unattended-upgrades does not install them: PHP's security releases wait for 'sudo lomp update'"
+  fi
+  if [[ -x "$PHP_STALE_SCRIPT" ]]; then
+    stale="$("$PHP_STALE_SCRIPT" --list 2>/dev/null || true)"
+    n="$(wc -w <<<"$stale")"
+    if (( n > 0 )); then _doc_add WARN "lsphp workers" "${n} still run PHP files an update replaced (sudo ${PHP_STALE_SCRIPT} ends them)"; fi
+  else
+    _doc_add WARN "lsphp workers" "${PHP_STALE_SCRIPT} is missing: workers keep the old PHP after an update ('sudo lomp update' puts it in place)"
+  fi
+  ver="$(lib_php_default_version)"
+  if lib_php_installed "$ver"; then
+    if lib_php_cli_is_lsphp "$ver"; then _doc_add OK "php command" "LSPHP ${ver}'s CLI, the PHP the sites run"
+    else
+      stale="$(command -v php 2>/dev/null || true)"
+      [[ -z "$stale" ]] || stale="$(readlink -f "$stale" 2>/dev/null || printf '%s' "$stale")"
+      _doc_add WARN "php command" "\"php\" in a shell is not LSPHP ${ver} but ${stale:-nothing} ('sudo lomp update' links ${PHP_CLI_LINK_DIR}/php)"
+    fi
+  fi
+  return 0
 }
 
 _doc_check_resources() {

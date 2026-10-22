@@ -35,11 +35,11 @@ after it is applied, and rolled back if the verification fails.
 | Layer | What is installed and tuned |
 |---|---|
 | Web server | OpenLiteSpeed from the official LiteSpeed repository, HTTP/2, HTTP/3 (QUIC), Brotli/gzip, catch-all vhost that returns 403 for unknown hostnames |
-| PHP | LSPHP (default 8.3, any version per site) with curl, mbstring, mysqli, PDO (MySQL and SQLite), sqlite3, gd, imagick, xml, zip, intl, bcmath, soap, opcache, redis, apcu, fileinfo, exif |
+| PHP | LSPHP (default 8.3, any version per site) with curl, mbstring, mysqli, PDO (MySQL and SQLite), sqlite3, gd, imagick, xml, zip, intl, bcmath, soap, opcache, redis, apcu, fileinfo, exif. `php` in a shell (SSH, sudo, cron) is the default LSPHP's CLI, the PHP the sites run, even where a distribution PHP is installed beside it (`/usr/local/bin/php`; `php83` and so on for each version) |
 | Database | MariaDB bound to 127.0.0.1, hardened, InnoDB tuned to your RAM and disk type, slow query log on |
 | Cache | Redis on localhost with a generated password, `allkeys-lru`, memory capped by RAM share |
 | TLS | Let's Encrypt via certbot, shared ACME webroot, TLS 1.2/1.3 only, HSTS, auto-renew with an OpenLiteSpeed deploy hook |
-| Security | UFW, Fail2ban (sshd + recidive + WordPress/scanner jails), sshd drop-in hardening, unattended security updates |
+| Security | UFW, Fail2ban (sshd + recidive + WordPress/scanner jails), sshd drop-in hardening, unattended security updates, LSPHP updates from the LiteSpeed repository installed the same way (the PHP workers an update leaves on the old files are restarted; OpenLiteSpeed itself waits for `lomp update`) |
 | Operations | Backups with retention/encryption/remote upload, daily health check, e-mail / Telegram / webhook alerts, `status` and `doctor` |
 | Optional | Node.js + PM2, Python venv tooling, Netdata, Cloudflare real-client-IP mode, a mail server with webmail (Postfix + Dovecot + Rspamd + Roundcube). None of these is installed unless you ask for it, on the command line or from the menu. |
 | Mail only | `install --mail-only` makes a server that carries mail and nothing else: every domain's mailboxes on one machine, their web sites wherever they are. See [A server for mail alone](#a-server-for-mail-alone). |
@@ -277,6 +277,9 @@ sudo lomp scan --all                                # look through every site's 
 sudo lomp speed example.com                         # a site opens slowly: where does the time go?
 sudo lomp apcu off example.com                      # APCu (PHP's in-memory cache) off for a site;
                                                     # "on" takes it back, --all is every site
+sudo lomp php-update                                # every LSPHP version to its latest release now
+                                                    # (8.3.35 -> 8.3.36), the sites' PHP restarted;
+                                                    # unattended-upgrades does it once a day anyway
 sudo lomp php-cleanup                               # undo an "apt-get install lsphp83*": purge the
                                                     # compiler, debug symbols and the rest it added
                                                     # beyond lomp's own PHP packages (asks first)
@@ -1058,6 +1061,8 @@ an image server, and an image server stays one.
 | `/etc/fail2ban/jail.d/server-setup.conf` | Fail2ban jails |
 | `/etc/cron.d/server-setup` | All scheduled tasks, in one place |
 | `/etc/letsencrypt/renewal-hooks/deploy/99-server-setup-ols.sh` | Certificate deploy hook |
+| `/etc/apt/apt.conf.d/52server-setup-unattended` | What unattended-upgrades installs: security updates and LSPHP |
+| `/usr/local/sbin/lomp-lsphp-restart` | Ends the lsphp processes still running PHP files a package update replaced; apt runs it after every dpkg run (`/etc/apt/apt.conf.d/53lompstack-lsphp-restart`) |
 | `/var/log/server_setup.log` | Operation log, mode 0600, secrets masked |
 | `/var/backups/server-setup/` | Local backups |
 
@@ -1568,7 +1573,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
 | `lib/system.sh` | Hardware analysis, resource profile, sysctl and limits, swap, timezone |
 | `lib/install.sh` | `install`, `update`, `optimize`, UFW, SSH hardening, Fail2ban, cron, optional runtimes |
 | `lib/ols.sh` | OpenLiteSpeed: transactional config editing, snapshots, config test, templates, WebAdmin |
-| `lib/php.sh` | LSPHP versions, extensions, php.ini tuning, `php-cleanup`, `apcu` |
+| `lib/php.sh` | LSPHP versions, extensions, php.ini tuning, `php-update`, `php-cleanup`, `apcu`, the apt hook that restarts workers after an update |
 | `lib/db.sh` | MariaDB install, hardening, tuning, per-site databases, Redis |
 | `lib/ssl.sh` | certbot, DNS checks, certificate deployment, renewal hook |
 | `lib/domain.sh` | Site lifecycle, users and directories, WordPress, logrotate and jail regeneration |

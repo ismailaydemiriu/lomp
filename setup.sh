@@ -251,6 +251,7 @@ main() {
     fix-owner)      lib_domain_fix_owner_main "${rest[@]}" || exit 1 ;;
     optimize)       lib_optimize_main "${rest[@]}" ;;
     php-cleanup)    lib_php_cleanup_main "${rest[@]}" || exit 1 ;;
+    php-update)     lib_php_update_main "${rest[@]}" || exit 1 ;;
     harden)         lib_harden_main "${rest[@]}" || exit 1 ;;
     apcu)           lib_php_apcu_main "${rest[@]}" || exit 1 ;;
     scan)           lib_scan_main "${rest[@]}" || exit 1 ;;

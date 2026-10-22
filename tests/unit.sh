@@ -1349,9 +1349,11 @@ section "renderers must exit 0 (pipefail safety)"
 # These run with errexit explicitly re-armed, which is how the installer executes them.
 for fn in lib_system_render_sysctl lib_system_render_limits lib_db_render_tuning \
           lib_php_render_ini lib_ols_render_default_vhconf lib_ols_render_default_vhost_block \
-          lib_ssl_hook_render lib_ols_admin_address; do
+          lib_ssl_hook_render lib_ols_admin_address lib_php_render_stale_script lib_php_render_apt_hook \
+          lib_install_render_unattended; do
   assert_eq "${fn} exits 0" 0 "$(run_isolated "$fn")"
 done
+assert_eq "lib_install_render_unattended --lsphp exits 0" 0 "$(run_isolated lib_install_render_unattended --lsphp)"
 assert_eq "lib_ols_render_extprocessor exits 0" 0 "$(run_isolated lib_ols_render_extprocessor 8.3 4)"
 assert_eq "lib_ols_render_vhost_block exits 0" 0 "$(run_isolated lib_ols_render_vhost_block example.com 1)"
 assert_eq "lib_redis_render_conf (cache) exits 0" 0 "$(run_isolated lib_redis_render_conf pw 0)"
@@ -14346,6 +14348,189 @@ eval "$_ng_fsaved"
 unset -f nginx _ng_map _ng_map_install
 eval "$_ng_saved"
 lib_domain_state_reset
+
+# =============================================================================
+section "LSPHP security updates: unattended-upgrades, the workers left on old files, the ini guards"
+# php.net's release of 21 Oct 2026 (CVE-2026-109618/109619) reached no lomp server by itself:
+# unattended-upgrades took the distribution's security updates only, and an lsphp worker keeps
+# the PHP it started with until it ends.
+_lu_saved="$(declare -f lib_php_cli lib_php_installed_versions lib_php_restart_workers lib_install_unattended_write)"
+_lu_reboot="$INS_AUTO_REBOOT"
+
+INS_AUTO_REBOOT=0
+_out="$(lib_install_render_unattended)"
+assert_lacks "an image server's unattended-upgrades leaves LiteSpeed out" 'LiteSpeedTech' "$_out"
+assert_lacks "and has no blacklist"                                       'Package-Blacklist' "$_out"
+_out="$(lib_install_render_unattended --lsphp)"
+assert_has "a web server's takes the LiteSpeed repository too"     '  "LiteSpeedTech:${distro_codename}";' "$_out"
+assert_has "inside the list of origins"                            "$(printf '%s\n%s\n};' '  "${distro_id}ESM:${distro_codename}-infra-security";' '  "LiteSpeedTech:${distro_codename}";')" "$_out"
+assert_has "beside the distribution's security updates"            '"${distro_id}:${distro_codename}-security";' "$_out"
+assert_has "no automatic reboot unless asked"                      'Automatic-Reboot "false";' "$_out"
+# unattended-upgrades matches each entry with Python's re.match (anchored at the start) against
+# every package name: of what the LiteSpeed repository carries, only LSPHP passes
+_lu_black="$(sed -n '/^Unattended-Upgrade::Package-Blacklist {/,/^};/p' <<<"$_out" | sed -n 's/^  "\(.*\)";$/\1/p')"
+assert_eq "two blacklist entries" 2 "$(wc -l <<<"$_lu_black")"
+for _p in openlitespeed ols-pagespeed ols-modsecurity; do
+  assert_true "${_p} stays with lomp update" grep -qE -f <(printf '%s\n' "$_lu_black") <<<"$_p"
+done
+for _p in lsphp83 lsphp83-common lsphp85-redis openssl libssl3t64 openssh-server; do
+  assert_false "${_p} is not held back" grep -qE -f <(printf '%s\n' "$_lu_black") <<<"$_p"
+done
+INS_AUTO_REBOOT=1
+assert_has "an automatic reboot where it was asked for" 'Automatic-Reboot "true";' "$(lib_install_render_unattended --lsphp)"
+INS_AUTO_REBOOT=0
+assert_has  "install, on a web server, names LSPHP"       'lib_install_unattended --lsphp' "$(declare -f lib_install_main)"
+assert_has  "an image server's install has it too"       'lib_install_unattended' "$(declare -f lib_nginx_install_main)"
+assert_lacks "without LSPHP, which it does not run"       'lib_install_unattended --lsphp' "$(declare -f lib_nginx_install_main)"
+assert_has  "migrate brings a server set up before along" 'lib_php_security_migrate' "$(declare -f lib_install_migrate)"
+assert_has  "doctor looks at it"                          '_doc_check_lsphp_updates' "$(declare -f _doc_check_services)"
+
+# ---- the ini guards
+_out="$(lib_php_render_ini)"
+for _g in "${PHP_INI_GUARDS[@]}"; do
+  assert_has "a new server's PHP reads ${_g%%|*} = ${_g#*|}" "${_g%%|*} = ${_g#*|}" "$_out"
+done
+
+# ---- the script apt runs after dpkg: it ends lsphp processes on replaced files, and only those
+lib_php_render_stale_script >"$TMP/lu-stale"; chmod +x "$TMP/lu-stale"
+mkdir -p "$TMP/lu-bin"; printf '#!/bin/sh\nprintf "%%s\\n" "$*" >>"%s/lu-logger"\n' "$TMP" >"$TMP/lu-bin/logger"; chmod +x "$TMP/lu-bin/logger"
+_lu_proc() {   # pid comm maps-line...  (pids above any pid_max: nothing real is signalled)
+  local p="$1" c="$2"; shift 2
+  mkdir -p "$TMP/lu-proc/$p"; printf '%s\n' "$c" >"$TMP/lu-proc/$p/comm"; printf '%s\n' "$@" >"$TMP/lu-proc/$p/maps"
+}
+_lu_m() { printf '7f00-7f10 r-xp 00000000 08:01 42                         %s' "$1"; }
+_lu_proc 9000001 lsphp "$(_lu_m "$LSWS_HOME/lsphp83/bin/lsphp (deleted)")" "$(_lu_m /usr/lib/x86_64-linux-gnu/libc.so.6)"
+_lu_proc 9000002 lsphp "$(_lu_m "$LSWS_HOME/lsphp83/bin/lsphp")" "$(_lu_m "$LSWS_HOME/lsphp83/lib/php/20230831/redis.so (deleted)")"
+_lu_proc 9000003 lsphp "$(_lu_m "$LSWS_HOME/lsphp83/bin/lsphp")" "$(_lu_m /usr/lib/x86_64-linux-gnu/libc.so.6)"
+_lu_proc 9000004 php   "$(_lu_m "$LSWS_HOME/lsphp83/bin/php (deleted)")"
+_lu_proc 9000005 lsphp "$(_lu_m "$LSWS_HOME/lsphp83/bin/lsphp")" "$(_lu_m "/tmp/.ZendSem.x (deleted)")"
+_lu_run() { LOMP_PROC="$TMP/lu-proc" PATH="$TMP/lu-bin:$PATH" sh "$TMP/lu-stale" "$@"; }
+assert_eq "it names the workers on a replaced binary or extension, no other" "9000001 9000002" "$(_lu_run --list)"
+_out="$(_lu_run; printf 'rc=%s' "$?")"
+assert_has "it ends them and says so"           "ended the lsphp processes still running replaced PHP files: 9000001 9000002" "$_out"
+assert_has "and never fails apt"                "rc=0" "$_out"
+assert_has "the system log says it too"         "ended the lsphp processes" "$(cat "$TMP/lu-logger" 2>/dev/null)"
+rm -rf "$TMP/lu-proc"; mkdir -p "$TMP/lu-proc"; rm -f "$TMP/lu-logger"
+assert_eq "nothing to end: nothing said, status 0" "|0" "$(_lu_run; printf '|%s' "$?")"
+assert_false "and nothing logged"               test -e "$TMP/lu-logger"
+_out="$(lib_php_render_apt_hook)"
+assert_has "apt runs it after every dpkg run"   "DPkg::Post-Invoke { \"if [ -x ${PHP_STALE_SCRIPT} ]; then ${PHP_STALE_SCRIPT} || true; fi\"; };" "$_out"
+_lu_cmd="$(PHP_STALE_SCRIPT="$TMP/lu-none"; lib_php_render_apt_hook | sed -n 's/^DPkg::Post-Invoke { "\(.*\)"; };$/\1/p')"
+assert_eq "the hook without its script fails no apt run" 0 "$(sh -c "$_lu_cmd" >/dev/null 2>&1; printf '%s' "$?")"
+printf '#!/bin/sh\nexit 3\n' >"$TMP/lu-none"; chmod +x "$TMP/lu-none"
+assert_eq "nor one whose script fails"           0 "$(sh -c "$_lu_cmd" >/dev/null 2>&1; printf '%s' "$?")"
+
+# ---- migrate on a server set up before: the guards go into the ini there, the rest stays
+mkdir -p "$TMP/lu-scan"
+printf '%s\n' '; Managed by lompstack' 'memory_limit = 512M' 'session.upload_progress.enabled = 1' >"$TMP/lu-scan/99-server-setup.ini"
+lib_php_cli() { printf '%s/bin/php' "$TMP/fakephp"; }
+lib_php_installed_versions() { printf '8.3\n'; }
+lib_php_restart_workers() { printf 'RESTARTED\n'; }
+lib_install_unattended_write() { UNATTENDED_CHANGED=1; printf 'WRITE %s\n' "$*"; }
+PHP_STALE_SCRIPT="$TMP/lu-no-script"; lib_manifest_set '.params.auto_reboot' false
+UNATTENDED_CONF="$TMP/lu-unattended"; printf 'Unattended-Upgrade::Automatic-Reboot "true";\n' >"$UNATTENDED_CONF"
+_lu_mig() { ( export FAKE_SCAN="$TMP/lu-scan"; OPT_QUIET=0; lib_php_security_migrate 2>&1; printf 'reboot=%s\n' "$INS_AUTO_REBOOT" ); }
+_out="$(_lu_mig)"
+assert_has "migrate writes unattended-upgrades with LSPHP"       "WRITE --lsphp" "$_out"
+assert_has "keeping an automatic reboot the old file had"        "reboot=1" "$_out"
+assert_has "and says what changed"                               "now installs LSPHP updates from the LiteSpeed repository" "$_out"
+_lu_ini="$(cat "$TMP/lu-scan/99-server-setup.ini")"
+assert_has "session upload progress off"                         "session.upload_progress.enabled = 0" "$_lu_ini"
+assert_lacks "in place of the old line"                          "session.upload_progress.enabled = 1" "$_lu_ini"
+assert_has "fatal backtraces off"                                "fatal_error_backtraces = 0" "$_lu_ini"
+assert_has "the server's own tuning left alone"                  "memory_limit = 512M" "$_lu_ini"
+assert_has "the workers restarted to read it"                    "RESTARTED" "$_out"
+assert_has "and that said"                                       "PHP 8.3: session upload progress is off now" "$_out"
+lib_install_unattended_write() { UNATTENDED_CHANGED=0; }
+: >"$UNATTENDED_CONF"
+_out="$(_lu_mig)"
+assert_lacks "run again: no restart"                             "RESTARTED" "$_out"
+assert_has   "and the state said"                                "unattended-upgrades installs LSPHP updates from the LiteSpeed repository" "$_out"
+assert_has   "no reboot made up"                                 "reboot=0" "$_out"
+rm -f "$TMP/lu-scan/99-server-setup.ini"
+_out="$(_lu_mig)"
+assert_has "no drop-in yet: the whole one is written"            "session.upload_progress.enabled = 0" "$(cat "$TMP/lu-scan/99-server-setup.ini" 2>/dev/null)"
+assert_has "with the tuning it has everywhere"                   "opcache.enable = 1" "$(cat "$TMP/lu-scan/99-server-setup.ini" 2>/dev/null)"
+assert_eq "the Turkish of what migrate says" "unattended-upgrades LiteSpeed deposundaki LSPHP güncellemelerini kuruyor" \
+  "$(LIB_LANG=tr; lib_lang_build; lib_tr "unattended-upgrades installs LSPHP updates from the LiteSpeed repository"; printf '%s' "$LIB_TR")"
+
+# ---- "php" in a shell is the LSPHP the sites run, a distribution PHP beside it or not
+if (( CAN_SYMLINK )); then
+  _lu_saved+=$'\n'"$(declare -f lib_php_installed lib_php_default_version)"
+  PHP_CLI_LINK_DIR="$TMP/lu-local-bin"; mkdir -p "$PHP_CLI_LINK_DIR" "$TMP/lu-lsphp/bin" "$TMP/lu-usr-bin"
+  printf '#!/bin/sh\necho lsphp\n' >"$TMP/lu-lsphp/bin/php"; chmod +x "$TMP/lu-lsphp/bin/php"
+  printf '#!/bin/sh\necho distro\n' >"$TMP/lu-usr-bin/php"; chmod +x "$TMP/lu-usr-bin/php"
+  lib_php_cli() { printf '%s/lu-lsphp/bin/php' "$TMP"; }
+  lib_php_installed() { return 0; }
+  lib_php_default_version() { printf '8.3'; }
+  _lu_cli() { ( OPT_QUIET=0; lib_php_cli_migrate 2>&1 ); }
+  assert_false "no link yet: php is not LSPHP"                 lib_php_cli_is_lsphp 8.3
+  _out="$(_lu_cli)"
+  assert_eq  "php links to the LSPHP CLI"                      "$TMP/lu-lsphp/bin/php" "$(readlink "$PHP_CLI_LINK_DIR/php")"
+  assert_eq  "and php83 too"                                   "$TMP/lu-lsphp/bin/php" "$(readlink "$PHP_CLI_LINK_DIR/php83")"
+  assert_has "migrate says so"                                 "is now LSPHP 8.3's CLI" "$_out"
+  assert_true "doctor's test agrees"                           lib_php_cli_is_lsphp 8.3
+  # a server where it pointed at the distribution's PHP (what a link by hand, or alternatives, leave)
+  ln -sfn "$TMP/lu-usr-bin/php" "$PHP_CLI_LINK_DIR/php"
+  assert_false "php linked to the distribution's is not LSPHP" lib_php_cli_is_lsphp 8.3
+  _out="$(_lu_cli)"
+  assert_eq  "that link is replaced"                           "lsphp" "$("$PHP_CLI_LINK_DIR/php")"
+  assert_eq  "the distribution's PHP itself stays"             "distro" "$("$TMP/lu-usr-bin/php")"
+  _out="$(_lu_cli)"
+  assert_has "run again: the state said"                       "\"php\" in a shell is LSPHP 8.3's CLI" "$_out"
+  assert_lacks "nothing changed"                               "is now" "$_out"
+  rm -f "$PHP_CLI_LINK_DIR/php"; printf '#!/bin/sh\necho mine\n' >"$PHP_CLI_LINK_DIR/php"; chmod +x "$PHP_CLI_LINK_DIR/php"
+  _out="$(_lu_cli)"
+  assert_eq  "a file of the operator's own is left"            "mine" "$("$PHP_CLI_LINK_DIR/php")"
+  assert_has "and said"                                        "is a file of its own, not lomp's link" "$_out"
+  assert_false "doctor names it"                               lib_php_cli_is_lsphp 8.3
+  assert_has "install links it"                                'lib_php_cli_links "$PHP_VERSION"' "$(declare -f lib_install_main)"
+  assert_has "migrate too"                                     'lib_php_cli_migrate' "$(declare -f lib_install_migrate)"
+  assert_has "doctor looks"                                    'lib_php_cli_is_lsphp' "$(declare -f _doc_check_lsphp_updates)"
+  PHP_CLI_LINK_DIR="/usr/local/bin"
+  unset -f _lu_cli
+fi
+
+# ---- php-update: the installed LSPHP packages to the repository's latest release, nothing else
+_lu_saved+=$'\n'"$(declare -f lib_php_installed_versions lib_php_full_version _php_update_packages lib_apt_update lib_run lib_require_tools lib_require_installed lib_domains_list lib_php_restart_workers)"
+lib_php_installed_versions() { printf '8.3\n'; }
+lib_php_full_version() { cat "$TMP/lu-fullver"; }
+_php_update_packages() { printf '%s\n' lsphp83 lsphp83-common lsphp83-mysql; }
+lib_apt_update() { printf 'APT-UPDATE\n'; }
+lib_run() { printf 'RUN %s\n' "$*"; if [[ " $* " == *" --only-upgrade "* ]]; then cat "$TMP/lu-newver" >"$TMP/lu-fullver"; fi; }
+lib_require_tools() { :; }; lib_require_installed() { :; }
+lib_domains_list() { :; }
+lib_php_restart_workers() { printf 'RESTARTED\n'; }
+_lu_up() { ( OPT_QUIET=0; lib_php_update_main "$@" 2>&1; printf 'rc=%s\n' "$?" ); }
+printf '8.3.35' >"$TMP/lu-fullver"; printf '8.3.36' >"$TMP/lu-newver"
+_out="$(_lu_up)"
+assert_has "it reads the package lists first"                 "APT-UPDATE" "$_out"
+assert_has "and upgrades only what is installed of LSPHP"     "apt-get install -y -q --only-upgrade -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold lsphp83 lsphp83-common lsphp83-mysql" "$_out"
+assert_has "it says the release it went to"                   "PHP 8.3: 8.3.35 -> 8.3.36" "$_out"
+assert_has "and restarts the workers"                         "RESTARTED" "$_out"
+assert_has "status 0"                                         "rc=0" "$_out"
+_out="$(_lu_up)"
+assert_has "already the latest: said"                         "PHP 8.3: 8.3.36, the latest release in the repository" "$_out"
+assert_lacks "and no restart"                                 "RESTARTED" "$_out"
+assert_has "an unknown option is refused"                     "Unknown option for php-update: --x" "$(_lu_up --x)"
+apt-get() { printf 'Inst lsphp83 [8.3.35-1] (8.3.36-1 LST)\n'; }
+OPT_DRY_RUN=1; _out="$(_lu_up)"; OPT_DRY_RUN=0
+unset -f apt-get
+assert_has   "a dry run shows what apt would install"         "lsphp83 [8.3.35-1] (8.3.36-1" "$_out"
+assert_lacks "a dry run upgrades nothing"                     "--only-upgrade -o" "$_out"
+assert_has   "and says what it would"                         "would upgrade, where the repository has a newer release: lsphp83 lsphp83-common lsphp83-mysql" "$_out"
+assert_has "setup.sh has the command"                         'php-update)     lib_php_update_main' "$(cat "$ROOT/setup.sh")"
+assert_has "the menu offers it as 32"                         '_menu_item 32 "Update PHP' "$(declare -f lib_menu_main)"
+assert_has "and runs it"                                      '32) _menu_run php-update ;;' "$(cat "$ROOT/lib/menu.sh")"
+assert_has "the command reference has it"                     "php-update                    Bring every installed LSPHP version" "$(LIB_LANG=en lib_usage 2>/dev/null)"
+assert_eq  "the menu's line in Turkish"                       "PHP'yi güncelle (her sürümün son yayını; sitelerin PHP'si yeniden başlar)" \
+  "${MENU_TR["Update PHP (latest release of each version; the sites' PHP restarted)"]:-}"
+unset -f _lu_up
+
+eval "$_lu_saved"
+INS_AUTO_REBOOT="$_lu_reboot"
+UNATTENDED_CONF="/etc/apt/apt.conf.d/52server-setup-unattended"; PHP_STALE_SCRIPT="/usr/local/sbin/lomp-lsphp-restart"
+unset -f _lu_proc _lu_m _lu_run _lu_mig
 
 assert_true "no test started the pm2 of this machine: it would have left a daemon behind" pm2_none_started
 assert_true "nor any other program of it that changes the machine or reaches beyond it" machine_none_started

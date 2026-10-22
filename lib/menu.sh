@@ -216,6 +216,9 @@ KOMUTLAR
                                 doğrudan web sunucusundan ve ziyaretçinin yolundan ister, DNS /
                                 bağlantı / TLS / ilk bayt süresini ayırır, önbelleğe ve makinenin
                                 yüküne, belleğine, swap'ına bakar. Hiçbir şeyi değiştirmez
+  php-update                    Kurulu her LSPHP sürümünü depodaki en son yayınına günceller
+                                (8.3.35 -> 8.3.36; 8.3 -> 8.4 asla) ve sitelerin PHP'sini yeniden
+                                başlatır. unattended-upgrades bunu günde bir kez kendisi yapar
   php-cleanup [--php 8.3]       Bir "apt-get install lsphp83*" işlemini geri alır: onun, lomp'un kendi
                                 PHP paketleri dışında eklediklerini siler (derleyici, hata
                                 ayıklama sembolleri, kaynaklar, dağıtımın PHP'si). Listeyi
@@ -493,6 +496,9 @@ COMMANDS
                                 from the web server and the way a visitor goes, split DNS /
                                 connect / TLS / first byte, and look at the cache and at the
                                 machine's load, memory and swap. Changes nothing
+  php-update                    Bring every installed LSPHP version to its latest release in the
+                                repository (8.3.35 -> 8.3.36; never 8.3 -> 8.4) and restart the
+                                sites' PHP. unattended-upgrades does this by itself once a day
   php-cleanup [--php 8.3]       Undo an "apt-get install lsphp83*": purge what it added beyond
                                 lomp's own PHP packages (compiler, debug symbols, sources,
                                 the distribution's PHP). Shows the list and asks first
@@ -856,6 +862,7 @@ lib_menu_main() {
     _menu_item 13 "Restore a site"
     _menu_group "MAINTENANCE"
     _menu_item 14 "Update packages"
+    _menu_item 32 "Update PHP (latest release of each version; the sites' PHP restarted)"
     _menu_item 15 "Update lompstack"
     _menu_item 16 "Re-tune to hardware"
     _menu_item 17 "Notifications"
@@ -892,6 +899,7 @@ lib_menu_main() {
       12) _menu_backup ;;
       13) _menu_restore ;;
       14) _menu_run update ;;
+      32) _menu_run php-update ;;
       15) _menu_run self-update ;;
       16) _menu_run optimize ;;
       22) _menu_run php-cleanup ;;
@@ -2072,6 +2080,7 @@ MENU_TR['Update lompstack']='lompstack'\''i güncelle'
 MENU_TR['Re-tune to hardware']='Donanıma göre yeniden ayarla'
 MENU_TR['Notifications']='Bildirimler'
 MENU_TR['Optional components (Node.js, Python, Netdata, Mail)']='İsteğe bağlı bileşenler (Node.js, Python, Netdata, Posta)'
+MENU_TR['Update PHP (latest release of each version; the sites'\'' PHP restarted)']='PHP'\''yi güncelle (her sürümün son yayını; sitelerin PHP'\''si yeniden başlar)'
 MENU_TR['Remove extra PHP packages (after apt install lsphp83*)']='Fazla PHP paketlerini kaldır (apt install lsphp83* sonrası)'
 MENU_TR['Domain (without www, e.g. example.com)']='Alan adı (www olmadan, örn. example.com)'
 MENU_TR['%s"%s" is not a valid domain name.%s\n']='%s"%s" geçerli bir alan adı değil.%s\n'

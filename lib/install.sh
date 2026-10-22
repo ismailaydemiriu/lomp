@@ -237,7 +237,7 @@ lib_install_main() {
   lib_system_swap_ensure
 
   lib_step "Unattended security updates"
-  lib_install_unattended
+  lib_install_unattended --lsphp
 
   lib_step "Firewall (UFW)"
   lib_install_ufw
@@ -328,27 +328,63 @@ lib_install_base_packages() {
   lib_ok "Base packages present"
 }
 
-lib_install_unattended() {
-  local reboot="false"; (( INS_AUTO_REBOOT )) && reboot="true"
-  printf 'APT::Periodic::Update-Package-Lists "1";\nAPT::Periodic::Unattended-Upgrade "1";\nAPT::Periodic::Download-Upgradeable-Packages "1";\nAPT::Periodic::AutocleanInterval "7";\n' \
-    | lib_write_file /etc/apt/apt.conf.d/20auto-upgrades 0644 root:root
-  cat <<EOF | lib_write_file /etc/apt/apt.conf.d/52server-setup-unattended 0644 root:root
-// Managed by lompstack - security updates only, no automatic reboot unless --auto-reboot
+UNATTENDED_CONF="/etc/apt/apt.conf.d/52server-setup-unattended"
+UNATTENDED_CHANGED=0
+
+# The distribution's security updates and, on a web server (--lsphp), LSPHP from the LiteSpeed
+# repository: PHP's own security releases reach a server only from there. That repository also
+# carries OpenLiteSpeed and two modules of it; those stay with "lomp update", which tests the
+# configuration and restarts the server with them. The blacklist is matched against every
+# package name, from any origin; none of the distribution's begins so.
+lib_install_render_unattended() {   # [--lsphp]
+  local reboot="false" origin="" black=""
+  (( INS_AUTO_REBOOT )) && reboot="true"
+  if [[ "${1:-}" == "--lsphp" ]]; then
+    origin=$'\n  "LiteSpeedTech:${distro_codename}";'
+    black=$'Unattended-Upgrade::Package-Blacklist {\n  "^openlitespeed$";\n  "^ols-";\n};\n'
+  fi
+  cat <<EOF
+// Managed by lompstack - security updates$( [[ -n "$origin" ]] && printf ' and LSPHP') only, no automatic reboot unless --auto-reboot
 #clear Unattended-Upgrade::Allowed-Origins;
 Unattended-Upgrade::Allowed-Origins {
   "\${distro_id}:\${distro_codename}-security";
   "\${distro_id}ESMApps:\${distro_codename}-apps-security";
-  "\${distro_id}ESM:\${distro_codename}-infra-security";
+  "\${distro_id}ESM:\${distro_codename}-infra-security";${origin}
 };
-Unattended-Upgrade::Automatic-Reboot "${reboot}";
+${black}Unattended-Upgrade::Automatic-Reboot "${reboot}";
 Unattended-Upgrade::Automatic-Reboot-Time "04:30";
 Unattended-Upgrade::Remove-Unused-Dependencies "true";
 Unattended-Upgrade::Remove-Unused-Kernel-Packages "true";
 Unattended-Upgrade::MinimalSteps "true";
 Unattended-Upgrade::SyslogEnable "true";
 EOF
+}
+
+# Sets UNATTENDED_CHANGED. With --lsphp also the apt hook that restarts the PHP workers an update
+# leaves on the old files (lib/php.sh).
+lib_install_unattended_write() {   # [--lsphp]
+  UNATTENDED_CHANGED=0
+  printf 'APT::Periodic::Update-Package-Lists "1";\nAPT::Periodic::Unattended-Upgrade "1";\nAPT::Periodic::Download-Upgradeable-Packages "1";\nAPT::Periodic::AutocleanInterval "7";\n' \
+    | lib_write_file /etc/apt/apt.conf.d/20auto-upgrades 0644 root:root
+  (( LIB_FILE_CHANGED )) && UNATTENDED_CHANGED=1
+  lib_install_render_unattended "$@" | lib_write_file "$UNATTENDED_CONF" 0644 root:root
+  (( LIB_FILE_CHANGED )) && UNATTENDED_CHANGED=1
+  if [[ "${1:-}" == "--lsphp" ]]; then
+    lib_php_stale_install
+    (( PHP_STALE_CHANGED )) && UNATTENDED_CHANGED=1
+  fi
+  return 0
+}
+
+lib_install_unattended() {   # [--lsphp]
+  local reboot="false"; (( INS_AUTO_REBOOT )) && reboot="true"
+  lib_install_unattended_write "$@"
   lib_systemctl enable unattended-upgrades >/dev/null 2>&1 || true
-  lib_ok "unattended-upgrades: security updates only, automatic reboot ${reboot} (reboot-required is reported by the daily healthcheck)"
+  if [[ "${1:-}" == "--lsphp" ]]; then
+    lib_ok "unattended-upgrades: security updates and LSPHP updates (the PHP workers left on the old files are restarted), automatic reboot ${reboot} (reboot-required is reported by the daily healthcheck)"
+  else
+    lib_ok "unattended-upgrades: security updates only, automatic reboot ${reboot} (reboot-required is reported by the daily healthcheck)"
+  fi
 }
 
 lib_install_ufw() {
@@ -769,6 +805,10 @@ lib_install_migrate() {
   # the site firewall, where it is on: its loader and unit as this release writes them - and
   # on again where an install re-run dropped the setting
   lib_sitefw_migrate
+  # PHP's security releases: installed by unattended-upgrades, the workers restarted after them,
+  # and the request-parsing guards in every version's ini
+  lib_php_security_migrate
+  lib_php_cli_migrate
   lib_domain_isolation_repair
   if [[ -z "$DOMAIN_ISOLATED" ]]; then lib_ok "Every site's home is closed to the other sites' users"
   elif (( OPT_DRY_RUN )); then lib_info "[dry-run] would close these sites' homes to the other sites' users: ${DOMAIN_ISOLATED}"

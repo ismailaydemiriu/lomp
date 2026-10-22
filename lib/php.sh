@@ -178,11 +178,13 @@ display_errors = Off
 display_startup_errors = Off
 log_errors = On
 error_reporting = E_ALL & ~E_DEPRECATED & ~E_STRICT
+fatal_error_backtraces = 0
 realpath_cache_size = 4096K
 realpath_cache_ttl = 600
 session.cookie_httponly = 1
 session.use_strict_mode = 1
 session.gc_maxlifetime = 1440
+session.upload_progress.enabled = 0
 allow_url_include = Off
 cgi.fix_pathinfo = 0
 opcache.enable = 1
@@ -228,17 +230,238 @@ lib_php_restart_workers() {
   lib_debug "lsphp workers signalled to restart"
 }
 
-# /usr/local/bin/php -> default LSPHP CLI (only when no distro php exists), plus php<ver> links.
+# =============================================================================
+#  LSPHP security updates and the workers they leave on the old files
+# =============================================================================
+# unattended-upgrades installs LSPHP updates from the LiteSpeed repository
+# (lib_install_render_unattended names it). An lsphp process keeps the PHP it was started with:
+# after a package replaced its binary or one of its extensions, it serves with the old code
+# until it ends. apt runs the script below after every dpkg run - unattended-upgrades, "lomp
+# update", an apt-get by hand - and it ends those processes, those alone. OpenLiteSpeed starts
+# new ones from the new files with the next request.
+PHP_STALE_SCRIPT="/usr/local/sbin/lomp-lsphp-restart"
+PHP_APT_HOOK="/etc/apt/apt.conf.d/53lompstack-lsphp-restart"
+# What PHP is to read before it parses a request, against the request-parsing paths php.net
+# named for CVE-2026-109619 (21 Oct 2026): the session upload progress hook, and on PHP 8.5 the
+# fatal error backtraces. An older PHP passes over a setting it does not know.
+PHP_INI_GUARDS=("session.upload_progress.enabled|0" "fatal_error_backtraces|0")
+
+lib_php_render_stale_script() {
+  cat <<EOF
+#!/bin/sh
+# Managed by lompstack - apt runs it after every dpkg run (${PHP_APT_HOOK}).
+# Ends the lsphp processes that still run PHP files a package replaced: their binary or an
+# extension shows as "(deleted)" in their memory map. OpenLiteSpeed starts new ones from the new
+# files with the next request. --list names them and ends nothing. Never fails: apt would
+# report that as an error of its own.
+proc="\${LOMP_PROC:-/proc}"; pids=""
+for m in "\$proc"/[0-9]*/maps; do
+  d="\${m%/maps}"; c=""
+  read -r c 2>/dev/null <"\$d/comm" || continue
+  [ "\$c" = lsphp ] || continue
+  grep -q ' ${LSWS_HOME}/lsphp[0-9][0-9]/.* (deleted)\$' "\$m" 2>/dev/null || continue
+  pids="\$pids \${d##*/}"
+done
+if [ "\${1:-}" = --list ]; then
+  [ -z "\$pids" ] || echo \$pids
+  exit 0
+fi
+[ -n "\$pids" ] || exit 0
+kill \$pids 2>/dev/null
+msg="lompstack: ended the lsphp processes still running replaced PHP files:\$pids"
+echo "\$msg"
+logger -t lompstack "\$msg" 2>/dev/null
+exit 0
+EOF
+}
+
+lib_php_render_apt_hook() {
+  printf '// Managed by lompstack - ends the lsphp processes a package update left on the old PHP files\n'
+  printf 'DPkg::Post-Invoke { "if [ -x %s ]; then %s || true; fi"; };\n' "$PHP_STALE_SCRIPT" "$PHP_STALE_SCRIPT"
+}
+
+# The script and the apt hook that runs it. Sets PHP_STALE_CHANGED.
+PHP_STALE_CHANGED=0
+lib_php_stale_install() {
+  PHP_STALE_CHANGED=0
+  lib_php_render_stale_script | lib_write_file "$PHP_STALE_SCRIPT" 0755 root:root
+  (( LIB_FILE_CHANGED )) && PHP_STALE_CHANGED=1
+  lib_php_render_apt_hook | lib_write_file "$PHP_APT_HOOK" 0644 root:root
+  (( LIB_FILE_CHANGED )) && PHP_STALE_CHANGED=1
+  return 0
+}
+
+# The guards in the version's ini as it is, the rest of it left alone (a server set up before
+# them). Writes the whole drop-in where there is none yet. Sets PHP_INI_CHANGED.
+lib_php_ini_guards() {   # version
+  local g="" target=""
+  PHP_INI_CHANGED=0
+  lib_php_ini_paths "$1"
+  if [[ -n "$PHP_INI_SCAN_DIR" ]]; then
+    target="${PHP_INI_SCAN_DIR%/}/99-server-setup.ini"
+    if [[ ! -f "$target" ]]; then lib_php_write_ini "$1"; return 0; fi
+  elif [[ -n "$PHP_INI_FILE" ]]; then
+    target="$PHP_INI_FILE"
+  else
+    return 0
+  fi
+  for g in "${PHP_INI_GUARDS[@]}"; do
+    lib_set_kv "$target" "${g%%|*}" "${g#*|}" "="
+    (( LIB_FILE_CHANGED )) && PHP_INI_CHANGED=1
+  done
+  return 0
+}
+
+# What migrate does for PHP's security: unattended-upgrades installs LSPHP updates, the workers
+# an update leaves on the old files are ended, and every version reads the guards.
+lib_php_security_migrate() {
+  local v="" changed=() stale=""
+  if [[ "$(lib_manifest_get '.params.auto_reboot')" == "true" ]] \
+    || grep -qs 'Automatic-Reboot "true"' "$UNATTENDED_CONF"; then INS_AUTO_REBOOT=1; fi
+  lib_install_unattended_write --lsphp
+  if (( UNATTENDED_CHANGED )); then
+    if (( OPT_DRY_RUN )); then lib_info "[dry-run] would have unattended-upgrades install LSPHP updates from the LiteSpeed repository too, and restart the PHP workers they leave on the old files"
+    else lib_ok "unattended-upgrades now installs LSPHP updates from the LiteSpeed repository too, and the PHP workers they leave on the old files are restarted"; fi
+  else
+    lib_ok "unattended-upgrades installs LSPHP updates from the LiteSpeed repository"
+  fi
+  for v in $(lib_php_installed_versions); do
+    lib_php_ini_guards "$v"
+    (( PHP_INI_CHANGED )) && changed+=("$v")
+  done
+  if ((${#changed[@]})); then
+    if (( OPT_DRY_RUN )); then lib_info "[dry-run] PHP ${changed[*]}: would switch session upload progress off (CVE-2026-109619) and restart the PHP workers"
+    else
+      lib_php_restart_workers
+      lib_ok "PHP ${changed[*]}: session upload progress is off now (CVE-2026-109619); the PHP workers were restarted"
+    fi
+  elif (( ! OPT_DRY_RUN )); then
+    # an update installed before the hook was there: its workers still run the old files
+    if [[ -x "$PHP_STALE_SCRIPT" ]]; then stale="$("$PHP_STALE_SCRIPT" --list 2>/dev/null || true)"; fi
+    if [[ -n "$stale" ]]; then
+      "$PHP_STALE_SCRIPT" >/dev/null 2>&1 || true
+      lib_ok "PHP workers that still ran the files an update replaced were restarted"
+    fi
+  fi
+  return 0
+}
+
+# =============================================================================
+#  php-update - the PHP of every installed version to the repository's latest release
+# =============================================================================
+# The same minor version, its latest release: 8.3.35 -> 8.3.36, never 8.3 -> 8.4 (that is
+# "lomp add --php" per site). Only the LSPHP packages that are installed; nothing else of the
+# server. unattended-upgrades does this by itself once a day; this is for now.
+_php_update_packages() {   # the installed LSPHP packages, one per line
+  { dpkg-query -W -f '${db:Status-Abbrev} ${Package}\n' 'lsphp*' 2>/dev/null || true; } \
+    | awk '$1 == "ii" && $2 ~ /^lsphp[0-9][0-9]/ { print $2 }'
+}
+
+lib_php_update_main() {
+  local a="" v="" d="" code="" changed=0
+  local -a pkgs=() versions=() sites=() broke=()
+  local -A was=() code_before=()
+  while (($# > 0)); do
+    a="$1"; shift
+    case "$a" in
+      -h|--help|help) lib_tr "Usage: lomp php-update"; printf '%s\n' "$LIB_TR"; return 0 ;;
+      *) lib_die "Unknown option for php-update: ${a}" "" "lomp php-update" ;;
+    esac
+  done
+  lib_require_tools
+  lib_require_installed
+  for v in $(lib_php_installed_versions); do versions+=("$v"); was["$v"]="$(lib_php_full_version "$v")"; done
+  ((${#versions[@]})) || { lib_ok "No LSPHP version is installed"; return 0; }
+  mapfile -t pkgs < <(_php_update_packages)
+  ((${#pkgs[@]})) || lib_die "No LSPHP package is installed through apt" "" "lomp status lists the PHP versions"
+  LIB_APT_UPDATED=0
+  lib_apt_update
+  if (( OPT_DRY_RUN )); then
+    lib_info "[dry-run] would upgrade, where the repository has a newer release: ${pkgs[*]}"
+    { LC_ALL=C apt-get -s install --only-upgrade "${pkgs[@]}" 2>/dev/null || true; } | awk '$1 == "Inst" { print "        " $2, $3, $4 }'
+    return 0
+  fi
+  # the sites' answers before, so that one PHP no longer serves after is named
+  while read -r d; do
+    [[ -n "$d" ]] || continue
+    lib_domain_state_load "$d" || continue
+    [[ "$D_MODE" == "php" || "$D_MODE" == "wordpress" ]] || continue
+    sites+=("$d"); code_before["$d"]="$(_harden_code "$d")"
+  done < <(lib_domains_list)
+  lib_run env DEBIAN_FRONTEND=noninteractive apt-get install -y -q --only-upgrade \
+      -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold "${pkgs[@]}" \
+    || lib_die "apt-get could not upgrade PHP" "see the log" "fix apt problems (apt-get -f install) and run it again"
+  for v in "${versions[@]}"; do
+    if [[ "$(lib_php_full_version "$v")" != "${was[$v]}" ]]; then
+      changed=1; lib_ok "PHP ${v}: ${was[$v]:-?} -> $(lib_php_full_version "$v")"
+    else
+      lib_ok "PHP ${v}: ${was[$v]:-?}, the latest release in the repository"
+    fi
+  done
+  if (( ! changed )); then return 0; fi
+  # every worker, not only those apt's hook found on replaced files: the next request is the new PHP
+  lib_php_restart_workers
+  lib_ok "PHP workers restarted: the next request is served by the new release"
+  for d in "${sites[@]}"; do
+    code="$(_harden_code "$d")"
+    if [[ "${code_before[$d]}" =~ ^[23] && ! "$code" =~ ^[23] ]]; then broke+=("${d} (HTTP ${code_before[$d]} -> ${code})"); fi
+  done
+  if ((${#broke[@]})); then
+    lib_warn "These sites answered before and do not now: ${broke[*]}"
+    lib_note "Their error log says why (lomp logs <domain>)."
+    return 1
+  fi
+  ((${#sites[@]} == 0)) || lib_ok "Every PHP site answers as it did before (${#sites[@]})"
+  return 0
+}
+
+# "php" typed in a shell is the default LSPHP's CLI, the PHP the sites run, with the same
+# extensions and ini: /usr/local/bin/php links to it, plus php<ver> for every version.
+# /usr/local/bin comes before /usr/bin in every PATH Ubuntu sets (login shells, sudo's
+# secure_path, lomp's cron file), so a distribution PHP that came with some package
+# (php8.3-cli by Recommends) stays installed and is no longer what "php" starts. A symlink there
+# is replaced; a file of the operator's own is left, and said. Sets PHP_CLI_LINKED when "php"
+# changed, PHP_CLI_KEPT when such a file kept it.
+PHP_CLI_LINK_DIR="/usr/local/bin"
+PHP_CLI_LINKED=0
+PHP_CLI_KEPT=0
 lib_php_cli_links() {
-  local ver="$1" cli=""
+  local ver="$1" cli="" link="${PHP_CLI_LINK_DIR}/php"
+  PHP_CLI_LINKED=0; PHP_CLI_KEPT=0
   cli="$(lib_php_cli "$ver")"
   [[ -x "$cli" ]] || return 0
+  if [[ -e "$link" && ! -L "$link" ]]; then PHP_CLI_KEPT=1
+  elif [[ "$(readlink "$link" 2>/dev/null || true)" != "$cli" ]]; then PHP_CLI_LINKED=1; fi
   if (( OPT_DRY_RUN )); then lib_debug "dry-run: would link CLI for PHP ${ver}"; return 0; fi
-  ln -sfn "$cli" "/usr/local/bin/php${ver//./}"
-  if [[ ! -e /usr/bin/php ]]; then
-    if [[ ! -e /usr/local/bin/php || "$(readlink -f /usr/local/bin/php)" == "$LSWS_HOME"/lsphp* ]]; then
-      ln -sfn "$cli" /usr/local/bin/php
-    fi
+  ln -sfn "$cli" "${PHP_CLI_LINK_DIR}/php${ver//./}"
+  if (( PHP_CLI_KEPT )); then
+    lib_warn "${link} is a file of its own, not lomp's link: \"php\" in a shell runs it, not LSPHP ${ver} (remove it and run 'sudo lomp update' to have LSPHP there)"
+  elif (( PHP_CLI_LINKED )); then
+    ln -sfn "$cli" "$link"
+  fi
+  return 0
+}
+
+# Is "php" in a shell the LSPHP CLI? (doctor)
+lib_php_cli_is_lsphp() {   # version
+  local p="" want=""
+  p="$(readlink -f "${PHP_CLI_LINK_DIR}/php" 2>/dev/null || true)"
+  want="$(readlink -f "$(lib_php_cli "$1")" 2>/dev/null || true)"
+  [[ -n "$p" && "$p" == "$want" ]]
+}
+
+# What migrate does: a server set up before has "php" as the distribution's where one was there.
+lib_php_cli_migrate() {
+  local ver=""
+  ver="$(lib_php_default_version)"
+  lib_php_installed "$ver" || return 0
+  lib_php_cli_links "$ver"
+  if (( PHP_CLI_KEPT )); then return 0
+  elif (( PHP_CLI_LINKED )); then
+    if (( OPT_DRY_RUN )); then lib_info "[dry-run] \"php\" in a shell would become LSPHP ${ver}'s CLI (${PHP_CLI_LINK_DIR}/php)"
+    else lib_ok "\"php\" in a shell is now LSPHP ${ver}'s CLI, the PHP the sites run (${PHP_CLI_LINK_DIR}/php)"; fi
+  else
+    lib_ok "\"php\" in a shell is LSPHP ${ver}'s CLI"
   fi
   return 0
 }
