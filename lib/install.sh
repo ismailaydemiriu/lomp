@@ -635,7 +635,7 @@ lib_fail2ban_lists_update() {
   (( OPT_DRY_RUN )) && { lib_info "[dry-run] would fetch Google's crawler ranges and Cloudflare's"; return 0; }
   if tmp="$(lib_fail2ban_google_download)" && [[ -n "$tmp" ]]; then
     { printf '# Google crawler ranges - fetched %s\n' "$(lib_iso_now)"; sort -u "$tmp"; } >"${tmp}.h"
-    if [[ "$(grep -v '^#' "$F2B_GOOGLE_IPS" 2>/dev/null)" != "$(grep -v '^#' "${tmp}.h")" ]]; then
+    if [[ "$(grep -v '^#' "$F2B_GOOGLE_IPS" 2>/dev/null || true)" != "$(grep -v '^#' "${tmp}.h" || true)" ]]; then
       lib_write_file "$F2B_GOOGLE_IPS" 0644 root:root <"${tmp}.h"
     fi
     rm -f "$tmp" "${tmp}.h"
@@ -646,7 +646,7 @@ lib_fail2ban_lists_update() {
   if [[ ! -s "$CF_IPS_FILE" ]]; then
     if tmp="$(lib_cf_ips_download)" && [[ -n "$tmp" ]]; then
       { printf '# Cloudflare ranges - fetched %s\n' "$(lib_iso_now)"; sort -u "$tmp"; } >"${tmp}.h"
-      if [[ "$(grep -v '^#' "$F2B_CF_IPS" 2>/dev/null)" != "$(grep -v '^#' "${tmp}.h")" ]]; then
+      if [[ "$(grep -v '^#' "$F2B_CF_IPS" 2>/dev/null || true)" != "$(grep -v '^#' "${tmp}.h" || true)" ]]; then
         lib_write_file "$F2B_CF_IPS" 0644 root:root <"${tmp}.h"
       fi
       rm -f "$tmp" "${tmp}.h"
@@ -657,8 +657,10 @@ lib_fail2ban_lists_update() {
   return 0
 }
 
-_fail2ban_cf_list()     { if [[ -s "$CF_IPS_FILE" ]]; then grep -v '^#' "$CF_IPS_FILE"; else grep -v '^#' "$F2B_CF_IPS" 2>/dev/null; fi; return 0; }
-_fail2ban_google_list() { grep -v '^#' "$F2B_GOOGLE_IPS" 2>/dev/null; return 0; }
+# (a list not fetched yet is no list: grep's status 2 would reach the ERR trap in the reader's
+# process substitution)
+_fail2ban_cf_list()     { if [[ -s "$CF_IPS_FILE" ]]; then grep -v '^#' "$CF_IPS_FILE" || true; else grep -v '^#' "$F2B_CF_IPS" 2>/dev/null || true; fi; }
+_fail2ban_google_list() { grep -v '^#' "$F2B_GOOGLE_IPS" 2>/dev/null || true; }
 
 lib_fail2ban_render_allow_jail() {
   local extra="$FAIL2BAN_IGNORE_IP" a=""

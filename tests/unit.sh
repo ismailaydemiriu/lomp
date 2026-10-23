@@ -14641,6 +14641,13 @@ assert_eq  "every continuation line is indented"              "0" "$(sed -n '/^i
 mv "$CF_IPS_FILE" "$TMP/fb/cf.saved"; printf '104.16.0.0/13\n' >"$F2B_CF_IPS"
 assert_has "no Cloudflare mode: its own copy of the ranges"   "           104.16.0.0/13" "$(lib_fail2ban_render_allow_jail)"
 mv "$TMP/fb/cf.saved" "$CF_IPS_FILE"
+# a fresh server has neither list yet: grep's status 2 reached the ERR trap of the reader's
+# process substitution (CI's install --dry-run printed two "FAILED" blocks)
+mv "$F2B_GOOGLE_IPS" "$TMP/fb/g.saved"; mv "$F2B_CF_IPS" "$TMP/fb/fcf.saved"; mv "$CF_IPS_FILE" "$TMP/fb/cf.saved"
+_out="$( set -E; trap 'echo TRAPPED' ERR; lib_fail2ban_render_allow_jail 2>&1 )"
+assert_lacks "no list yet: nothing fails on the way"           "TRAPPED" "$_out"
+assert_has   "and this machine is still in"                    "ignoreip = 127.0.0.1/8" "$_out"
+mv "$TMP/fb/g.saved" "$F2B_GOOGLE_IPS"; mv "$TMP/fb/fcf.saved" "$F2B_CF_IPS"; mv "$TMP/fb/cf.saved" "$CF_IPS_FILE"
 # an older release's base jails carried ignoreip; read after the allow file, it would win
 printf '[DEFAULT]\nbackend = systemd\nignoreip = 127.0.0.1/8 ::1\nbantime = 1h\n' >"$FAIL2BAN_JAIL_FILE"
 lib_fail2ban_allow_write >/dev/null 2>&1
