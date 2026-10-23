@@ -205,8 +205,10 @@ handed over:
 sudo lomp fix-owner example.com     # or --all for every site; item 21 in the menu does the same
 ```
 
-Only what belongs to someone else changes; `logs` stays root's and the file modes stay as they
-are. A device node and a file that has a second name outside the site (a hard link: pnpm
+Only what belongs to someone else changes hands, and `logs` stays root's. What comes in open -
+777 directories and 666 files, from WinSCP's permission setting or an archive made elsewhere -
+loses write access for group and others (777 -> 755, 666 -> 644), as the site's user, by hand
+and by itself alike; read access stays, and so does a mode that is already closed. A device node and a file that has a second name outside the site (a hard link: pnpm
 installing from root's store, `cp -al`) are never handed over, by hand or by itself: the
 command lists them, and `doctor` names a site the automatic hand-over stopped at. A file whose
 names are all inside the site - the `esbuild` binary npm installs, say - is handed over like

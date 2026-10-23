@@ -5337,6 +5337,7 @@ printf 'jpg' >"$_fo_h/public_html/wp-content/uploads/a.jpg"
 printf 'zip' >"$_fo_h/site.zip"
 printf 'log\n' >"$_fo_ld/access.log"
 if (( CAN_SYMLINK )); then ln -s "$_fo_ld" "$_fo_h/logs"; else mkdir -p "$_fo_h/logs"; printf 'log\n' >"$_fo_h/logs/access.log"; fi
+chmod -R go-w "$_fo_h" "$_fo_ld"   # whatever the runner's umask: nothing in it is open to begin with
 _fo_hp="$(cd "$_fo_h" && pwd -P)"
 read -r _fo_u _fo_g < <(stat -c '%u %g' "$_fo_h/public_html/index.php")
 _fo_mine="${_fo_u} ${_fo_g}"; _fo_other="$(( _fo_u + 1 )) ${_fo_g}"
@@ -5367,6 +5368,62 @@ _fo_ids="$_fo_mine"; : >"$_fo_calls"
 assert_eq  "a site whose files are all its own exits 0" 0 "$(_fo own.example.com)"
 assert_has "and says so" "own.example.com: everything already belongs to own_example_com" "$(cat "$_fo_out")"
 assert_eq  "without starting chown: nothing is re-dated" "" "$(cat "$_fo_calls")"
+
+# What came in open - WinSCP's 777, an archive's 666 - loses write for group and others, as the
+# site's user; read and execute stay, and so does a mode closed further, and logs/.
+if [[ "${OSTYPE:-}" != msys* && "${OSTYPE:-}" != cygwin* ]]; then
+  mkdir -p "$_fo_h/public_html/open/deeper"; printf 'o' >"$_fo_h/public_html/open/a.php"; printf 'x' >"$_fo_h/public_html/open/run.sh"
+  mkdir -p "$_fo_h/public_html/shut"; printf 'l' >"$_fo_ld/open.log"
+  chmod 0777 "$_fo_h/public_html/open" "$_fo_h/public_html/open/run.sh"; chmod 0775 "$_fo_h/public_html/open/deeper"
+  chmod 0666 "$_fo_h/public_html/open/a.php" "$_fo_ld/open.log"; chmod 1777 "$_fo_h/public_html/shut"; chmod 0700 "$_fo_h/private"
+  if (( ! CAN_SYMLINK )); then printf 'l' >"$_fo_h/logs/open.log"; chmod 0666 "$_fo_h/logs/open.log"; fi
+  _fo_m() { stat -c %a "$@" | tr '\n' ' '; }
+  : >"$_fo_calls"; : >"$RUNUSER_LOG"
+  OPT_DRY_RUN=1
+  assert_eq  "a dry run of a site with open modes exits 0" 0 "$(_fo own.example.com)"
+  assert_has "and counts what a real run would close" "[dry-run] own.example.com: would take write access for group and others away from 5 files and directories (777 -> 755, 666 -> 644)" "$(cat "$_fo_out")"
+  assert_lacks "with nothing to hand over, nothing is said about it" "would hand" "$(cat "$_fo_out")"
+  assert_eq  "and changes no mode" "777 775 666 777 1777 " "$(cd "$_fo_h/public_html" && _fo_m open open/deeper open/a.php open/run.sh shut)"
+  OPT_DRY_RUN=0
+  assert_eq  "a site whose files are its own but open exits 0" 0 "$(_fo own.example.com)"
+  assert_has "and says what it closed" "own.example.com: write access for group and others taken away from 5 files and directories (777 -> 755, 666 -> 644)" "$(cat "$_fo_out")"
+  assert_lacks "not that everything was in order already" "everything already belongs" "$(cat "$_fo_out")"
+  assert_eq  "777 becomes 755, 775 too, 666 becomes 644, a sticky 1777 keeps its sticky bit" "755 755 644 755 1755 " "$(cd "$_fo_h/public_html" && _fo_m open open/deeper open/a.php open/run.sh shut)"
+  assert_eq  "a mode closed further stays as it is" "700" "$(_fo_m "$_fo_h/private" | tr -d ' ')"
+  assert_eq  "what logs/ leads to is not touched" "666" "$(_fo_m "$_fo_ld/open.log" | tr -d ' ')"
+  if (( ! CAN_SYMLINK )); then assert_eq "nor logs/ as a directory" "666" "$(_fo_m "$_fo_h/logs/open.log" | tr -d ' ')"; fi
+  assert_eq  "without starting chown" "" "$(cat "$_fo_calls")"
+  assert_has "the chmod runs as the site's user" "-u own_example_com -- env -C / PATH=" "$(cat "$RUNUSER_LOG")"
+  assert_has "and takes write from group and others only" "-exec chmod go-w {} +" "$(cat "$RUNUSER_LOG")"
+  assert_has "it is in the log" "fix-owner own.example.com: chmod go-w, as own_example_com, what group or others may write to in ${_fo_h} (5)" "$(cat "$LOG_FILE")"
+  assert_eq  "a second run has nothing to do" 0 "$(_fo own.example.com)"
+  assert_has "and says so" "own.example.com: everything already belongs to own_example_com" "$(cat "$_fo_out")"
+  # a chmod that cannot close it (an immutable file): said, and the run fails
+  _fo_cl_orig="$(declare -f _domain_fix_owner_close)"
+  eval '_domain_fix_owner_close() { return 1; }'
+  chmod 0777 "$_fo_h/public_html/open"
+  assert_eq  "what stays open after the run is an error" 1 "$(_fo own.example.com)"
+  assert_has "named as such" "own.example.com: 1 file or directory can still be written by group or others" "$(cat "$_fo_out")"
+  eval "$_fo_cl_orig"
+  (
+    LIB_LANG=tr; LIB_TR_BUILT=0; lib_lang_build
+    lib_tr "own.example.com: write access for group and others taken away from 5 files and directories (777 -> 755, 666 -> 644)"
+    printf '%s\n' "$LIB_TR"
+  ) >"$_fo_out"
+  assert_eq  "in Turkish, the count with it" "own.example.com: 5 dosya ve dizin için grubun ve herkesin yazma izni kaldırıldı (777 -> 755, 666 -> 644)" "$(cat "$_fo_out")"
+  # the minute pass closes what an upload brought open, in the same pass as the chown (the group
+  # stands in for somebody else's here: the chown is a fake, the chmod is real)
+  _fo_ids="${_fo_u} $(( _fo_g + 1 ))"; : >"$_fo_calls"
+  _fo_prev="$(trap -p ERR || true)"; trap - ERR; set +e
+  ( set -Eeuo pipefail; shopt -s lastpipe; OPT_QUIET=0; lib_domain_state_reset; lib_domain_fix_owner_auto ) >/dev/null 2>&1
+  set -e; [[ -z "$_fo_prev" ]] || eval "$_fo_prev"
+  assert_has "the pass starts the chown" "call -h -- own_example_com:own_example_com" "$(cat "$_fo_calls")"
+  assert_eq  "and closes the upload's 777 too" "755" "$(_fo_m "$_fo_h/public_html/open" | tr -d ' ')"
+  rm -f "$STATE_DIR/domains/own.example.com/fix-owner.auto"
+  rm -rf "$_fo_h/public_html/open" "$_fo_h/public_html/shut" "$_fo_ld/open.log" "$_fo_h/logs/open.log"
+  chmod 0755 "$_fo_h/private"; chmod -R go-w "$_fo_h"
+  _fo_ids="$_fo_mine"
+fi
 
 _fo_ids="$_fo_other"; : >"$_fo_calls"
 OPT_DRY_RUN=1
@@ -5663,8 +5720,14 @@ if (( EUID == 0 )) && [[ "${OSTYPE:-}" != msys* && "${OSTYPE:-}" != cygwin* ]] &
   ln -s "$_fo_v/dir" "$_fo_r/public_html/deep/dir-link"
   ln -s "$_fo_v/secret" "$_fo_r/public_html/deep/er/file-link"
   _fo_ids="$(id -u nobody) $(id -g nobody)"
+  chmod -R go-w "$_fo_r"; chmod 0777 "$_fo_r/public_html/deep"; chmod 0666 "$_fo_r/public_html/deep/er/page.html"
+  chmod 0666 "$_fo_v/secret"; chmod 0777 "$_fo_v/dir"
   assert_eq  "a real run exits 0" 0 "$(_fo real.example.com)"
   assert_has "and reports what it handed over" "files and directories handed to nobody:" "$(cat "$_fo_out")"
+  assert_has "and what it closed" "real.example.com: write access for group and others taken away from 2 files and directories" "$(cat "$_fo_out")"
+  assert_eq  "an uploaded 777 directory is 755 now, its 666 file 644, both the site user's" "755 nobody 644 nobody" \
+    "$(stat -c '%a %U' "$_fo_r/public_html/deep" "$_fo_r/public_html/deep/er/page.html" | tr '\n' ' ' | sed 's/ $//')"
+  assert_eq  "what a link led to keeps its mode" "666 777" "$(stat -c %a "$_fo_v/secret") $(stat -c %a "$_fo_v/dir")"
   printf 'r' >"$_fo_r/public_html/one-more.txt"
   assert_eq  "one more upload" 0 "$(_fo real.example.com)"
   assert_has "is one file, in the singular" "real.example.com: 1 file or directory handed to nobody:" "$(cat "$_fo_out")"
@@ -5679,8 +5742,11 @@ if (( EUID == 0 )) && [[ "${OSTYPE:-}" != msys* && "${OSTYPE:-}" != cygwin* ]] &
   assert_has "and says so" "real.example.com: everything already belongs to nobody" "$(cat "$_fo_out")"
   # ... and by itself: a new upload as root, its wp-config.php with it
   mkdir -p "$_fo_r/public_html/up"; printf 'u' >"$_fo_r/public_html/up/new.php"
+  chmod 0777 "$_fo_r/public_html/up"; chmod 0666 "$_fo_r/public_html/up/new.php"
   assert_eq  "by itself: a pass exits 0" 0 "$(_fa)"
   assert_has "and says what it handed over" "real.example.com: 2 files and directories handed to nobody:" "$(cat "$_fo_out")"
+  assert_has "and what it closed" "real.example.com: write access for group and others taken away from 2 files and directories (777 -> 755, 666 -> 644)" "$(cat "$_fo_out")"
+  assert_eq  "the upload's 777 and 666 are 755 and 644" "755 644" "$(stat -c %a "$_fo_r/public_html/up" "$_fo_r/public_html/up/new.php" | tr '\n' ' ' | sed 's/ $//')"
   assert_eq  "nothing in the home but logs/ is root's after it" "" "$(find "$_fo_r" -path "$_fo_r/logs" -prune -o -uid 0 -print)"
   assert_eq  "logs/ still is" "0 0" "$(stat -c '%u %g' "$_fo_r/logs")"
   printf '<?php // uploaded as root\n' >"$_fo_r/public_html/wp-config.php"; chmod 0644 "$_fo_r/public_html/wp-config.php"

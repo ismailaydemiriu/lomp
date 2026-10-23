@@ -1647,8 +1647,9 @@ lib_domain_fix_owner_usage() {
 Kullanım: setup.sh fix-owner <domain>... | --all
           setup.sh fix-owner --auto on|off
   root olarak yüklemeden sonra (WinSCP, scp, root'un açtığı bir arşiv) bir sitenin dosyalarını
-  kendi kullanıcısına ve grubuna geri verir. Yalnızca başkasına ait olanlar değişir; logs/
-  root'ta kalır, dosya izinleri de olduğu gibi kalır. Seçenek olarak --dry-run verilirse yalnızca sayar.
+  kendi kullanıcısına ve grubuna geri verir. Yalnızca başkasına ait olanlar devredilir; logs/
+  root'ta kalır. Grubun ya da herkesin yazabildiği dizin ve dosyalardan bu izin kaldırılır
+  (777 -> 755, 666 -> 644), okuma izni kalır. Seçenek olarak --dry-run verilirse yalnızca sayar.
   Aynısı her sitede, yüklemeden sonraki bir dakika içinde kendiliğinden olur: bu komut, bir
   dakika beklemeden hemen yapmak ve bir sitenin dosyalarının neden devredilmediğini görmek
   içindir. Bunu --auto off durdurur; root'un bir sitede bilerek kendi dosyalarını tuttuğu
@@ -1661,8 +1662,9 @@ EOF
 Usage: setup.sh fix-owner <domain>... | --all
        setup.sh fix-owner --auto on|off
   Hand a site's files back to its own user and group after uploading as root (WinSCP, scp,
-  an archive unpacked by root). Only what belongs to someone else changes; logs/ stays
-  root's and the file modes stay as they are. With --dry-run it only counts.
+  an archive unpacked by root). Only what belongs to someone else changes hands; logs/ stays
+  root's. Directories and files group or others may write to lose that (777 -> 755,
+  666 -> 644); read access stays. With --dry-run it only counts.
   The same happens by itself, in every site, within a minute of an upload: the command is
   for now rather than in a minute, and for seeing why a site's files were not handed over.
   --auto off stops that, on a server where root keeps files of its own in a site on purpose
@@ -1753,6 +1755,25 @@ _domain_fix_owner_count() {   # home uid gid
   printf '%d' "$(( n ))"
 }
 
+# What comes in as root often comes in open as well - 777 directories and 666 files, from
+# WinSCP's permission setting or an archive made elsewhere - and chown leaves a mode as it is.
+# Nobody but the site's user has to write there (PHP runs as it; OpenLiteSpeed only reads),
+# so fix-owner and the minute pass take write away from group and others: 777 -> 755,
+# 666 -> 644, read and execute stay. How many directories and files in the home, logs/ left
+# out, group or others may write to:
+_domain_fix_owner_open_count() {   # home
+  local n=""
+  n="$( { find -P "$1" -xdev \( -path "$1/logs" -prune \) -o \( -type d -o -type f \) -perm /022 -printf . 2>/dev/null || true; } | wc -c)"
+  printf '%d' "$(( n ))"
+}
+
+# ... and the change, as the site's user: after the chown they are its own files, and a name it
+# swaps for a link meanwhile takes chmod to nothing it could not change itself anyway.
+_domain_fix_owner_close() {   # home uid
+  lib_domain_as_user PATH="$DOM_FIX_OWNER_PATH" find -P "$1" -xdev \( -path "$1/logs" -prune \) -o \
+    -uid "$2" \( -type d -o -type f \) -perm /022 -exec chmod go-w {} +
+}
+
 # The change. -execdir runs chown from the directory find holds open, on names relative to
 # it, so a directory swapped for a link while the run is under way takes chown nowhere new;
 # chown -h changes a link itself, never what it names; -xdev keeps to the home's filesystem.
@@ -1780,11 +1801,12 @@ _domain_fix_owner_apply() {   # home uid gid [inode:links]...
 
 # One site: its home and everything below it but logs/, which leads to - or, on a server an
 # older release set up, still is - the log directory root has to keep. Only what belongs to
-# someone else changes: a chown re-dates a file (ctime), and the .htaccess check reloads
-# OpenLiteSpeed for a .htaccess that looks changed. A site that fails a check is left exactly
-# as it is. Returns 1 when not all of it could be handed over.
+# someone else changes hands, and only what group or others may write to changes its mode: a
+# chown or chmod re-dates a file (ctime), and the .htaccess check reloads OpenLiteSpeed for a
+# .htaccess that looks changed. A site that fails a check is left exactly as it is. Returns 1
+# when not all of it could be handed over, or closed.
 lib_domain_fix_owner() {   # domain
-  local domain="$1" home="" ids="" uid="" gid="" mounts="" n=0 left=0 f=""
+  local domain="$1" home="" ids="" uid="" gid="" mounts="" n=0 left=0 open=0 open_left=0 f=""
   local -a hazards=() shared=()
   home="$(lib_domain_home "$domain")"
   lib_domain_state_load "$domain" || { lib_error "${domain} is not registered"; return 1; }
@@ -1812,25 +1834,43 @@ lib_domain_fix_owner() {   # domain
     return 1
   fi
   n="$(_domain_fix_owner_count "$home" "$uid" "$gid")"
-  if (( n == 0 )); then
+  open="$(_domain_fix_owner_open_count "$home")"
+  if (( n == 0 && open == 0 )); then
     lib_ok "${domain}: everything already belongs to ${D_USER}"
     return 0
   fi
   if (( OPT_DRY_RUN )); then
-    lib_info "[dry-run] ${domain}: would hand $(_domain_n_entries "$n") to ${D_USER}:${D_GROUP}"
+    if (( n > 0 )); then lib_info "[dry-run] ${domain}: would hand $(_domain_n_entries "$n") to ${D_USER}:${D_GROUP}"; fi
+    if (( open > 0 )); then lib_info "[dry-run] ${domain}: would take write access for group and others away from $(_domain_n_entries "$open") (777 -> 755, 666 -> 644)"; fi
     return 0
   fi
-  lib_log_write CMD "fix-owner ${domain}: chown -h ${D_USER}:${D_GROUP} what belongs to someone else in ${home} (${n})"
-  # what find and chown complain about goes to the log, without the control characters a name
-  # the site user chose could bring along
-  { _domain_fix_owner_apply "$home" "$uid" "$gid" "${shared[@]}" 2>&1 >/dev/null || true; } \
-    | tr -d '\000-\011\013-\037\177' | lib_mask_secrets >>"$LOG_FILE" 2>/dev/null || true
-  left="$(_domain_fix_owner_count "$home" "$uid" "$gid")"
+  # what find, chown and chmod complain about goes to the log, without the control characters a
+  # name the site user chose could bring along
+  if (( n > 0 )); then
+    lib_log_write CMD "fix-owner ${domain}: chown -h ${D_USER}:${D_GROUP} what belongs to someone else in ${home} (${n})"
+    { _domain_fix_owner_apply "$home" "$uid" "$gid" "${shared[@]}" 2>&1 >/dev/null || true; } \
+      | tr -d '\000-\011\013-\037\177' | lib_mask_secrets >>"$LOG_FILE" 2>/dev/null || true
+    left="$(_domain_fix_owner_count "$home" "$uid" "$gid")"
+  fi
+  if (( open > 0 )); then
+    lib_log_write CMD "fix-owner ${domain}: chmod go-w, as ${D_USER}, what group or others may write to in ${home} (${open})"
+    { _domain_fix_owner_close "$home" "$uid" 2>&1 >/dev/null || true; } \
+      | tr -d '\000-\011\013-\037\177' | lib_mask_secrets >>"$LOG_FILE" 2>/dev/null || true
+    open_left="$(_domain_fix_owner_open_count "$home")"
+  fi
   if (( left > 0 )); then
     lib_warn "${domain}: not all of it changed hands (${left} of ${n} left) - an upload still under way, or a file made immutable (lsattr); run it again once the upload is done"
     return 1
   fi
-  lib_ok "${domain}: $(_domain_n_entries "$n") handed to ${D_USER}:${D_GROUP}"
+  if (( n > 0 )); then lib_ok "${domain}: $(_domain_n_entries "$n") handed to ${D_USER}:${D_GROUP}"; fi
+  if (( open > open_left )); then
+    lib_ok "${domain}: write access for group and others taken away from $(_domain_n_entries "$(( open - open_left ))") (777 -> 755, 666 -> 644)"
+  fi
+  if (( open_left > 0 )); then
+    lib_warn "${domain}: $(_domain_n_entries "$open_left") can still be written by group or others - made immutable (lsattr)? run it again once the upload is done"
+    return 1
+  fi
+  return 0
 }
 
 # What has to hold before lib_domain_fix_owner runs at all, for whoever calls it.
@@ -1857,7 +1897,7 @@ lib_domain_fix_owner_guard() {
 # What cannot be handed over is said once, not every minute: the reason is kept in the site's
 # state directory, where doctor reads it, and goes when the site has nothing left that is
 # somebody else's.
-DOM_AUTO_N=0 DOM_AUTO_WHY=""
+DOM_AUTO_N=0 DOM_AUTO_CLOSED=0 DOM_AUTO_WHY=""
 
 lib_domain_fix_owner_auto_enabled() { [[ "$(lib_manifest_get '.fix_owner_auto')" != "off" ]]; }
 _domain_fix_owner_stamp() { printf '%s/fix-owner.auto' "$(lib_domain_state_dir "$1")"; }
@@ -1866,9 +1906,9 @@ _domain_fix_owner_stamp() { printf '%s/fix-owner.auto' "$(lib_domain_state_dir "
 # DOM_AUTO_WHY says why. An upload still under way leaves some for the next pass: that is
 # progress, not a failure.
 _domain_fix_owner_quiet() {   # domain  (its D_* are loaded)
-  local home="" ids="" uid="" gid="" mounts="" n=0 left=0
+  local home="" ids="" uid="" gid="" mounts="" n=0 left=0 open=0
   local -a hazards=() shared=()
-  DOM_AUTO_N=0; DOM_AUTO_WHY=""
+  DOM_AUTO_N=0; DOM_AUTO_CLOSED=0; DOM_AUTO_WHY=""
   home="$(lib_domain_home "$1")"
   if ! ids="$(_domain_fix_owner_ids "$home")"; then DOM_AUTO_WHY="$ids"; return 1; fi
   read -r uid gid <<<"$ids"
@@ -1883,6 +1923,12 @@ _domain_fix_owner_quiet() {   # domain  (its D_* are loaded)
   n="$(_domain_fix_owner_count "$home" "$uid" "$gid")"
   (( n > 0 )) || return 0
   _domain_fix_owner_apply "$home" "$uid" "$gid" "${shared[@]}" >/dev/null 2>&1 || true
+  # an upload came in: what it brought open is closed in the same pass (fix-owner's chmod)
+  open="$(_domain_fix_owner_open_count "$home")"
+  if (( open > 0 )); then
+    _domain_fix_owner_close "$home" "$uid" >/dev/null 2>&1 || true
+    DOM_AUTO_CLOSED=$(( open - $(_domain_fix_owner_open_count "$home") ))
+  fi
   left="$(_domain_fix_owner_count "$home" "$uid" "$gid")"
   if (( left >= n )); then
     DOM_AUTO_WHY="$(_domain_n_entries "$left") did not change hands (made immutable? lsattr)"
@@ -1918,6 +1964,9 @@ lib_domain_fix_owner_auto() {
       if [[ -e "$stamp" ]]; then rm -f -- "$stamp"; fi
       if (( DOM_AUTO_N > 0 )); then
         lib_ok "${d}: $(_domain_n_entries "$DOM_AUTO_N") handed to ${D_USER}:${D_GROUP} (somebody else's until now: uploaded as root?)"
+      fi
+      if (( DOM_AUTO_CLOSED > 0 )); then
+        lib_ok "${d}: write access for group and others taken away from $(_domain_n_entries "$DOM_AUTO_CLOSED") (777 -> 755, 666 -> 644)"
       fi
     elif [[ "$(cat "$stamp" 2>/dev/null || true)" != "$DOM_AUTO_WHY" ]]; then
       printf '%s\n' "$DOM_AUTO_WHY" >"$stamp"

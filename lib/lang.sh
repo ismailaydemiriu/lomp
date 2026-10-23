@@ -2848,4 +2848,9 @@ LIB_TR_PAIRS=(
   'not installed for this PHP version' 'bu PHP sürümü için kurulu değil'
   '@doctor site {1}: APCu' 'site {1}: APCu önbelleği'
   '@doctor it is meant to be off, but {1}/{2} does not say so (lomp apcu off {3})' 'kapalı olmalıydı ama {1}/{2} bunu söylemiyor (lomp apcu off {3})'
+  '[dry-run] {1}: would take write access for group and others away from {2} (777 -> 755, 666 -> 644)' '[dry-run] {1}: {2} için grubun ve herkesin yazma izni kaldırılacaktı (777 -> 755, 666 -> 644)'
+  '{1}: write access for group and others taken away from {2} (777 -> 755, 666 -> 644)' '{1}: {2} için grubun ve herkesin yazma izni kaldırıldı (777 -> 755, 666 -> 644)'
+  '{1}: {2} can still be written by group or others - made immutable (lsattr)? run it again once the upload is done' '{1}: {2} hâlâ grup ya da herkes tarafından yazılabiliyor - değiştirilemez mi yapıldı (lsattr)? yükleme bitince yeniden çalıştırın'
+  '{1} files and directories' '{1} dosya ve dizin'
+  '1 file or directory' '1 dosya ya da dizin'
 )

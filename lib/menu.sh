@@ -194,8 +194,9 @@ KOMUTLAR
   credentials <domain>|--all    Saklanan kimlik bilgilerini gösterir (asla loglanmaz)
   fix-owner <domain>|--all      root olarak yüklemeden sonra (WinSCP, scp) sitenin dosyalarını
                                 kendi kullanıcısına geri verir. Yalnızca başkasına ait olan
-                                değişir; logs/ ve dosya izinleri aynı kalır. Yüklemeden sonra
-                                bir dakika içinde kendiliğinden olur; komut beklemeden yapmak içindir
+                                değişir, logs/ aynı kalır; 777 olan 755, 666 olan 644 olur.
+                                Yüklemeden sonra bir dakika içinde kendiliğinden olur; komut
+                                beklemeden yapmak içindir
   fix-owner --auto on|off       Bunu durdurur (root sitede kendi dosyalarını tutar) veya başlatır
   optimize                      Sistemi yeniden ölçer ve yeniden ayarlar (fark gösterir)
   harden <domain>|--all         Bir sitedeki PHP shell'in yapabileceklerini sınırlar: PHP'den
@@ -474,8 +475,8 @@ COMMANDS
   doctor                        Deep health check (--json, --quiet)
   credentials <domain>|--all    Show stored credentials (never logged)
   fix-owner <domain>|--all      Hand a site's files back to its own user after uploading as
-                                root (WinSCP, scp). Only what is someone else's changes;
-                                logs/ and the file modes stay as they are. It happens by itself
+                                root (WinSCP, scp). Only what is someone else's changes,
+                                logs/ stays; 777 becomes 755, 666 644. It happens by itself
                                 within a minute of an upload; the command is for right now
   fix-owner --auto on|off       Stop that (root keeps files of its own in a site), or start it
   optimize                      Re-measure the system and re-tune (shows a diff)
@@ -1331,6 +1332,7 @@ _menu_fix_owner() {
   local what="" domain="" auto="on"
   lib_domain_fix_owner_auto_enabled || auto="off"
   printf '\n'; _menu_note "Files uploaded as root go to their site's own user; what already is the site's stays as it is."
+  _menu_note "What group or others may write to is closed: 777 becomes 755, 666 becomes 644."
   if [[ "$auto" == "on" ]]; then _menu_note "It happens by itself within a minute of an upload; this does it right now."; fi
   _menu_opt 1 "Every site"
   _menu_opt 2 "One site"
@@ -2196,6 +2198,7 @@ MENU_TR['Where to (a site here, or any other domain)']='Nereye (buradaki bir sit
 MENU_TR['Also redirect www.%s? (y/n)']='www.%s de yönlendirilsin mi? (y/n)'
 MENU_TR['Which one (its name, empty to cancel)']='Hangisi (adı; vazgeçmek için boş bırakın)'
 MENU_TR['Files uploaded as root go to their site'\''s own user; what already is the site'\''s stays as it is.']='Root olarak yüklenen dosyalar sitenin kendi kullanıcısına geçer; zaten sitenin olanlar olduğu gibi kalır.'
+MENU_TR['What group or others may write to is closed: 777 becomes 755, 666 becomes 644.']='Grubun ya da herkesin yazabildiği izinler kapatılır: 777 olan 755, 666 olan 644 olur.'
 MENU_TR['It happens by itself within a minute of an upload; this does it right now.']='Yüklemeden sonra bir dakika içinde kendiliğinden olur; bu seçenek hemen yapar.'
 MENU_TR['Every site']='Tüm siteler'
 MENU_TR['One site']='Tek site'
