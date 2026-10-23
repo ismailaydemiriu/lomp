@@ -369,12 +369,14 @@ _doc_check_services() {
   if lib_redis_installed; then
     if lib_service_active "$REDIS_SERVICE" && lib_redis_ping; then _doc_add OK "redis" "PONG ($(lib_redis_version))"; else _doc_add FAIL "redis" "not running or auth failure (check ${REDIS_INFO})"; fi
   else _doc_add WARN "redis" "not installed"; fi
-  if lib_pkg_installed fail2ban; then
+  if lib_fail2ban_off; then _doc_add OK "fail2ban" "switched off (lomp fail2ban on switches it on)"
+  elif lib_pkg_installed fail2ban; then
     if lib_service_active fail2ban; then
       if fail2ban-client status 2>/dev/null | lib_grepq 'sshd'; then _doc_add OK "fail2ban" "active, sshd jail loaded"; else _doc_add WARN "fail2ban" "active but sshd jail missing"; fi
     else _doc_add FAIL "fail2ban" "service inactive"; fi
   else _doc_add WARN "fail2ban" "not installed"; fi
-  if lib_have ufw; then
+  if lib_ufw_off; then _doc_add OK "ufw" "switched off (lomp ufw on switches it on)"
+  elif lib_have ufw; then
     if ufw status 2>/dev/null | sed -n 1p | lib_grepq 'Status: active'; then
       local p="" missing=()
       for p in $SYS_SSH_PORTS; do ufw status 2>/dev/null | lib_grepq -E "^${p}/tcp" || missing+=("$p"); done
@@ -395,6 +397,9 @@ _doc_check_services() {
   # after the next boot and nothing anywhere saying so.
   for svc in "$OLS_SERVICE" mariadb "$REDIS_SERVICE" fail2ban ufw; do
     lib_service_exists "$svc" || continue
+    # (switched off on purpose: it is meant not to start)
+    if [[ "$svc" == fail2ban ]] && lib_fail2ban_off; then continue; fi
+    if [[ "$svc" == ufw ]] && lib_ufw_off; then continue; fi
     if lib_service_enabled "$svc"; then
       _doc_add OK "${svc} at boot" "enabled"
     else

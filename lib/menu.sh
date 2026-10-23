@@ -207,6 +207,13 @@ KOMUTLAR
   apcu on|off <domain>|--all    APCu'yu (PHP'nin bellek içi önbelleği) bir site için açar ya da
                                 kapatır (varsayılan: açık); --all tüm siteler ve sonradan
                                 eklenenler içindir. "apcu status" geçerli durumu gösterir
+  fail2ban on|off [--ufw]       fail2ban'ı tamamen kapatır (yoğun sitede her erişim satırını
+                                okumasın diye) ya da açar; --ufw UFW'yi de birlikte kapatır/açar.
+                                Kapalıyken yeniden başlatma ve güncellemeler onu açmaz. Cloudflare
+                                ve Google'ın botları hiçbir zaman banlanmaz ("fail2ban status";
+                                "fail2ban refresh" bu listeleri yeniler, haftalık cron da yapar)
+  ufw on|off|status             UFW güvenlik duvarını tamamen kapatır ya da açar (kuralları
+                                korunur); kapatınca dışarıdan erişilebilen portları listeler
   scan <domain>|--all [--wide]  Sitenin PHP dosyalarında web shell'lerin yapı taşlarını arar
                                 (çözülmüş veya istekten gelen verinin eval edilmesi, istekten
                                 kurulan komutlar, paketlenmiş kod) ve bakılacak dosyaları
@@ -488,6 +495,13 @@ COMMANDS
   apcu on|off <domain>|--all    Switch APCu, PHP's in-memory cache, on or off for a site (it is
                                 on by default); --all is every site and those added later.
                                 "apcu status" shows what is set
+  fail2ban on|off [--ufw]       Switch fail2ban off completely (so a busy site's every access
+                                log line is not read) or on again; --ufw switches UFW with it.
+                                Off, it stays off across reboots and updates. Cloudflare and
+                                Google's crawlers are never banned ("fail2ban status";
+                                "fail2ban refresh" fetches those lists again, as a weekly cron does)
+  ufw on|off|status             Switch the UFW firewall off completely or on again (its rules
+                                are kept); off, it lists the ports that answer from outside
   scan <domain>|--all [--wide]  Look through a site's PHP files for what web shells are made of
                                 (eval of decoded or request data, commands made of the request,
                                 packed code) and list the files to open. Changes nothing;
@@ -761,15 +775,22 @@ _menu_ask() {   # _menu_ask VAR "prompt" ["default"]
   _out="${ans:-$def}"
 }
 
+# A service in the header line: up, DOWN, or off where it was switched off on purpose
+# ("lomp fail2ban off" - not a failure, so not red).
+_menu_badge() {   # unit:label
+  local svc="${1%%:*}" label="${1#*:}"
+  if [[ "$svc" == fail2ban ]] && lib_fail2ban_off; then printf ' %s%s:off%s' "$C_DIM" "$label" "$C_RST"
+  elif lib_service_active "$svc"; then printf ' %s%s:up%s' "$C_GRN" "$label" "$C_RST"
+  else printf ' %s%s:DOWN%s' "$C_RED" "$label" "$C_RST"; fi
+}
+
 # One compact line of context, so the whole menu still fits an 80x24 terminal.
 _menu_header() {
-  local sites=0 d="" svc="" label=""
+  local sites=0 d="" svc=""
   while read -r d; do [[ -n "$d" ]] && sites=$((sites + 1)); done < <(lib_domains_list)
   printf '\n %s%slompstack%s  %s  %s site(s) ' "$C_BLD" "$C_CYN" "$C_RST" "$(hostname -s 2>/dev/null || hostname)" "$sites"
   for svc in lsws:web mariadb:db redis-server:cache fail2ban:f2b; do
-    label="${svc#*:}"; svc="${svc%%:*}"
-    if lib_service_active "$svc"; then printf ' %s%s:up%s' "$C_GRN" "$label" "$C_RST"
-    else printf ' %s%s:DOWN%s' "$C_RED" "$label" "$C_RST"; fi
+    _menu_badge "$svc"
   done
   printf '\n'
   _menu_rule
@@ -861,6 +882,7 @@ lib_menu_main() {
     _menu_item 11 "Certificates (which exist, automatic renewal, a site's first one)"
     _menu_item 12 "Back up sites (now, or automatically)"
     _menu_item 13 "Restore a site"
+    _menu_item 33 "fail2ban and the UFW firewall: on or off (busy servers)"
     _menu_group "MAINTENANCE"
     _menu_item 14 "Update packages"
     _menu_item 32 "Update PHP (latest release of each version; the sites' PHP restarted)"
@@ -899,6 +921,7 @@ lib_menu_main() {
       11) _menu_certificates ;;
       12) _menu_backup ;;
       13) _menu_restore ;;
+      33) _menu_fail2ban ;;
       14) _menu_run update ;;
       32) _menu_run php-update ;;
       15) _menu_run self-update ;;
@@ -1366,6 +1389,27 @@ _menu_harden() {
   esac
 }
 
+# Whether fail2ban and UFW run at all. On a very busy server fail2ban reads every line of every
+# access log and UFW sees every packet; off, nothing bans a password guesser and every listening
+# port answers. Cloudflare and Google's crawlers are never banned either way.
+_menu_fail2ban() {
+  local what=""
+  printf '\n'; _menu_note "fail2ban reads the logs and bans an address that keeps guessing passwords (SSH, WordPress, mail) or probing for files." \
+    "It never bans Cloudflare's edge or Google's crawlers. UFW lets in only the ports its rules allow." \
+    "On a very busy server both cost time on every request. Off, they stay off after a reboot and after updates."
+  _menu_opt 1 "Show their state"
+  _menu_opt 2 "Switch fail2ban off (UFW stays on)"
+  _menu_opt 3 "Switch fail2ban and UFW off"
+  _menu_opt 4 "Switch fail2ban and UFW on"
+  _menu_ask what "Choice" "1"
+  case "$what" in
+    2) _menu_run fail2ban off ;;
+    3) _menu_run fail2ban off --ufw ;;
+    4) _menu_run fail2ban on --ufw ;;
+    *) _menu_run fail2ban status ;;
+  esac
+}
+
 # What is set, then one site or all of them. "Every site" also decides what a site added later
 # starts with, and says so.
 _menu_apcu() {
@@ -1582,14 +1626,12 @@ _menu_mail_off() {
 
 # Header of the mail menu when it is the server's own menu.
 _menu_mail_header() {
-  local n=0 d="" svc="" label=""
+  local n=0 d="" svc=""
   while read -r d; do [[ -n "$d" ]] && n=$((n + 1)); done < <(lib_mail_domains)
   printf '\n %s%slompstack%s  %s  mail server, sends as %s  %s domain(s)\n ' "$C_BLD" "$C_CYN" "$C_RST" \
     "$(hostname -s 2>/dev/null || hostname)" "$(lib_mail_host)" "$n"
   for svc in postfix:smtp dovecot:imap rspamd:filter lsws:webmail mariadb:db fail2ban:f2b; do
-    label="${svc#*:}"; svc="${svc%%:*}"
-    if lib_service_active "$svc"; then printf ' %s%s:up%s' "$C_GRN" "$label" "$C_RST"
-    else printf ' %s%s:DOWN%s' "$C_RED" "$label" "$C_RST"; fi
+    _menu_badge "$svc"
   done
   printf '\n'
   _menu_rule
@@ -1775,13 +1817,11 @@ _menu_install_images() {
 }
 
 _menu_images_header() {
-  local sites=0 d="" svc="" label=""
+  local sites=0 d="" svc=""
   while read -r d; do [[ -n "$d" ]] && sites=$((sites + 1)); done < <(lib_domains_list)
   printf '\n %s%slompstack%s  %s  images  %s site(s) ' "$C_BLD" "$C_CYN" "$C_RST" "$(hostname -s 2>/dev/null || hostname)" "$sites"
   for svc in nginx:web fail2ban:f2b; do
-    label="${svc#*:}"; svc="${svc%%:*}"
-    if lib_service_active "$svc"; then printf ' %s%s:up%s' "$C_GRN" "$label" "$C_RST"
-    else printf ' %s%s:DOWN%s' "$C_RED" "$label" "$C_RST"; fi
+    _menu_badge "$svc"
   done
   printf '\n'
   _menu_rule
@@ -1858,6 +1898,7 @@ _menu_images() {
     _menu_group "SERVER"
     _menu_item  6 "Status"
     _menu_item  7 "Health check"
+    _menu_item 15 "fail2ban and the UFW firewall: on or off (busy servers)"
     _menu_item  8 "Re-tune nginx to this machine's CPU and memory"
     _menu_group "MAINTENANCE"
     _menu_item  9 "Update packages"
@@ -1877,6 +1918,7 @@ _menu_images() {
       14) _menu_images_rename ;;
       6) _menu_run status ;;
       7) _menu_run doctor ;;
+      15) _menu_fail2ban ;;
       8) _menu_run optimize ;;
       9) _menu_run update ;;
       10) _menu_run self-update ;;
@@ -2313,4 +2355,12 @@ MENU_TR['Switch it off for one site']='Tek bir site için kapat'
 MENU_TR['Switch it on for one site']='Tek bir site için aç'
 MENU_TR['Switch it off for every site (and for the sites added later)']='Tüm siteler için kapat (sonradan eklenen siteler için de)'
 MENU_TR['Switch it on for every site (and for the sites added later)']='Tüm siteler için aç (sonradan eklenen siteler için de)'
+MENU_TR['fail2ban and the UFW firewall: on or off (busy servers)']='fail2ban ve UFW güvenlik duvarı: aç ya da kapat (yoğun sunucular)'
+MENU_TR['fail2ban reads the logs and bans an address that keeps guessing passwords (SSH, WordPress, mail) or probing for files.']='fail2ban günlükleri okur ve şifre denemeyi (SSH, WordPress, e-posta) ya da dosya yoklamayı sürdüren adresi banlar.'
+MENU_TR['It never bans Cloudflare'\''s edge or Google'\''s crawlers. UFW lets in only the ports its rules allow.']='Cloudflare'\''ın sunucularını ve Google'\''ın botlarını hiçbir zaman banlamaz. UFW yalnızca kurallarının izin verdiği portları içeri alır.'
+MENU_TR['On a very busy server both cost time on every request. Off, they stay off after a reboot and after updates.']='Çok yoğun bir sunucuda ikisi de her istekte zaman harcar. Kapatılınca yeniden başlatmadan ve güncellemelerden sonra da kapalı kalırlar.'
+MENU_TR['Show their state']='Durumlarını göster'
+MENU_TR['Switch fail2ban off (UFW stays on)']='fail2ban'\''ı kapat (UFW açık kalır)'
+MENU_TR['Switch fail2ban and UFW off']='fail2ban'\''ı ve UFW'\''yi kapat'
+MENU_TR['Switch fail2ban and UFW on']='fail2ban'\''ı ve UFW'\''yi aç'
 # MENU_TR-END

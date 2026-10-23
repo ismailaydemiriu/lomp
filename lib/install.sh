@@ -423,6 +423,12 @@ lib_install_ufw() {
       lib_ufw_delete_port_rules "$ADMIN_PORT"
       ;;
   esac
+  # switched off by "lomp ufw off": the rules above are kept for the day it comes back
+  if lib_ufw_off; then
+    lib_manifest_set_json '.components.ufw' true
+    lib_ok "UFW: rules kept up to date, but switched off (lomp ufw on switches it on)"
+    return 0
+  fi
   if (( ! OPT_DRY_RUN )); then
     if ! ufw status 2>/dev/null | sed -n 1p | lib_grepq 'Status: active'; then
       ufw show added 2>/dev/null | lib_grepq -E "allow ${SYS_SSH_PORTS%% *}/tcp" || lib_die "Refusing to enable UFW without an SSH allow rule" "SSH port ${SYS_SSH_PORTS} rule missing" "add it manually: ufw allow ${SYS_SSH_PORTS%% *}/tcp"
@@ -548,17 +554,189 @@ lib_install_ssh_harden() {
   fi
 }
 
+# fail2ban can be switched off for good ("lomp fail2ban off"): on a busy site it reads every
+# line of every access log. Nothing in lomp starts it again until "lomp fail2ban on".
+lib_fail2ban_off() { [[ "$(lib_manifest_get '.fail2ban' 2>/dev/null)" == "off" ]]; }
+
+# What fail2ban never bans, by any jail - one file, server-setup-allow.conf, since a second
+# "ignoreip" anywhere in jail.d replaces the first instead of adding to it:
+#  - this machine, the WebAdmin address install was given, and --fail2ban-ignore-ip;
+#  - Cloudflare's edge: banning one of its addresses shuts out every visitor it carries;
+#  - Google's crawlers, by the ranges Google publishes, refreshed weekly ("fail2ban refresh");
+#  - and, for a crawler address newer than the list, the way Google says to know one: the
+#    reverse DNS name ends in googlebot.com or google.com and leads back to the same address.
+#    Anyone can give their own address a googlebot.com name; only Google can make it lead back.
+#    (googleusercontent.com is left out on purpose: every Google Cloud VM has such a name.)
+# fail2ban looks at all of it only for an address a filter matched, never for every log line.
+F2B_GOODBOT_SCRIPT="/usr/local/sbin/lomp-f2b-goodbot"
+F2B_ALLOW_JAIL="/etc/fail2ban/jail.d/server-setup-allow.conf"
+F2B_ALLOW_CRON="35 4 * * 0"   # weekly, after update-cf-ips (04:20 on Sundays)
+F2B_GOOGLE_IPS="${STATE_DIR}/google-crawler-ips.conf"
+F2B_CF_IPS="${STATE_DIR}/fail2ban-cloudflare-ips.conf"   # only where the Cloudflare mode keeps no list
+F2B_GOOGLE_URLS=(
+  "https://developers.google.com/static/crawling/ipranges/common-crawlers.json"
+  "https://developers.google.com/static/crawling/ipranges/special-crawlers.json"
+)
+
+lib_fail2ban_render_goodbot_script() {
+  cat <<'EOF'
+#!/usr/bin/python3 -I
+# Managed by lompstack - fail2ban's ignorecommand (server-setup-allow.conf).
+# Exit 0: the address is one of Google's crawlers, never ban it. Exit 1: ban as usual.
+# Its reverse DNS name must end in googlebot.com or google.com AND resolve back to it.
+import ipaddress, socket, sys
+
+SUFFIXES = (".googlebot.com", ".google.com")
+
+def main():
+    try:
+        ip = ipaddress.ip_address(sys.argv[1].strip())
+        name = socket.gethostbyaddr(str(ip))[0].rstrip(".").lower()
+    except Exception:
+        return 1
+    if not name.endswith(SUFFIXES):
+        return 1
+    try:
+        infos = socket.getaddrinfo(name, None)
+    except Exception:
+        return 1
+    for info in infos:
+        try:
+            if ipaddress.ip_address(info[4][0].split("%")[0]) == ip:
+                return 0
+        except ValueError:
+            pass
+    return 1
+
+sys.exit(main())
+EOF
+}
+
+# Google's published crawler ranges, one per line, into a temporary file (printed); fails when
+# a list cannot be read or looks wrong, so a bad download never empties the one in use.
+lib_fail2ban_google_download() {
+  local tmp="" u="" n=""
+  tmp="$(lib_mktemp)"
+  for u in "${F2B_GOOGLE_URLS[@]}"; do
+    curl -fsSL --retry 2 --max-time 20 "$u" 2>/dev/null \
+      | jq -r '.prefixes[] | (.ipv4Prefix // .ipv6Prefix // empty)' >>"$tmp" 2>/dev/null \
+      || { rm -f "$tmp"; return 1; }
+  done
+  if grep -qvE '^([0-9]{1,3}(\.[0-9]{1,3}){3}/[0-9]{1,2}|[0-9a-fA-F:]+/[0-9]{1,3})$' "$tmp"; then rm -f "$tmp"; return 1; fi
+  n="$(wc -l <"$tmp" | tr -d ' ')"
+  (( n >= 10 )) || { rm -f "$tmp"; return 1; }
+  printf '%s' "$tmp"
+}
+
+# The lists the allow file is made of, fetched again. A list that cannot be fetched stays as it
+# was (said, not fatal: the reverse DNS check still covers Google's crawlers).
+lib_fail2ban_lists_update() {
+  local tmp=""
+  (( OPT_DRY_RUN )) && { lib_info "[dry-run] would fetch Google's crawler ranges and Cloudflare's"; return 0; }
+  if tmp="$(lib_fail2ban_google_download)" && [[ -n "$tmp" ]]; then
+    { printf '# Google crawler ranges - fetched %s\n' "$(lib_iso_now)"; sort -u "$tmp"; } >"${tmp}.h"
+    if [[ "$(grep -v '^#' "$F2B_GOOGLE_IPS" 2>/dev/null)" != "$(grep -v '^#' "${tmp}.h")" ]]; then
+      lib_write_file "$F2B_GOOGLE_IPS" 0644 root:root <"${tmp}.h"
+    fi
+    rm -f "$tmp" "${tmp}.h"
+  else
+    lib_warn "Google's crawler ranges could not be fetched; the list in use stays ($(grep -vc '^#' "$F2B_GOOGLE_IPS" 2>/dev/null || printf 0) ranges)"
+  fi
+  # the Cloudflare mode keeps its own list up to date (update-cf-ips); without it, this one
+  if [[ ! -s "$CF_IPS_FILE" ]]; then
+    if tmp="$(lib_cf_ips_download)" && [[ -n "$tmp" ]]; then
+      { printf '# Cloudflare ranges - fetched %s\n' "$(lib_iso_now)"; sort -u "$tmp"; } >"${tmp}.h"
+      if [[ "$(grep -v '^#' "$F2B_CF_IPS" 2>/dev/null)" != "$(grep -v '^#' "${tmp}.h")" ]]; then
+        lib_write_file "$F2B_CF_IPS" 0644 root:root <"${tmp}.h"
+      fi
+      rm -f "$tmp" "${tmp}.h"
+    else
+      lib_warn "Cloudflare's ranges could not be fetched; the list in use stays"
+    fi
+  fi
+  return 0
+}
+
+_fail2ban_cf_list()     { if [[ -s "$CF_IPS_FILE" ]]; then grep -v '^#' "$CF_IPS_FILE"; else grep -v '^#' "$F2B_CF_IPS" 2>/dev/null; fi; return 0; }
+_fail2ban_google_list() { grep -v '^#' "$F2B_GOOGLE_IPS" 2>/dev/null; return 0; }
+
+lib_fail2ban_render_allow_jail() {
+  local extra="$FAIL2BAN_IGNORE_IP" a=""
+  local -a ips=("127.0.0.1/8" "::1")
+  [[ -n "$extra" ]] || extra="$(lib_manifest_get '.params.fail2ban_ignore_ip' 2>/dev/null)"
+  for a in $ADMIN_ALLOWED_IP $extra; do ips+=("$a"); done
+  while read -r a; do if [[ -n "$a" ]]; then ips+=("$a"); fi; done < <(_fail2ban_cf_list)
+  while read -r a; do if [[ -n "$a" ]]; then ips+=("$a"); fi; done < <(_fail2ban_google_list)
+  printf '# Managed by lompstack - what fail2ban never bans: this machine, your addresses,\n'
+  printf '# Cloudflare'\''s edge and Google'\''s crawlers (refreshed weekly: lomp fail2ban refresh)\n'
+  printf '[DEFAULT]\n'
+  printf 'ignoreip = %s\n' "$(lib_join $'\n           ' "${ips[@]}")"
+  printf 'ignorecommand = /usr/bin/timeout 5 %s <ip>\n' "$F2B_GOODBOT_SCRIPT"
+  printf 'ignorecache = key="<ip>", max-count=10000, max-time=6h\n'
+}
+
+# The script and the allow file. Sets F2B_ALLOW_CHANGED.
+F2B_ALLOW_CHANGED=0
+lib_fail2ban_allow_write() {
+  F2B_ALLOW_CHANGED=0
+  lib_fail2ban_render_goodbot_script | lib_write_file "$F2B_GOODBOT_SCRIPT" 0755 root:root
+  (( LIB_FILE_CHANGED )) && F2B_ALLOW_CHANGED=1
+  lib_fail2ban_render_allow_jail | lib_write_file "$F2B_ALLOW_JAIL" 0644 root:root
+  (( LIB_FILE_CHANGED )) && F2B_ALLOW_CHANGED=1
+  # an older release kept ignoreip in the base jails; read after this file, it would win
+  if [[ -f "$FAIL2BAN_JAIL_FILE" ]] && lib_grepq '^ignoreip[[:space:]]*=' "$FAIL2BAN_JAIL_FILE"; then
+    sed '/^ignoreip[[:space:]]*=/d' "$FAIL2BAN_JAIL_FILE" | lib_write_file "$FAIL2BAN_JAIL_FILE" 0644 root:root
+    (( LIB_FILE_CHANGED )) && F2B_ALLOW_CHANGED=1
+  fi
+  return 0
+}
+
+# A file of the operator's own that sets ignoreip replaces lomp's whole list: fail2ban reads the
+# .local files last. Named, never touched.
+lib_fail2ban_foreign_ignoreip() {
+  local f=""
+  for f in /etc/fail2ban/jail.local /etc/fail2ban/jail.d/*.local /etc/fail2ban/jail.d/*.conf; do
+    [[ -f "$f" && "$f" != "$F2B_ALLOW_JAIL" && "$f" != "$FAIL2BAN_JAIL_FILE" ]] || continue
+    if lib_grepq '^[[:space:]]*ignoreip[[:space:]]*=' "$f"; then
+      lib_warn "${f} sets ignoreip, which replaces lomp's list (Cloudflare, Google's crawlers, your addresses): remove it, the list is in ${F2B_ALLOW_JAIL}"
+    fi
+  done
+  return 0
+}
+
+_fail2ban_reload_if_changed() {
+  if (( F2B_ALLOW_CHANGED )) && (( ! OPT_DRY_RUN )) && lib_service_active fail2ban; then
+    lib_run fail2ban-client reload || lib_warn "fail2ban reload failed (see log)"
+  fi
+  return 0
+}
+
+# A server set up before the allow list gets it (migrate, which self-update runs).
+lib_fail2ban_migrate() {
+  lib_pkg_installed fail2ban || return 0
+  if [[ ! -s "$F2B_GOOGLE_IPS" ]]; then lib_fail2ban_lists_update; fi
+  lib_fail2ban_allow_write
+  _fail2ban_reload_if_changed
+  if (( F2B_ALLOW_CHANGED )); then
+    if (( OPT_DRY_RUN )); then lib_info "[dry-run] would have fail2ban never ban Cloudflare's edge and Google's crawlers"
+    else lib_ok "fail2ban never bans Cloudflare's edge and Google's crawlers now ($(_fail2ban_cf_list | wc -l | tr -d ' ') + $(_fail2ban_google_list | wc -l | tr -d ' ') ranges, and reverse DNS)"; fi
+  fi
+  lib_fail2ban_foreign_ignoreip
+  if lib_fail2ban_off; then lib_ok "fail2ban is switched off (lomp fail2ban on switches it on)"; fi
+  return 0
+}
+
 lib_install_fail2ban() {
   local ignore="127.0.0.1/8 ::1" ports=""
   [[ -n "$ADMIN_ALLOWED_IP" ]] && ignore+=" ${ADMIN_ALLOWED_IP}"
   [[ -n "$FAIL2BAN_IGNORE_IP" ]] && ignore+=" ${FAIL2BAN_IGNORE_IP}"
   ports="$(printf '%s' "${SYS_SSH_PORTS} ${SSH_PORT}" | tr -s ' ' '\n' | sed '/^$/d' | sort -un | paste -sd, -)"
   lib_apt_install fail2ban
+  # (ignoreip lives in server-setup-allow.conf, written below)
   cat <<EOF | lib_write_file "$FAIL2BAN_JAIL_FILE" 0644 root:root
-# Managed by lompstack - base jails (web jails live in $(basename "$FAIL2BAN_WEB_JAIL_FILE"))
+# Managed by lompstack - base jails (web jails live in $(basename "$FAIL2BAN_WEB_JAIL_FILE"), what is never banned in $(basename "$F2B_ALLOW_JAIL"))
 [DEFAULT]
 backend = systemd
-ignoreip = ${ignore}
 bantime = 1h
 findtime = 10m
 maxretry = 5
@@ -578,15 +756,183 @@ findtime = 1d
 maxretry = 5
 EOF
   local changed="$LIB_FILE_CHANGED"
+  if [[ ! -s "$F2B_GOOGLE_IPS" ]]; then lib_fail2ban_lists_update; fi
+  lib_fail2ban_allow_write
+  changed=$(( changed + F2B_ALLOW_CHANGED ))
   lib_cf_fail2ban_action_write
   lib_domain_fail2ban_regen
+  lib_manifest_set_json '.components.fail2ban' true
+  # switched off by "lomp fail2ban off": the jails are kept up to date for the day it comes
+  # back, and it stays off (an install re-run is no reason to start it again)
+  if lib_fail2ban_off; then
+    lib_ok "Fail2ban: configured, but switched off (lomp fail2ban on switches it on)"
+    return 0
+  fi
   lib_systemctl enable fail2ban >/dev/null 2>&1 || true
   if (( ! OPT_DRY_RUN )); then
     if lib_service_active fail2ban; then (( changed )) && { lib_run fail2ban-client reload || lib_warn "fail2ban reload failed"; }
     else lib_systemctl restart fail2ban || lib_warn "fail2ban failed to start (journalctl -u fail2ban)"; fi
   fi
-  lib_manifest_set_json '.components.fail2ban' true
-  lib_ok "Fail2ban: sshd (port ${ports}) + recidive, ignoreip ${ignore}"
+  lib_ok "Fail2ban: sshd (port ${ports}) + recidive, ignoreip ${ignore} + Cloudflare + Google's crawlers"
+}
+
+# =============================================================================
+#  fail2ban on|off|status|refresh, ufw on|off|status
+# =============================================================================
+# UFW can be switched off for good as well ("lomp ufw off"): on a very busy server every packet
+# goes through its rules and connection tracking. Nothing in lomp enables it again until
+# "lomp ufw on"; its rules are kept, and still written by install, for that day.
+lib_ufw_off() { [[ "$(lib_manifest_get '.ufw' 2>/dev/null)" == "off" ]]; }
+
+# What answers from outside this machine once nothing filters: every socket listening on an
+# address other than loopback, as "port/proto (program)".
+_ufw_public_ports() {
+  ss -Hlntup 2>/dev/null | awk '{
+    l = $5; i = match(l, /:[^:]*$/); addr = substr(l, 1, i - 1); port = substr(l, i + 1)
+    if (addr ~ /^(127\.|\[::1\]|\[::ffff:127\.)/ || addr ~ /%lo$/) next
+    p = ""; if (match($0, /users:\(\("[^"]+"/)) p = substr($0, RSTART + 9, RLENGTH - 10)
+    print port "/" $1 (p != "" ? " (" p ")" : "")
+  }' | sort -t/ -k1,1n -u
+  return 0
+}
+
+_ufw_active() { lib_have ufw && ufw status 2>/dev/null | sed -n 1p | lib_grepq 'Status: active'; }
+
+lib_ufw_switch_off() {
+  local ports="" p=""
+  lib_manifest_set '.ufw' off
+  if lib_have ufw; then
+    lib_run ufw --force disable >/dev/null || lib_warn "ufw could not be switched off (see log)"
+  fi
+  lib_ok "UFW is off, and stays off after a reboot and after updates (lomp ufw on switches it on; its rules are kept)"
+  if lib_cf_origin_locked; then
+    lib_warn "The origin lock to Cloudflare is a UFW rule: with UFW off, the sites answer anyone who connects to this server directly"
+  fi
+  (( OPT_DRY_RUN )) && return 0
+  ports="$(_ufw_public_ports)"
+  if [[ -n "$ports" ]]; then
+    lib_note "Reachable from the internet now (listening on a public address):"
+    while read -r p; do lib_note "  ${p}"; done <<<"$ports"
+  fi
+  return 0
+}
+
+lib_ufw_switch_on() {
+  lib_manifest_set '.ufw' on
+  lib_have ufw || lib_die "ufw is not installed" "" "sudo lomp install"
+  if (( OPT_DRY_RUN )); then lib_info "[dry-run] would switch UFW on"; return 0; fi
+  if ! _ufw_active; then
+    lib_system_analyze --no-net
+    ufw show added 2>/dev/null | lib_grepq -E "allow ${SYS_SSH_PORTS%% *}/tcp" || lib_die "Refusing to enable UFW without an SSH allow rule" "SSH port ${SYS_SSH_PORTS} rule missing" "add it manually: ufw allow ${SYS_SSH_PORTS%% *}/tcp"
+    lib_run ufw --force enable >/dev/null || lib_die "ufw enable failed" "" "check 'ufw status' and the log"
+  fi
+  lib_systemctl enable ufw >/dev/null 2>&1 || true
+  lib_ok "UFW is on: only what its rules allow is reachable (ufw status)"
+}
+
+_ufw_status() {
+  local state="on" fw="inactive"
+  if lib_ufw_off; then state="off"; fi
+  if ! lib_have ufw; then lib_print_kv "UFW" "not installed"; return 0; fi
+  if _ufw_active; then fw="active"; fi
+  lib_print_kv "UFW switched" "$state"
+  lib_print_kv "UFW firewall" "$fw"
+  return 0
+}
+
+lib_ufw_main() {
+  local action="${1:-status}"
+  case "$action" in
+    -h|--help|help) lib_tr "Usage: lomp ufw on|off|status"; printf '%s\n' "$LIB_TR"; return 0 ;;
+    status|on|off) ;;
+    *) lib_die "Unknown ufw action: ${action}" "" "lomp ufw on|off|status" ;;
+  esac
+  (( $# <= 1 )) || lib_die "Unknown option for ufw: ${2}" "" "lomp ufw on|off|status"
+  lib_require_tools
+  lib_require_installed
+  case "$action" in
+    status) _ufw_status ;;
+    off)    lib_ufw_switch_off ;;
+    on)     lib_ufw_switch_on ;;
+  esac
+  return 0
+}
+
+_fail2ban_status() {
+  local state="on" svc="inactive" boot="disabled" jails="-"
+  if lib_fail2ban_off; then state="off"; fi
+  if ! lib_pkg_installed fail2ban; then
+    lib_print_kv "fail2ban" "not installed"
+    _ufw_status
+    return 0
+  fi
+  if lib_service_active fail2ban; then svc="active"; fi
+  if lib_service_enabled fail2ban; then boot="enabled"; fi
+  if [[ "$svc" == "active" ]] && lib_have fail2ban-client; then
+    jails="$(fail2ban-client status 2>/dev/null | sed -n 's/.*Jail list:[[:space:]]*//p')"
+    [[ -n "$jails" ]] || jails="-"
+  fi
+  lib_print_kv "switched" "$state"
+  lib_print_kv "service" "$svc"
+  lib_print_kv "at boot" "$boot"
+  lib_print_kv "jails" "$jails"
+  if [[ -f "$F2B_ALLOW_JAIL" ]]; then
+    lib_print_kv "never banned" "Cloudflare $(_fail2ban_cf_list | wc -l | tr -d ' ') + Google crawlers $(_fail2ban_google_list | wc -l | tr -d ' ') ranges, and reverse DNS"
+  else
+    lib_print_kv "never banned" "only this machine (sudo lomp self-update adds Cloudflare and Google)"
+  fi
+  _ufw_status
+  return 0
+}
+
+lib_fail2ban_main() {
+  local action="${1:-status}" ufw=0
+  case "$action" in
+    -h|--help|help) lib_tr "Usage: lomp fail2ban on|off [--ufw] | status | refresh"; printf '%s\n' "$LIB_TR"; return 0 ;;
+    status|on|off|refresh) ;;
+    *) lib_die "Unknown fail2ban action: ${action}" "" "lomp fail2ban on|off [--ufw] | status | refresh" ;;
+  esac
+  if (( $# > 1 )); then
+    # --ufw: UFW goes off or on with it, for a server whose traffic either would slow down
+    if [[ "$2" == "--ufw" && ( "$action" == on || "$action" == off ) && $# -eq 2 ]]; then ufw=1
+    else lib_die "Unknown option for fail2ban: ${2}" "" "lomp fail2ban on|off [--ufw] | status | refresh"; fi
+  fi
+  lib_require_tools
+  lib_require_installed
+  case "$action" in
+    status) _fail2ban_status ;;
+    refresh)
+      # (cron, weekly: Google's and Cloudflare's ranges change)
+      lib_pkg_installed fail2ban || return 0
+      lib_fail2ban_lists_update
+      lib_fail2ban_allow_write
+      _fail2ban_reload_if_changed
+      lib_ok "fail2ban never bans: Cloudflare $(_fail2ban_cf_list | wc -l | tr -d ' ') + Google crawlers $(_fail2ban_google_list | wc -l | tr -d ' ') ranges"
+      lib_fail2ban_foreign_ignoreip
+      ;;
+    off)
+      lib_manifest_set '.fail2ban' off
+      if lib_pkg_installed fail2ban; then
+        lib_systemctl disable --now fail2ban >/dev/null 2>&1 || lib_warn "systemctl could not stop fail2ban (journalctl -u fail2ban)"
+      fi
+      lib_ok "fail2ban is off, and stays off after a reboot and after updates (lomp fail2ban on switches it on)"
+      lib_note "Nothing bans an address that keeps guessing passwords now: SSH, WordPress logins, mail and the webmail included."
+      lib_note "Logging in to SSH with a key only (no password) keeps the server safe without it."
+      if (( ufw )); then lib_ufw_switch_off; fi
+      ;;
+    on)
+      lib_manifest_set '.fail2ban' on
+      lib_system_analyze --no-net
+      # (only install itself reads the extra addresses back; the rest of the settings come from lib_params_load)
+      [[ -n "$FAIL2BAN_IGNORE_IP" ]] || FAIL2BAN_IGNORE_IP="$(lib_manifest_get '.params.fail2ban_ignore_ip')"
+      lib_install_fail2ban
+      if (( ! OPT_DRY_RUN )) && ! lib_service_active fail2ban; then
+        lib_die "fail2ban did not start" "" "journalctl -u fail2ban"
+      fi
+      if (( ufw )); then lib_ufw_switch_on; fi
+      ;;
+  esac
+  return 0
 }
 
 lib_install_logrotate() {
@@ -628,8 +974,10 @@ EOF
 lib_install_cron_base() {
   local id="" added=()
   if lib_server_images; then lib_nginx_cron_base; return 0; fi
-  for id in healthcheck htaccess ols-logs; do lib_cron_has "$id" || added+=("$id"); done
+  for id in healthcheck htaccess ols-logs f2b-allow; do lib_cron_has "$id" || added+=("$id"); done
   lib_cron_set healthcheck "15 6 * * * root ${BIN_LINK} healthcheck"
+  # Google's crawler ranges and Cloudflare's, which fail2ban never bans, change now and then
+  lib_cron_set f2b-allow "${F2B_ALLOW_CRON} root ${BIN_LINK} fail2ban refresh --quiet"
   lib_ols_htaccess_watch_ensure
   lib_ols_logs_prune_ensure
   INS_CRON_ADDED="${added[*]-}"
@@ -809,6 +1157,7 @@ lib_install_migrate() {
   # and the request-parsing guards in every version's ini
   lib_php_security_migrate
   lib_php_cli_migrate
+  lib_fail2ban_migrate
   lib_domain_isolation_repair
   if [[ -z "$DOMAIN_ISOLATED" ]]; then lib_ok "Every site's home is closed to the other sites' users"
   elif (( OPT_DRY_RUN )); then lib_info "[dry-run] would close these sites' homes to the other sites' users: ${DOMAIN_ISOLATED}"

@@ -951,6 +951,12 @@ lib_nginx_ufw() {
     lib_ufw_rule allow 80/tcp
     lib_ufw_rule allow 443/tcp
   fi
+  # switched off by "lomp ufw off": the rules above are kept for the day it comes back
+  if lib_ufw_off; then
+    lib_manifest_set_json '.components.ufw' true
+    lib_ok "UFW: rules kept up to date, but switched off (lomp ufw on switches it on)"
+    return 0
+  fi
   if (( ! OPT_DRY_RUN )); then
     if ! ufw status 2>/dev/null | sed -n 1p | lib_grepq 'Status: active'; then
       ufw show added 2>/dev/null | lib_grepq -E "allow ${SYS_SSH_PORTS%% *}/tcp" || lib_die "Refusing to enable UFW without an SSH allow rule" "SSH port ${SYS_SSH_PORTS} rule missing" "add it manually: ufw allow ${SYS_SSH_PORTS%% *}/tcp"
@@ -1009,8 +1015,9 @@ EOF
 
 lib_nginx_cron_base() {
   local id="" added=()
-  for id in healthcheck nginx-perms; do lib_cron_has "$id" || added+=("$id"); done
+  for id in healthcheck nginx-perms f2b-allow; do lib_cron_has "$id" || added+=("$id"); done
   lib_cron_set healthcheck "15 6 * * * root ${BIN_LINK} healthcheck"
+  lib_cron_set f2b-allow "${F2B_ALLOW_CRON} root ${BIN_LINK} fail2ban refresh --quiet"
   lib_cron_set nginx-perms "${NGX_PERMS_CRON} root ${BIN_LINK} nginx-perms"
   # the sites' checks look for OpenLiteSpeed, which an image server has not
   lib_cron_remove htaccess
@@ -1179,6 +1186,7 @@ lib_nginx_migrate() {
   if (( NGX_CHANGED )); then lib_nginx_reload; lib_ok "nginx configuration rewritten the way this release writes it"
   else lib_ok "nginx configuration is up to date"; fi
   lib_domain_fail2ban_regen
+  lib_fail2ban_migrate
   return 0
 }
 
@@ -1253,9 +1261,11 @@ lib_nginx_status_main() {
 lib_nginx_doctor_checks() {
   local svc="" d="" days="" home=""
   for svc in nginx fail2ban; do
+    if [[ "$svc" == fail2ban ]] && lib_fail2ban_off; then _doc_add OK "fail2ban service" "switched off (lomp fail2ban on switches it on)"; continue; fi
     if lib_service_active "$svc"; then _doc_add OK "${svc} service" "running"; else _doc_add FAIL "${svc} service" "not running (systemctl status ${svc})"; fi
   done
-  if ufw status 2>/dev/null | sed -n 1p | lib_grepq 'Status: active'; then _doc_add OK "firewall" "UFW active"; else _doc_add FAIL "firewall" "UFW inactive"; fi
+  if lib_ufw_off; then _doc_add OK "firewall" "UFW switched off (lomp ufw on switches it on)"
+  elif ufw status 2>/dev/null | sed -n 1p | lib_grepq 'Status: active'; then _doc_add OK "firewall" "UFW active"; else _doc_add FAIL "firewall" "UFW inactive"; fi
   if lib_nginx_test; then _doc_add OK "nginx configuration" "nginx -t passes"; else _doc_add FAIL "nginx configuration" "${NGX_TEST_OUTPUT##*$'\n'}"; fi
   lib_nginx_tune
   if [[ -f "$NGX_CONF" ]] && cmp -s "$NGX_CONF" <(lib_nginx_render_conf); then _doc_add OK "nginx tuning" "sized for ${SYS_CPU_CORES} core(s), ${SYS_RAM_MB} MB"
@@ -1302,7 +1312,7 @@ lib_nginx_doctor_checks() {
 # is off for everything it calls.
 lib_nginx_owns() {   # command
   case "$1" in
-    install|self-update|migrate|update|optimize|status|doctor|healthcheck|logs|notify|menu|update-cf-ips|help|version) return 1 ;;
+    install|self-update|migrate|update|optimize|status|doctor|healthcheck|logs|notify|menu|update-cf-ips|fail2ban|ufw|help|version) return 1 ;;
   esac
   return 0
 }

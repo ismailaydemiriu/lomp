@@ -1012,6 +1012,8 @@ lib_webmail_fail2ban_apply() {
       return 1
     fi
   fi
+  # switched off by "lomp fail2ban off": the restart below would start it again
+  lib_fail2ban_off && return 0
   lib_systemctl reload fail2ban 2>/dev/null || lib_systemctl restart fail2ban 2>/dev/null || true
   return 0
 }

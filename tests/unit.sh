@@ -60,6 +60,8 @@ for m in common lang system ols php db ssl domain harden scan speed proxy app ma
   source "$ROOT/lib/$m.sh"
 done
 trap cleanup EXIT
+# (lib/install.sh names system paths when it is read)
+F2B_ALLOW_JAIL="$TMP/jail-allow.conf"; F2B_GOODBOT_SCRIPT="$TMP/lomp-f2b-goodbot"
 mkdir -p "$STATE_DIR" "$LSWS_HOME/conf/vhosts" "$SITES_ROOT"; : >"$LOG_FILE"
 chown() { return 0; }   # no lsadm/site users on the test machine
 # nor can the suite switch users: run the command as whoever runs the tests, and keep a record
@@ -3184,8 +3186,8 @@ assert_has "through what self-update runs too" 'lib_install_cron_base' "$(declar
 cp "$CRON_FILE" "$TMP/cron.keep"
 rm -f "$CRON_FILE"
 lib_install_cron_base
-assert_eq "a server with none gets all three" "healthcheck htaccess ols-logs" "$INS_CRON_ADDED"
-assert_eq "and exactly the ones it names"     3 "$(grep -c '# server-setup:' "$CRON_FILE")"
+assert_eq "a server with none gets all four" "healthcheck htaccess ols-logs f2b-allow" "$INS_CRON_ADDED"
+assert_eq "and exactly the ones it names"     4 "$(grep -c '# server-setup:' "$CRON_FILE")"
 # one from before the cleanup, with entries of its own after the base ones
 lib_cron_set "wpcron:example.com" "*/5 * * * * example_com true"
 lib_cron_set backup "0 3 * * * root ${BIN_LINK} backup --all --yes --quiet"
@@ -14609,6 +14611,199 @@ eval "$_lu_saved"
 INS_AUTO_REBOOT="$_lu_reboot"
 UNATTENDED_CONF="/etc/apt/apt.conf.d/52server-setup-unattended"; PHP_STALE_SCRIPT="/usr/local/sbin/lomp-lsphp-restart"
 unset -f _lu_proc _lu_m _lu_run _lu_mig
+
+
+# =============================================================================
+section "fail2ban and UFW on|off|status; Cloudflare and Google's crawlers never banned"
+_fb_real_inst="$(declare -f lib_install_fail2ban)"
+_fb_saved="$(declare -f lib_pkg_installed lib_service_active lib_service_enabled lib_systemctl lib_run lib_require_tools lib_require_installed lib_system_analyze lib_install_fail2ban fail2ban-client curl ufw ss lib_have lib_cf_origin_locked 2>/dev/null || true)"
+_fb_state="$STATE_DIR"; STATE_DIR="$TMP/fb-state"; mkdir -p "$STATE_DIR" "$TMP/fb"
+printf '{"installed_at":"x","params":{"fail2ban_ignore_ip":"203.0.113.9"}}\n' >"$STATE_DIR/manifest.json"
+_fb_paths="$(declare -p F2B_GOODBOT_SCRIPT F2B_ALLOW_JAIL F2B_GOOGLE_IPS F2B_CF_IPS CF_IPS_FILE ADMIN_ALLOWED_IP FAIL2BAN_JAIL_FILE)"
+F2B_GOODBOT_SCRIPT="$TMP/fb/lomp-f2b-goodbot"; F2B_ALLOW_JAIL="$TMP/fb/allow.conf"; FAIL2BAN_JAIL_FILE="$TMP/fb/base.conf"
+F2B_GOOGLE_IPS="$TMP/fb/google.conf"; F2B_CF_IPS="$TMP/fb/f2b-cf.conf"; CF_IPS_FILE="$TMP/fb/cf.conf"
+ADMIN_ALLOWED_IP="198.51.100.7"
+
+# ---- the allow file: this machine, the operator's addresses, Cloudflare, Google - one ignoreip
+printf '# Cloudflare\n173.245.48.0/20\n2400:cb00::/32\n' >"$CF_IPS_FILE"
+printf '# Google\n66.249.64.0/27\n2001:4860:4801:10::/64\n' >"$F2B_GOOGLE_IPS"
+_fb_allow="$(lib_fail2ban_render_allow_jail)"
+assert_has "one [DEFAULT] for every jail"                     "[DEFAULT]" "$_fb_allow"
+assert_has "this machine"                                     "ignoreip = 127.0.0.1/8" "$_fb_allow"
+assert_has "the WebAdmin address"                             "           198.51.100.7" "$_fb_allow"
+assert_has "the addresses install was given"                  "           203.0.113.9" "$_fb_allow"
+assert_has "Cloudflare's ranges"                              "           2400:cb00::/32" "$_fb_allow"
+assert_has "Google's crawler ranges"                          "           66.249.64.0/27" "$_fb_allow"
+assert_lacks "no comment line of a list"                      "# Google" "$(sed -n '/^ignoreip/,$p' <<<"$_fb_allow")"
+assert_has "the reverse DNS check, bounded in time"           "ignorecommand = /usr/bin/timeout 5 $F2B_GOODBOT_SCRIPT <ip>" "$_fb_allow"
+assert_has "and fail2ban keeps the answer"                    'ignorecache = key="<ip>"' "$_fb_allow"
+assert_eq  "every continuation line is indented"              "0" "$(sed -n '/^ignoreip/,/^ignorecommand/p' <<<"$_fb_allow" | sed '1d;$d' | grep -vc '^           ' || true)"
+mv "$CF_IPS_FILE" "$TMP/fb/cf.saved"; printf '104.16.0.0/13\n' >"$F2B_CF_IPS"
+assert_has "no Cloudflare mode: its own copy of the ranges"   "           104.16.0.0/13" "$(lib_fail2ban_render_allow_jail)"
+mv "$TMP/fb/cf.saved" "$CF_IPS_FILE"
+# an older release's base jails carried ignoreip; read after the allow file, it would win
+printf '[DEFAULT]\nbackend = systemd\nignoreip = 127.0.0.1/8 ::1\nbantime = 1h\n' >"$FAIL2BAN_JAIL_FILE"
+lib_fail2ban_allow_write >/dev/null 2>&1
+assert_lacks "the old ignoreip leaves the base jails"         "ignoreip" "$(cat "$FAIL2BAN_JAIL_FILE")"
+assert_has "the rest of them stays"                           "bantime = 1h" "$(cat "$FAIL2BAN_JAIL_FILE")"
+assert_eq  "and it says something changed"                    1 "$F2B_ALLOW_CHANGED"
+lib_fail2ban_allow_write >/dev/null 2>&1
+assert_eq  "a second time nothing does"                       0 "$F2B_ALLOW_CHANGED"
+assert_lacks "the base jails install writes have none"        "ignoreip = " "$_fb_real_inst"
+assert_has "install writes the allow file"                    'lib_fail2ban_allow_write' "$_fb_real_inst"
+assert_has "a server set up before gets it (migrate)"         'lib_fail2ban_migrate' "$(declare -f lib_install_migrate)"
+assert_has "an image server too"                              'lib_fail2ban_migrate' "$(declare -f lib_nginx_migrate)"
+assert_has "a weekly cron fetches the ranges again"           'fail2ban refresh --quiet' "$(declare -f lib_install_cron_base)"
+assert_has "on an image server too"                           'fail2ban refresh --quiet' "$(declare -f lib_nginx_cron_base)"
+# an operator's own ignoreip replaces lomp's list: named
+assert_has "doctor's eye for it is in the migrate"            'lib_fail2ban_foreign_ignoreip' "$(declare -f lib_fail2ban_migrate)"
+
+# ---- Google's published ranges: fetched, checked, never emptied by a bad download
+curl() { case "$*" in *common-crawlers*) printf '{"prefixes":[{"ipv6Prefix":"2001:4860:4801:10::/64"},{"ipv4Prefix":"66.249.64.0/27"}]}' ;;
+                      *special-crawlers*) printf '{"prefixes":[%s]}' "$(for i in $(seq 1 10); do printf '{"ipv4Prefix":"66.249.%s.0/27"},' "$i"; done | sed 's/,$//')" ;;
+                      *) return 22 ;; esac; }
+lib_fail2ban_lists_update >/dev/null 2>&1
+assert_has "the list is fetched"                              "66.249.5.0/27" "$(cat "$F2B_GOOGLE_IPS")"
+assert_has "from both of Google's files"                      "2001:4860:4801:10::/64" "$(cat "$F2B_GOOGLE_IPS")"
+assert_eq  "12 ranges"                                        12 "$(grep -vc '^#' "$F2B_GOOGLE_IPS")"
+curl() { case "$*" in *common-crawlers*) printf '{"prefixes":[{"ipv4Prefix":"x; rm -rf /"}]}' ;; *) printf '{"prefixes":[]}' ;; esac; }
+_out="$(OPT_QUIET=0 lib_fail2ban_lists_update 2>&1)"
+assert_eq  "a list that looks wrong is not taken"             12 "$(grep -vc '^#' "$F2B_GOOGLE_IPS")"
+assert_has "and it says so"                                   "could not be fetched; the list in use stays (12 ranges)" "$_out"
+curl() { return 22; }
+lib_fail2ban_lists_update >/dev/null 2>&1
+assert_eq  "nor does an unreachable Google empty it"          12 "$(grep -vc '^#' "$F2B_GOOGLE_IPS")"
+unset -f curl
+
+# ---- the reverse DNS check: the name ends in googlebot.com or google.com and leads back.
+# The script's own logic, with the resolver stood in for.
+lib_fail2ban_render_goodbot_script >"$F2B_GOODBOT_SCRIPT"
+if command -v python3 >/dev/null 2>&1; then
+  _fb_py() {   # ip ptr forward-addresses(comma) -> the script's exit status
+    python3 -I - "$F2B_GOODBOT_SCRIPT" "$@" <<'PY'
+import socket, sys
+path, ip, ptr, fwd = sys.argv[1:5]
+def gba(a):
+    if not ptr: raise socket.herror("no name")
+    return (ptr, [], [a])
+def gai(name, *a, **k):
+    if not fwd: raise socket.gaierror("no address")
+    return [(socket.AF_INET6 if ":" in x else socket.AF_INET, 1, 6, "", (x, 0)) for x in fwd.split(",")]
+socket.gethostbyaddr = gba; socket.getaddrinfo = gai
+sys.argv = [path, ip]
+try:
+    exec(compile(open(path).read(), path, "exec"), {"__name__": "__main__"})
+except SystemExit as e:
+    print(e.code)
+PY
+  }
+  assert_eq "Googlebot, both ways: never banned"              0 "$(_fb_py 66.249.66.1 crawl-66-249-66-1.googlebot.com. 66.249.66.1)"
+  assert_eq "a google.com crawler too"                         0 "$(_fb_py 66.249.90.77 rate-limited-proxy-66-249-90-77.google.com 66.249.90.77)"
+  assert_eq "IPv6, written another way"                        0 "$(_fb_py 2001:4860:4801:10::1 crawl-2001-4860-4801-10--1.googlebot.com 2001:4860:4801:0010:0000:0000:0000:0001)"
+  assert_eq "a googlebot.com name that does not lead back"     1 "$(_fb_py 203.0.113.5 crawl-66-249-66-1.googlebot.com 66.249.66.1)"
+  assert_eq "a name that only ends in the letters"             1 "$(_fb_py 203.0.113.5 x.evilgooglebot.com 203.0.113.5)"
+  assert_eq "a Google Cloud VM is not a crawler"               1 "$(_fb_py 203.0.113.5 5.113.0.203.bc.googleusercontent.com 203.0.113.5)"
+  assert_eq "no reverse name"                                  1 "$(_fb_py 203.0.113.5 "" "")"
+  assert_eq "no forward address"                               1 "$(_fb_py 66.249.66.1 crawl-66-249-66-1.googlebot.com "")"
+  assert_eq "not an address at all"                            1 "$(_fb_py 'x;id' crawl.googlebot.com 66.249.66.1)"
+  unset -f _fb_py
+fi
+
+# ---- off: stopped, not started at boot, remembered; nothing in lomp starts it again
+lib_pkg_installed() { [[ "$1" == fail2ban ]]; }
+lib_service_active() { [[ -f "$TMP/fb/active" ]]; }
+lib_service_enabled() { [[ -f "$TMP/fb/active" ]]; }
+lib_systemctl() { printf 'SYSTEMCTL %s\n' "$*" >>"$TMP/fb/calls"; if [[ "$*" == "disable --now fail2ban" ]]; then rm -f "$TMP/fb/active"; fi; }
+lib_run() { printf 'RUN %s\n' "$*" >>"$TMP/fb/calls"; if [[ "$*" == "ufw --force disable" ]]; then rm -f "$TMP/fb/ufw-on"; fi; if [[ "$*" == "ufw --force enable" ]]; then touch "$TMP/fb/ufw-on"; fi; }
+lib_require_tools() { :; }; lib_require_installed() { :; }
+lib_system_analyze() { SYS_SSH_PORTS=22; }
+lib_install_fail2ban() { printf 'INSTALL ignore=%s off=%s\n' "$FAIL2BAN_IGNORE_IP" "$(lib_fail2ban_off && echo y || echo n)" >>"$TMP/fb/calls"; touch "$TMP/fb/active"; }
+lib_cf_origin_locked() { [[ -f "$TMP/fb/locked" ]]; }
+fail2ban-client() { return 0; }
+ufw() { case "$1" in status) if [[ -f "$TMP/fb/ufw-on" ]]; then printf 'Status: active\n'; else printf 'Status: inactive\n'; fi ;;
+                     show) printf 'ufw allow 22/tcp\n' ;; esac; }
+ss() { printf '%s\n' 'tcp   LISTEN 0 511       0.0.0.0:80        0.0.0.0:*    users:(("lsws",pid=10,fd=3))' \
+                     'tcp   LISTEN 0 80      127.0.0.1:3306      0.0.0.0:*    users:(("mariadbd",pid=11,fd=20))' \
+                     'tcp   LISTEN 0 128          [::]:7080         [::]:*    users:(("lsws",pid=10,fd=5))' \
+                     'udp   UNCONN 0 0   127.0.0.53%lo:53        0.0.0.0:*    users:(("systemd-resolve",pid=9,fd=13))' \
+                     'tcp   LISTEN 0 511         [::1]:6379         [::]:*    users:(("redis-server",pid=12,fd=7))'; }
+_fb() { ( OPT_QUIET=0; LIB_LANG=en; lib_fail2ban_main "$@" 2>&1; printf 'rc=%s\n' "$?" ); }
+_uf() { ( OPT_QUIET=0; LIB_LANG=en; lib_ufw_main "$@" 2>&1; printf 'rc=%s\n' "$?" ); }
+touch "$TMP/fb/active" "$TMP/fb/ufw-on"; : >"$TMP/fb/calls"
+assert_false "on by default"                                  lib_fail2ban_off
+assert_false "UFW too"                                        lib_ufw_off
+_out="$(_fb off)"
+assert_has "off stops it and keeps it from starting at boot"  "SYSTEMCTL disable --now fail2ban" "$(cat "$TMP/fb/calls")"
+assert_true "and is remembered"                               lib_fail2ban_off
+assert_has "it says so"                                       "stays off after a reboot and after updates" "$_out"
+assert_has "and what that leaves open"                        "Nothing bans an address that keeps guessing passwords" "$_out"
+assert_has "status 0"                                         "rc=0" "$_out"
+assert_false "UFW is left alone without --ufw"                lib_ufw_off
+assert_true "and still runs"                                  test -f "$TMP/fb/ufw-on"
+_out="$(_fb status)"
+assert_has "status: off"                                      "off" "$(grep -E '^ *switched' <<<"$_out")"
+assert_has "status: not running"                              "inactive" "$(grep -E '^ *service' <<<"$_out")"
+assert_has "status: what is never banned"                     "Cloudflare 2 + Google crawlers 12 ranges, and reverse DNS" "$_out"
+assert_has "status: UFW"                                      "active" "$(grep 'UFW firewall' <<<"$_out")"
+# the webmail's jail used to restart a stopped fail2ban
+_fb_wm="$(declare -p WM_JAIL_FILE WM_FILTER_FILE)"
+WM_JAIL_FILE="$TMP/fb/wm-jail.conf"; WM_FILTER_FILE="$TMP/fb/wm-filter.conf"; : >"$TMP/fb/calls"
+lib_webmail_fail2ban_apply >/dev/null 2>&1 || true
+assert_lacks "the webmail's jail does not start it again"     "fail2ban" "$(cat "$TMP/fb/calls")"
+eval "$_fb_wm"
+assert_has "an install re-run asks before it enables it"      "lib_fail2ban_off" "${_fb_real_inst%%lib_systemctl enable fail2ban*}"
+assert_has "doctor: off is not a failure"                     'lib_fail2ban_off' "$(declare -f _doc_check_services)"
+assert_has "nor on an image server"                           'lib_fail2ban_off' "$(declare -f lib_nginx_doctor_checks)"
+C_DIM="<dim>"; assert_has "the menu header: off, not DOWN"    "<dim>f2b:off" "$(_menu_badge fail2ban:f2b)"; C_DIM=""
+
+# ---- off --ufw: UFW goes off with it; its rules stay; what answers from outside is listed
+touch "$TMP/fb/locked"
+_out="$(_fb off --ufw)"
+assert_has "UFW switched off"                                 "RUN ufw --force disable" "$(cat "$TMP/fb/calls")"
+assert_true "and remembered"                                  lib_ufw_off
+assert_has "it says the rules are kept"                       "its rules are kept" "$_out"
+assert_has "a locked origin is open now: said"                "with UFW off, the sites answer anyone" "$_out"
+assert_has "the web port answers from outside"                "80/tcp (lsws)" "$_out"
+assert_has "and the WebAdmin port"                            "7080/tcp (lsws)" "$_out"
+assert_lacks "a loopback one does not"                        "3306" "$_out"
+assert_lacks "nor the resolver"                               "53/udp" "$_out"
+assert_lacks "nor IPv6 loopback"                              "6379" "$_out"
+rm -f "$TMP/fb/locked"
+assert_has "install keeps UFW's rules but does not enable it" "lib_ufw_off" "$(declare -f lib_install_ufw)"
+assert_has "doctor: UFW off is not a failure"                 'lib_ufw_off' "$(declare -f _doc_check_services)"
+assert_has "the origin lock warns while UFW is off"           'lib_ufw_off' "$(declare -f lib_cf_firewall_main)"
+assert_has "ufw status"                                       "off" "$(_uf status | grep 'UFW switched')"
+# ---- on --ufw: both back, the extra addresses install was given included
+: >"$TMP/fb/calls"
+_out="$(_fb on --ufw)"
+assert_has "on runs the install step, no longer off"          "INSTALL ignore=203.0.113.9 off=n" "$(cat "$TMP/fb/calls")"
+assert_has "and switches UFW on"                              "RUN ufw --force enable" "$(cat "$TMP/fb/calls")"
+assert_false "both remembered"                                lib_fail2ban_off
+assert_false "(UFW)"                                          lib_ufw_off
+assert_has "status 0"                                         "rc=0" "$_out"
+ufw() { case "$1" in status) printf 'Status: inactive\n' ;; show) printf 'ufw allow 2222/tcp\n' ;; esac; }
+assert_has "UFW never comes on without an SSH rule"           "Refusing to enable UFW without an SSH allow rule" "$(_uf on)"
+assert_has "an unknown action is refused"                     "Unknown fail2ban action: up" "$(_fb up)"
+assert_has "an extra argument too"                            "Unknown option for fail2ban: now" "$(_fb off now)"
+assert_has "--ufw only with on or off"                        "Unknown option for fail2ban: --ufw" "$(_fb status --ufw)"
+assert_has "ufw: an unknown action"                           "Unknown ufw action: up" "$(_uf up)"
+assert_has "setup.sh has the commands"                        'fail2ban)       lib_fail2ban_main' "$(cat "$ROOT/setup.sh")"
+assert_has "(ufw)"                                            'ufw)            lib_ufw_main' "$(cat "$ROOT/setup.sh")"
+assert_has "and takes the lock for on and off"                'fail2ban) case "${rest[0]:-status}" in status|help|-h|--help) ;; *) lib_lock ;; esac ;;' "$(cat "$ROOT/setup.sh")"
+assert_false "an image server runs them itself"               lib_nginx_owns fail2ban
+assert_false "(ufw)"                                          lib_nginx_owns ufw
+assert_has "the menu offers it as 33"                         '_menu_item 33 "fail2ban and the UFW firewall' "$(declare -f lib_menu_main)"
+assert_has "and runs it"                                      "33) _menu_fail2ban ;;" "$(cat "$ROOT/lib/menu.sh")"
+assert_has "the image server's menu as 15"                    "15) _menu_fail2ban ;;" "$(cat "$ROOT/lib/menu.sh")"
+assert_has "the menu switches both off"                       '_menu_run fail2ban off --ufw' "$(declare -f _menu_fail2ban)"
+assert_has "the command reference has it"                     "fail2ban on|off [--ufw]       Switch fail2ban off completely" "$(LIB_LANG=en lib_usage 2>/dev/null)"
+assert_has "and ufw"                                          "ufw on|off|status             Switch the UFW firewall off" "$(LIB_LANG=en lib_usage 2>/dev/null)"
+assert_eq  "the menu's line in Turkish"                       "fail2ban ve UFW güvenlik duvarı: aç ya da kapat (yoğun sunucular)" \
+  "${MENU_TR["fail2ban and the UFW firewall: on or off (busy servers)"]:-}"
+unset -f _fb _uf fail2ban-client ufw ss
+eval "$_fb_saved"
+eval "$_fb_paths"
+STATE_DIR="$_fb_state"
 
 assert_true "no test started the pm2 of this machine: it would have left a daemon behind" pm2_none_started
 assert_true "nor any other program of it that changes the machine or reaches beyond it" machine_none_started

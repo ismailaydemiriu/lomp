@@ -250,7 +250,9 @@ lib_cf_origin_relock() {
 lib_cf_firewall_main() {
   local a="${1:-status}"
   case "$a" in
-    --web-cloudflare-only|lock)  lib_cf_origin_lock ;;
+    --web-cloudflare-only|lock)  lib_cf_origin_lock
+      # the lock is UFW rules: with UFW switched off they are written and do nothing
+      if lib_ufw_off; then lib_warn "UFW is switched off: the lock takes effect once it is on again (lomp ufw on)"; fi ;;
     --web-open|open)             lib_cf_origin_unlock ;;
     status|--status|"")
       if lib_cf_origin_locked; then
@@ -259,6 +261,7 @@ lib_cf_firewall_main() {
         lib_print_kv "Web ports" "open to everyone (lomp firewall --web-cloudflare-only closes them to all but Cloudflare)"
       fi
       lib_print_kv "Cloudflare ranges" "$(_cf_ips_count) (refreshed $(lib_manifest_get '.cloudflare.ips_checked'))"
+      if lib_ufw_off; then lib_print_kv "UFW" "switched off: no rule of it applies (lomp ufw on)"; fi
       ;;
     *) lib_die "Unknown firewall command: ${a}" "" "lomp firewall --web-cloudflare-only | --web-open | status" ;;
   esac
