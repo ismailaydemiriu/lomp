@@ -19,6 +19,7 @@ DOM_OPT_WP_TITLE="" DOM_OPT_WP_ADMIN="admin" DOM_OPT_WP_EMAIL="" DOM_OPT_WP_LOCA
 DOM_OPT_MAIL=0 DOM_OPT_MAILBOX="" DOM_OPT_MAIL_QUOTA=""
 DOMAIN_CREATED_HOME=0
 DOMAIN_CREATED_USER=0
+DOMAIN_CHILDREN_RAISED=""   # sites lib_domain_children_migrate gave the busier default of PHP workers
 DOMAIN_LOGS_MOVED=""    # sites whose logs lib_domain_logs_repair moved out of their homes
 DOMAIN_F2B_FILTERS_CHANGED=0   # set by lib_domain_fail2ban_filters_write
 DOMAIN_ISOLATED=""      # sites whose homes lib_domain_isolation_repair closed to other accounts
@@ -292,7 +293,7 @@ lib_domain_parse_add_args() {
   fi
   if [[ "$D_MODE" == "php" || "$D_MODE" == "wordpress" ]]; then
     lib_php_valid_version "$D_PHP" || lib_die "Invalid PHP version '${D_PHP}'" "expected e.g. 8.3" "--php 8.3"
-    [[ -z "$D_PHP_CHILDREN" || "$D_PHP_CHILDREN" =~ ^[0-9]{1,2}$ ]] || lib_die "Invalid --php-children '${D_PHP_CHILDREN}'" "1..64 expected" "--php-children 6"
+    [[ -z "$D_PHP_CHILDREN" || "$D_PHP_CHILDREN" =~ ^[1-9][0-9]{0,2}$ && "$D_PHP_CHILDREN" -le 256 ]] || lib_die "Invalid --php-children '${D_PHP_CHILDREN}'" "1..256 expected" "--php-children 6"
     [[ -z "$D_MEMORY" || "$D_MEMORY" =~ ^[0-9]+[MG]$ ]] || lib_die "Invalid --memory '${D_MEMORY}'" "use e.g. 256M or 1G" "--memory 256M"
     [[ -z "$D_UPLOAD" || "$D_UPLOAD" =~ ^[0-9]+[MG]$ ]] || lib_die "Invalid --upload '${D_UPLOAD}'" "use e.g. 64M" "--upload 64M"
   else
@@ -872,6 +873,40 @@ _domain_logs_move_old() (   # home dir group
   (( ! left )) || { printf 'a name that is already in %s, something other than a file, or a copy that failed' "$dir"; exit 1; }
   exit 0
 )
+
+# Sites made by a release that gave every site at most 32 PHP workers keep that number in
+# their state file, and every vhost is written from there - so a busier default reaches them
+# only here. A site whose number is exactly what the old formula gave was never set by hand
+# (--php-children) and takes the new default; any other number is left as its owner set it.
+# DOMAIN_CHILDREN_RAISED names the sites changed, as "<domain>:<old>-><new>".
+lib_domain_children_migrate() {
+  local d="" raised=()
+  DOMAIN_CHILDREN_RAISED=""
+  lib_ols_is_installed || return 0
+  [[ -n "$(lib_domains_list)" ]] || return 0
+  lib_system_profile
+  (( CALC_PHP_CHILDREN_SITE > CALC_PHP_CHILDREN_SITE_OLD )) || return 0
+  while read -r d; do
+    [[ -n "$d" ]] || continue
+    lib_domain_state_load "$d" || continue
+    [[ "$D_MODE" == "php" || "$D_MODE" == "wordpress" ]] || continue
+    [[ "$D_PHP_CHILDREN" == "$CALC_PHP_CHILDREN_SITE_OLD" ]] || continue
+    raised+=("${d}:${D_PHP_CHILDREN}->${CALC_PHP_CHILDREN_SITE}")
+  done < <(lib_domains_list)
+  ((${#raised[@]})) || return 0
+  DOMAIN_CHILDREN_RAISED="${raised[*]}"
+  (( OPT_DRY_RUN )) && return 0
+  lib_ols_change_begin
+  for d in "${raised[@]}"; do
+    d="${d%%:*}"
+    lib_domain_state_load "$d" || continue
+    D_PHP_CHILDREN="$CALC_PHP_CHILDREN_SITE"
+    lib_domain_state_save
+    lib_ols_vhconf_write "$d"
+  done
+  lib_ols_change_commit "PHP workers per site"
+  return 0
+}
 
 # "update" gives every site what a new one gets from lib_domain_dirs_create and the vhost
 # template: its logs in SITES_LOG_ROOT, with a link in the home, and a vhost rendered again -

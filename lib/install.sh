@@ -1170,6 +1170,12 @@ lib_install_migrate() {
   # where a site with mail was renamed by a release that did not tell Dovecot the addresses its
   # mailboxes had before, it is told now
   lib_mail_former_migrate
+  # sites on the old 32-worker default take the busier one (a number someone set stays)
+  lib_domain_children_migrate
+  if [[ -n "$DOMAIN_CHILDREN_RAISED" ]]; then
+    if (( OPT_DRY_RUN )); then lib_info "[dry-run] would give these sites more PHP workers, as this release's default does: ${DOMAIN_CHILDREN_RAISED}"
+    else lib_ok "These sites now have more PHP workers, as this release's default gives (--php-children sets one by hand): ${DOMAIN_CHILDREN_RAISED}"; fi
+  fi
   # last: a vhost OpenLiteSpeed refuses ends the run here
   lib_domain_logs_repair
   if [[ -n "$DOMAIN_LOGS_MOVED" ]]; then

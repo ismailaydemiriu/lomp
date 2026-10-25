@@ -16,7 +16,7 @@ CALC_DB_TABLE_CACHE=0 CALC_DB_THREAD_CACHE=0 CALC_DB_IO_CAP=0 CALC_DB_IO_CAP_MAX
 CALC_REDIS_PCT=0 CALC_REDIS_MB=0
 CALC_PHP_MEMORY_MB=0 CALC_PHP_UPLOAD_MB=0 CALC_PHP_POST_MB=0 CALC_PHP_MAX_EXEC=0 CALC_PHP_MAX_INPUT_VARS=0
 CALC_OPCACHE_MB=0 CALC_OPCACHE_FILES=0 CALC_OPCACHE_STRINGS_MB=0
-CALC_PHP_CHILDREN_TOTAL=0 CALC_PHP_CHILDREN_SITE=0
+CALC_PHP_CHILDREN_TOTAL=0 CALC_PHP_CHILDREN_SITE=0 CALC_PHP_CHILDREN_SITE_OLD=0
 CALC_OLS_WORKERS=0 CALC_OLS_MAX_CONN=0 CALC_OLS_INMEM_MB=0 CALC_OLS_MMAP_MB=0
 CALC_SWAP_MB=0 CALC_MAIL_MB=0
 
@@ -192,8 +192,16 @@ lib_system_profile() {
   local budget=$(( r - os_reserve - CALC_DB_BUFFER_MB - CALC_REDIS_MB - ols_share - CALC_MAIL_MB ))
   (( budget < 192 )) && budget=192
   CALC_PHP_CHILDREN_TOTAL="$(_sys_clamp $(( budget * 7 / 10 / 48 )) 4 $(( c * 12 )))"
-  CALC_PHP_CHILDREN_SITE="$(_sys_clamp $(( CALC_PHP_CHILDREN_TOTAL / 2 )) 2 $(( c * 4 )))"
-  if (( CALC_PHP_CHILDREN_SITE > 32 )); then CALC_PHP_CHILDREN_SITE=32; fi   # per-site cap; raise with --php-children
+  # A busy site (a film site: 1.4 million player calls a day) waits on the network and the
+  # database, so its workers fill long before the CPU does; 32 of them filled on a 20-core,
+  # 64 GB server and OpenLiteSpeed logged "possible dead lock" a hundred times a burst, which
+  # Cloudflare showed as 520/524. A site may use half of the server's budget, up to 128.
+  CALC_PHP_CHILDREN_SITE="$(_sys_clamp $(( CALC_PHP_CHILDREN_TOTAL / 2 )) 2 $(( c * 8 )))"
+  if (( CALC_PHP_CHILDREN_SITE > 128 )); then CALC_PHP_CHILDREN_SITE=128; fi   # per-site cap; raise with --php-children
+  # what releases before this one gave a new site: a site that still has exactly this number
+  # was never set by hand, and "migrate" raises it to the figure above
+  CALC_PHP_CHILDREN_SITE_OLD="$(_sys_clamp $(( CALC_PHP_CHILDREN_TOTAL / 2 )) 2 $(( c * 4 )))"
+  if (( CALC_PHP_CHILDREN_SITE_OLD > 32 )); then CALC_PHP_CHILDREN_SITE_OLD=32; fi
 
   # ---- OpenLiteSpeed ----------------------------------------------------------
   CALC_OLS_WORKERS="$(_sys_clamp "$c" 1 16)"
