@@ -641,15 +641,15 @@ assert_eq "opcache" 192 "$CALC_OPCACHE_MB"
 assert_eq "ols workers" 2 "$CALC_OLS_WORKERS"
 assert_eq "ols max conn" 5000 "$CALC_OLS_MAX_CONN"
 assert_eq "no swap needed at 4G" 0 "$CALC_SWAP_MB"
-assert_true "php children sane" bash -c "(( $CALC_PHP_CHILDREN_SITE >= 2 && $CALC_PHP_CHILDREN_SITE <= 16 && $CALC_PHP_CHILDREN_TOTAL >= $CALC_PHP_CHILDREN_SITE ))"
-# a big server: a busy site gets half of the server's workers (32 filled up and OpenLiteSpeed
+assert_true "php children sane" bash -c "(( $CALC_PHP_CHILDREN_SITE >= 2 && $CALC_PHP_CHILDREN_SITE <= 256 && $CALC_PHP_CHILDREN_TOTAL >= $CALC_PHP_CHILDREN_SITE ))"
+# a big server: a site may use the whole worker budget (32 filled up and OpenLiteSpeed
 # logged "possible dead lock"), and the old default is kept for the migration to recognise
 SYS_RAM_MB=65536; SYS_RAM_AVAIL_MB=60000; SYS_CPU_CORES=20; lib_system_profile
 assert_eq "php children total at 64G/20 cores" 240 "$CALC_PHP_CHILDREN_TOTAL"
-assert_eq "php children per site at 64G/20 cores" 120 "$CALC_PHP_CHILDREN_SITE"
+assert_eq "php children per site at 64G/20 cores" 240 "$CALC_PHP_CHILDREN_SITE"
 assert_eq "the old per-site default is known" 32 "$CALC_PHP_CHILDREN_SITE_OLD"
 SYS_RAM_MB=4096; SYS_RAM_AVAIL_MB=3000; SYS_CPU_CORES=2; lib_system_profile
-assert_true "a small server gets more than the old default, not more than its budget allows" bash -c "(( $CALC_PHP_CHILDREN_SITE > $CALC_PHP_CHILDREN_SITE_OLD && $CALC_PHP_CHILDREN_SITE <= $CALC_PHP_CHILDREN_TOTAL / 2 ))"
+assert_true "a small server gets more than the old default, not more than its budget allows" bash -c "(( $CALC_PHP_CHILDREN_SITE > $CALC_PHP_CHILDREN_SITE_OLD && $CALC_PHP_CHILDREN_SITE <= $CALC_PHP_CHILDREN_TOTAL ))"
 SYS_RAM_MB=1024; SYS_DISK_TYPE=nvme; lib_system_profile
 assert_eq "db buffer pct 1G" 25 "$CALC_DB_BUFFER_PCT"
 assert_eq "swap 1G" 2048 "$CALC_SWAP_MB"
@@ -3498,12 +3498,12 @@ for _p in "lr1 32" "lr2 48" "lr3 4"; do
   jq --arg c "$2" '.php.children = $c' "$_f" >"$_f.n" && mv -f "$_f.n" "$_f"
 done
 OPT_DRY_RUN=1; lib_domain_children_migrate >"$TMP/lr-out" 2>&1; OPT_DRY_RUN=0
-assert_eq "a dry run names the site on the old default" "lr1.example.com:32->120" "$DOMAIN_CHILDREN_RAISED"
+assert_eq "a dry run names the site on the old default" "lr1.example.com:32->240" "$DOMAIN_CHILDREN_RAISED"
 assert_eq "and changes nothing" "32" "$(jq -r '.php.children' "$STATE_DIR/domains/lr1.example.com/domain.json")"
 lib_domain_children_migrate >"$TMP/lr-out" 2>&1
-assert_eq "only the site on the old default is raised" "lr1.example.com:32->120" "$DOMAIN_CHILDREN_RAISED"
-assert_eq "its state has the new number"  "120" "$(jq -r '.php.children' "$STATE_DIR/domains/lr1.example.com/domain.json")"
-assert_has "its vhost has it too" "PHP_LSAPI_CHILDREN=120" "$(cat "$LSWS_VHOSTS_DIR/lr1.example.com/vhconf.conf")"
+assert_eq "only the site on the old default is raised" "lr1.example.com:32->240" "$DOMAIN_CHILDREN_RAISED"
+assert_eq "its state has the new number"  "240" "$(jq -r '.php.children' "$STATE_DIR/domains/lr1.example.com/domain.json")"
+assert_has "its vhost has it too" "PHP_LSAPI_CHILDREN=240" "$(cat "$LSWS_VHOSTS_DIR/lr1.example.com/vhconf.conf")"
 assert_eq "a number somebody set stays"   "48" "$(jq -r '.php.children' "$STATE_DIR/domains/lr2.example.com/domain.json")"
 lib_domain_children_migrate >"$TMP/lr-out" 2>&1
 assert_eq "run again, nothing is left to raise" "" "$DOMAIN_CHILDREN_RAISED"

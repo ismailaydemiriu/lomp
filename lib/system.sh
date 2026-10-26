@@ -195,9 +195,10 @@ lib_system_profile() {
   # A busy site (a film site: 1.4 million player calls a day) waits on the network and the
   # database, so its workers fill long before the CPU does; 32 of them filled on a 20-core,
   # 64 GB server and OpenLiteSpeed logged "possible dead lock" a hundred times a burst, which
-  # Cloudflare showed as 520/524. A site may use half of the server's budget, up to 128.
-  CALC_PHP_CHILDREN_SITE="$(_sys_clamp $(( CALC_PHP_CHILDREN_TOTAL / 2 )) 2 $(( c * 8 )))"
-  if (( CALC_PHP_CHILDREN_SITE > 128 )); then CALC_PHP_CHILDREN_SITE=128; fi   # per-site cap; raise with --php-children
+  # Cloudflare showed as 520/524. The figure is a ceiling, not a reservation: workers exist
+  # only while requests come, so a site nobody visits holds none. Every site may use the
+  # server's whole budget; only if all of them burst at once can that exceed the RAM.
+  CALC_PHP_CHILDREN_SITE="$(_sys_clamp "$CALC_PHP_CHILDREN_TOTAL" 2 256)"   # raise with --php-children
   # what releases before this one gave a new site: a site that still has exactly this number
   # was never set by hand, and "migrate" raises it to the figure above
   CALC_PHP_CHILDREN_SITE_OLD="$(_sys_clamp $(( CALC_PHP_CHILDREN_TOTAL / 2 )) 2 $(( c * 4 )))"
