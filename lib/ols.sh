@@ -1533,7 +1533,7 @@ lib_ols_configure_server() {
   (( LIB_FILE_CHANGED )) && OLS_PENDING_RELOAD=1
   lib_ols_tx_begin
   lib_ols_tx_apply_server_settings
-  if [[ "$(lib_manifest_get '.cloudflare.enabled')" == "true" ]]; then lib_cf_tx_apply 1; fi
+  if lib_realip_wanted; then lib_realip_tx_apply; fi
   lib_ols_tx_commit
   if (( OLS_PENDING_RELOAD )); then
     lib_ols_change_commit "server configuration"

@@ -84,10 +84,10 @@ _cf_ufw_lock_rule_ranges() {
 # and not by their shape: whatever matches here is about to be deleted.
 _cf_ufw_web_rule_numbers() {
   lib_have ufw || return 0
-  ufw status numbered 2>/dev/null | awk -v tag="$CF_UFW_COMMENT" '
+  ufw status numbered 2>/dev/null | awk -v tag="$CF_UFW_COMMENT" -v tp="$TP_UFW_COMMENT" '
     match($0, /^\[[ ]*[0-9]+\]/) {
       num = substr($0, RSTART + 1, RLENGTH - 2); gsub(/ /, "", num)
-      if (index($0, "# " tag) > 0) next
+      if (index($0, "# " tag) > 0 || index($0, "# " tp) > 0) next
       rest = substr($0, RSTART + RLENGTH); sub(/^[ \t]+/, "", rest)
       spec = rest; sub(/[ \t].*$/, "", spec)
       slash = index(spec, "/"); if (slash > 0) spec = substr(spec, 1, slash - 1)
@@ -110,6 +110,7 @@ _cf_ufw_foreign_web_rules() {
   ufw status 2>/dev/null \
     | grep -E '^([0-9,:]*\b(80|443)\b[0-9,:]*)/(tcp|udp)' \
     | grep -vF "$CF_UFW_COMMENT" \
+    | grep -vF "$TP_UFW_COMMENT" \
     | grep -viE '[[:space:]]Anywhere[[:space:]]*(\(v6\))?[[:space:]]*$' || true
 }
 
@@ -128,6 +129,7 @@ lib_cf_origin_unlock() {
     count=$((count + 1))
   done < <(_cf_ufw_lock_rules)
   lib_manifest_set '.cloudflare.origin_lock' 'false'
+  _tp_ufw_sync 0      # the trusted proxies' own rules: the ports are open to them like to everyone
   left="$(_cf_ufw_lock_rules | wc -l | tr -d ' ')"
   (( left == 0 )) || lib_warn "${left} Cloudflare rule(s) could not be deleted; they allow, so the ports are open, but 'ufw status numbered' will show them"
   lib_ok "The web ports are open to everyone again (${count} Cloudflare rule(s) removed)"
@@ -195,6 +197,9 @@ lib_cf_origin_lock() {
     "UFW refused every rule, so the ports were left open" "ufw status, then try again"
   # a partly applied lock is not a lock: the edge addresses that were refused reach nothing
   (( n == ${#ranges[@]} )) || lib_warn "only ${n} of ${#ranges[@]} ranges could be allowed - the rest of Cloudflare's edge now gets no answer (IPv6 disabled in /etc/default/ufw?)"
+  # a proxy of the operator's own in front of the server ("lomp trusted-proxy") is no Cloudflare
+  # range: it gets its own way in, before the open rules go
+  _tp_ufw_sync 1
   # only now: a range rule and an "anywhere" rule together are still open to everyone. Every
   # other rule that opens either port goes, by number and highest first, whatever shape it was
   # written in - HTTP/3 on 443/udp and a combined "80,443/tcp" included.
@@ -448,22 +453,224 @@ lib_cf_is_proxied() {   # domain -> 0 when all A/AAAA records are Cloudflare
   lib_cf_ips_are_cloudflare "$a"
 }
 
-# Inside an open OLS transaction: trusted ranges + useIpInProxyHeader.
+# Inside an open OLS transaction: trusted ranges + useIpInProxyHeader. The trusted proxies
+# ("lomp trusted-proxy") are trusted whether the Cloudflare mode is on or not: a server behind
+# a proxy of the operator's own has the same question to answer as one behind Cloudflare.
 lib_cf_tx_apply() {   # enabled(0/1)
-  local enabled="${1:-1}" allow="ALL" cidr=""
+  local enabled="${1:-1}" allow="ALL" cidr="" any=0
   if (( enabled )) && [[ -s "$CF_IPS_FILE" ]]; then
     while read -r cidr; do
       [[ -z "$cidr" || "$cidr" == \#* ]] && continue
       allow+=", ${cidr}T"
+      any=1
     done <"$CF_IPS_FILE"
-    lib_ols_tx_top_set useIpInProxyHeader 2
-  else
-    lib_ols_tx_top_set useIpInProxyHeader 0
   fi
+  while read -r cidr; do
+    [[ -n "$cidr" ]] || continue
+    allow+=", $(_tp_ols_entry "$cidr")T"
+    any=1
+  done < <(lib_tp_list)
+  if (( any )); then lib_ols_tx_top_set useIpInProxyHeader 2
+  else lib_ols_tx_top_set useIpInProxyHeader 0; fi
   if ! lib_ols_tx_block_exists accessControl ""; then
     lib_ols_tx_block_put accessControl "" <<<$'accessControl  {\n  allow                   ALL\n}'
   fi
   lib_ols_tx_block_set accessControl "" allow "$allow"
+}
+
+# =============================================================================
+#  Trusted proxies: a proxy of the operator's own in front of this server
+# =============================================================================
+# nginx, HAProxy or another server that passes the visitors on to this one connects from its
+# own address, and OpenLiteSpeed takes that address for the visitor: every site sees one
+# visitor, and fail2ban, banning it, shuts out everyone the proxy carries. An address named
+# here ("lomp trusted-proxy add") is believed when it says who the visitor is - by
+# OpenLiteSpeed (a "T" entry of accessControl, useIpInProxyHeader 2), by nginx on an image
+# server (set_real_ip_from), by fail2ban (never banned) and by the origin lock (let in on 80
+# and 443). Nobody else is: a visitor who writes those headers himself is still himself.
+# The list is the manifest's, so the weekly Cloudflare refresh, optimize and an install re-run
+# render it again instead of wiping an entry made by hand.
+TP_UFW_COMMENT="lompstack trusted proxy"
+TP_ERR=""
+
+lib_tp_list() { jq -r '.trusted_proxies[]? // empty' "$STATE_DIR/manifest.json" 2>/dev/null || true; }
+lib_realip_wanted() { lib_cf_enabled || [[ -n "$(lib_tp_list)" ]]; }
+lib_realip_tx_apply() { if lib_cf_enabled; then lib_cf_tx_apply 1; else lib_cf_tx_apply 0; fi; }
+
+# An IPv6 address alone is written as a /128 network for OpenLiteSpeed, the way its own
+# Cloudflare entries are written.
+_tp_ols_entry() { if [[ "$1" == *:* && "$1" != */* ]]; then printf '%s/128' "$1"; else printf '%s' "$1"; fi; }
+
+# One address or network, written the one way ("203.0.113.10", "10.0.0.0/24", "2001:db8::1",
+# "2001:db8::/48"), in TP_NORM. Fails with the reason in TP_ERR for anything else, and for a
+# network so wide that trusting it would trust strangers. Both are variables, not output: run
+# inside $(...) the reason would be lost with the subshell. (python prints the verdict and
+# always exits 0: a failing command inside $(...) reaches lomp's ERR trap.)
+TP_NORM=""
+_tp_norm() {   # address -> TP_NORM
+  local out=""
+  TP_ERR=""; TP_NORM=""
+  out="$(python3 -I - "$1" <<'PYEOF'
+import ipaddress, sys
+s = sys.argv[1]
+try:
+    if s != s.strip() or not s:
+        raise ValueError
+    n = ipaddress.ip_network(s, strict=False)
+except ValueError:
+    print("ERR not an IP address or network")
+    sys.exit(0)
+least = 16 if n.version == 4 else 48
+if n.prefixlen < least:
+    print("ERR /%d is too wide: every address in it could say who the visitor is (/%d at the widest)" % (n.prefixlen, least))
+elif n.prefixlen == n.max_prefixlen:
+    print("OK %s" % n.network_address)
+else:
+    print("OK %s" % n.with_prefixlen)
+PYEOF
+)"
+  case "$out" in
+    "OK "*) TP_NORM="${out#OK }"; return 0 ;;
+    "ERR "*) TP_ERR="${out#ERR }" ;;
+    *) TP_ERR="python3 could not read it" ;;
+  esac
+  return 1
+}
+
+# The trusted proxies' UFW rules: "<number> <source>", highest number first (deleting by
+# number renumbers everything after it).
+_tp_ufw_rules() {
+  lib_have ufw || return 0
+  ufw status numbered 2>/dev/null | awk -v tag="# ${TP_UFW_COMMENT}" '
+    index($0, tag) > 0 && match($0, /^\[[ ]*[0-9]+\]/) {
+      num = substr($0, RSTART + 1, RLENGTH - 2); gsub(/ /, "", num)
+      line = substr($0, 1, index($0, tag) - 1); sub(/[ \t]+$/, "", line)
+      n = split(line, f, /[ \t]+/)
+      print num, f[n]
+    }' | sort -rn || true
+}
+
+# With the origin locked to Cloudflare, the proxies need a way in of their own: 80 and 443 from
+# each of them. Unlocked, the ports are open to everyone and their rules go. So do the rules of
+# an address no longer listed.
+_tp_ufw_sync() {   # [locked 0/1, default: as the manifest says]
+  local locked="${1:-}" want="" p="" num="" src=""
+  lib_have ufw || return 0
+  if [[ -z "$locked" ]]; then locked=0; if lib_cf_origin_locked; then locked=1; fi; fi
+  if (( locked )); then want="$(lib_tp_list)"; fi
+  while read -r p; do
+    [[ -n "$p" ]] || continue
+    lib_ufw_rule allow from "$p" to any port 80,443 proto tcp comment "$TP_UFW_COMMENT" || lib_warn "could not allow ${p} on ports 80 and 443"
+    lib_ufw_rule allow from "$p" to any port 443 proto udp comment "$TP_UFW_COMMENT" || true
+  done <<<"$want"
+  while read -r num src; do
+    [[ -n "$num" && -n "$src" ]] || continue
+    [[ $'\n'"${want}"$'\n' == *$'\n'"${src}"$'\n'* ]] && continue
+    lib_run ufw --force delete "$num" || lib_warn "could not delete UFW rule ${num}"
+  done < <(_tp_ufw_rules)
+  return 0
+}
+
+# Everything that believes the list, brought in step with it.
+_tp_apply() {
+  if lib_ols_is_installed; then
+    lib_ols_change_begin
+    lib_ols_tx_begin
+    lib_realip_tx_apply
+    lib_ols_tx_commit
+    lib_ols_change_commit "trusted proxies"
+  fi
+  if lib_server_images && lib_nginx_installed; then lib_nginx_cf_apply; fi
+  if lib_pkg_installed fail2ban; then
+    lib_fail2ban_allow_write
+    _fail2ban_reload_if_changed
+  fi
+  _tp_ufw_sync
+}
+
+_tp_show() {
+  local p="" n=0
+  while read -r p; do
+    [[ -n "$p" ]] || continue
+    n=$((n + 1))
+    lib_print_kv "Trusted proxy" "$p"
+  done < <(lib_tp_list)
+  if (( n == 0 )); then
+    lib_print_kv "Trusted proxies" "none (lomp trusted-proxy add <ip> names a proxy in front of this server)"
+  fi
+  if lib_ols_is_installed; then
+    lib_print_kv "OpenLiteSpeed" "useIpInProxyHeader $(lib_ols_conf_top_get useIpInProxyHeader 2>/dev/null || true)"
+  fi
+  if lib_cf_enabled; then lib_print_kv "Cloudflare mode" "on: its ranges are trusted too"; fi
+  return 0
+}
+
+_tp_usage() {
+  lib_tr "Usage: lomp trusted-proxy add <ip|network>... | del <ip|network>... | list"; printf '%s\n' "$LIB_TR"
+  lib_tr "A proxy in front of this server (nginx, HAProxy ...) is believed when it says who the visitor is."; printf '%s\n' "$LIB_TR"
+}
+
+_tp_change() {   # add|del address...
+  local op="$1" a="" n="" cur="" new="" json=""
+  local -a addrs=()
+  shift
+  for a in "$@"; do
+    _tp_norm "$a" || lib_die "${a}: ${TP_ERR}" "" "lomp trusted-proxy ${op} 203.0.113.10"
+    addrs+=("$TP_NORM")
+  done
+  cur="$(lib_tp_list)"
+  new="$cur"
+  for n in "${addrs[@]}"; do
+    if [[ "$op" == add ]]; then
+      if [[ $'\n'"${new}"$'\n' == *$'\n'"${n}"$'\n'* ]]; then lib_info "${n} is already trusted"; continue; fi
+      new="${new:+${new}$'\n'}${n}"
+    else
+      if [[ $'\n'"${new}"$'\n' != *$'\n'"${n}"$'\n'* ]]; then lib_info "${n} is not in the list"; continue; fi
+      new="$(printf '%s\n' "$new" | awk -v x="$n" '$0 != x')"
+    fi
+  done
+  if [[ "$new" == "$cur" ]]; then
+    # nothing to change in the list; what believes it is brought in step all the same
+    # (a file edited by hand, a reload that failed last time)
+    _tp_apply
+    return 0
+  fi
+  if (( OPT_DRY_RUN )); then
+    lib_info "[dry-run] would trust: $(printf '%s' "$new" | tr '\n' ' ')"
+    return 0
+  fi
+  json="$(printf '%s\n' "$new" | jq -R 'select(length > 0)' | jq -cs '.')"
+  lib_manifest_set_json '.trusted_proxies' "$json"
+  _tp_apply
+  if [[ "$op" == add ]]; then
+    lib_ok "Trusted: ${addrs[*]} - this server believes it when it says who the visitor is"
+    # measured on OpenLiteSpeed: CF-Connecting-IP wins, then X-Real-IP or the FIRST address of
+    # X-Forwarded-For - the one a visitor writes himself when the proxy only appends to it
+    lib_note "OpenLiteSpeed takes the visitor from CF-Connecting-IP, else X-Real-IP or the first address of X-Forwarded-For."
+    lib_note "So the proxy must set them, not append to what the visitor sent. For nginx:"
+    lib_note "  proxy_set_header X-Real-IP \$remote_addr;  proxy_set_header X-Forwarded-For \$remote_addr;"
+  else
+    lib_ok "No longer trusted: ${addrs[*]}"
+  fi
+  return 0
+}
+
+lib_tp_main() {
+  local action="${1:-list}"
+  (( $# )) && shift
+  case "$action" in
+    help|-h|--help) _tp_usage; return 0 ;;
+    list|--list|status) (( $# == 0 )) || lib_die "Unknown option for trusted-proxy: ${1}" "" "lomp trusted-proxy list" ;;
+    add|del|delete|remove) (( $# > 0 )) || lib_die "Which address?" "" "lomp trusted-proxy ${action} 203.0.113.10" ;;
+    *) lib_die "Unknown trusted-proxy action: ${action}" "" "lomp trusted-proxy add|del <ip> | list" ;;
+  esac
+  lib_require_tools
+  lib_require_installed
+  case "$action" in
+    list|--list|status) _tp_show ;;
+    add) _tp_change add "$@" ;;
+    *)   _tp_change del "$@" ;;
+  esac
 }
 
 # =============================================================================

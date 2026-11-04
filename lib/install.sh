@@ -667,6 +667,8 @@ lib_fail2ban_render_allow_jail() {
   local -a ips=("127.0.0.1/8" "::1")
   [[ -n "$extra" ]] || extra="$(lib_manifest_get '.params.fail2ban_ignore_ip' 2>/dev/null)"
   for a in $ADMIN_ALLOWED_IP $extra; do ips+=("$a"); done
+  # a proxy in front of this server ("lomp trusted-proxy"): banned, it shuts out every visitor it carries
+  while read -r a; do if [[ -n "$a" ]]; then ips+=("$a"); fi; done < <(lib_tp_list)
   while read -r a; do if [[ -n "$a" ]]; then ips+=("$a"); fi; done < <(_fail2ban_cf_list)
   while read -r a; do if [[ -n "$a" ]]; then ips+=("$a"); fi; done < <(_fail2ban_google_list)
   printf '# Managed by lompstack - what fail2ban never bans: this machine, your addresses,\n'
@@ -1661,7 +1663,7 @@ lib_optimize_main() {
   if lib_ols_is_installed; then
     lib_ols_tx_begin
     lib_ols_tx_apply_server_settings
-    lib_cf_enabled && lib_cf_tx_apply 1
+    lib_realip_wanted && lib_realip_tx_apply
     if ! cmp -s "$OLS_TX_FILE" "$LSWS_CONF"; then
       printf '\n%s--- OpenLiteSpeed (%s)%s\n' "$C_BLD" "$LSWS_CONF" "$C_RST"
       # sed reads to the end. head left after its 80 lines, tail was killed writing the rest
@@ -1687,7 +1689,7 @@ lib_optimize_main() {
         lib_ols_change_begin
         lib_ols_tx_begin
         lib_ols_tx_apply_server_settings
-        lib_cf_enabled && lib_cf_tx_apply 1
+        lib_realip_wanted && lib_realip_tx_apply
         lib_ols_tx_commit
         lib_ols_change_commit "optimize" ;;
     esac

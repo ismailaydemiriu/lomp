@@ -14840,6 +14840,158 @@ eval "$_fb_saved"
 eval "$_fb_paths"
 STATE_DIR="$_fb_state"
 
+# =============================================================================
+section "trusted-proxy: a proxy of the operator's own in front of the server"
+_tp_saved="$(declare -f lib_ols_is_installed lib_ols_change_begin lib_ols_change_commit lib_pkg_installed lib_server_images lib_run lib_require_tools lib_require_installed lib_cf_origin_locked lib_have ufw fail2ban-client lib_service_active 2>/dev/null || true)"
+_tp_vars="$(declare -p STATE_DIR LSWS_CONF CF_IPS_FILE F2B_GOODBOT_SCRIPT F2B_ALLOW_JAIL F2B_GOOGLE_IPS F2B_CF_IPS FAIL2BAN_JAIL_FILE ADMIN_ALLOWED_IP)"
+mkdir -p "$TMP/tp/state"; STATE_DIR="$TMP/tp/state"
+printf '{"installed_at":"x","cloudflare":{"enabled":false}}\n' >"$STATE_DIR/manifest.json"
+CF_IPS_FILE="$TMP/tp/cf.conf"; printf '# cf\n173.245.48.0/20\n2400:cb00::/32\n' >"$CF_IPS_FILE"
+LSWS_CONF="$TMP/tp/httpd.conf"
+printf 'useIpInProxyHeader        0\n\naccessControl  {\n  allow                   ALL\n}\n' >"$LSWS_CONF"
+F2B_GOODBOT_SCRIPT="$TMP/tp/goodbot"; F2B_ALLOW_JAIL="$TMP/tp/allow.conf"; FAIL2BAN_JAIL_FILE="$TMP/tp/base.conf"
+F2B_GOOGLE_IPS="$TMP/tp/google.conf"; F2B_CF_IPS="$TMP/tp/f2b-cf.conf"; ADMIN_ALLOWED_IP=""
+
+# ---- an address, written the one way; too wide or not an address at all: refused
+_tp_norm_out() { _tp_norm "$1" && printf '%s' "$TP_NORM"; }
+if command -v python3 >/dev/null 2>&1; then
+  assert_eq "an IPv4 address"                      "203.0.113.10"   "$(_tp_norm_out 203.0.113.10)"
+  assert_eq "a /32 is the address"                 "203.0.113.10"   "$(_tp_norm_out 203.0.113.10/32)"
+  assert_eq "a network, host bits taken away"      "10.0.0.0/24"    "$(_tp_norm_out 10.0.0.7/24)"
+  assert_eq "IPv6, written short"                  "2001:db8::1"    "$(_tp_norm_out 2001:0db8:0:0::0001)"
+  assert_eq "an IPv6 network"                      "2001:db8::/48"  "$(_tp_norm_out 2001:db8::/48)"
+  assert_false "the whole internet"                _tp_norm 0.0.0.0/0
+  _tp_norm 10.0.0.0/8 || true
+  assert_has "a /8 is too wide, and why"           "/8 is too wide" "$TP_ERR"
+  assert_false "an IPv6 /32 too"                   _tp_norm 2001:db8::/32
+  assert_false "a name"                            _tp_norm proxy.example.com
+  assert_false "an empty one"                      _tp_norm ""
+  assert_false "a line break in it"                _tp_norm $'1.2.3.4\nallow ALL'
+  assert_false "a space after it"                  _tp_norm '1.2.3.4 '
+  assert_false "a configuration word"              _tp_norm '1.2.3.4T'
+  _out="$( set -E; trap 'echo TRAPPED' ERR; _tp_norm nonsense 2>&1 || true; printf '%s' "$TP_ERR" )"
+  assert_lacks "a refusal trips no ERR trap"       "TRAPPED" "$_out"
+  assert_eq  "and says why"                     "not an IP address or network" "$_out"
+fi
+
+# ---- OpenLiteSpeed: the proxies are "T" entries, Cloudflare mode or not
+assert_eq "an IPv6 address is a /128 for OLS"      "2001:db8::1/128" "$(_tp_ols_entry 2001:db8::1)"
+assert_eq "an IPv4 one as it is"                   "203.0.113.10"    "$(_tp_ols_entry 203.0.113.10)"
+assert_false "nothing listed, no Cloudflare: nothing to believe" lib_realip_wanted
+lib_manifest_set_json '.trusted_proxies' '["203.0.113.10","2001:db8::1"]'
+assert_eq "the list"                               "$(printf '203.0.113.10\n2001:db8::1')" "$(lib_tp_list)"
+assert_true "a proxy listed: something to believe" lib_realip_wanted
+lib_ols_tx_begin; lib_realip_tx_apply
+assert_eq "Cloudflare off: still useIpInProxyHeader 2" "2" "$(lib_ols_tx_top_get useIpInProxyHeader)"
+assert_eq "only the proxies are trusted"           "ALL, 203.0.113.10T, 2001:db8::1/128T" "$(lib_ols_tx_block_get accessControl "" allow)"
+lib_cf_tx_apply 1
+assert_eq "Cloudflare on: its ranges and the proxies" "ALL, 173.245.48.0/20T, 2400:cb00::/32T, 203.0.113.10T, 2001:db8::1/128T" "$(lib_ols_tx_block_get accessControl "" allow)"
+lib_ols_tx_abort
+assert_has "the weekly refresh keeps them (it renders the list again)" 'lib_cf_tx_apply 1' "$(declare -f lib_cf_update_ips)"
+assert_has "the server settings render them"       'lib_realip_wanted' "$(declare -f lib_ols_configure_server)"
+assert_has "optimize too"                          'lib_realip_wanted && lib_realip_tx_apply' "$(declare -f lib_optimize_main)"
+
+# ---- nginx on an image server: set_real_ip_from, X-Forwarded-For read from the right
+_out="$(lib_nginx_render_cloudflare)"
+assert_has "nginx: the proxy is believed"          "set_real_ip_from 203.0.113.10;" "$_out"
+assert_has "from X-Forwarded-For"                  "real_ip_header X-Forwarded-For;" "$_out"
+assert_has "read from the right"                   "real_ip_recursive on;" "$_out"
+assert_lacks "Cloudflare off: none of its ranges"  "173.245.48.0/20" "$_out"
+
+# ---- fail2ban never bans it
+assert_has "fail2ban never bans it"                "           203.0.113.10" "$(lib_fail2ban_render_allow_jail)"
+
+# ---- UFW: the origin lock lets it in on 80/443, by a comment of its own
+ufw() {
+  printf 'UFW %s\n' "$*" >>"$TMP/tp/calls"
+  [[ "$*" == "status numbered" || "$*" == "status" ]] || return 0
+  cat <<'EOF'
+Status: active
+
+     To                         Action      From
+     --                         ------      ----
+[ 1] 22/tcp                     ALLOW IN    Anywhere
+[ 2] 80,443/tcp                 ALLOW IN    173.245.48.0/20            # lompstack cloudflare origin
+[ 3] 80,443/tcp                 ALLOW IN    203.0.113.10               # lompstack trusted proxy
+[ 4] 443/udp                    ALLOW IN    203.0.113.10               # lompstack trusted proxy
+[ 5] 80,443/tcp                 ALLOW IN    198.51.100.4               # lompstack trusted proxy
+[ 6] 80/tcp                     ALLOW IN    Anywhere
+[ 7] 80,443/tcp (v6)            ALLOW IN    2001:db8::1                # lompstack trusted proxy
+EOF
+}
+lib_have() { [[ "$1" == ufw ]] || command -v "$1" >/dev/null 2>&1; }
+lib_run() { printf 'RUN %s\n' "$*" >>"$TMP/tp/calls"; }
+assert_eq "its rules, with the address each one names" "$(printf '7 2001:db8::1\n5 198.51.100.4\n4 203.0.113.10\n3 203.0.113.10')" "$(_tp_ufw_rules)"
+assert_eq "the lock never deletes them as foreign" "6" "$(_cf_ufw_web_rule_numbers)"
+assert_lacks "nor names them"                      "trusted proxy" "$(_cf_ufw_foreign_web_rules)"
+assert_eq "the lock's own rules are only Cloudflare's" "2 173.245.48.0/20" "$(_cf_ufw_lock_rule_ranges)"
+: >"$TMP/tp/calls"; _tp_ufw_sync 1
+assert_has "locked: the proxy is let in on 80 and 443" "RUN ufw allow from 203.0.113.10 to any port 80,443 proto tcp comment lompstack trusted proxy" "$(cat "$TMP/tp/calls")"
+assert_has "and HTTP/3"                            "RUN ufw allow from 203.0.113.10 to any port 443 proto udp comment lompstack trusted proxy" "$(cat "$TMP/tp/calls")"
+assert_has "an address no longer listed loses its rule" "RUN ufw --force delete 5" "$(cat "$TMP/tp/calls")"
+assert_lacks "a listed one keeps it"               "RUN ufw --force delete 3" "$(cat "$TMP/tp/calls")"
+assert_lacks "(IPv6 too)"                          "RUN ufw --force delete 7" "$(cat "$TMP/tp/calls")"
+: >"$TMP/tp/calls"; _tp_ufw_sync 0
+assert_eq "unlocked: every one of them goes, highest first" "$(printf 'RUN ufw --force delete 7\nRUN ufw --force delete 5\nRUN ufw --force delete 4\nRUN ufw --force delete 3')" "$(grep '^RUN' "$TMP/tp/calls")"
+assert_lacks "and nothing is allowed"              "ufw allow" "$(cat "$TMP/tp/calls")"
+assert_has "the lock lets them in before the open rules go" '_tp_ufw_sync 1' "$(declare -f lib_cf_origin_lock)"
+assert_has "unlocking takes their rules away"      '_tp_ufw_sync 0' "$(declare -f lib_cf_origin_unlock)"
+
+# ---- the command
+lib_ols_is_installed() { return 0; }
+lib_ols_change_begin() { :; }
+lib_ols_change_commit() { printf 'OLS COMMIT %s\n' "$*" >>"$TMP/tp/calls"; }
+lib_pkg_installed() { [[ "$1" == fail2ban ]]; }
+lib_service_active() { return 1; }
+lib_server_images() { return 1; }
+lib_cf_origin_locked() { return 1; }
+lib_require_tools() { :; }; lib_require_installed() { :; }
+_tpc() { ( OPT_QUIET=0; LIB_LANG=en; lib_tp_main "$@" 2>&1; printf 'rc=%s\n' "$?" ) || true; }
+printf '{"installed_at":"x","cloudflare":{"enabled":false}}\n' >"$STATE_DIR/manifest.json"
+: >"$TMP/tp/calls"
+if command -v python3 >/dev/null 2>&1; then
+  _out="$(_tpc add 203.0.113.10)"
+  assert_has "add: done"                           "rc=0" "$_out"
+  assert_has "add: said"                           "Trusted: 203.0.113.10" "$_out"
+  assert_has "and what the proxy has to send"      "proxy_set_header X-Forwarded-For \$remote_addr;" "$_out"
+  assert_eq  "kept in the manifest"                '["203.0.113.10"]' "$(jq -c '.trusted_proxies' "$STATE_DIR/manifest.json")"
+  assert_eq  "OLS believes it"                     "2" "$(lib_ols_conf_top_get useIpInProxyHeader)"
+  assert_has "as a T entry"                        "203.0.113.10T" "$(cat "$LSWS_CONF")"
+  assert_has "and reloads"                         "OLS COMMIT trusted proxies" "$(cat "$TMP/tp/calls")"
+  assert_has "fail2ban's list has it"              "203.0.113.10" "$(cat "$F2B_ALLOW_JAIL")"
+  _out="$(_tpc add 203.0.113.10/32 10.0.0.5/24)"
+  assert_has "the same address again: said"        "203.0.113.10 is already trusted" "$_out"
+  assert_eq  "a network is added once"             '["203.0.113.10","10.0.0.0/24"]' "$(jq -c '.trusted_proxies' "$STATE_DIR/manifest.json")"
+  _out="$(_tpc list)"
+  assert_has "list"                                "10.0.0.0/24" "$_out"
+  assert_has "list: what OLS is set to"            "useIpInProxyHeader 2" "$_out"
+  _out="$(_tpc add 1.2.3.4 0.0.0.0/0 || true)"
+  assert_has "one bad address: refused"            "0.0.0.0/0: /0 is too wide" "$_out"
+  assert_lacks "and nothing of it is kept"         "1.2.3.4" "$(cat "$STATE_DIR/manifest.json")"
+  _out="$(_tpc del 203.0.113.10 10.0.0.0/24)"
+  assert_has "del: said"                           "No longer trusted: 203.0.113.10 10.0.0.0/24" "$_out"
+  assert_eq  "the list is empty"                   '[]' "$(jq -c '.trusted_proxies' "$STATE_DIR/manifest.json")"
+  assert_eq  "OLS believes nobody again"           "0" "$(lib_ols_conf_top_get useIpInProxyHeader)"
+  assert_lacks "no T entry left"                   "T," "$(grep allow "$LSWS_CONF")"
+  assert_lacks "fail2ban's list neither"           "203.0.113.10" "$(cat "$F2B_ALLOW_JAIL")"
+  assert_has "del of one not listed: said"         "198.51.100.1 is not in the list" "$(_tpc del 198.51.100.1)"
+  _out="$(LIB_LANG=tr; LIB_TR_BUILT=0; lib_lang_build; lib_tr "Trusted: 1.2.3.4 - this server believes it when it says who the visitor is"; printf '%s' "$LIB_TR")"
+  assert_has "in Turkish too"                      "Güvenilir: 1.2.3.4" "$_out"
+fi
+assert_has "add without an address: refused"      "Which address?" "$(_tpc add)"
+assert_has "an unknown action: refused"            "Unknown trusted-proxy action: put" "$(_tpc put 1.2.3.4)"
+assert_has "list takes no address"                 "Unknown option for trusted-proxy: 1.2.3.4" "$(_tpc list 1.2.3.4)"
+assert_has "help"                                  "Usage: lomp trusted-proxy add" "$(_tpc help)"
+assert_has "setup.sh has the command"              'trusted-proxy)  lib_tp_main' "$(cat "$ROOT/setup.sh")"
+assert_has "and takes the lock for add and del"    'trusted-proxy) case "${rest[0]:-list}" in list|--list|status|help|-h|--help) ;; *) lib_lock ;; esac ;;' "$(cat "$ROOT/setup.sh")"
+assert_false "an image server runs it itself"      lib_nginx_owns trusted-proxy
+assert_has "the menu offers it as 34"              "34) _menu_trusted_proxy ;;" "$(cat "$ROOT/lib/menu.sh")"
+assert_has "the image server's menu as 16"         "16) _menu_trusted_proxy ;;" "$(cat "$ROOT/lib/menu.sh")"
+assert_has "the command reference has it"          "trusted-proxy add|del <ip>    A proxy of your own" "$(LIB_LANG=en lib_usage 2>/dev/null)"
+unset -f _tpc _tp_norm_out ufw
+eval "$_tp_saved"
+eval "$_tp_vars"
+
 assert_true "no test started the pm2 of this machine: it would have left a daemon behind" pm2_none_started
 assert_true "nor any other program of it that changes the machine or reaches beyond it" machine_none_started
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"

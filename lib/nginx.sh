@@ -232,15 +232,25 @@ EOF
 _ngx_common_file() { printf '%s/common-%sd.conf' "$NGX_LOMP_DIR" "$1"; }
 
 lib_nginx_render_cloudflare() {
-  printf '# Managed by lompstack - Cloudflare ranges whose CF-Connecting-IP is believed\n'
+  local cidr="" cf=0 tp=0
+  printf '# Managed by lompstack - Cloudflare ranges and trusted proxies whose word on the visitor is believed\n'
   if lib_cf_enabled && [[ -s "$CF_IPS_FILE" ]]; then
-    local cidr=""
+    cf=1
     while read -r cidr; do
       [[ -z "$cidr" || "$cidr" == \#* ]] && continue
       printf 'set_real_ip_from %s;\n' "$cidr"
     done <"$CF_IPS_FILE"
-    printf 'real_ip_header CF-Connecting-IP;\n'
   fi
+  while read -r cidr; do
+    [[ -n "$cidr" ]] || continue
+    tp=1
+    printf 'set_real_ip_from %s;\n' "$cidr"
+  done < <(lib_tp_list)
+  # Cloudflare alone: its CF-Connecting-IP. With a proxy of the operator's own in the chain,
+  # X-Forwarded-For read from the right, every trusted address skipped: the first one that is
+  # not trusted is the visitor, whatever a visitor wrote to the left of it.
+  if (( tp )); then printf 'real_ip_header X-Forwarded-For;\nreal_ip_recursive on;\n'
+  elif (( cf )); then printf 'real_ip_header CF-Connecting-IP;\n'; fi
   return 0
 }
 
@@ -425,7 +435,7 @@ _ngx_refused() {   # path
 lib_nginx_cf_apply() {
   lib_server_images || return 0
   lib_nginx_render_cloudflare | lib_nginx_write "${NGX_LOMP_DIR}/cloudflare.conf" 0644 || _ngx_refused "${NGX_LOMP_DIR}/cloudflare.conf"
-  if (( LIB_FILE_CHANGED )); then lib_nginx_reload; lib_ok "nginx believes CF-Connecting-IP from Cloudflare's ranges only"; fi
+  if (( LIB_FILE_CHANGED )); then lib_nginx_reload; lib_ok "nginx believes the visitor's address only from Cloudflare's ranges and the trusted proxies"; fi
   return 0
 }
 
@@ -1312,7 +1322,7 @@ lib_nginx_doctor_checks() {
 # is off for everything it calls.
 lib_nginx_owns() {   # command
   case "$1" in
-    install|self-update|migrate|update|optimize|status|doctor|healthcheck|logs|notify|menu|update-cf-ips|fail2ban|ufw|help|version) return 1 ;;
+    install|self-update|migrate|update|optimize|status|doctor|healthcheck|logs|notify|menu|update-cf-ips|trusted-proxy|fail2ban|ufw|help|version) return 1 ;;
   esac
   return 0
 }

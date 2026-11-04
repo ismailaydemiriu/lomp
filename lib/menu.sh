@@ -263,6 +263,10 @@ KOMUTLAR
                                 böylece kimse sunucunun adresini kullanarak korumayı atlatamaz.
                                 Cloudflare token'ı gerekir: sertifikalar o zaman DNS-01 ile gelir
   firewall --web-open           Onları yeniden açar
+  trusted-proxy add|del <ip>    Sunucunun önündeki kendi proxy'niz (nginx, HAProxy ...): ziyaretçinin
+                                gerçek IP'sini söylediğinde ona inanılır (OpenLiteSpeed, nginx),
+                                fail2ban onu banlamaz, origin kilidi 80/443'ü ona da açar.
+                                "trusted-proxy list" listeyi gösterir
   htaccess-check                Bir sitenin .htaccess dosyası değişince OpenLiteSpeed'i yeniden
                                 yükler (cron her dakika çalıştırır; OpenLiteSpeed onu yalnızca
                                 yüklenirken okur), root'un siteye yüklediklerini sitenin
@@ -548,6 +552,10 @@ COMMANDS
                                 nobody can walk around the edge by using the server's address.
                                 Needs a Cloudflare token: certificates then come over DNS-01
   firewall --web-open           Open them again
+  trusted-proxy add|del <ip>    A proxy of your own in front of this server (nginx, HAProxy ...):
+                                believed when it says who the visitor is (OpenLiteSpeed, nginx),
+                                never banned by fail2ban, let in on 80/443 by the origin lock.
+                                "trusted-proxy list" shows the list
   htaccess-check                Reload OpenLiteSpeed when a site's .htaccess has changed
                                 (cron runs it every minute; OpenLiteSpeed reads it only on load),
                                 hand what root uploaded into a site to the site's user, and
@@ -883,6 +891,7 @@ lib_menu_main() {
     _menu_item 12 "Back up sites (now, or automatically)"
     _menu_item 13 "Restore a site"
     _menu_item 33 "fail2ban and the UFW firewall: on or off (busy servers)"
+    _menu_item 34 "A proxy in front of this server (nginx ...): its visitors' real IP"
     _menu_group "MAINTENANCE"
     _menu_item 14 "Update packages"
     _menu_item 32 "Update PHP (latest release of each version; the sites' PHP restarted)"
@@ -922,6 +931,7 @@ lib_menu_main() {
       12) _menu_backup ;;
       13) _menu_restore ;;
       33) _menu_fail2ban ;;
+      34) _menu_trusted_proxy ;;
       14) _menu_run update ;;
       32) _menu_run php-update ;;
       15) _menu_run self-update ;;
@@ -1407,6 +1417,26 @@ _menu_fail2ban() {
     3) _menu_run fail2ban off --ufw ;;
     4) _menu_run fail2ban on --ufw ;;
     *) _menu_run fail2ban status ;;
+  esac
+}
+
+# A proxy of the operator's own in front of the server (nginx, HAProxy ...): which addresses
+# are believed when they say who the visitor is.
+_menu_trusted_proxy() {
+  local what="" ip=""
+  printf '\n'; _menu_note "A proxy in front of this server (nginx, HAProxy ...) connects from its own address, and every visitor looks like it." \
+    "An address listed here is believed when it says who the visitor is, and fail2ban never bans it." \
+    "Nobody else is believed: a visitor cannot write his own address into the headers."
+  _menu_opt 1 "Show the list"
+  _menu_opt 2 "Add a proxy's address"
+  _menu_opt 3 "Remove an address"
+  _menu_ask what "Choice" "1"
+  case "$what" in
+    2|3)
+      _menu_ask ip "The proxy's IP address (or network, e.g. 10.0.0.0/24)" ""
+      if [[ -z "$ip" ]]; then _menu_pause; return 0; fi
+      if [[ "$what" == 2 ]]; then _menu_run trusted-proxy add "$ip"; else _menu_run trusted-proxy del "$ip"; fi ;;
+    *) _menu_run trusted-proxy list ;;
   esac
 }
 
@@ -1899,6 +1929,7 @@ _menu_images() {
     _menu_item  6 "Status"
     _menu_item  7 "Health check"
     _menu_item 15 "fail2ban and the UFW firewall: on or off (busy servers)"
+    _menu_item 16 "A proxy in front of this server (nginx ...): its visitors' real IP"
     _menu_item  8 "Re-tune nginx to this machine's CPU and memory"
     _menu_group "MAINTENANCE"
     _menu_item  9 "Update packages"
@@ -1919,6 +1950,7 @@ _menu_images() {
       6) _menu_run status ;;
       7) _menu_run doctor ;;
       15) _menu_fail2ban ;;
+      16) _menu_trusted_proxy ;;
       8) _menu_run optimize ;;
       9) _menu_run update ;;
       10) _menu_run self-update ;;
@@ -2363,4 +2395,12 @@ MENU_TR['Show their state']='Durumlarını göster'
 MENU_TR['Switch fail2ban off (UFW stays on)']='fail2ban'\''ı kapat (UFW açık kalır)'
 MENU_TR['Switch fail2ban and UFW off']='fail2ban'\''ı ve UFW'\''yi kapat'
 MENU_TR['Switch fail2ban and UFW on']='fail2ban'\''ı ve UFW'\''yi aç'
+MENU_TR['A proxy in front of this server (nginx ...): its visitors'\'' real IP']='Sunucunun önündeki proxy (nginx ...): ziyaretçilerin gerçek IP'\''si'
+MENU_TR['A proxy in front of this server (nginx, HAProxy ...) connects from its own address, and every visitor looks like it.']='Sunucunun önündeki bir proxy (nginx, HAProxy ...) kendi adresinden bağlanır ve her ziyaretçi o adresten geliyor görünür.'
+MENU_TR['An address listed here is believed when it says who the visitor is, and fail2ban never bans it.']='Buradaki bir adres ziyaretçinin kim olduğunu söylediğinde ona inanılır ve fail2ban onu hiçbir zaman banlamaz.'
+MENU_TR['Nobody else is believed: a visitor cannot write his own address into the headers.']='Başka kimseye inanılmaz: bir ziyaretçi başlıklara kendi istediği adresi yazamaz.'
+MENU_TR['Show the list']='Listeyi göster'
+MENU_TR['Add a proxy'\''s address']='Bir proxy adresi ekle'
+MENU_TR['Remove an address']='Bir adresi kaldır'
+MENU_TR['The proxy'\''s IP address (or network, e.g. 10.0.0.0/24)']='Proxy'\''nin IP adresi (ya da ağ, örn. 10.0.0.0/24)'
 # MENU_TR-END
