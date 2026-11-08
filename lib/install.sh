@@ -3,7 +3,7 @@
 #                  MariaDB, Redis, SSL infra, optional runtimes, cron, self-install),
 #                  plus "update" and "optimize".
 
-INS_WITH_NODE=0 INS_NODE_MAJOR="" INS_WITH_PYTHON=0 INS_WITH_NETDATA=0 INS_CLOUDFLARE=0 INS_CF_TOKEN=""
+INS_WITH_NODE=0 INS_NODE_MAJOR="" INS_WITH_PYTHON=0 INS_WITH_NETDATA=0 INS_CLOUDFLARE="" INS_CF_TOKEN=""   # INS_CLOUDFLARE: 1 --cloudflare, 0 --no-cloudflare, empty = the default (lib_cf_install_step)
 INS_WITH_MAIL=0 INS_MAIL_HOSTNAME=""
 INS_ROLE=""              # "mail" (--mail-only), "images" (--images) or "web" when given on THIS run; empty keeps what the server is
 # Node.js major for a server that has never had Node (Active LTS). A server that already runs
@@ -40,6 +40,7 @@ lib_install_parse_args() {
       --role)            INS_ROLE="${1:-}"; shift ;;
       --with-netdata)    INS_WITH_NETDATA=1 ;;
       --cloudflare)      INS_CLOUDFLARE=1 ;;
+      --no-cloudflare)   INS_CLOUDFLARE=0 ;;
       --cf-api-token)    INS_CF_TOKEN="${1:-}"; shift
                          # "-" reads the token from standard input. A token given on the
                          # command line is readable by every user on this server for as long
@@ -276,7 +277,7 @@ lib_install_main() {
   lib_ssl_install
 
   lib_step "Cloudflare real-IP mode"
-  if (( INS_CLOUDFLARE )) || lib_cf_enabled; then lib_cf_enable; else lib_info "Cloudflare mode disabled (enable with --cloudflare)"; fi
+  lib_cf_install_step "$rerun"
 
   lib_step "Optional runtimes (Node.js / Python / Netdata / Mail)"
   (( INS_WITH_NODE ))    && lib_install_node

@@ -695,6 +695,121 @@ lib_cf_schedule() {
   lib_cron_set cfips "20 4 * * 0 root ${BIN_LINK} update-cf-ips --quiet"
 }
 
+# The install step. A new server starts with the mode on: only Cloudflare's own ranges are
+# believed, so a site that is not behind Cloudflare loses nothing, and one that is gets its
+# visitors' real IP from the first request (the operator asked for it on every new server,
+# 2026-11-08). "--no-cloudflare" leaves it off. A re-run keeps what the server has - an
+# operator who turned it off ("lomp cloudflare off") is not overruled by "install" again.
+# Without the internet the ranges cannot be had: the mode stays off and the install goes on.
+lib_cf_install_step() {   # rerun(0/1)
+  local rerun="${1:-0}"
+  case "${INS_CLOUDFLARE:-}" in
+    1) lib_cf_enable; return 0 ;;
+    0)
+      if lib_cf_enabled; then
+        if lib_cf_origin_locked; then
+          lib_warn "Cloudflare mode stays on: the web ports are locked to Cloudflare (lomp firewall --web-open, then lomp cloudflare off)"
+        else
+          _cf_off
+        fi
+      else
+        lib_info "Cloudflare mode off (--no-cloudflare; lomp cloudflare on turns it on)"
+      fi
+      return 0 ;;
+  esac
+  if (( rerun )); then
+    if lib_cf_enabled; then lib_cf_enable; else lib_info "Cloudflare mode off (lomp cloudflare on turns it on)"; fi
+    return 0
+  fi
+  if [[ ! -s "$CF_IPS_FILE" ]] && (( ! OPT_DRY_RUN )) && ! lib_cf_update_ips; then
+    lib_warn "Cloudflare mode left off: its IP ranges could not be fetched (lomp cloudflare on, once this server reaches www.cloudflare.com)"
+    return 0
+  fi
+  lib_cf_enable
+}
+
+# =============================================================================
+#  cloudflare on|off|status: the real-IP mode on a server that is already set up
+# =============================================================================
+# Before this command the mode came only with "install --cloudflare" or "add ... --cloudflare":
+# a server installed without it had no way to turn it on for the sites it already has. A site
+# that is not behind Cloudflare loses nothing when it is on: only Cloudflare's own ranges are
+# believed, so a visitor who connects directly is still himself.
+_cf_usage() {
+  lib_tr "Usage: lomp cloudflare on | off | status"; printf '%s\n' "$LIB_TR"
+}
+
+_cf_show() {
+  local d="" n=0
+  if lib_cf_enabled; then
+    lib_print_kv "Cloudflare mode" "on: the visitor's real IP comes from CF-Connecting-IP, believed only from Cloudflare's ranges"
+  else
+    lib_print_kv "Cloudflare mode" "off: behind Cloudflare every visitor looks like a Cloudflare address (lomp cloudflare on)"
+  fi
+  lib_print_kv "Cloudflare ranges" "$(_cf_ips_count)"
+  if lib_ols_is_installed; then
+    lib_print_kv "OpenLiteSpeed" "useIpInProxyHeader $(lib_ols_conf_top_get useIpInProxyHeader 2>/dev/null || true)"
+  fi
+  while read -r d; do
+    [[ -n "$d" ]] || continue
+    n=$((n + 1))
+    if lib_cf_is_proxied "$d"; then lib_print_kv "$d" "behind Cloudflare"
+    else lib_print_kv "$d" "not behind Cloudflare (DNS points elsewhere, or the cloud is grey)"; fi
+  done < <(lib_domains_list)
+  return 0
+}
+
+_cf_off() {
+  if ! lib_cf_enabled; then lib_ok "Cloudflare mode is already off"; return 0; fi
+  # the origin lock keeps the web ports for Cloudflare alone: with the mode off every visitor
+  # would come in as a Cloudflare address, banned by fail2ban as one
+  if lib_cf_origin_locked; then
+    lib_die "The web ports are locked to Cloudflare" "with the mode off every visitor would look like a Cloudflare address" "lomp firewall --web-open first"
+  fi
+  lib_manifest_set_json '.cloudflare.enabled' false
+  if lib_ols_is_installed; then
+    lib_ols_change_begin
+    lib_ols_tx_begin
+    lib_realip_tx_apply      # the trusted proxies of "lomp trusted-proxy" stay believed
+    lib_ols_tx_commit
+    lib_ols_change_commit "disable Cloudflare real-IP mode"
+  fi
+  if lib_server_images && lib_nginx_installed; then lib_nginx_cf_apply; fi
+  # the weekly refresh stays: fail2ban's allow list reads the same ranges
+  if [[ -n "$(lib_tp_list)" ]] && lib_ols_is_installed; then
+    # measured on OpenLiteSpeed 1.9 (2026-11-08): with useIpInProxyHeader 2 it believes
+    # Cloudflare's own addresses by a list of its own, whatever accessControl names - a
+    # trusted proxy keeps it at 2, so the headers from Cloudflare are still believed
+    lib_ok "Cloudflare mode disabled: its ranges are no longer listed"
+    lib_note "OpenLiteSpeed still believes Cloudflare's own addresses: a trusted proxy keeps useIpInProxyHeader at 2, and at 2 it knows Cloudflare by itself."
+  else
+    lib_ok "Cloudflare mode disabled: Cloudflare's headers are no longer believed"
+  fi
+  return 0
+}
+
+lib_cf_main() {
+  local action="${1:-status}"
+  (( $# )) && shift
+  case "$action" in
+    help|-h|--help) _cf_usage; return 0 ;;
+    on|enable|off|disable|status|--status) ;;
+    *) lib_die "Unknown cloudflare action: ${action}" "" "lomp cloudflare on | off | status" ;;
+  esac
+  (( $# == 0 )) || lib_die "Unknown option for cloudflare: ${1}" "" "lomp cloudflare ${action}"
+  lib_require_tools
+  lib_require_installed
+  case "$action" in
+    on|enable)
+      lib_cf_enabled && lib_info "Cloudflare mode is already on; its settings are written again"
+      lib_cf_enable
+      if lib_server_images && lib_nginx_installed; then lib_nginx_cf_apply; fi
+      lib_note "A site not behind Cloudflare loses nothing: only Cloudflare's own ranges are believed." ;;
+    off|disable) _cf_off ;;
+    *) _cf_show ;;
+  esac
+}
+
 # Store the API token (certbot dns-cloudflare format, 0600) and discover the account id.
 lib_cf_store_token() {   # token
   local token="$1" verify="" acct=""

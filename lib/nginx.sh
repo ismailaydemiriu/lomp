@@ -1070,7 +1070,7 @@ lib_nginx_install_guard() {
   fi
   if (( INS_WITH_MAIL || INS_WITH_NODE || INS_WITH_PYTHON || INS_WITH_NETDATA )); then
     lib_die "An image server takes no optional components" "--with-mail, --with-node, --with-python and --with-netdata belong to the sites' server" \
-      "lomp install --images [--email you@example.com] [--cloudflare]"
+      "lomp install --images [--email you@example.com] [--no-cloudflare]"
   fi
   return 0
 }
@@ -1124,12 +1124,8 @@ lib_nginx_install_main() {   # rerun(0/1)
   lib_nginx_ssl_setup
 
   lib_step "Cloudflare real-IP mode"
-  if (( INS_CLOUDFLARE )) || lib_cf_enabled; then
-    lib_cf_enable
-    lib_nginx_installed && lib_nginx_cf_apply
-  else
-    lib_info "Cloudflare mode disabled (enable with --cloudflare)"
-  fi
+  lib_cf_install_step "$rerun"
+  if lib_cf_enabled && lib_nginx_installed; then lib_nginx_cf_apply; fi
 
   lib_step "Log rotation and scheduled tasks"
   lib_nginx_logrotate
@@ -1322,7 +1318,7 @@ lib_nginx_doctor_checks() {
 # is off for everything it calls.
 lib_nginx_owns() {   # command
   case "$1" in
-    install|self-update|migrate|update|optimize|status|doctor|healthcheck|logs|notify|menu|update-cf-ips|trusted-proxy|fail2ban|ufw|help|version) return 1 ;;
+    install|self-update|migrate|update|optimize|status|doctor|healthcheck|logs|notify|menu|update-cf-ips|cloudflare|trusted-proxy|fail2ban|ufw|help|version) return 1 ;;
   esac
   return 0
 }

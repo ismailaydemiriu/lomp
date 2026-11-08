@@ -14370,7 +14370,7 @@ _ng_map_install() { ( _ng_ans=("$@"); _ng_i=0
     eval '_menu_ask() { local -n _o="$1"; _o="${_ng_ans[$_ng_i]:-${3:-}}"; _ng_i=$((_ng_i + 1)); }
           _menu_run() { printf "%s\n" "$*"; }'
     _menu_install_images 2>/dev/null | tail -n 1 ); }
-assert_eq "install from the menu, behind Cloudflare"     "install --images --email a@b.example --cloudflare" "$(_ng_map_install a@b.example y)"
+assert_eq "install from the menu: no Cloudflare question (on by default)" "install --images --email a@b.example" "$(_ng_map_install a@b.example y)"
 
 # ---- rename: the files move, the old name answers 301
 _ng_calls=""
@@ -14989,6 +14989,98 @@ assert_has "the menu offers it as 34"              "34) _menu_trusted_proxy ;;" 
 assert_has "the image server's menu as 16"         "16) _menu_trusted_proxy ;;" "$(cat "$ROOT/lib/menu.sh")"
 assert_has "the command reference has it"          "trusted-proxy add|del <ip>    A proxy of your own" "$(LIB_LANG=en lib_usage 2>/dev/null)"
 unset -f _tpc _tp_norm_out ufw
+
+section "cloudflare on|off|status: the real-IP mode on a server already set up"
+_cf_saved="$(declare -f lib_cron_set lib_resolve lib_nginx_installed 2>/dev/null || true)"
+lib_cron_set() { printf 'CRON %s %s\n' "$1" "$2" >>"$TMP/tp/calls"; }
+lib_nginx_installed() { return 1; }
+lib_resolve() { case "$2" in cf.example) [[ "$1" == A ]] && printf '173.245.48.5\n' ;; direct.example) [[ "$1" == A ]] && printf '198.51.100.7\n' ;; esac; return 0; }
+_cfc() { ( OPT_QUIET=0; LIB_LANG=en; lib_cf_main "$@" 2>&1; printf 'rc=%s\n' "$?" ) || true; }
+printf '{"installed_at":"x","cloudflare":{"enabled":false},"trusted_proxies":["203.0.113.10"]}\n' >"$STATE_DIR/manifest.json"
+printf 'useIpInProxyHeader        0\n\naccessControl  {\n  allow                   ALL\n}\n' >"$LSWS_CONF"
+mkdir -p "$STATE_DIR/domains/cf.example" "$STATE_DIR/domains/direct.example"
+printf '{}\n' >"$STATE_DIR/domains/cf.example/domain.json"; printf '{}\n' >"$STATE_DIR/domains/direct.example/domain.json"
+: >"$TMP/tp/calls"
+_out="$(_cfc status)"
+assert_has "status: off"                           "off: behind Cloudflare every visitor looks like a Cloudflare address" "$_out"
+assert_has "status: what OLS is set to"            "useIpInProxyHeader 0" "$_out"
+if command -v python3 >/dev/null 2>&1; then
+  assert_has "a site behind Cloudflare"            "cf.example" "$(grep -F 'behind Cloudflare' <<<"$_out" | grep -v 'not behind')"
+  assert_has "a site that is not"                  "direct.example" "$(grep -F 'not behind Cloudflare' <<<"$_out")"
+fi
+_out="$(_cfc on)"
+assert_has "on: done"                              "rc=0" "$_out"
+assert_has "on: said"                              "Cloudflare mode enabled" "$_out"
+assert_eq  "on: kept in the manifest"              "true" "$(jq -r '.cloudflare.enabled' "$STATE_DIR/manifest.json")"
+assert_eq  "on: OLS believes the header"           "2" "$(lib_ols_conf_top_get useIpInProxyHeader)"
+assert_has "on: from Cloudflare's ranges"          "173.245.48.0/20T" "$(grep allow "$LSWS_CONF")"
+assert_has "on: the trusted proxy stays"           "203.0.113.10T" "$(grep allow "$LSWS_CONF")"
+assert_has "on: reloads"                           "OLS COMMIT enable Cloudflare real-IP mode" "$(cat "$TMP/tp/calls")"
+assert_has "on: the weekly refresh"                "CRON cfips" "$(cat "$TMP/tp/calls")"
+assert_has "on again: said, and written again"     "already on" "$(_cfc on)"
+assert_has "status: on"                            "on: the visitor's real IP comes from CF-Connecting-IP" "$(_cfc status)"
+lib_cf_origin_locked() { return 0; }
+_out="$(_cfc off)"
+assert_has "off with the origin locked: refused"   "The web ports are locked to Cloudflare" "$_out"
+assert_eq  "and nothing changed"                   "true" "$(jq -r '.cloudflare.enabled' "$STATE_DIR/manifest.json")"
+lib_cf_origin_locked() { return 1; }
+_out="$(_cfc off)"
+assert_has "off: done"                             "rc=0" "$_out"
+assert_has "off: said"                             "Cloudflare mode disabled" "$_out"
+assert_eq  "off: kept in the manifest"             "false" "$(jq -r '.cloudflare.enabled' "$STATE_DIR/manifest.json")"
+assert_eq  "off: the trusted proxy keeps it at 2"  "2" "$(lib_ols_conf_top_get useIpInProxyHeader)"
+assert_lacks "off: no Cloudflare range left"       "173.245.48.0/20T" "$(grep allow "$LSWS_CONF")"
+assert_has "off: the proxy still believed"         "203.0.113.10T" "$(grep allow "$LSWS_CONF")"
+assert_has "off with a proxy: says OLS still knows Cloudflare at 2" "still believes Cloudflare's own addresses" "$_out"
+lib_manifest_set_json '.trusted_proxies' '[]'
+_cfc on >/dev/null; _out="$(_cfc off)"
+assert_eq  "off with no proxy: OLS believes nobody" "0" "$(lib_ols_conf_top_get useIpInProxyHeader)"
+assert_has "and says so"                           "Cloudflare's headers are no longer believed" "$_out"
+assert_has "off again: said"                       "already off" "$(_cfc off)"
+# ---- install: a new server starts with the mode on; --no-cloudflare and a re-run keep it off
+_cfi() {   # INS_CLOUDFLARE rerun -> output, then the manifest's word
+  ( OPT_QUIET=0; LIB_LANG=en; INS_CLOUDFLARE="$1"; lib_cf_install_step "$2" 2>&1 ) || true
+  printf 'enabled=%s\n' "$(jq -r '.cloudflare.enabled' "$STATE_DIR/manifest.json")"
+}
+_cf_reset() { lib_manifest_set_json '.cloudflare.enabled' false; }
+_cf_reset; assert_has "a new server: on"           "enabled=true" "$(_cfi "" 0)"
+assert_eq  "and OLS believes Cloudflare"           "2" "$(lib_ols_conf_top_get useIpInProxyHeader)"
+_cf_reset; lib_ols_tx_begin; lib_realip_tx_apply; lib_ols_tx_commit
+_out="$(_cfi "" 1)"
+assert_has "a re-run of a server that has it off: stays off" "enabled=false" "$_out"
+assert_has "and says how to turn it on"            "lomp cloudflare on turns it on" "$_out"
+lib_manifest_set_json '.cloudflare.enabled' true
+assert_has "a re-run of one that has it on: on"    "enabled=true" "$(_cfi "" 1)"
+_cf_reset; assert_has "--no-cloudflare on a new server: off" "enabled=false" "$(_cfi 0 0)"
+lib_manifest_set_json '.cloudflare.enabled' true
+assert_has "--no-cloudflare on a re-run: turned off" "enabled=false" "$(_cfi 0 1)"
+lib_manifest_set_json '.cloudflare.enabled' true; lib_cf_origin_locked() { return 0; }
+assert_has "--no-cloudflare with the origin locked: stays on, said" "Cloudflare mode stays on" "$(_cfi 0 1)"
+lib_cf_origin_locked() { return 1; }
+_cf_reset; assert_has "--cloudflare on a re-run: on" "enabled=true" "$(_cfi 1 1)"
+_cf_reset; mv "$CF_IPS_FILE" "$CF_IPS_FILE.keep"
+_out="$( lib_cf_update_ips() { return 1; }; _cfi "" 0 )"
+assert_has "no ranges to be had: the install goes on, off" "enabled=false" "$_out"
+assert_has "and says so"                           "Cloudflare mode left off" "$_out"
+mv "$CF_IPS_FILE.keep" "$CF_IPS_FILE"
+assert_has "the server install runs the step"      'lib_cf_install_step "$rerun"' "$(declare -f lib_install_main)"
+assert_has "the image server's too"                'lib_cf_install_step "$rerun"' "$(declare -f lib_nginx_install_main)"
+assert_has "--no-cloudflare is an install option"  '--no-cloudflare)   INS_CLOUDFLARE=0' "$(cat "$ROOT/lib/install.sh")"
+unset -f _cfi _cf_reset
+assert_has "an unknown action: refused"            "Unknown cloudflare action: maybe" "$(_cfc maybe)"
+assert_has "on takes no argument"                  "Unknown option for cloudflare: x.com" "$(_cfc on x.com)"
+assert_has "help"                                  "Usage: lomp cloudflare on | off | status" "$(_cfc help)"
+_out="$(LIB_LANG=tr; LIB_TR_BUILT=0; lib_lang_build; lib_tr "Cloudflare mode is already off"; printf '%s' "$LIB_TR")"
+assert_eq  "in Turkish too"                        "Cloudflare modu zaten kapalı" "$_out"
+assert_has "setup.sh has the command"              'cloudflare)     lib_cf_main' "$(cat "$ROOT/setup.sh")"
+assert_has "and takes the lock for on and off"     'cloudflare) case "${rest[0]:-status}" in status|--status|help|-h|--help) ;; *) lib_lock ;; esac ;;' "$(cat "$ROOT/setup.sh")"
+assert_false "an image server runs it itself"      lib_nginx_owns cloudflare
+assert_has "the menu offers it as 35"              "35) _menu_cloudflare ;;" "$(cat "$ROOT/lib/menu.sh")"
+assert_has "the image server's menu as 17"         "17) _menu_cloudflare ;;" "$(cat "$ROOT/lib/menu.sh")"
+assert_has "the command reference has it"          "cloudflare on|off|status      Cloudflare mode" "$(LIB_LANG=en lib_usage 2>/dev/null)"
+rm -rf "$STATE_DIR/domains"
+unset -f _cfc lib_cron_set lib_resolve lib_nginx_installed
+eval "$_cf_saved"
 eval "$_tp_saved"
 eval "$_tp_vars"
 

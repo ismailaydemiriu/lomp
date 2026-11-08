@@ -118,10 +118,11 @@ no static IP. See [WebAdmin access](#webadmin-access) if you want to change that
 Useful extras:
 
 ```bash
-# Node.js app hosting, Python tooling, Cloudflare in front, custom PHP.
+# Node.js app hosting, Python tooling, custom PHP.
 # These are opt-in: without the flags nothing extra is installed. They can also be
 # added later, from "Optional components" in the menu or by re-running install.
-sudo ./setup.sh install --with-node --with-python --cloudflare --php 8.3
+# (Cloudflare's real-IP mode is on by default; --no-cloudflare leaves it off.)
+sudo ./setup.sh install --with-node --with-python --php 8.3
 
 # A mail server for the sites on this machine (see "Mail" below for what it needs first)
 sudo ./setup.sh install --with-mail --mail-hostname mail.example.com
@@ -1006,7 +1007,7 @@ space on the filesystem that holds `/var/log`, not the one with `/home`.
 ## A server for images
 
 ```bash
-sudo ./setup.sh install --images --email you@example.com [--cloudflare]
+sudo ./setup.sh install --images --email you@example.com [--no-cloudflare]
 sudo lomp add img.example.com                    # Let's Encrypt when DNS points here already
 sudo lomp add cdn.example.org --www --cache-days 365 --no-ssl
 ```
@@ -1044,7 +1045,7 @@ ends the redirect later.
 
 `list`, `remove [--keep-files] [--keep-ssl]`, `logs`, `renew-ssl`, `status`, `doctor`,
 `optimize`, `update` and `self-update` work on it; what needs PHP, a database or mail is refused
-with the reason. `--cloudflare` makes nginx take the visitor's address from `CF-Connecting-IP`,
+with the reason. The Cloudflare mode (on unless `--no-cloudflare`) makes nginx take the visitor's address from `CF-Connecting-IP`,
 believed from Cloudflare's ranges only. A server that already runs OpenLiteSpeed cannot become
 an image server, and an image server stays one.
 
@@ -1074,15 +1075,22 @@ These names are part of the public contract and stay stable across releases.
 
 ## Cloudflare
 
-Enable it globally at install time, or per site:
+A new server starts with the Cloudflare mode on: a site that is not behind Cloudflare loses
+nothing, since only Cloudflare's own ranges are believed. `install --no-cloudflare` leaves it
+off; a re-run of install keeps what the server has. On a server that is already set up:
 
 ```bash
-sudo lomp install --cloudflare
-sudo lomp add example.com --cloudflare
+sudo lomp cloudflare status   # on or off, useIpInProxyHeader, and which sites are behind Cloudflare
+sudo lomp cloudflare on
+sudo lomp cloudflare off      # refused while the web ports are locked to Cloudflare
 ```
 
+The menu has it as "Cloudflare: the visitors' real IP" (35; 17 on an image server). In
+Cloudflare's own Network settings leave **Pseudo IPv4** off (or "Add Header"): "Overwrite
+Headers" replaces an IPv6 visitor's address in `CF-Connecting-IP` with a made-up 240.x one.
+
 The published Cloudflare ranges are downloaded and marked as trusted proxies, and only
-those ranges are allowed to set the client IP header. Access logs and Fail2ban then see
+those ranges are allowed to set the client IP header (OpenLiteSpeed `useIpInProxyHeader 2`). Access logs and Fail2ban then see
 real visitor addresses instead of Cloudflare's. The list refreshes weekly; if a download
 fails the previous list is kept and you get an alert.
 

@@ -45,7 +45,10 @@ KOMUTLAR
                                 başlıklarıyla sunan bir nginx sitesi yapar. Oradaki add
                                 seçenekleri: --www --no-ssl --email --cache-days N (varsayılan 30);
                                 "rename <eski> <yeni>" siteyi taşır, <eski> <yeni>'ye 301 olur
-      --cloudflare              Cloudflare proxy'lerine güvenir (gerçek istemci IP'si)
+      --no-cloudflare           Cloudflare modunu kapalı bırakır. Yeni bir sunucuda açıktır:
+                                ziyaretçinin gerçek IP'si CF-Connecting-IP'den, yalnızca
+                                Cloudflare aralıklarından gelirse alınır (Cloudflare arkasında
+                                olmayan siteye zararı yok). Yeniden kurulum ayarı korur
       --cf-api-token TOKEN      Cloudflare API token'ını saklar (DNS-01 / fail2ban); "-" onu
                                 stdin'den okur, böylece süreç listesinde görünmez
       --mariadb 11.4            MariaDB'yi resmi depodan kurar
@@ -258,6 +261,10 @@ KOMUTLAR
                                 değiştirdiklerini sunucuya uygular.
                                 Hiçbir pakete dokunulmaz (onu update yapar).
   update-cf-ips                 Cloudflare IP aralıklarını yeniler
+  cloudflare on|off|status      Cloudflare modu: ziyaretçinin gerçek IP'si CF-Connecting-IP'den
+                                alınır, yalnızca Cloudflare aralıklarından geldiğinde
+                                (OpenLiteSpeed useIpInProxyHeader 2). status her sitenin
+                                Cloudflare arkasında olup olmadığını da gösterir
   firewall [status]             Web portları herkese mi yoksa yalnızca Cloudflare'e mi yanıt verir
   firewall --web-cloudflare-only   80/443'ü Cloudflare aralıkları dışında her şeye kapatır;
                                 böylece kimse sunucunun adresini kullanarak korumayı atlatamaz.
@@ -343,7 +350,10 @@ COMMANDS
                                 with long cache headers. Options of add there: --www
                                 --no-ssl --email --cache-days N (default 30); "rename <old>
                                 <new>" moves a site and leaves <old> as a 301 to <new>
-      --cloudflare              Trust Cloudflare proxies (real client IP)
+      --no-cloudflare           Leave the Cloudflare mode off. A new server starts with it on:
+                                the visitor's real IP is taken from CF-Connecting-IP, only
+                                when it comes from Cloudflare's ranges (a site not behind
+                                Cloudflare loses nothing). A re-run keeps what is set
       --cf-api-token TOKEN      Store Cloudflare API token (DNS-01 / fail2ban); "-" reads it
                                 from stdin so it stays out of the process list
       --mariadb 11.4            Install MariaDB from the official repository
@@ -547,6 +557,10 @@ COMMANDS
                                 copy, which then applies what it changes on the server.
                                 No package is touched (update does that).
   update-cf-ips                 Refresh Cloudflare IP ranges
+  cloudflare on|off|status      Cloudflare mode: the visitor's real IP is taken from
+                                CF-Connecting-IP, believed only from Cloudflare's ranges
+                                (OpenLiteSpeed useIpInProxyHeader 2). status also shows
+                                which sites are behind Cloudflare
   firewall [status]             Whether the web ports answer everyone or Cloudflare only
   firewall --web-cloudflare-only   Close 80/443 to everything but Cloudflare's ranges, so
                                 nobody can walk around the edge by using the server's address.
@@ -892,6 +906,7 @@ lib_menu_main() {
     _menu_item 13 "Restore a site"
     _menu_item 33 "fail2ban and the UFW firewall: on or off (busy servers)"
     _menu_item 34 "A proxy in front of this server (nginx ...): its visitors' real IP"
+    _menu_item 35 "Cloudflare: the visitors' real IP (on, off, which sites are behind it)"
     _menu_group "MAINTENANCE"
     _menu_item 14 "Update packages"
     _menu_item 32 "Update PHP (latest release of each version; the sites' PHP restarted)"
@@ -932,6 +947,7 @@ lib_menu_main() {
       13) _menu_restore ;;
       33) _menu_fail2ban ;;
       34) _menu_trusted_proxy ;;
+      35) _menu_cloudflare ;;
       14) _menu_run update ;;
       32) _menu_run php-update ;;
       15) _menu_run self-update ;;
@@ -1440,6 +1456,24 @@ _menu_trusted_proxy() {
   esac
 }
 
+# Cloudflare's real-IP mode: what it is set to and which sites are behind Cloudflare, then on
+# or off.
+_menu_cloudflare() {
+  local what=""
+  printf '\n'; _menu_note "Behind Cloudflare (orange cloud) every visitor connects from a Cloudflare address." \
+    "With the mode on, the real IP is taken from Cloudflare's CF-Connecting-IP header - only when it comes from Cloudflare's ranges." \
+    "Logs, PHP and fail2ban then see the visitor; a site not behind Cloudflare loses nothing."
+  _menu_opt 1 "Show what is set (and which sites are behind Cloudflare)"
+  _menu_opt 2 "Turn it on"
+  _menu_opt 3 "Turn it off"
+  _menu_ask what "Choice" "1"
+  case "$what" in
+    2) _menu_run cloudflare on ;;
+    3) _menu_run cloudflare off ;;
+    *) _menu_run cloudflare status ;;
+  esac
+}
+
 # What is set, then one site or all of them. "Every site" also decides what a site added later
 # starts with, and says so.
 _menu_apcu() {
@@ -1832,7 +1866,7 @@ _menu_install_mail_only() {
 
 # An image server from the menu: nginx alone, for any number of domains (lib/nginx.sh).
 _menu_install_images() {
-  local email="" cf=""
+  local email=""
   local -a args=(install --images)
   printf '\n'
   _menu_note "A server that only serves files - images first - for as many domains as you add." \
@@ -1841,8 +1875,8 @@ _menu_install_images() {
   printf '\n'
   _menu_ask email "E-mail for Let's Encrypt and alerts" "$DEFAULT_EMAIL"
   [[ -n "$email" ]] && args+=(--email "$email")
-  _menu_ask cf "Will these domains be proxied through Cloudflare (orange cloud)? (y/n)" "n"
-  [[ "${cf,,}" == y* ]] && args+=(--cloudflare)
+  # (no Cloudflare question: a new server starts with the Cloudflare mode on, which costs a
+  # domain that is not behind Cloudflare nothing)
   _menu_run "${args[@]}"
 }
 
@@ -1930,6 +1964,7 @@ _menu_images() {
     _menu_item  7 "Health check"
     _menu_item 15 "fail2ban and the UFW firewall: on or off (busy servers)"
     _menu_item 16 "A proxy in front of this server (nginx ...): its visitors' real IP"
+    _menu_item 17 "Cloudflare: the visitors' real IP (on, off, which sites are behind it)"
     _menu_item  8 "Re-tune nginx to this machine's CPU and memory"
     _menu_group "MAINTENANCE"
     _menu_item  9 "Update packages"
@@ -1951,6 +1986,7 @@ _menu_images() {
       7) _menu_run doctor ;;
       15) _menu_fail2ban ;;
       16) _menu_trusted_proxy ;;
+      17) _menu_cloudflare ;;
       8) _menu_run optimize ;;
       9) _menu_run update ;;
       10) _menu_run self-update ;;
@@ -2114,7 +2150,6 @@ MENU_TR['Install an image server (nginx only: images and other files for any num
 MENU_TR['A server that only serves files - images first - for as many domains as you add.']='Yalnızca dosya - önce de resim - sunan bir sunucu; eklediğiniz kadar alan adı için.'
 MENU_TR['nginx is installed and sized for this machine'\''s CPU and memory; no PHP, database or mail.']='nginx kurulur ve bu makinenin işlemcisine ve belleğine göre ayarlanır; PHP, veritabanı ya da posta yok.'
 MENU_TR['Each domain gets /home/<domain>/public_html: upload the files there over SFTP (WinSCP).']='Her alan adı /home/<domain>/public_html alır: dosyaları oraya SFTP (WinSCP) ile yükleyin.'
-MENU_TR['Will these domains be proxied through Cloudflare (orange cloud)? (y/n)']='Bu alan adları Cloudflare üzerinden (turuncu bulut) mu yayınlanacak? (y/n)'
 MENU_TR['A name of its own for the images works best, e.g. img.example.com or cdn.example.com.']='Resimler için ayrı bir ad en iyisidir, ör. img.example.com ya da cdn.example.com.'
 MENU_TR['Browsers and Cloudflare keep an image this long before they ask for it again.']='Tarayıcılar ve Cloudflare bir resmi yeniden istemeden önce bu kadar süre saklar.'
 MENU_TR['Replacing a file under the same name shows up after that time, so keep it short if you do.']='Aynı adla değiştirilen bir dosya bu süreden sonra görünür; bunu yapıyorsanız kısa tutun.'
@@ -2396,6 +2431,13 @@ MENU_TR['Switch fail2ban off (UFW stays on)']='fail2ban'\''ı kapat (UFW açık 
 MENU_TR['Switch fail2ban and UFW off']='fail2ban'\''ı ve UFW'\''yi kapat'
 MENU_TR['Switch fail2ban and UFW on']='fail2ban'\''ı ve UFW'\''yi aç'
 MENU_TR['A proxy in front of this server (nginx ...): its visitors'\'' real IP']='Sunucunun önündeki proxy (nginx ...): ziyaretçilerin gerçek IP'\''si'
+MENU_TR['Cloudflare: the visitors'\'' real IP (on, off, which sites are behind it)']='Cloudflare: ziyaretçilerin gerçek IP'\''si (aç, kapat, hangi siteler arkasında)'
+MENU_TR['Behind Cloudflare (orange cloud) every visitor connects from a Cloudflare address.']='Cloudflare arkasında (turuncu bulut) her ziyaretçi bir Cloudflare adresinden bağlanır.'
+MENU_TR['With the mode on, the real IP is taken from Cloudflare'\''s CF-Connecting-IP header - only when it comes from Cloudflare'\''s ranges.']='Mod açıkken gerçek IP, Cloudflare'\''in CF-Connecting-IP başlığından alınır - yalnızca Cloudflare aralıklarından geldiğinde.'
+MENU_TR['Logs, PHP and fail2ban then see the visitor; a site not behind Cloudflare loses nothing.']='Loglar, PHP ve fail2ban o zaman ziyaretçiyi görür; Cloudflare arkasında olmayan bir site hiçbir şey kaybetmez.'
+MENU_TR['Show what is set (and which sites are behind Cloudflare)']='Ayarı göster (ve hangi siteler Cloudflare arkasında)'
+MENU_TR['Turn it on']='Aç'
+MENU_TR['Turn it off']='Kapat'
 MENU_TR['A proxy in front of this server (nginx, HAProxy ...) connects from its own address, and every visitor looks like it.']='Sunucunun önündeki bir proxy (nginx, HAProxy ...) kendi adresinden bağlanır ve her ziyaretçi o adresten geliyor görünür.'
 MENU_TR['An address listed here is believed when it says who the visitor is, and fail2ban never bans it.']='Buradaki bir adres ziyaretçinin kim olduğunu söylediğinde ona inanılır ve fail2ban onu hiçbir zaman banlamaz.'
 MENU_TR['Nobody else is believed: a visitor cannot write his own address into the headers.']='Başka kimseye inanılmaz: bir ziyaretçi başlıklara kendi istediği adresi yazamaz.'
