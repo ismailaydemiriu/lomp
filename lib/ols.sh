@@ -556,7 +556,10 @@ lib_ols_running() { lib_service_active "$OLS_SERVICE"; }
 # systemd's view of the service correct, and its ExecStop already drains connections.
 lib_ols_reload() {
   if lib_ols_running; then lib_systemctl stop "$OLS_SERVICE" || true; fi
-  lib_ols_admin_port_release
+  # A port that stays taken is reported, not fatal here: the callers restore the previous
+  # configuration and start the server again. Dying here left OpenLiteSpeed stopped - every
+  # site down - after a "remove" on a server whose old instance was still draining streams.
+  lib_ols_admin_port_release || return 1
   lib_systemctl start "$OLS_SERVICE"
   lib_ols_reap_orphans
 }
@@ -596,30 +599,51 @@ lib_ols_reap_orphans() {
 # and "systemctl restart" does not guarantee the old process released its sockets before
 # the new one binds. Wait for the port, clear a stale instance, and name the holder if it
 # is something else entirely rather than failing with a generic "did not come back".
+# The unit stops with "lswsctrl delay-stop": the old instance goes on serving open
+# connections for up to gracefulRestartTimeout (300 s) - a video site always has some - and
+# keeps its listeners meanwhile. So after a short wait a holder that is OpenLiteSpeed itself
+# (known by its executable, since it rewrites its process title) is ended outright.
+# Returns 1 (after saying why) when the port stays taken; the caller decides what follows.
+_ols_port_pids() {   # port -> every pid listening on it, one per line
+  ss -tlnpH 2>/dev/null | awk -v p="[:.]${1}$" '$4 ~ p' | grep -oE 'pid=[0-9]+' | sed 's/pid=//' | sort -u || true
+}
+_ols_pid_is_ols() {   # pid
+  local exe="" comm=""
+  exe="$(readlink "/proc/${1}/exe" 2>/dev/null || true)"
+  [[ -n "$exe" && "$exe" == "${LSWS_HOME}/"* ]] && return 0
+  comm="$(cat "/proc/${1}/comm" 2>/dev/null || true)"
+  case "$comm" in lshttpd|litespeed|openlitespeed|lscgid|lsphp*) return 0 ;; esac
+  return 1
+}
 lib_ols_admin_port_release() {   # [timeout seconds]
-  local timeout="${1:-10}" i="" holder=""
+  local timeout="${1:-5}" i="" holder="" pid="" pids=""
+  local -a ours=()
   (( OPT_DRY_RUN )) && return 0
   [[ -n "${ADMIN_PORT:-}" ]] || return 0
   for (( i = 0; i < timeout; i++ )); do
     lib_port_listening "$ADMIN_PORT" || return 0
     sleep 1
   done
+  pids="$(_ols_port_pids "$ADMIN_PORT")"
+  while read -r pid; do
+    [[ -n "$pid" ]] || continue
+    if _ols_pid_is_ols "$pid"; then ours+=("$pid"); fi
+  done <<<"$pids"
+  if (( ${#ours[@]} )); then
+    lib_warn "A previous OpenLiteSpeed instance still holds port ${ADMIN_PORT} (pid ${ours[*]}); stopping it"
+    if [[ -x "${LSWS_HOME}/bin/lswsctrl" ]]; then lib_run "${LSWS_HOME}/bin/lswsctrl" stop || true; fi
+    for (( i = 0; i < 20; i++ )); do
+      lib_port_listening "$ADMIN_PORT" || return 0
+      if (( i == 5 )); then kill -TERM "${ours[@]}" 2>/dev/null || true; fi
+      if (( i == 12 )); then kill -KILL "${ours[@]}" 2>/dev/null || true; fi
+      sleep 1
+    done
+  fi
+  lib_port_listening "$ADMIN_PORT" || return 0
   holder="$(lib_port_holder "$ADMIN_PORT")"
-  case "$holder" in
-    *lshttpd*|*litespeed*|*openlitespeed*|*lsws*)
-      lib_warn "A previous OpenLiteSpeed instance still holds port ${ADMIN_PORT} (${holder}); stopping it"
-      if [[ -x "${LSWS_HOME}/bin/lswsctrl" ]]; then lib_run "${LSWS_HOME}/bin/lswsctrl" stop || true; fi
-      pkill -f "^${LSWS_HOME}/bin/" 2>/dev/null || true
-      for (( i = 0; i < 10; i++ )); do
-        lib_port_listening "$ADMIN_PORT" || return 0
-        sleep 1
-      done
-      ;;
-  esac
-  holder="$(lib_port_holder "$ADMIN_PORT")"
-  lib_die "WebAdmin port ${ADMIN_PORT} is still in use${holder:+ by ${holder}}" \
-    "OpenLiteSpeed treats a WebAdmin listener it cannot bind as fatal and refuses to start the web server at all" \
-    "free that port, or install on another one: lomp install --admin-port 7081"
+  lib_error "WebAdmin port ${ADMIN_PORT} is still in use${holder:+ by ${holder}}"
+  lib_error "OpenLiteSpeed treats a WebAdmin listener it cannot bind as fatal; free that port, or install on another one: lomp install --admin-port 7081"
+  return 1
 }
 
 # The last few OpenLiteSpeed errors, for failure messages. Its own log says exactly why it

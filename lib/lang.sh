@@ -2769,6 +2769,7 @@ LIB_TR_PAIRS=(
   'WebAdmin port {1} is still in use by {2}' 'WebAdmin portu {1} hâlâ kullanımda ({2} kullanıyor)'
   'WebAdmin port {1} is still in use' 'WebAdmin portu {1} hâlâ kullanımda'
   'OpenLiteSpeed treats a WebAdmin listener it cannot bind as fatal and refuses to start the web server at all' 'OpenLiteSpeed, bağlanamadığı bir WebAdmin dinleyicisini ölümcül hata sayar ve web sunucusunu hiç başlatmaz'
+  'OpenLiteSpeed treats a WebAdmin listener it cannot bind as fatal; free that port, or install on another one: lomp install --admin-port 7081' 'OpenLiteSpeed, bağlanamadığı bir WebAdmin dinleyicisini ölümcül hata sayar; o portu boşaltın ya da başka bir porta kurun: lomp install --admin-port 7081'
   'free that port, or install on another one: lomp install --admin-port 7081' 'o portu boşaltın ya da başka bir porta kurun: lomp install --admin-port 7081'
   'without it a rejected change could not be undone; the usual cause is no free space on the filesystem holding {1}' 'bu olmadan reddedilen bir değişiklik geri alınamazdı; olağan neden, {1} dizininin bulunduğu dosya sisteminde yer kalmamasıdır'
   'check '\''df -h {1}'\'', free some space and re-run' ''\''df -h {1}'\'' ile bakın, yer açıp yeniden çalıştırın'

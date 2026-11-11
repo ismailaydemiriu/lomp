@@ -567,7 +567,44 @@ ss() { printf 'LISTEN 0 100 [::]:7080 [::]:* users:(("caddy",pid=77,fd=3))\n'; }
 assert_eq "IPv6 listeners are seen too" "caddy (pid 77)" "$(lib_port_holder 7080)"
 ss() { return 0; }
 assert_eq "nothing listening" "" "$(lib_port_holder 7080)"
+ss() { printf 'LISTEN 0 100 *:7080 *:* users:(("openlitespeed",pid=900,fd=7),("openlitespeed",pid=901,fd=7))\nLISTEN 0 100 *:443 *:* users:(("x",pid=5,fd=3))\n'; }
+assert_eq "every pid on the port, none from another port" "$(printf '900\n901')" "$(_ols_port_pids 7080)"
 unset -f ss
+# A "remove" on a video site: delay-stop leaves the old instance draining streams (up to 300 s)
+# with 7080 still bound; the port check died there and left OpenLiteSpeed stopped - every site
+# down. Now the old instance is ended, and a port that stays taken is reported to the caller.
+_pr_saved="$(declare -f lib_port_listening lib_run _ols_port_pids _ols_pid_is_ols lib_port_holder lib_systemctl lib_ols_running lib_ols_reap_orphans)"
+_PR_N=0; _PR_FREE_AT=999; _PR_KILLS=""; _PR_STARTS=0
+lib_port_listening() { _PR_N=$(( _PR_N + 1 )); (( _PR_N < _PR_FREE_AT )); }
+sleep() { :; }
+kill() { _PR_KILLS+="$* "; }
+lib_run() { :; }
+_ols_port_pids() { printf '900\n'; }
+_ols_pid_is_ols() { [[ "$1" == 900 ]]; }
+lib_port_holder() { printf 'openlitespeed (pid 900)'; }
+ADMIN_PORT=7080
+_PR_N=0; _PR_FREE_AT=3
+assert_true "a port that frees itself in the wait is fine" lib_ols_admin_port_release
+assert_eq   "and nothing is killed" "" "$_PR_KILLS"
+_PR_N=0; _PR_FREE_AT=12
+assert_true "a draining old OpenLiteSpeed is ended" lib_ols_admin_port_release
+assert_eq   "with TERM first" "-TERM 900 " "$_PR_KILLS"
+_PR_N=0; _PR_FREE_AT=999; _PR_KILLS=""
+_ols_pid_is_ols() { return 1; }
+lib_port_holder() { printf 'nginx (pid 77)'; }
+_pr_out="$( { lib_ols_admin_port_release && printf rc=0 || printf 'rc=%s' "$?"; } 2>&1 )"
+assert_has "a stranger on the port: status 1, not a die" "rc=1" "$_pr_out"
+assert_has "and the holder is named" "in use by nginx (pid 77)" "$_pr_out"
+assert_eq       "and a stranger is never killed" "" "$_PR_KILLS"
+lib_ols_running() { return 0; }
+lib_systemctl() { [[ "$1" == start ]] && _PR_STARTS=$(( _PR_STARTS + 1 )); return 0; }
+lib_ols_reap_orphans() { :; }
+_PR_N=0
+_pr_out="$( { lib_ols_reload && printf rc=0 || printf 'rc=%s' "$?"; } 2>&1 )"
+assert_has "reload hands the failure back (the caller restores and starts again)" "rc=1" "$_pr_out"
+unset -f lib_port_listening sleep kill lib_run _ols_pid_is_ols lib_port_holder lib_systemctl lib_ols_running lib_ols_reap_orphans _ols_port_pids
+eval "$_pr_saved"
+ADMIN_PORT=7080
 # OpenLiteSpeed's own reason must reach the failure message
 mkdir -p "${LSWS_HOME}/logs"
 cat >"${LSWS_HOME}/logs/error.log" <<'EOF'
